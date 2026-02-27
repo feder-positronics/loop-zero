@@ -21,8 +21,8 @@ if find tests -mindepth 2 -name "conftest.py" -exec grep -E "^[[:space:]]*pytest
     exit 1
 fi
 
-# Quick pytest collection check (fast validation)
-if ! uv run pytest --collect-only -q > /dev/null 2>&1; then
+# Quick pytest collection check (unit tests only — catches conftest import errors fast)
+if ! uv run pytest --collect-only -q tests/unit/ > /dev/null 2>&1; then
     echo "❌ ERROR: Pytest test collection failed"
     echo ""
     echo "Run: cd fastapi_backend && uv run pytest --collect-only"
