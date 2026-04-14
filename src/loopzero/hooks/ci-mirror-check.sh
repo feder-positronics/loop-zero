@@ -34,6 +34,27 @@ resolve_base_ref() {
 base_ref="$(resolve_base_ref)"
 
 has_branch_changes_in() {
+has_local_changes_in() {
+    if ! git diff --quiet -- "$@"; then
+        return 0
+    fi
+
+    if ! git diff --cached --quiet -- "$@"; then
+        return 0
+    fi
+
+    if git ls-files --others --exclude-standard -- "$@" | grep -q .; then
+        return 0
+    fi
+
+    return 1
+}
+
+has_relevant_changes_in() {
+    if has_local_changes_in "$@"; then
+        return 0
+    fi
+
     ! git diff --quiet "${base_ref}...HEAD" -- "$@"
 }
 
@@ -52,7 +73,7 @@ echo ""
 echo "== Frontend type check =="
 (cd nextjs-frontend && pnpm run tsc)
 
-if ! has_branch_changes_in nextjs-frontend; then
+if ! has_relevant_changes_in nextjs-frontend; then
     echo ""
     echo "== Frontend changed-tests =="
     echo "No frontend changes relative to ${base_ref}; skipping Jest changedSince run."
@@ -62,7 +83,7 @@ else
     (cd nextjs-frontend && pnpm test -- --changedSince="${base_ref}" --passWithNoTests)
 fi
 
-if ! has_branch_changes_in AGENTS.md .cursor .agents .agent .claude; then
+if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
     echo ""
     echo "== Agent config sync =="
     echo "No agent-surface changes relative to ${base_ref}; skipping sync validation."
