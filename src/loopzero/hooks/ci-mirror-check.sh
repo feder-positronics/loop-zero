@@ -33,7 +33,6 @@ resolve_base_ref() {
 
 base_ref="$(resolve_base_ref)"
 
-has_branch_changes_in() {
 has_local_changes_in() {
     if ! git diff --quiet -- "$@"; then
         return 0
