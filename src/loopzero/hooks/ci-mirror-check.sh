@@ -79,7 +79,7 @@ if ! has_relevant_changes_in nextjs-frontend; then
 else
     echo ""
     echo "== Frontend changed-tests =="
-    (cd nextjs-frontend && pnpm test -- --changedSince="${base_ref}" --passWithNoTests)
+    (cd nextjs-frontend && pnpm test --changedSince="${base_ref}" --passWithNoTests)
 fi
 
 if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
