@@ -57,6 +57,19 @@ has_relevant_changes_in() {
     ! git diff --quiet "${base_ref}...HEAD" -- "$@"
 }
 
+collect_changed_frontend_files() {
+    local tmp
+    tmp="$(mktemp)"
+
+    git diff --name-only "${base_ref}...HEAD" -- nextjs-frontend >>"$tmp" || true
+    git diff --name-only -- nextjs-frontend >>"$tmp"
+    git diff --cached --name-only -- nextjs-frontend >>"$tmp"
+    git ls-files --others --exclude-standard -- nextjs-frontend >>"$tmp"
+
+    sort -u "$tmp" | sed '/^$/d'
+    rm -f "$tmp"
+}
+
 echo "🔍 CI mirror check"
 echo "   Base ref: ${base_ref}"
 
@@ -79,7 +92,16 @@ if ! has_relevant_changes_in nextjs-frontend; then
 else
     echo ""
     echo "== Frontend changed-tests =="
-    (cd nextjs-frontend && pnpm test --changedSince="${base_ref}" --passWithNoTests)
+    mapfile -t frontend_changed_files < <(collect_changed_frontend_files)
+    if [ ${#frontend_changed_files[@]} -eq 0 ]; then
+        echo "No frontend file list resolved; skipping Jest related-tests run."
+    else
+        frontend_changed_args=()
+        for path in "${frontend_changed_files[@]}"; do
+            frontend_changed_args+=("${path#nextjs-frontend/}")
+        done
+        (cd nextjs-frontend && pnpm test --findRelatedTests --passWithNoTests -- "${frontend_changed_args[@]}")
+    fi
 fi
 
 if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
