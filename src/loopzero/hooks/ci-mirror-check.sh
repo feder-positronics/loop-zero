@@ -74,6 +74,10 @@ echo "🔍 CI mirror check"
 echo "   Base ref: ${base_ref}"
 
 echo ""
+echo "== GitHub Actions branch policy =="
+make check-actions-branch-policy
+
+echo ""
 echo "== Backend lint =="
 (cd fastapi_backend && uv run ruff check .)
 
