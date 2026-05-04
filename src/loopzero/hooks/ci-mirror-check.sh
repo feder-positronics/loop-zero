@@ -92,19 +92,19 @@ echo "== Frontend type check =="
 if ! has_relevant_changes_in nextjs-frontend; then
     echo ""
     echo "== Frontend changed-tests =="
-    echo "No frontend changes relative to ${base_ref}; skipping Jest changedSince run."
+    echo "No frontend changes relative to ${base_ref}; skipping vitest related run."
 else
     echo ""
     echo "== Frontend changed-tests =="
     mapfile -t frontend_changed_files < <(collect_changed_frontend_files)
     if [ ${#frontend_changed_files[@]} -eq 0 ]; then
-        echo "No frontend file list resolved; skipping Jest related-tests run."
+        echo "No frontend file list resolved; skipping vitest related run."
     else
         frontend_changed_args=()
         for path in "${frontend_changed_files[@]}"; do
             frontend_changed_args+=("${path#nextjs-frontend/}")
         done
-        (cd nextjs-frontend && pnpm test --findRelatedTests --passWithNoTests -- "${frontend_changed_args[@]}")
+        (cd nextjs-frontend && pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}")
     fi
 fi
 
