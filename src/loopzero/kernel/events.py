@@ -61,10 +61,19 @@ VALID_RESULT = {"pass", "fail", "skip"}
 
 
 def repo_root() -> Path:
+    """Resolve the path used to anchor `.audit/`.
+
+    Uses `--git-common-dir` so worktrees write to the **main repo's** `.audit/`
+    rather than their own ephemeral `.audit/` that disappears when the
+    worktree is removed. Without this, every parallel-agent worktree loses
+    its telemetry on cleanup.
+    """
     out = subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"], text=True
+        ["git", "rev-parse", "--git-common-dir"], text=True
     ).strip()
-    return Path(out)
+    # Main checkout: returns ".git"; worktree: returns "/abs/path/to/mainrepo/.git".
+    # Parent of the common .git dir is the main repo root in both cases.
+    return Path(out).resolve().parent
 
 
 def git_branch() -> str:
