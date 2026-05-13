@@ -108,6 +108,20 @@ else
     fi
 fi
 
+if ! has_relevant_changes_in fastapi_backend; then
+    echo ""
+    echo "== Backend changed-tests =="
+    echo "No backend changes relative to ${base_ref}; skipping pytest --testmon run."
+else
+    echo ""
+    echo "== Backend changed-tests =="
+    # pytest-testmon uses import-graph data in .testmondata to run only the
+    # tests affected by changed code. First run on a fresh checkout instruments
+    # the suite (slow); subsequent runs are fast. Mirrors the frontend
+    # `vitest related` pattern.
+    (cd fastapi_backend && uv run pytest --testmon -q -m "not slow" tests/unit tests/integration)
+fi
+
 if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
     echo ""
     echo "== Agent config sync =="
