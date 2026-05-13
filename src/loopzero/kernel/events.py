@@ -10,7 +10,11 @@ Event kinds:
 
 1. `phase` — boundary marker for a numbered phase/step in an orchestrator skill.
        agent_event phase --skill work-issue --phase 5 --name review-gate \\
-                         --status start|complete [--elapsed-s 120]
+                         --status start|complete
+
+   `agent_event_stats.py` derives elapsed time from paired start/complete
+   events in the same session. `--elapsed-s` remains supported for older
+   manual stopwatch-style emission.
 
 2. `output` — what an "additive" skill produced (code-review, security-review,
    design-handoff, resolve-findings, etc.). Drives the additive-score view.
@@ -57,10 +61,19 @@ VALID_RESULT = {"pass", "fail", "skip"}
 
 
 def repo_root() -> Path:
+    """Resolve the path used to anchor `.audit/`.
+
+    Uses `--git-common-dir` so worktrees write to the **main repo's** `.audit/`
+    rather than their own ephemeral `.audit/` that disappears when the
+    worktree is removed. Without this, every parallel-agent worktree loses
+    its telemetry on cleanup.
+    """
     out = subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"], text=True
+        ["git", "rev-parse", "--git-common-dir"], text=True
     ).strip()
-    return Path(out)
+    # Main checkout: returns ".git"; worktree: returns "/abs/path/to/mainrepo/.git".
+    # Parent of the common .git dir is the main repo root in both cases.
+    return Path(out).resolve().parent
 
 
 def git_branch() -> str:
@@ -198,7 +211,11 @@ def main() -> int:
     p_phase.add_argument("--phase", required=True, help="Numbered phase id, e.g. '5'")
     p_phase.add_argument("--name", help="Short phase name, e.g. 'review-gate'")
     p_phase.add_argument("--status", required=True, choices=sorted(VALID_STATUS))
-    p_phase.add_argument("--elapsed-s", type=int, help="Seconds since phase start (on complete)")
+    p_phase.add_argument(
+        "--elapsed-s",
+        type=int,
+        help="Seconds since phase start; optional because stats derive paired start/complete events",
+    )
     p_phase.set_defaults(func=cmd_phase)
 
     p_out = sub.add_parser("output", help="What an additive skill produced")

@@ -33,10 +33,12 @@ VALID_OUTCOMES = {"merged", "abandoned", "blocked", "in_progress"}
 def repo_root() -> Path:
     import subprocess
 
+    # Use --git-common-dir so skill runs from worktrees write to the main
+    # repo's `.audit/skill-runs/`, not the worktree's ephemeral one.
     out = subprocess.check_output(
-        ["git", "rev-parse", "--show-toplevel"], text=True
+        ["git", "rev-parse", "--git-common-dir"], text=True
     ).strip()
-    return Path(out)
+    return Path(out).resolve().parent
 
 
 def main() -> int:
