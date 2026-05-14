@@ -50,14 +50,14 @@ cat >&2 <<EOF
    parallel merge.
 
    Resolve before continuing:
-     git stash -u                # if you have uncommitted WIP
-     git pull --ff-only --rebase
-     git stash pop               # if you stashed
+     git stash -u           # if you have uncommitted WIP
+     git pull --rebase
+     git stash pop          # if you stashed
 
    To bypass intentionally (e.g. recovering a known-good divergent state):
      STAGING_BASE_BYPASS=1 git commit ...
 
-   See AGENTS.md § Key Rules #15 (Worktree per task) for why direct commits
-   on staging/main are discouraged in agent sessions.
+   See AGENTS.md § Worktree per task for why direct commits on staging/main
+   are discouraged in agent sessions.
 EOF
 exit 1
