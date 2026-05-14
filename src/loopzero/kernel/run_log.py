@@ -16,6 +16,9 @@ Schema (one JSON object per line):
   "notes": "free-form short note"         # ≤100 chars (optional)
 }
 
+When `--duration-s` is omitted, the script attempts to derive wall-clock time
+from prior `agent_event.py` entries in the same session for the same skill.
+
 Storage: `.audit/skill-runs/YYYY-MM-DD.jsonl` (gitignored, local-only).
 """
 
@@ -27,18 +30,84 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agent_event import common_fields, repo_root
+
 VALID_OUTCOMES = {"merged", "abandoned", "blocked", "in_progress"}
 
 
-def repo_root() -> Path:
-    import subprocess
+def parse_ts(raw: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
-    # Use --git-common-dir so skill runs from worktrees write to the main
-    # repo's `.audit/skill-runs/`, not the worktree's ephemeral one.
-    out = subprocess.check_output(
-        ["git", "rev-parse", "--git-common-dir"], text=True
-    ).strip()
-    return Path(out).resolve().parent
+
+def derive_duration_s(
+    root: Path, skill: str, session_id: str, end_ts: datetime
+) -> int | None:
+    audit_dir = root / ".audit" / "agent-events"
+    if not audit_dir.exists():
+        return None
+
+    start_ts: datetime | None = None
+    for log_path in sorted(audit_dir.glob("*.jsonl")):
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("skill") != skill or event.get("session_id") != session_id:
+                continue
+            event_ts_raw = event.get("ts")
+            if not isinstance(event_ts_raw, str):
+                continue
+            event_ts = parse_ts(event_ts_raw)
+            if event_ts is None or event_ts > end_ts:
+                continue
+            if start_ts is None or event_ts < start_ts:
+                start_ts = event_ts
+
+    if start_ts is None:
+        return None
+    return max(0, int((end_ts - start_ts).total_seconds()))
+
+
+def build_entry(args: argparse.Namespace) -> dict[str, object]:
+    fields = common_fields()
+    entry: dict[str, object] = {
+        "ts": fields["ts"],
+        "skill": args.skill,
+        "outcome": args.outcome,
+        "session_id": fields["session_id"],
+        "session_source": fields["session_source"],
+        "harness": fields["harness"],
+        "git_branch": fields["git_branch"],
+    }
+
+    if args.duration_s is not None:
+        entry["duration_s"] = args.duration_s
+    else:
+        end_ts = parse_ts(str(fields["ts"]))
+        if end_ts is not None:
+            derived_duration = derive_duration_s(
+                repo_root(), args.skill, str(fields["session_id"]), end_ts
+            )
+            if derived_duration is not None:
+                entry["duration_s"] = derived_duration
+
+    if args.review_passes is not None:
+        entry["review_passes"] = args.review_passes
+    if args.issue is not None:
+        entry["issue"] = args.issue
+    if args.pr is not None:
+        entry["pr"] = args.pr
+    if args.footgun_bypass:
+        entry["footgun_bypass"] = True
+    if args.notes:
+        entry["notes"] = args.notes[:100]
+    return entry
 
 
 def main() -> int:
@@ -62,23 +131,7 @@ def main() -> int:
     parser.add_argument("--notes", help="Free-form short note (≤100 chars)")
     args = parser.parse_args()
 
-    entry: dict[str, object] = {
-        "ts": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
-        "skill": args.skill,
-        "outcome": args.outcome,
-    }
-    if args.duration_s is not None:
-        entry["duration_s"] = args.duration_s
-    if args.review_passes is not None:
-        entry["review_passes"] = args.review_passes
-    if args.issue is not None:
-        entry["issue"] = args.issue
-    if args.pr is not None:
-        entry["pr"] = args.pr
-    if args.footgun_bypass:
-        entry["footgun_bypass"] = True
-    if args.notes:
-        entry["notes"] = args.notes[:100]
+    entry = build_entry(args)
 
     root = repo_root()
     audit_dir = root / ".audit" / "skill-runs"
