@@ -32,7 +32,8 @@ Common fields on every event:
 
 session_id resolution (Finding 4 — hybrid):
   - Prefer $AGENT_SESSION_ID
-  - Fall back to a deterministic hash of (git_branch + worktree path + YYYY-MM-DD)
+  - Then use platform thread ids such as $CODEX_THREAD_ID when available
+  - Fall back to a deterministic hash when no stable thread/session id exists
   - The `session_source` field records which path was used.
 
 harness resolution: $AGENT_HARNESS if set, else auto-detect via known env vars
@@ -88,6 +89,8 @@ def git_branch() -> str:
 def detect_harness() -> str:
     if explicit := os.environ.get("AGENT_HARNESS"):
         return explicit
+    if any(k.startswith("CODEX_") for k in os.environ):
+        return "codex"
     if any(k.startswith("CLAUDE_CODE") for k in os.environ):
         return "claude"
     if any(k.startswith("CURSOR_") for k in os.environ):
@@ -99,6 +102,8 @@ def resolve_session(root: Path, branch: str) -> tuple[str, str]:
     """Return (session_id, source). Prefer env, else derived hash."""
     if env_id := os.environ.get("AGENT_SESSION_ID"):
         return env_id, "env"
+    if codex_thread_id := os.environ.get("CODEX_THREAD_ID"):
+        return codex_thread_id, "codex_thread"
     day = datetime.now(UTC).strftime("%Y-%m-%d")
     raw = f"{branch}|{root}|{day}".encode()
     return hashlib.sha1(raw).hexdigest()[:12], "derived"

@@ -7,6 +7,26 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
+now_ms() {
+    date +%s%3N
+}
+
+emit_tool_event() {
+    local category="$1"
+    local started_ms="$2"
+    local result="$3"
+    local ended_ms
+    local duration_ms
+
+    ended_ms="$(now_ms)"
+    duration_ms=$((ended_ms - started_ms))
+    python3 scripts/util/agent_event.py tool \
+        --skill ci-mirror-check \
+        --category "$category" \
+        --duration-ms "$duration_ms" \
+        --result "$result" >/dev/null 2>&1 || true
+}
+
 resolve_base_ref() {
     if [ -n "${CI_MIRROR_BASE_REF:-}" ]; then
         echo "$CI_MIRROR_BASE_REF"
@@ -75,19 +95,58 @@ echo "   Base ref: ${base_ref}"
 
 echo ""
 echo "== GitHub Actions branch policy =="
-make check-actions-branch-policy
+started_ms="$(now_ms)"
+if make check-actions-branch-policy; then
+    emit_tool_event "branch-policy" "$started_ms" "pass"
+else
+    emit_tool_event "branch-policy" "$started_ms" "fail"
+    exit 1
+fi
 
-echo ""
-echo "== Backend lint =="
-(cd fastapi_backend && uv run ruff check .)
+if ! has_relevant_changes_in fastapi_backend .github/workflows/ci.yml scripts/hooks/ci-mirror-check.sh; then
+    echo ""
+    echo "== Backend lint =="
+    echo "No backend changes relative to ${base_ref}; skipping backend lint."
+    echo ""
+    echo "== Backend type check =="
+    echo "No backend changes relative to ${base_ref}; skipping backend mypy."
+else
+    echo ""
+    echo "== Backend lint =="
+    started_ms="$(now_ms)"
+    if (cd fastapi_backend && uv run ruff check .); then
+        emit_tool_event "backend-ruff" "$started_ms" "pass"
+    else
+        emit_tool_event "backend-ruff" "$started_ms" "fail"
+        exit 1
+    fi
 
-echo ""
-echo "== Backend type check =="
-(cd fastapi_backend && uv run mypy app/)
+    echo ""
+    echo "== Backend type check =="
+    started_ms="$(now_ms)"
+    if (cd fastapi_backend && uv run mypy app/); then
+        emit_tool_event "backend-mypy" "$started_ms" "pass"
+    else
+        emit_tool_event "backend-mypy" "$started_ms" "fail"
+        exit 1
+    fi
+fi
 
-echo ""
-echo "== Frontend type check =="
-(cd nextjs-frontend && pnpm run tsc)
+if ! has_relevant_changes_in nextjs-frontend .github/workflows/ci.yml scripts/hooks/ci-mirror-check.sh; then
+    echo ""
+    echo "== Frontend type check =="
+    echo "No frontend changes relative to ${base_ref}; skipping frontend tsc."
+else
+    echo ""
+    echo "== Frontend type check =="
+    started_ms="$(now_ms)"
+    if (cd nextjs-frontend && pnpm run tsc); then
+        emit_tool_event "frontend-tsc" "$started_ms" "pass"
+    else
+        emit_tool_event "frontend-tsc" "$started_ms" "fail"
+        exit 1
+    fi
+fi
 
 if ! has_relevant_changes_in nextjs-frontend; then
     echo ""
@@ -104,7 +163,13 @@ else
         for path in "${frontend_changed_files[@]}"; do
             frontend_changed_args+=("${path#nextjs-frontend/}")
         done
-        (cd nextjs-frontend && pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}")
+        started_ms="$(now_ms)"
+        if (cd nextjs-frontend && pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}"); then
+            emit_tool_event "frontend-changed-tests" "$started_ms" "pass"
+        else
+            emit_tool_event "frontend-changed-tests" "$started_ms" "fail"
+            exit 1
+        fi
     fi
 fi
 
@@ -119,7 +184,13 @@ else
     # tests affected by changed code. First run on a fresh checkout instruments
     # the suite (slow); subsequent runs are fast. Mirrors the frontend
     # `vitest related` pattern.
-    (cd fastapi_backend && uv run pytest --testmon -q -m "not slow" tests/unit tests/integration)
+    started_ms="$(now_ms)"
+    if (cd fastapi_backend && uv run pytest --testmon -q -m "not slow" tests/unit tests/integration); then
+        emit_tool_event "backend-changed-tests" "$started_ms" "pass"
+    else
+        emit_tool_event "backend-changed-tests" "$started_ms" "fail"
+        exit 1
+    fi
 fi
 
 if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
@@ -129,7 +200,13 @@ if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
 else
     echo ""
     echo "== Agent config sync =="
-    make check-agent-configs
+    started_ms="$(now_ms)"
+    if make check-agent-configs; then
+        emit_tool_event "agent-config-sync" "$started_ms" "pass"
+    else
+        emit_tool_event "agent-config-sync" "$started_ms" "fail"
+        exit 1
+    fi
 fi
 
 echo ""
