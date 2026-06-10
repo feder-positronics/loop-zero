@@ -27,6 +27,11 @@ Event kinds:
        agent_event tool --category test-precommit \\
                         --duration-ms 34200 --result pass|fail
 
+4. `invoke` — leaf-skill invocation marker, emitted at SKILL.md entry.
+   Pure usage counting (run-outcome logs only cover orchestrators).
+       agent_event invoke --skill refine-code
+   Aggregate with `make invoke-counts DAYS=30`.
+
 Common fields on every event:
   ts, kind, session_id, harness, git_branch, correlation_id (optional).
 
@@ -207,6 +212,18 @@ def cmd_tool(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_invoke(args: argparse.Namespace) -> int:
+    event = {
+        **common_fields(),
+        "kind": "invoke",
+        "skill": args.skill,
+    }
+    if args.notes:
+        event["notes"] = args.notes[:100]
+    write_event(event)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="kind", required=True)
@@ -244,6 +261,13 @@ def main() -> int:
     p_tool.add_argument("--skill", help="Optional skill context")
     p_tool.add_argument("--notes", help="≤100 chars")
     p_tool.set_defaults(func=cmd_tool)
+
+    p_invoke = sub.add_parser(
+        "invoke", help="Leaf-skill invocation marker (usage counting only)"
+    )
+    p_invoke.add_argument("--skill", required=True)
+    p_invoke.add_argument("--notes", help="≤100 chars")
+    p_invoke.set_defaults(func=cmd_invoke)
 
     args = parser.parse_args()
     return args.func(args)
