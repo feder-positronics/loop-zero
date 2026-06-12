@@ -103,6 +103,22 @@ else
     exit 1
 fi
 
+echo ""
+echo "== Docs governance: blueprint drift =="
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    started_ms="$(now_ms)"
+    if make blueprint-drift-check; then
+        emit_tool_event "blueprint-drift" "$started_ms" "pass"
+    else
+        emit_tool_event "blueprint-drift" "$started_ms" "fail"
+        exit 1
+    fi
+else
+    echo "gh is unavailable or unauthenticated; skipping online blueprint drift check."
+    echo "CI will still enforce live issue-label and issue-state drift."
+    emit_tool_event "blueprint-drift" "$(now_ms)" "skip"
+fi
+
 if ! has_relevant_changes_in fastapi_backend .github/workflows/ci.yml scripts/hooks/ci-mirror-check.sh; then
     echo ""
     echo "== Backend lint =="
