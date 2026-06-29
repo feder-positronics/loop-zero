@@ -90,6 +90,20 @@ collect_changed_frontend_files() {
     rm -f "$tmp"
 }
 
+should_run_blueprint_drift() {
+    if [ "${CI_MIRROR_BLUEPRINT_DRIFT:-}" = "1" ]; then
+        return 0
+    fi
+
+    has_relevant_changes_in \
+        docs/design/blueprints \
+        docs/policies/repo-workflow.yaml \
+        scripts/docs/blueprint-activate.py \
+        scripts/docs/blueprint-complete.py \
+        scripts/docs/check_blueprint_refs.py \
+        scripts/hooks/ci-mirror-check.sh
+}
+
 echo "🔍 CI mirror check"
 echo "   Base ref: ${base_ref}"
 
@@ -105,7 +119,11 @@ fi
 
 echo ""
 echo "== Docs governance: blueprint drift =="
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+if ! should_run_blueprint_drift; then
+    echo "No blueprint-policy changes relative to ${base_ref}; skipping online blueprint drift check."
+    echo "Set CI_MIRROR_BLUEPRINT_DRIFT=1 to force it locally."
+    emit_tool_event "blueprint-drift" "$(now_ms)" "skip"
+elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     started_ms="$(now_ms)"
     if make blueprint-drift-check; then
         emit_tool_event "blueprint-drift" "$started_ms" "pass"
@@ -196,17 +214,9 @@ if ! has_relevant_changes_in fastapi_backend; then
 else
     echo ""
     echo "== Backend changed-tests =="
-    # pytest-testmon uses import-graph data in .testmondata to run only the
-    # tests affected by changed code. First run on a fresh checkout instruments
-    # the suite (slow); subsequent runs are fast. Mirrors the frontend
-    # `vitest related` pattern.
-    started_ms="$(now_ms)"
-    if (cd fastapi_backend && uv run pytest --testmon -q -m "not slow" tests/unit tests/integration); then
-        emit_tool_event "backend-changed-tests" "$started_ms" "pass"
-    else
-        emit_tool_event "backend-changed-tests" "$started_ms" "fail"
-        exit 1
-    fi
+    echo "Removed from local mirror for cost. Use make test-for in the edit loop,"
+    echo "targeted integration for DB/API/task paths, and PR/post-merge CI for broad coverage."
+    emit_tool_event "backend-changed-tests" "$(now_ms)" "skip"
 fi
 
 if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
