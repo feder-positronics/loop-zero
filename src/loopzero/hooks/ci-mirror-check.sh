@@ -100,6 +100,7 @@ should_run_blueprint_drift() {
         docs/policies/repo-workflow.yaml \
         scripts/docs/blueprint-activate.py \
         scripts/docs/blueprint-complete.py \
+        scripts/docs/blueprint-lifecycle.py \
         scripts/docs/check_blueprint_refs.py \
         scripts/hooks/ci-mirror-check.sh
 }
@@ -125,7 +126,19 @@ if ! should_run_blueprint_drift; then
     emit_tool_event "blueprint-drift" "$(now_ms)" "skip"
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     started_ms="$(now_ms)"
-    if make blueprint-drift-check; then
+    if [ "${CI_MIRROR_BLUEPRINT_DRIFT:-}" = "1" ]; then
+        blueprint_cmd=(make blueprint-drift-check)
+    elif has_local_changes_in docs/design/blueprints; then
+        echo "Local blueprint edits found; running offline structure drift only."
+        echo "Online changed-blueprint issue-state drift will run after the edits are committed."
+        blueprint_cmd=(python3 scripts/docs/blueprint-drift-check.py --offline)
+    elif git diff --quiet "${base_ref}...HEAD" -- docs/design/blueprints; then
+        echo "No committed blueprint file changes relative to ${base_ref}; running offline structure drift only."
+        blueprint_cmd=(python3 scripts/docs/blueprint-drift-check.py --offline)
+    else
+        blueprint_cmd=(python3 scripts/docs/blueprint-drift-check.py --changed-base "${base_ref}")
+    fi
+    if "${blueprint_cmd[@]}"; then
         emit_tool_event "blueprint-drift" "$started_ms" "pass"
     else
         emit_tool_event "blueprint-drift" "$started_ms" "fail"
