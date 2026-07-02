@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import os
 import sys
@@ -35,3 +36,56 @@ def test_resolve_session_prefers_codex_thread_id(monkeypatch) -> None:
 
     assert session_id == "thread-xyz"
     assert source == "codex_thread"
+
+
+def test_output_event_records_decision_counts_and_ids(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-07-02T10:00:00Z",
+            "session_id": "session-1",
+            "session_source": "env",
+            "harness": "codex",
+            "git_branch": "feature/test",
+        },
+    )
+    monkeypatch.setattr(module, "write_event", lambda event: captured.update(event))
+
+    args = argparse.Namespace(
+        skill="resolve-findings",
+        pass_num=None,
+        findings_critical=None,
+        findings_high=None,
+        findings_medium=None,
+        findings_low=None,
+        docs_created=None,
+        docs_updated=None,
+        drift_fixes=None,
+        decisions_made=None,
+        decisions_locked=1,
+        decisions_assumed=2,
+        decisions_deferred=3,
+        decision_locked_ids=["DR-1"],
+        decision_assumed_ids=["DR-2", "DR-3"],
+        decision_deferred_ids=["DR-4"],
+        reverses_decision_ids=["DR-2"],
+        notes=None,
+    )
+
+    assert module.cmd_output(args) == 0
+
+    assert captured["kind"] == "output"
+    assert captured["skill"] == "resolve-findings"
+    assert captured["decisions"] == {
+        "locked": 1,
+        "assumed": 2,
+        "deferred": 3,
+        "ids": {
+            "locked": ["DR-1"],
+            "assumed": ["DR-2", "DR-3"],
+            "deferred": ["DR-4"],
+        },
+    }
+    assert captured["reverses_decision_ids"] == ["DR-2"]

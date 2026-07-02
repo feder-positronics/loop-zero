@@ -21,6 +21,9 @@ Event kinds:
        agent_event output --skill code-review --pass 1 \\
                           --findings-critical 0 --findings-high 2 \\
                           --findings-medium 5 --findings-low 3
+       agent_event output --skill resolve-findings \\
+                          --decisions-locked 1 --decisions-assumed 2 \\
+                          --decisions-deferred 0
 
 3. `tool` — duration of a long sub-process (precommit suite, openapi sync,
    lint-staged, etc.), typically emitted from inside `commit-autofix`.
@@ -84,9 +87,12 @@ def repo_root() -> Path:
 
 def git_branch() -> str:
     try:
-        return subprocess.check_output(
-            ["git", "branch", "--show-current"], text=True
-        ).strip() or "(detached)"
+        return (
+            subprocess.check_output(
+                ["git", "branch", "--show-current"], text=True
+            ).strip()
+            or "(detached)"
+        )
     except subprocess.CalledProcessError:
         return "(unknown)"
 
@@ -186,6 +192,27 @@ def cmd_output(args: argparse.Namespace) -> int:
         v = getattr(args, key.replace("_", "_"), None)
         if v is not None:
             event[key] = v
+    decision_counts = {
+        state: getattr(args, f"decisions_{state}", None)
+        for state in ("locked", "assumed", "deferred")
+    }
+    decision_ids = {
+        state: getattr(args, f"decision_{state}_ids", None) or []
+        for state in ("locked", "assumed", "deferred")
+    }
+    if any(value is not None for value in decision_counts.values()) or any(
+        decision_ids.values()
+    ):
+        event["decisions"] = {
+            state: int(decision_counts[state] or 0)
+            for state in ("locked", "assumed", "deferred")
+        }
+        if any(decision_ids.values()):
+            event["decisions"]["ids"] = {
+                state: ids for state, ids in decision_ids.items() if ids
+            }
+    if reversal_ids := getattr(args, "reverses_decision_ids", None):
+        event["reverses_decision_ids"] = reversal_ids
     if args.notes:
         event["notes"] = args.notes[:100]
     write_event(event)
@@ -251,11 +278,28 @@ def main() -> int:
     p_out.add_argument("--docs-updated", type=int)
     p_out.add_argument("--drift-fixes", type=int)
     p_out.add_argument("--decisions-made", type=int)
+    p_out.add_argument("--decisions-locked", type=int)
+    p_out.add_argument("--decisions-assumed", type=int)
+    p_out.add_argument("--decisions-deferred", type=int)
+    p_out.add_argument(
+        "--decision-locked-id", dest="decision_locked_ids", action="append"
+    )
+    p_out.add_argument(
+        "--decision-assumed-id", dest="decision_assumed_ids", action="append"
+    )
+    p_out.add_argument(
+        "--decision-deferred-id", dest="decision_deferred_ids", action="append"
+    )
+    p_out.add_argument(
+        "--reverses-decision-id", dest="reverses_decision_ids", action="append"
+    )
     p_out.add_argument("--notes", help="≤100 chars")
     p_out.set_defaults(func=cmd_output)
 
     p_tool = sub.add_parser("tool", help="Long sub-process duration")
-    p_tool.add_argument("--category", required=True, help="e.g. test-precommit, openapi-sync")
+    p_tool.add_argument(
+        "--category", required=True, help="e.g. test-precommit, openapi-sync"
+    )
     p_tool.add_argument("--duration-ms", required=True, type=int)
     p_tool.add_argument("--result", choices=sorted(VALID_RESULT))
     p_tool.add_argument("--skill", help="Optional skill context")
