@@ -35,6 +35,11 @@ Event kinds:
        agent_event invoke --skill refine-code
    Aggregate with `make invoke-counts DAYS=30`.
 
+5. `proposal` — a stable proposal identifier at the point a roadmap or design
+   skill emits it. A later event with the same (skill, proposal_id) may attach
+   the artifact path once the owner accepts it. `make proposal-outcomes` joins
+   these events to the committed artifact lifecycle and merged PR history.
+
 Common fields on every event:
   ts, kind, session_id, harness, git_branch, correlation_id (optional).
 
@@ -255,6 +260,26 @@ def cmd_invoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_proposal(args: argparse.Namespace) -> int:
+    """Record a proposal without making telemetry a workflow dependency."""
+    event = {
+        **common_fields(),
+        "kind": "proposal",
+        "skill": args.skill,
+        "proposal_id": args.proposal_id,
+    }
+    if args.artifact_type:
+        event["artifact_type"] = args.artifact_type
+    if args.artifact_path:
+        event["artifact_path"] = args.artifact_path
+    if args.created_at:
+        event["created_at"] = args.created_at
+    if args.notes:
+        event["notes"] = args.notes[:100]
+    write_event(event)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="kind", required=True)
@@ -320,6 +345,29 @@ def main() -> int:
     p_invoke.add_argument("--skill", required=True)
     p_invoke.add_argument("--notes", help="≤100 chars")
     p_invoke.set_defaults(func=cmd_invoke)
+
+    p_proposal = sub.add_parser(
+        "proposal", help="Stable proposal identifier for outcome telemetry"
+    )
+    p_proposal.add_argument(
+        "--skill",
+        required=True,
+        choices=("frontier-roadmap", "fortify-roadmap", "write-design-doc"),
+    )
+    p_proposal.add_argument("--proposal-id", required=True)
+    p_proposal.add_argument(
+        "--artifact-type",
+        help="e.g. blueprint, exploration, adr, initiative, issue, scenario",
+    )
+    p_proposal.add_argument(
+        "--artifact-path",
+        help="Repo-relative path; add in a companion event once an artifact exists",
+    )
+    p_proposal.add_argument(
+        "--created-at", help="Original proposal date (YYYY-MM-DD), for backfills"
+    )
+    p_proposal.add_argument("--notes", help="≤100 chars")
+    p_proposal.set_defaults(func=cmd_proposal)
 
     args = parser.parse_args()
     return args.func(args)
