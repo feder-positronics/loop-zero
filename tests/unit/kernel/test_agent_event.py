@@ -89,3 +89,27 @@ def test_output_event_records_decision_counts_and_ids(monkeypatch) -> None:
         },
     }
     assert captured["reverses_decision_ids"] == ["DR-2"]
+
+
+def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(module, "common_fields", lambda: {"ts": "2026-07-10T10:00:00Z"})
+    monkeypatch.setattr(module, "write_event", lambda event: captured.update(event))
+
+    args = argparse.Namespace(
+        category="cross-harness-review",
+        duration_ms=19_000,
+        result="pass",
+        skill="code-review",
+        cost_usd=0.37,
+        budget_usd=1.0,
+        provider="claude",
+        scope_digest="abc123",
+        notes=None,
+    )
+
+    assert module.cmd_tool(args) == 0
+    assert captured["cost_usd"] == 0.37
+    assert captured["budget_usd"] == 1.0
+    assert captured["provider"] == "claude"
+    assert captured["scope_digest"] == "abc123"

@@ -233,6 +233,10 @@ def cmd_tool(args: argparse.Namespace) -> int:
         event["result"] = args.result
     if args.skill:
         event["skill"] = args.skill
+    for key in ("cost_usd", "budget_usd", "provider", "scope_digest"):
+        value = getattr(args, key, None)
+        if value is not None:
+            event[key] = value
     if args.notes:
         event["notes"] = args.notes[:100]
     write_event(event)
@@ -303,6 +307,10 @@ def main() -> int:
     p_tool.add_argument("--duration-ms", required=True, type=int)
     p_tool.add_argument("--result", choices=sorted(VALID_RESULT))
     p_tool.add_argument("--skill", help="Optional skill context")
+    p_tool.add_argument("--cost-usd", type=float)
+    p_tool.add_argument("--budget-usd", type=float)
+    p_tool.add_argument("--provider")
+    p_tool.add_argument("--scope-digest")
     p_tool.add_argument("--notes", help="≤100 chars")
     p_tool.set_defaults(func=cmd_tool)
 
