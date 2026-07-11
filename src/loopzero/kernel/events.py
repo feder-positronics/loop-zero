@@ -1,4 +1,4 @@
-"""Append a JSONL event capturing one of phase | output | tool boundaries.
+"""Append JSONL events for skill execution and decision calibration.
 
 Cross-harness instrumentation for the skill workflow. Called from any harness
 (Claude Code, Cursor/Codex) via Bash at well-known boundaries in SKILL.md.
@@ -40,6 +40,10 @@ Event kinds:
    the artifact path once the owner accepts it. `make proposal-outcomes` joins
    these events to the committed artifact lifecycle and merged PR history.
 
+6. `decision` / `verdict` / `outcome` — one addressable autonomous decision,
+   its owner-calibration result, and its later product result. These detailed
+   events coexist with legacy output tallies and feed `make decision-stats`.
+
 Common fields on every event:
   ts, kind, session_id, harness, git_branch, correlation_id (optional).
 
@@ -72,6 +76,13 @@ from pathlib import Path
 
 VALID_STATUS = {"start", "complete", "failed"}
 VALID_RESULT = {"pass", "fail", "skip"}
+DECISION_STATES = {"locked", "assumed", "deferred"}
+DECISION_WEIGHTS = {"routine", "normal", "high", "reserved"}
+AUTHORITY_MODES = {"ask", "recommend", "decide-notify", "autonomous"}
+CONFIDENCE_LEVELS = {"low", "medium", "high"}
+CHALLENGER_VERDICTS = {"not-run", "agree", "mixed", "disagree"}
+OWNER_VERDICTS = {"pending", "confirmed", "no-veto", "edited", "vetoed"}
+OUTCOME_VERDICTS = {"unknown", "supported", "mixed", "failed"}
 
 
 def repo_root() -> Path:
@@ -280,6 +291,72 @@ def cmd_proposal(args: argparse.Namespace) -> int:
     return 0
 
 
+def _copy_present(event: dict, args: argparse.Namespace, keys: tuple[str, ...]) -> None:
+    for key in keys:
+        value = getattr(args, key, None)
+        if value is not None:
+            event[key] = value
+
+
+def cmd_decision(args: argparse.Namespace) -> int:
+    """Record one decision with enough context to calibrate authority later."""
+    event = {
+        **common_fields(),
+        "kind": "decision",
+        "decision_id": args.decision_id,
+        "state": args.state,
+        "owner_verdict": "pending",
+        "outcome_verdict": "unknown",
+    }
+    _copy_present(
+        event,
+        args,
+        (
+            "skill",
+            "category",
+            "weight",
+            "authority",
+            "confidence",
+            "reversibility",
+            "calibration_deadline",
+            "challenger_verdict",
+            "rejected_alternative",
+            "grounding",
+            "expected_outcome",
+        ),
+    )
+    if args.notes:
+        event["notes"] = args.notes[:100]
+    write_event(event)
+    return 0
+
+
+def cmd_verdict(args: argparse.Namespace) -> int:
+    event = {
+        **common_fields(),
+        "kind": "decision-verdict",
+        "decision_id": args.decision_id,
+        "owner_verdict": args.owner_verdict,
+    }
+    if args.notes:
+        event["notes"] = args.notes[:100]
+    write_event(event)
+    return 0
+
+
+def cmd_outcome(args: argparse.Namespace) -> int:
+    event = {
+        **common_fields(),
+        "kind": "decision-outcome",
+        "decision_id": args.decision_id,
+        "outcome_verdict": args.outcome_verdict,
+    }
+    if args.notes:
+        event["notes"] = args.notes[:100]
+    write_event(event)
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="kind", required=True)
@@ -368,6 +445,51 @@ def main() -> int:
     )
     p_proposal.add_argument("--notes", help="≤100 chars")
     p_proposal.set_defaults(func=cmd_proposal)
+
+    p_decision = sub.add_parser(
+        "decision", help="One addressable decision with calibration metadata"
+    )
+    p_decision.add_argument("--decision-id", required=True)
+    p_decision.add_argument("--state", required=True, choices=sorted(DECISION_STATES))
+    p_decision.add_argument("--skill")
+    p_decision.add_argument("--category", required=True)
+    p_decision.add_argument("--weight", required=True, choices=sorted(DECISION_WEIGHTS))
+    p_decision.add_argument(
+        "--authority", required=True, choices=sorted(AUTHORITY_MODES)
+    )
+    p_decision.add_argument(
+        "--confidence", required=True, choices=sorted(CONFIDENCE_LEVELS)
+    )
+    p_decision.add_argument(
+        "--reversibility", required=True, help="e.g. single-pr, migration, irreversible"
+    )
+    p_decision.add_argument("--calibration-deadline", help="YYYY-MM-DD")
+    p_decision.add_argument(
+        "--challenger-verdict",
+        default="not-run",
+        choices=sorted(CHALLENGER_VERDICTS),
+    )
+    p_decision.add_argument("--rejected-alternative")
+    p_decision.add_argument("--grounding")
+    p_decision.add_argument("--expected-outcome")
+    p_decision.add_argument("--notes", help="≤100 chars")
+    p_decision.set_defaults(func=cmd_decision)
+
+    p_verdict = sub.add_parser("verdict", help="Owner verdict on a recorded decision")
+    p_verdict.add_argument("--decision-id", required=True)
+    p_verdict.add_argument(
+        "--owner-verdict", required=True, choices=sorted(OWNER_VERDICTS)
+    )
+    p_verdict.add_argument("--notes", help="≤100 chars")
+    p_verdict.set_defaults(func=cmd_verdict)
+
+    p_outcome = sub.add_parser("outcome", help="Observed product outcome of a decision")
+    p_outcome.add_argument("--decision-id", required=True)
+    p_outcome.add_argument(
+        "--outcome-verdict", required=True, choices=sorted(OUTCOME_VERDICTS)
+    )
+    p_outcome.add_argument("--notes", help="≤100 chars")
+    p_outcome.set_defaults(func=cmd_outcome)
 
     args = parser.parse_args()
     return args.func(args)

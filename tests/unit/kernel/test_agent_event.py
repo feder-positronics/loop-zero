@@ -113,3 +113,75 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
     assert captured["budget_usd"] == 1.0
     assert captured["provider"] == "claude"
     assert captured["scope_digest"] == "abc123"
+
+
+def test_decision_event_records_calibration_envelope(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(module, "common_fields", lambda: {"ts": "2026-07-11T10:00:00Z"})
+    monkeypatch.setattr(module, "write_event", lambda event: captured.update(event))
+
+    args = argparse.Namespace(
+        decision_id="ADC-05",
+        state="assumed",
+        skill="resolve-findings",
+        category="workflow-policy",
+        weight="normal",
+        authority="decide-notify",
+        confidence="high",
+        reversibility="single-pr",
+        calibration_deadline="2026-07-18",
+        challenger_verdict="agree",
+        rejected_alternative="ask-first",
+        grounding="D-16; issue #2466",
+        expected_outcome="fewer owner interruptions",
+        notes=None,
+    )
+
+    assert module.cmd_decision(args) == 0
+    assert captured == {
+        "ts": "2026-07-11T10:00:00Z",
+        "kind": "decision",
+        "decision_id": "ADC-05",
+        "state": "assumed",
+        "owner_verdict": "pending",
+        "outcome_verdict": "unknown",
+        "skill": "resolve-findings",
+        "category": "workflow-policy",
+        "weight": "normal",
+        "authority": "decide-notify",
+        "confidence": "high",
+        "reversibility": "single-pr",
+        "calibration_deadline": "2026-07-18",
+        "challenger_verdict": "agree",
+        "rejected_alternative": "ask-first",
+        "grounding": "D-16; issue #2466",
+        "expected_outcome": "fewer owner interruptions",
+    }
+
+
+def test_verdict_and_outcome_events_are_addressed_by_decision_id(monkeypatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(module, "common_fields", lambda: {"ts": "2026-07-18T10:00:00Z"})
+    monkeypatch.setattr(module, "write_event", captured.append)
+
+    assert (
+        module.cmd_verdict(
+            argparse.Namespace(
+                decision_id="ADC-05", owner_verdict="no-veto", notes="weekly digest"
+            )
+        )
+        == 0
+    )
+    assert (
+        module.cmd_outcome(
+            argparse.Namespace(
+                decision_id="ADC-05", outcome_verdict="supported", notes=None
+            )
+        )
+        == 0
+    )
+
+    assert captured[0]["kind"] == "decision-verdict"
+    assert captured[0]["owner_verdict"] == "no-veto"
+    assert captured[1]["kind"] == "decision-outcome"
+    assert captured[1]["outcome_verdict"] == "supported"
