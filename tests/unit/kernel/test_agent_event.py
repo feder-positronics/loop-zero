@@ -115,6 +115,130 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
     assert captured["scope_digest"] == "abc123"
 
 
+def test_friction_event_records_required_and_optional_fields(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(module, "common_fields", lambda: {"session_id": "session-1"})
+    monkeypatch.setattr(module, "write_event", lambda event: captured.update(event))
+
+    args = argparse.Namespace(
+        skill="code-review",
+        signal="repeated-finding",
+        summary="Authorization finding survived a review pass",
+        evidence_kind="review-finding",
+        evidence_id="review-42",
+        surface="backend-auth",
+        issue_key="missing-user-filter",
+        status="observed",
+    )
+
+    assert module.cmd_friction(args) == 0
+    assert captured == {
+        "session_id": "session-1",
+        "kind": "friction",
+        "skill": "code-review",
+        "signal": "repeated-finding",
+        "summary": "Authorization finding survived a review pass",
+        "evidence_kind": "review-finding",
+        "evidence_id": "review-42",
+        "surface": "backend-auth",
+        "issue_key": "missing-user-filter",
+        "status": "observed",
+    }
+
+
+def test_friction_parser_supports_exact_signal_vocabulary() -> None:
+    parser = module.build_parser()
+    expected = {
+        "owner-correction",
+        "repeated-finding",
+        "escape-hatch",
+        "blocked-workflow",
+        "unexpected-workaround",
+        "useful-simplification",
+    }
+
+    for signal in expected:
+        args = [
+            "friction",
+            "--skill",
+            "code-review",
+            "--signal",
+            signal,
+            "--summary",
+            "Observed friction",
+        ]
+        if signal in module.KEYED_FRICTION_SIGNALS:
+            args.extend(["--issue-key", f"test-{signal}"])
+        assert parser.parse_args(args).signal == signal
+
+
+def test_friction_requires_issue_key_for_recurrence_signals(capsys) -> None:
+    for signal in ("repeated-finding", "unexpected-workaround"):
+        try:
+            module.main(
+                [
+                    "friction",
+                    "--skill",
+                    "code-review",
+                    "--signal",
+                    signal,
+                    "--summary",
+                    "A recurring problem",
+                ]
+            )
+        except SystemExit as exc:
+            assert exc.code == 2
+        else:
+            raise AssertionError(f"{signal} unexpectedly accepted without --issue-key")
+
+    assert "--issue-key is required" in capsys.readouterr().err
+
+
+def test_blocked_workflow_may_be_unkeyed(monkeypatch) -> None:
+    captured: list[dict] = []
+    monkeypatch.setattr(module, "common_fields", lambda: {"session_id": "session-1"})
+    monkeypatch.setattr(module, "write_event", captured.append)
+
+    assert (
+        module.main(
+            [
+                "friction",
+                "--skill",
+                "work-issue",
+                "--signal",
+                "blocked-workflow",
+                "--summary",
+                "Merge gate could not inspect the final SHA",
+            ]
+        )
+        == 0
+    )
+    assert "issue_key" not in captured[0]
+
+
+def test_friction_resolution_requires_issue_key(capsys) -> None:
+    try:
+        module.main(
+            [
+                "friction",
+                "--skill",
+                "skill-health",
+                "--signal",
+                "blocked-workflow",
+                "--summary",
+                "Fixed the workflow blocker",
+                "--status",
+                "resolved",
+            ]
+        )
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("resolved friction unexpectedly accepted without a key")
+
+    assert "--issue-key is required" in capsys.readouterr().err
+
+
 def test_decision_event_records_calibration_envelope(monkeypatch) -> None:
     captured: dict = {}
     monkeypatch.setattr(module, "common_fields", lambda: {"ts": "2026-07-11T10:00:00Z"})

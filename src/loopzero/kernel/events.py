@@ -44,6 +44,9 @@ Event kinds:
    its owner-calibration result, and its later product result. These detailed
    events coexist with legacy output tallies and feed `make decision-stats`.
 
+7. `friction` — one workflow observation using the bounded friction-signal
+   vocabulary. Stable `issue_key` values make exact recurrence measurable.
+
 Common fields on every event:
   ts, kind, session_id, harness, git_branch, correlation_id (optional).
 
@@ -83,6 +86,25 @@ CONFIDENCE_LEVELS = {"low", "medium", "high"}
 CHALLENGER_VERDICTS = {"not-run", "agree", "mixed", "disagree"}
 OWNER_VERDICTS = {"pending", "confirmed", "no-veto", "edited", "vetoed"}
 OUTCOME_VERDICTS = {"unknown", "supported", "mixed", "failed"}
+FRICTION_SIGNALS = {
+    "owner-correction",
+    "repeated-finding",
+    "escape-hatch",
+    "blocked-workflow",
+    "unexpected-workaround",
+    "useful-simplification",
+}
+KEYED_FRICTION_SIGNALS = {"repeated-finding", "unexpected-workaround"}
+FRICTION_STATUSES = {"observed", "resolved", "dismissed"}
+FRICTION_EVIDENCE_KINDS = {
+    "command-output",
+    "escape-hatch",
+    "owner-verdict",
+    "review-finding",
+    "run-outcome",
+    "session-correction",
+    "self-report",
+}
 
 
 def repo_root() -> Path:
@@ -357,7 +379,26 @@ def cmd_outcome(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def cmd_friction(args: argparse.Namespace) -> int:
+    """Record one bounded workflow-friction observation."""
+    event = {
+        **common_fields(),
+        "kind": "friction",
+        "skill": args.skill,
+        "signal": args.signal,
+        "summary": args.summary,
+        "status": args.status,
+    }
+    _copy_present(
+        event,
+        args,
+        ("evidence_kind", "evidence_id", "surface", "issue_key"),
+    )
+    write_event(event)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="kind", required=True)
 
@@ -491,7 +532,36 @@ def main() -> int:
     p_outcome.add_argument("--notes", help="≤100 chars")
     p_outcome.set_defaults(func=cmd_outcome)
 
-    args = parser.parse_args()
+    p_friction = sub.add_parser(
+        "friction", help="One observed workflow-friction signal"
+    )
+    p_friction.add_argument("--skill", required=True)
+    p_friction.add_argument(
+        "--signal", required=True, choices=sorted(FRICTION_SIGNALS)
+    )
+    p_friction.add_argument("--summary", required=True)
+    p_friction.add_argument(
+        "--evidence-kind", choices=sorted(FRICTION_EVIDENCE_KINDS)
+    )
+    p_friction.add_argument("--evidence-id")
+    p_friction.add_argument("--surface")
+    p_friction.add_argument("--issue-key")
+    p_friction.add_argument(
+        "--status", choices=sorted(FRICTION_STATUSES), default="observed"
+    )
+    p_friction.set_defaults(func=cmd_friction)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.kind == "friction":
+        if args.signal in KEYED_FRICTION_SIGNALS and not args.issue_key:
+            parser.error(f"--issue-key is required for {args.signal}")
+        if args.status != "observed" and not args.issue_key:
+            parser.error("--issue-key is required for resolved/dismissed friction")
     return args.func(args)
 
 
