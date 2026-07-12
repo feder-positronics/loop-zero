@@ -211,10 +211,23 @@ else
             frontend_changed_args+=("${path#nextjs-frontend/}")
         done
         started_ms="$(now_ms)"
-        if (cd nextjs-frontend && pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}"); then
-            emit_tool_event "frontend-changed-tests" "$started_ms" "pass"
+        validation_scope_args=("${frontend_changed_files[@]}")
+        if [ "${CI_MIRROR_FULL_FRONTEND:-}" = "1" ]; then
+            validation_scope_args=(--force "${validation_scope_args[@]}")
+        fi
+        frontend_validation_scope="$(python3 scripts/util/frontend_validation_scope.py "${validation_scope_args[@]}")"
+        if [ "$frontend_validation_scope" = "full" ]; then
+            echo "Shared/broad frontend boundary changed; running the full frontend suite."
+            frontend_test_cmd=(pnpm exec vitest run)
+            frontend_event="frontend-full-tests"
         else
-            emit_tool_event "frontend-changed-tests" "$started_ms" "fail"
+            frontend_test_cmd=(pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}")
+            frontend_event="frontend-changed-tests"
+        fi
+        if (cd nextjs-frontend && "${frontend_test_cmd[@]}"); then
+            emit_tool_event "$frontend_event" "$started_ms" "pass"
+        else
+            emit_tool_event "$frontend_event" "$started_ms" "fail"
             exit 1
         fi
     fi
