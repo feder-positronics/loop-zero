@@ -8,7 +8,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
 now_ms() {
-    date +%s%3N
+    python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
 }
 
 emit_tool_event() {
