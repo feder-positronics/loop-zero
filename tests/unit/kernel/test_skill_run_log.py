@@ -123,6 +123,7 @@ def test_build_entry_auto_derives_duration(monkeypatch, tmp_path: Path) -> None:
     assert entry["harness"] == "codex"
     assert entry["git_branch"] == "feature/x"
     assert entry["run_id"] == "sr_0123456789abcdef0123456789abcdef"
+    assert entry["reentry_contract_version"] == 1
 
 
 def _entry(run_id: str, outcome: str, **extra: object) -> dict[str, object]:

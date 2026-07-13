@@ -69,9 +69,11 @@ stderr and exits 0.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -105,6 +107,9 @@ FRICTION_EVIDENCE_KINDS = {
     "session-correction",
     "self-report",
 }
+CONTEXT_BOUNDARY_DISPOSITIONS = {"rollover", "kept_inline"}
+OUTER_ORCHESTRATORS = {"work-issue", "execute-blueprint"}
+RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
 
 
 def repo_root() -> Path:
@@ -169,10 +174,88 @@ def write_event(event: dict) -> None:
         audit_dir.mkdir(parents=True, exist_ok=True)
         day = datetime.now(UTC).strftime("%Y-%m-%d")
         log_path = audit_dir / f"{day}.jsonl"
-        with log_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event) + "\n")
+        lock_path = audit_dir / ".write.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event) + "\n")
     except Exception as e:
         print(f"agent_event: warning — could not write event ({e})", file=sys.stderr)
+
+
+def write_unique_event(event: dict, *, key_fields: tuple[str, ...]) -> bool:
+    """Append once for an exact logical key; failures remain non-blocking."""
+    try:
+        root = repo_root()
+        audit_dir = root / ".audit" / "agent-events"
+        audit_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = audit_dir / ".write.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+            for log_path in sorted(audit_dir.glob("*.jsonl")):
+                for line in log_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    try:
+                        existing = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(existing, dict):
+                        continue
+                    if all(
+                        existing.get(field) == event.get(field) for field in key_fields
+                    ):
+                        return False
+            day = str(event.get("ts", now_iso()))[:10]
+            log_path = audit_dir / f"{day}.jsonl"
+            with log_path.open("a", encoding="utf-8") as output:
+                output.write(json.dumps(event) + "\n")
+        return True
+    except Exception as exc:
+        print(
+            f"agent_event: warning — could not write unique event ({exc})",
+            file=sys.stderr,
+        )
+        return False
+
+
+def write_context_boundary_event(
+    *,
+    run_id: str,
+    skill: str,
+    disposition: str,
+    issue: int | None = None,
+    pr: int | None = None,
+) -> bool:
+    """Record one idempotent context-boundary observation for a logical run."""
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("invalid logical run ID")
+    if skill not in OUTER_ORCHESTRATORS:
+        raise ValueError("context boundary requires an outer orchestrator")
+    if disposition not in CONTEXT_BOUNDARY_DISPOSITIONS:
+        raise ValueError("invalid context boundary disposition")
+    try:
+        event = {
+            **common_fields(),
+            "kind": "context_boundary",
+            "run_id": run_id,
+            "skill": skill,
+            "disposition": disposition,
+        }
+    except Exception as exc:
+        print(
+            f"agent_event: warning — could not build context boundary ({exc})",
+            file=sys.stderr,
+        )
+        return False
+    if issue is not None:
+        event["issue"] = issue
+    if pr is not None:
+        event["pr"] = pr
+    return write_unique_event(
+        event,
+        key_fields=("kind", "run_id", "disposition"),
+    )
 
 
 def common_fields() -> dict:
@@ -398,6 +481,17 @@ def cmd_friction(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_context_boundary(args: argparse.Namespace) -> int:
+    write_context_boundary_event(
+        run_id=args.run_id,
+        skill=args.skill,
+        disposition=args.disposition,
+        issue=args.issue,
+        pr=args.pr,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="kind", required=True)
@@ -536,13 +630,9 @@ def build_parser() -> argparse.ArgumentParser:
         "friction", help="One observed workflow-friction signal"
     )
     p_friction.add_argument("--skill", required=True)
-    p_friction.add_argument(
-        "--signal", required=True, choices=sorted(FRICTION_SIGNALS)
-    )
+    p_friction.add_argument("--signal", required=True, choices=sorted(FRICTION_SIGNALS))
     p_friction.add_argument("--summary", required=True)
-    p_friction.add_argument(
-        "--evidence-kind", choices=sorted(FRICTION_EVIDENCE_KINDS)
-    )
+    p_friction.add_argument("--evidence-kind", choices=sorted(FRICTION_EVIDENCE_KINDS))
     p_friction.add_argument("--evidence-id")
     p_friction.add_argument("--surface")
     p_friction.add_argument("--issue-key")
@@ -550,6 +640,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--status", choices=sorted(FRICTION_STATUSES), default="observed"
     )
     p_friction.set_defaults(func=cmd_friction)
+
+    p_boundary = sub.add_parser(
+        "context-boundary", help="Logical-task context rollover marker"
+    )
+    p_boundary.add_argument("--run-id", required=True)
+    p_boundary.add_argument(
+        "--skill", required=True, choices=sorted(OUTER_ORCHESTRATORS)
+    )
+    p_boundary.add_argument(
+        "--disposition",
+        required=True,
+        choices=sorted(CONTEXT_BOUNDARY_DISPOSITIONS),
+    )
+    p_boundary.add_argument("--issue", type=int)
+    p_boundary.add_argument("--pr", type=int)
+    p_boundary.set_defaults(func=cmd_context_boundary)
 
     return parser
 

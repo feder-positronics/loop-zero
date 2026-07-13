@@ -1,5 +1,6 @@
 import argparse
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,79 @@ def load_module() -> ModuleType:
 
 
 module = load_module()
+
+
+def test_context_boundary_event_is_idempotent(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-07-13T12:00:00Z",
+            "session_id": "session-1",
+            "git_branch": "feature/test",
+        },
+    )
+
+    assert (
+        module.write_context_boundary_event(
+            run_id="sr_0123456789abcdef0123456789abcdef",
+            skill="work-issue",
+            disposition="rollover",
+            issue=2644,
+            pr=2700,
+        )
+        is True
+    )
+    assert (
+        module.write_context_boundary_event(
+            run_id="sr_0123456789abcdef0123456789abcdef",
+            skill="work-issue",
+            disposition="rollover",
+            issue=2644,
+            pr=2700,
+        )
+        is False
+    )
+
+    log_path = tmp_path / ".audit" / "agent-events" / "2026-07-13.jsonl"
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "context_boundary"
+    assert rows[0]["run_id"] == "sr_0123456789abcdef0123456789abcdef"
+
+
+def test_context_boundary_parser_has_bounded_vocabulary() -> None:
+    args = module.build_parser().parse_args(
+        [
+            "context-boundary",
+            "--run-id",
+            "sr_0123456789abcdef0123456789abcdef",
+            "--skill",
+            "execute-blueprint",
+            "--disposition",
+            "kept_inline",
+            "--issue",
+            "2644",
+        ]
+    )
+
+    assert args.disposition == "kept_inline"
+
+
+def test_context_boundary_common_field_failure_is_non_blocking(monkeypatch) -> None:
+    monkeypatch.setattr(
+        module, "common_fields", lambda: (_ for _ in ()).throw(OSError("offline"))
+    )
+
+    assert (
+        module.write_context_boundary_event(
+            run_id="sr_0123456789abcdef0123456789abcdef",
+            skill="work-issue",
+            disposition="rollover",
+        )
+        is False
+    )
 
 
 def test_detect_harness_prefers_codex_env(monkeypatch) -> None:

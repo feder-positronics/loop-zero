@@ -199,6 +199,8 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
         entry["footgun_bypass"] = True
     if args.notes:
         entry["notes"] = args.notes[:100]
+    if args.skill in {"work-issue", "execute-blueprint"}:
+        entry["reentry_contract_version"] = 1
     return entry
 
 
