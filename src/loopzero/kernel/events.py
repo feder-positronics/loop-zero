@@ -3,7 +3,7 @@
 Cross-harness instrumentation for the skill workflow. Called from any harness
 (Claude Code, Cursor/Codex) via Bash at well-known boundaries in SKILL.md.
 
-Pairs with `skill_run_log.py` (one entry per skill run at exit) — this primitive
+Pairs with `skill_run_log.py` (append-only logical-run lifecycle events) — this primitive
 captures the *intra-run* events that explain where time and effort went.
 
 Event kinds:

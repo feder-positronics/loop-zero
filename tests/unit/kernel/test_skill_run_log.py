@@ -5,6 +5,9 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
+from uuid import UUID
+
+import pytest
 
 
 def load_agent_event_module() -> ModuleType:
@@ -91,6 +94,8 @@ def test_build_entry_auto_derives_duration(monkeypatch, tmp_path: Path) -> None:
         pr=34,
         footgun_bypass=False,
         notes="done",
+        run_id="sr_0123456789abcdef0123456789abcdef",
+        git_branch=None,
     )
     monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(
@@ -117,3 +122,105 @@ def test_build_entry_auto_derives_duration(monkeypatch, tmp_path: Path) -> None:
     assert entry["session_source"] == "codex_thread"
     assert entry["harness"] == "codex"
     assert entry["git_branch"] == "feature/x"
+    assert entry["run_id"] == "sr_0123456789abcdef0123456789abcdef"
+
+
+def _entry(run_id: str, outcome: str, **extra: object) -> dict[str, object]:
+    return {
+        "ts": "2026-07-13T10:00:00Z",
+        "skill": "work-issue",
+        "run_id": run_id,
+        "outcome": outcome,
+        "issue": 2639,
+        "git_branch": "feat/2639-skill-run-lifecycle",
+        **extra,
+    }
+
+
+def test_start_reuses_exact_active_run_identity() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    entries = [_entry(run_id, "in_progress")]
+
+    resolved = module.resolve_start_run_id(
+        entries,
+        skill="work-issue",
+        issue=2639,
+        git_branch="feat/2639-skill-run-lifecycle",
+    )
+
+    assert resolved == run_id
+
+
+def test_start_generates_opaque_run_id_without_active_match() -> None:
+    run_id = module.resolve_start_run_id(
+        [],
+        skill="work-issue",
+        issue=2639,
+        git_branch="feat/2639-skill-run-lifecycle",
+    )
+
+    assert run_id.startswith("sr_")
+    assert len(run_id) == 35
+    UUID(hex=run_id.removeprefix("sr_"))
+
+
+def test_repeated_same_state_is_idempotent() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    existing = [_entry(run_id, "merged", pr=2700)]
+
+    assert (
+        module.validate_transition(existing, _entry(run_id, "merged", pr=2700)) is False
+    )
+
+
+def test_in_progress_can_transition_to_terminal_from_another_session() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    existing = [_entry(run_id, "in_progress", session_id="first")]
+
+    should_append = module.validate_transition(
+        existing,
+        _entry(run_id, "merged", pr=2700, session_id="closeout"),
+    )
+
+    assert should_append is True
+
+
+def test_resolved_no_change_is_a_truthful_terminal_outcome() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+
+    assert (
+        module.validate_transition(
+            [_entry(run_id, "in_progress")],
+            _entry(run_id, "resolved_no_change"),
+        )
+        is True
+    )
+
+
+def test_conflicting_terminal_transition_is_rejected() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+
+    with pytest.raises(ValueError, match="contradictory terminal"):
+        module.validate_transition(
+            [_entry(run_id, "merged")],
+            _entry(run_id, "blocked"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            "Refs #2639\n\n<!-- skill-run-id: sr_0123456789abcdef0123456789abcdef -->",
+            "sr_0123456789abcdef0123456789abcdef",
+        ),
+        ("Refs #2639", None),
+        (
+            "<!-- skill-run-id: sr_0123456789abcdef0123456789abcdef -->\n"
+            "<!-- skill-run-id: sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->",
+            None,
+        ),
+    ],
+)
+def test_extract_run_id_marker(body: str, expected: str | None) -> None:
+    assert module.extract_run_id_marker(body) == expected
