@@ -245,7 +245,20 @@ else
     emit_tool_event "backend-changed-tests" "$(now_ms)" "skip"
 fi
 
-if ! has_relevant_changes_in AGENTS.md .cursor .agents .agent .claude; then
+if ! has_relevant_changes_in \
+    AGENTS.md \
+    Makefile \
+    .cursor \
+    .agents \
+    .agent \
+    .claude \
+    scripts/util/skill_convergence.py \
+    scripts/util/test_skill_convergence.py \
+    scripts/util/skill_convergence_manifest.json \
+    scripts/util/skill_convergence_receipts.json \
+    scripts/hooks/ci-mirror-check.sh \
+    scripts/docs/check_repo_workflow_policy.py \
+    fastapi_backend/tests/unit/scripts/test_check_repo_workflow_policy.py; then
     echo ""
     echo "== Agent config sync =="
     echo "No agent-surface changes relative to ${base_ref}; skipping sync validation."
