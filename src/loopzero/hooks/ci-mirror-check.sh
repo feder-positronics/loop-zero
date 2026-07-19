@@ -90,6 +90,34 @@ collect_changed_frontend_files() {
     rm -f "$tmp"
 }
 
+collect_changed_files() {
+    local tmp
+    tmp="$(mktemp)"
+
+    if ! git diff --name-only "${base_ref}...HEAD" >>"$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! git diff --name-only >>"$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! git diff --cached --name-only >>"$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    if ! git ls-files --others --exclude-standard >>"$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    if ! sort -u "$tmp" | sed '/^$/d'; then
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+}
+
 should_run_blueprint_drift() {
     if [ "${CI_MIRROR_BLUEPRINT_DRIFT:-}" = "1" ]; then
         return 0
@@ -245,26 +273,30 @@ else
     emit_tool_event "backend-changed-tests" "$(now_ms)" "skip"
 fi
 
-if ! has_relevant_changes_in \
-    AGENTS.md \
-    Makefile \
-    .cursor \
-    .agents \
-    .agent \
-    .claude \
-    scripts/util/skill_convergence.py \
-    scripts/util/test_skill_convergence.py \
-    scripts/util/skill_convergence_manifest.json \
-    scripts/util/skill_convergence_receipts.json \
-    scripts/hooks/ci-mirror-check.sh \
-    scripts/docs/check_repo_workflow_policy.py \
-    fastapi_backend/tests/unit/scripts/test_check_repo_workflow_policy.py; then
+changed_files_output="$(collect_changed_files)" || {
+    echo "Unable to enumerate changed files for agent-config sync." >&2
+    exit 1
+}
+changed_files=()
+if [ -n "$changed_files_output" ]; then
+    mapfile -t changed_files <<<"$changed_files_output"
+fi
+if [ ${#changed_files[@]} -eq 0 ]; then
+    semantic_changes=""
+else
+    semantic_changes="$(
+        python3 scripts/util/skill_semantic_paths.py -- "${changed_files[@]}"
+    )" || exit 1
+fi
+if [ -z "$semantic_changes" ]; then
     echo ""
     echo "== Agent config sync =="
-    echo "No agent-surface changes relative to ${base_ref}; skipping sync validation."
+    echo "No convergence-trigger changes relative to ${base_ref}; skipping sync validation."
 else
     echo ""
     echo "== Agent config sync =="
+    echo "Convergence-trigger changes:"
+    printf '%s\n' "$semantic_changes"
     started_ms="$(now_ms)"
     if make check-agent-configs; then
         emit_tool_event "agent-config-sync" "$started_ms" "pass"
