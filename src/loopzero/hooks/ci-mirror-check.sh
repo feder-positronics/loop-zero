@@ -147,6 +147,16 @@ else
 fi
 
 echo ""
+echo "== Repository workflow policy =="
+started_ms="$(now_ms)"
+if make check-repo-workflow-policy; then
+    emit_tool_event "repo-workflow-policy" "$started_ms" "pass"
+else
+    emit_tool_event "repo-workflow-policy" "$started_ms" "fail"
+    exit 1
+fi
+
+echo ""
 echo "== Docs governance: blueprint drift =="
 if ! should_run_blueprint_drift; then
     echo "No blueprint-policy changes relative to ${base_ref}; skipping online blueprint drift check."
