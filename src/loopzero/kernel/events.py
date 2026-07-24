@@ -354,7 +354,14 @@ def cmd_tool(args: argparse.Namespace) -> int:
         event["result"] = args.result
     if args.skill:
         event["skill"] = args.skill
-    for key in ("cost_usd", "budget_usd", "provider", "scope_digest"):
+    for key in (
+        "cost_usd",
+        "budget_usd",
+        "provider",
+        "scope_digest",
+        "prompt_chars",
+        "timeout_seconds",
+    ):
         value = getattr(args, key, None)
         if value is not None:
             event[key] = value
@@ -548,6 +555,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_tool.add_argument("--budget-usd", type=float)
     p_tool.add_argument("--provider")
     p_tool.add_argument("--scope-digest")
+    p_tool.add_argument("--prompt-chars", type=int)
+    p_tool.add_argument("--timeout-seconds", type=int)
     p_tool.add_argument("--notes", help="≤100 chars")
     p_tool.set_defaults(func=cmd_tool)
 

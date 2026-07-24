@@ -179,6 +179,8 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
         budget_usd=1.0,
         provider="claude",
         scope_digest="abc123",
+        prompt_chars=52_890,
+        timeout_seconds=120,
         notes=None,
     )
 
@@ -187,6 +189,8 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
     assert captured["budget_usd"] == 1.0
     assert captured["provider"] == "claude"
     assert captured["scope_digest"] == "abc123"
+    assert captured["prompt_chars"] == 52_890
+    assert captured["timeout_seconds"] == 120
 
 
 def test_friction_event_records_required_and_optional_fields(monkeypatch) -> None:
