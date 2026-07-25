@@ -361,6 +361,8 @@ def cmd_tool(args: argparse.Namespace) -> int:
         "scope_digest",
         "prompt_chars",
         "timeout_seconds",
+        "finding_count",
+        "max_severity",
     ):
         value = getattr(args, key, None)
         if value is not None:
@@ -557,6 +559,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_tool.add_argument("--scope-digest")
     p_tool.add_argument("--prompt-chars", type=int)
     p_tool.add_argument("--timeout-seconds", type=int)
+    # Residual-miss telemetry: a cross-harness pass runs AFTER local review has
+    # converged, so any finding it reports is a local-gate miss over a known
+    # denominator. Counting catches without counting misses made gate
+    # effectiveness unmeasurable.
+    p_tool.add_argument(
+        "--finding-count",
+        type=int,
+        help="Findings reported by an advisory pass (0 = clean)",
+    )
+    p_tool.add_argument(
+        "--max-severity",
+        choices=("critical", "important", "suggestion", "none"),
+        help="Highest severity reported by an advisory pass",
+    )
     p_tool.add_argument("--notes", help="≤100 chars")
     p_tool.set_defaults(func=cmd_tool)
 
