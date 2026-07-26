@@ -310,7 +310,7 @@ def cmd_output(args: argparse.Namespace) -> int:
         event["findings"] = counts
     # generic produced-artifact counts for non-finding skills
     for key in ("docs_created", "docs_updated", "drift_fixes", "decisions_made"):
-        v = getattr(args, key.replace("_", "_"), None)
+        v = getattr(args, key, None)
         if v is not None:
             event[key] = v
     decision_counts = {
@@ -344,6 +344,23 @@ def cmd_tool(args: argparse.Namespace) -> int:
     if args.result and args.result not in VALID_RESULT:
         print(f"agent_event: invalid --result {args.result!r}", file=sys.stderr)
         return 0
+    finding_count = getattr(args, "finding_count", None)
+    max_severity = getattr(args, "max_severity", None)
+    if finding_count is not None or max_severity is not None:
+        valid_pair = (
+            not isinstance(finding_count, bool)
+            and isinstance(finding_count, int)
+            and finding_count >= 0
+            and max_severity in {"critical", "important", "suggestion", "none"}
+            and ((finding_count == 0) == (max_severity == "none"))
+        )
+        if not valid_pair:
+            print(
+                "agent_event: invalid cross-harness finding telemetry",
+                file=sys.stderr,
+            )
+            finding_count = None
+            max_severity = None
     event = {
         **common_fields(),
         "kind": "tool",
@@ -361,12 +378,13 @@ def cmd_tool(args: argparse.Namespace) -> int:
         "scope_digest",
         "prompt_chars",
         "timeout_seconds",
-        "finding_count",
-        "max_severity",
     ):
         value = getattr(args, key, None)
         if value is not None:
             event[key] = value
+    if finding_count is not None:
+        event["finding_count"] = finding_count
+        event["max_severity"] = max_severity
     if args.notes:
         event["notes"] = args.notes[:100]
     write_event(event)
@@ -566,12 +584,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_tool.add_argument(
         "--finding-count",
         type=int,
-        help="Findings reported by an advisory pass (0 = clean)",
+        help="Findings reported by an advisory pass; requires consistent --max-severity",
     )
     p_tool.add_argument(
         "--max-severity",
         choices=("critical", "important", "suggestion", "none"),
-        help="Highest severity reported by an advisory pass",
+        help="Highest severity; requires --finding-count (none iff count is 0)",
     )
     p_tool.add_argument("--notes", help="≤100 chars")
     p_tool.set_defaults(func=cmd_tool)

@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 def load_module() -> ModuleType:
     repo_root = Path(__file__).resolve().parents[4]
@@ -181,6 +183,8 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
         scope_digest="abc123",
         prompt_chars=52_890,
         timeout_seconds=120,
+        finding_count=2,
+        max_severity="important",
         notes=None,
     )
 
@@ -191,6 +195,52 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
     assert captured["scope_digest"] == "abc123"
     assert captured["prompt_chars"] == 52_890
     assert captured["timeout_seconds"] == 120
+    assert captured["finding_count"] == 2
+    assert captured["max_severity"] == "important"
+
+
+@pytest.mark.parametrize(
+    ("finding_count", "max_severity"),
+    [
+        (-1, "important"),
+        (0, "important"),
+        (1, "none"),
+        (1, None),
+        (None, "important"),
+    ],
+)
+def test_tool_event_rejects_invalid_cross_harness_findings(
+    monkeypatch,
+    capsys,
+    finding_count: int | None,
+    max_severity: str | None,
+) -> None:
+    written: list[dict] = []
+    monkeypatch.setattr(module, "common_fields", lambda: {"ts": "2026-07-10T10:00:00Z"})
+    monkeypatch.setattr(module, "write_event", written.append)
+    args = argparse.Namespace(
+        category="cross-harness-review",
+        duration_ms=19_000,
+        result="pass",
+        skill="code-review",
+        cost_usd=None,
+        budget_usd=None,
+        provider="claude",
+        scope_digest="abc123",
+        prompt_chars=None,
+        timeout_seconds=None,
+        finding_count=finding_count,
+        max_severity=max_severity,
+        notes=None,
+    )
+
+    assert module.cmd_tool(args) == 0
+    assert len(written) == 1
+    assert written[0]["category"] == "cross-harness-review"
+    assert written[0]["result"] == "pass"
+    assert "finding_count" not in written[0]
+    assert "max_severity" not in written[0]
+    assert "invalid cross-harness finding telemetry" in capsys.readouterr().err
 
 
 def test_friction_event_records_required_and_optional_fields(monkeypatch) -> None:
