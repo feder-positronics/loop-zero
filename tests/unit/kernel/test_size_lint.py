@@ -50,7 +50,7 @@ def test_is_exempt() -> None:
         module.is_exempt(
             "fastapi_backend/app/scripts/run_structured_pdf_engine_benchmark.py"
         )
-        is True
+        is False
     )
     assert module.is_exempt("fastapi_backend/app/services/x.py") is False
 
@@ -118,16 +118,3 @@ def test_allowlist_entries_exist() -> None:
     repo_root = Path(__file__).resolve().parents[4]
     missing = [p for p in module.ALLOWLIST_FILES if not (repo_root / p).exists()]
     assert missing == [], f"ALLOWLIST_FILES entries no longer exist: {missing}"
-
-
-def test_benchmark_baseline_still_over_limit() -> None:
-    """Ratchet: when the baselined benchmark script is decomposed below the hard
-    limit, this fails — prompting removal of its ALLOWLIST exemption."""
-    repo_root = Path(__file__).resolve().parents[4]
-    bench = "fastapi_backend/app/scripts/run_structured_pdf_engine_benchmark.py"
-    lines = module.count_lines(str(repo_root / bench))
-    hard = module.BACKEND_WARN * module.HARD_MULTIPLIER
-    assert lines > hard, (
-        f"{bench} is now {lines} lines (<= {hard}). Remove it from "
-        f"ALLOWLIST_FILES in scripts/hooks/size_lint.py to lock in the win."
-    )

@@ -37,8 +37,6 @@ ALLOWLIST_FILES: frozenset[str] = frozenset(
     {
         # cohesive JATS XML parser
         "fastapi_backend/app/etl/fulltext/providers/pmc/jats_parser.py",
-        # baseline: 2152-line one-off benchmark script; decomposition low-value
-        "fastapi_backend/app/scripts/run_structured_pdf_engine_benchmark.py",
     }
 )
 
