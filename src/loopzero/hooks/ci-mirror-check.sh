@@ -133,6 +133,19 @@ should_run_blueprint_drift() {
         scripts/hooks/ci-mirror-check.sh
 }
 
+should_run_test_for_oracle() {
+    has_relevant_changes_in \
+        Makefile \
+        fastapi_backend/pyproject.toml \
+        fastapi_backend/uv.lock \
+        scripts/util/backend_test_lane.py \
+        scripts/util/commit-auto-fix.sh \
+        scripts/hooks/ci-mirror-check.sh \
+        fastapi_backend/tests/unit/scripts/test_backend_test_lane.py \
+        fastapi_backend/tests/unit/scripts/test_test_for_contract.py \
+        fastapi_backend/tests/unit/scripts/test_commit_autofix_merge_scope.py
+}
+
 echo "🔍 CI mirror check"
 echo "   Base ref: ${base_ref}"
 
@@ -281,6 +294,21 @@ else
     echo "Removed from local mirror for cost. Use make test-for in the edit loop,"
     echo "targeted integration for DB/API/task paths, and PR/post-merge CI for broad coverage."
     emit_tool_event "backend-changed-tests" "$(now_ms)" "skip"
+fi
+
+echo ""
+echo "== Backend impacted-test oracle =="
+if ! should_run_test_for_oracle; then
+    echo "No selector/toolchain policy changes relative to ${base_ref}; skipping oracle."
+    emit_tool_event "backend-test-for-oracle" "$(now_ms)" "skip"
+else
+    started_ms="$(now_ms)"
+    if make test-for-oracle; then
+        emit_tool_event "backend-test-for-oracle" "$started_ms" "pass"
+    else
+        emit_tool_event "backend-test-for-oracle" "$started_ms" "fail"
+        exit 1
+    fi
 fi
 
 changed_files_output="$(collect_changed_files)" || {
