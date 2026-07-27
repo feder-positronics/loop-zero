@@ -131,10 +131,23 @@ cmd_wait() {
 	local waited=0
 	while job_running "$dir"; do
 		if [ "$waited" -ge "$timeout" ]; then
-			echo "job '$name' still running after ${timeout}s (pid $(cat "$dir/pid" 2>/dev/null))" >&2
+			# Re-waiting at the same too-short timeout rebuilds the poll loop
+			# this tool exists to remove, so suggest a concrete larger value
+			# based on how long the job has actually been alive.
+			local started elapsed suggest
+			started="$(date -u -d "$(cat "$dir/started_at" 2>/dev/null)" +%s 2>/dev/null || echo 0)"
+			if [ "$started" -gt 0 ]; then
+				elapsed=$(($(date -u +%s) - started))
+			else
+				elapsed="$waited"
+			fi
+			suggest=$((elapsed * 2))
+			[ "$suggest" -lt 60 ] && suggest=60
+			echo "job '$name' still running after ${timeout}s (alive ${elapsed}s, pid $(cat "$dir/pid" 2>/dev/null))" >&2
 			echo "--- last $tail_lines log lines ---" >&2
 			tail -n "$tail_lines" "$dir/log" >&2 2>/dev/null || true
-			echo "still running; re-wait with a longer --timeout or inspect $dir/log" >&2
+			echo "Do NOT re-wait at --timeout $timeout; that is a poll loop. Use:" >&2
+			echo "  scripts/util/job.sh wait $name --timeout $suggest" >&2
 			return 124
 		fi
 		sleep 2
