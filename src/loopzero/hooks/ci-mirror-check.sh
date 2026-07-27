@@ -345,4 +345,17 @@ else
 fi
 
 echo ""
+echo "== Background jobs =="
+started_ms="$(now_ms)"
+if scripts/util/job.sh check; then
+    echo "No unfinished background jobs."
+    emit_tool_event "job-drain" "$started_ms" "pass"
+else
+    emit_tool_event "job-drain" "$started_ms" "fail"
+    echo ""
+    echo "✗ Pushing with unfinished background jobs hides their verdict." >&2
+    exit 1
+fi
+
+echo ""
 echo "✅ CI mirror check passed"

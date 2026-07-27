@@ -84,6 +84,43 @@ def test_refuses_to_clobber_a_running_job(tmp_path: Path) -> None:
     _job(tmp_path, "clean", "--all")
 
 
+def test_check_passes_when_no_jobs_exist(tmp_path: Path) -> None:
+    assert _job(tmp_path, "check").returncode == 0
+
+
+def test_check_fails_while_a_job_is_running(tmp_path: Path) -> None:
+    assert _job(tmp_path, "start", "inflight", "--", "sleep", "30").returncode == 0
+
+    result = _job(tmp_path, "check")
+
+    assert result.returncode == 1
+    assert "still RUNNING" in result.stderr
+
+    _job(tmp_path, "clean", "--all")
+
+
+def test_check_fails_for_a_finished_but_unreaped_job(tmp_path: Path) -> None:
+    # `start` without a matching `wait` means the exit code was never read —
+    # the failure mode job.sh exists to prevent.
+    assert _job(tmp_path, "start", "orphan", "--", "sh", "-c", "exit 3").returncode == 0
+    for _ in range(50):
+        if _job(tmp_path, "check").returncode != 0:
+            break
+
+    result = _job(tmp_path, "check")
+
+    assert result.returncode == 1
+    assert "never waited on" in result.stderr
+
+
+def test_check_passes_once_the_job_is_waited_on(tmp_path: Path) -> None:
+    assert (
+        _job(tmp_path, "run", "reaped", "--timeout", "30", "--", "true").returncode == 0
+    )
+
+    assert _job(tmp_path, "check").returncode == 0
+
+
 def test_wait_on_unknown_job_is_a_usage_error(tmp_path: Path) -> None:
     result = _job(tmp_path, "wait", "ghost")
 

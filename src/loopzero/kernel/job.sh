@@ -14,6 +14,7 @@
 #   scripts/util/job.sh status <name>
 #   scripts/util/job.sh log   <name> [--tail LINES] [--follow]
 #   scripts/util/job.sh list
+#   scripts/util/job.sh check                 # non-zero if any job is running or unreaped
 #   scripts/util/job.sh clean [--all]
 #
 # `wait` exits with the job's own exit code, 124 on timeout, 2 on usage error.
@@ -28,7 +29,7 @@ DEFAULT_TIMEOUT="${INTELFLO_JOB_TIMEOUT:-1800}"
 DEFAULT_TAIL=40
 
 usage() {
-	sed -n '2,26p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
 }
 
@@ -142,6 +143,9 @@ cmd_wait() {
 
 	local code
 	code="$(cat "$dir/exit_code" 2>/dev/null || echo 1)"
+	# Mark the result as read so `check` can distinguish a reaped job from one
+	# whose exit code nobody ever looked at.
+	: >"$dir/waited"
 	emit_result "$dir" "$name" "$tail_lines" "$code"
 	return "$code"
 }
@@ -237,6 +241,33 @@ cmd_list() {
 	[ "$found" = "1" ] || echo "no jobs"
 }
 
+# A job whose result nobody reads is worse than a poll loop: the work happened,
+# the failure is invisible, and the turn ends believing it succeeded.
+cmd_check() {
+	[ -d "$JOB_DIR" ] || return 0
+	local running=0 unreaped=0
+	for dir in "$JOB_DIR"/*/; do
+		[ -d "$dir" ] || continue
+		local name
+		name="$(basename "$dir")"
+		if job_running "$dir"; then
+			running=$((running + 1))
+			echo "job '$name' is still RUNNING (pid $(cat "$dir/pid" 2>/dev/null))" >&2
+		elif [ ! -f "$dir/waited" ]; then
+			unreaped=$((unreaped + 1))
+			echo "job '$name' finished with exit $(cat "$dir/exit_code" 2>/dev/null || echo '?') but was never waited on" >&2
+		fi
+	done
+	if [ "$running" -gt 0 ] || [ "$unreaped" -gt 0 ]; then
+		echo "" >&2
+		echo "$running running, $unreaped unreaped. Wait on each before finishing:" >&2
+		echo "  scripts/util/job.sh wait <name> --timeout <seconds>" >&2
+		echo "  scripts/util/job.sh clean --all   # only if the results are genuinely not needed" >&2
+		return 1
+	fi
+	return 0
+}
+
 cmd_clean() {
 	local all=0
 	[ "${1:-}" = "--all" ] && all=1
@@ -262,6 +293,7 @@ main() {
 	status) cmd_status "$@" ;;
 	log) cmd_log "$@" ;;
 	list) cmd_list "$@" ;;
+	check) cmd_check "$@" ;;
 	clean) cmd_clean "$@" ;;
 	-h | --help | help) usage 0 ;;
 	*) usage 2 ;;
