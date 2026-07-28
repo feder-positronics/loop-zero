@@ -62,11 +62,23 @@ def _run(payload: dict, tmp_path: Path, name: str = "s") -> list[dict]:
     return [e for e in events if e.get("kind") == "invoke"]
 
 
-def test_hook_is_executable_and_never_fails() -> None:
+def test_hook_is_executable_and_never_fails(tmp_path: Path) -> None:
+    """Run in a sandbox repo, never `cwd=REPO`.
+
+    Running the hook in the real checkout writes real events: the unmapped
+    payloads below each emit an `invoke-unmapped-unknown` marker into the
+    primary `.audit/agent-events/`, polluting the telemetry this hook exists
+    to keep truthful (diagnosed in #2995).
+    """
     assert HOOK.exists()
+    sandbox = _sandbox(tmp_path)
     for payload in ("", "not json", "{}", '{"a":1}'):
         proc = subprocess.run(
-            ["bash", str(HOOK)], input=payload, text=True, capture_output=True, cwd=REPO
+            ["bash", str(HOOK)],
+            input=payload,
+            text=True,
+            capture_output=True,
+            cwd=sandbox,
         )
         assert proc.returncode == 0, f"hook must never fail the caller: {payload!r}"
 
