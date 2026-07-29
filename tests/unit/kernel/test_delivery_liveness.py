@@ -5,6 +5,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
+import pytest
+
 
 def load_module() -> ModuleType:
     repo_root = Path(__file__).resolve().parents[4]
@@ -195,6 +197,48 @@ def test_fresh_unstaged_deletion_uses_parent_directory_activity(
     monkeypatch.setattr(module, "_status_paths", lambda _path: ("deleted.py",))
 
     assert module.inspect_dirty_worktree(worktree, NOW) is None
+
+
+@pytest.mark.parametrize(
+    ("link_age", "target_age", "expected_latest_activity"),
+    [
+        ("fresh", "old", NOW - timedelta(minutes=5)),
+        ("old", "fresh", NOW - timedelta(hours=3)),
+    ],
+)
+def test_symlink_activity_uses_link_mtime_not_target_mtime(
+    tmp_path: Path,
+    monkeypatch,
+    link_age: str,
+    target_age: str,
+    expected_latest_activity: datetime,
+) -> None:
+    worktree_path = tmp_path / "worktree"
+    worktree_path.mkdir()
+    index = worktree_path / "index"
+    index.write_text("index", encoding="utf-8")
+    target = worktree_path / "target.py"
+    target.write_text("target", encoding="utf-8")
+    link = worktree_path / "changed.py"
+    link.symlink_to(target)
+
+    old = (NOW - timedelta(hours=3)).timestamp()
+    fresh = (NOW - timedelta(minutes=5)).timestamp()
+    os.utime(index, (old, old))
+    os.utime(target, (old if target_age == "old" else fresh,) * 2)
+    os.utime(link, (old if link_age == "old" else fresh,) * 2, follow_symlinks=False)
+
+    worktree = module.RegisteredWorktree(worktree_path, "feature/symlink-mtime")
+    monkeypatch.setattr(module, "_worktree_index_path", lambda _path: index)
+    monkeypatch.setattr(module, "_status_paths", lambda _path: ("changed.py",))
+
+    finding = module.inspect_dirty_worktree(worktree, NOW)
+
+    if link_age == "fresh":
+        assert finding is None
+    else:
+        assert finding is not None
+        assert finding.latest_activity_at == expected_latest_activity
 
 
 def test_path_activity_does_not_walk_outside_worktree(tmp_path: Path) -> None:

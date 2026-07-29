@@ -223,7 +223,11 @@ def _status_paths(worktree: Path) -> tuple[str, ...] | None:
 
 
 def _path_activity_mtime(path: Path, worktree: Path) -> datetime | None:
-    """Use the nearest existing path so fresh unstaged deletions stay fresh."""
+    """Use the nearest existing path so fresh unstaged deletions stay fresh.
+
+    ``lstat`` keeps a symlink's activity independent from the target it points
+    to, including for broken symlinks.
+    """
     try:
         path.relative_to(worktree)
     except ValueError:
@@ -231,8 +235,10 @@ def _path_activity_mtime(path: Path, worktree: Path) -> datetime | None:
 
     candidate = path
     while True:
-        if timestamp := _mtime(candidate):
-            return timestamp
+        try:
+            return datetime.fromtimestamp(candidate.lstat().st_mtime, tz=UTC)
+        except OSError:
+            pass
         if candidate == worktree or candidate == candidate.parent:
             return None
         candidate = candidate.parent
