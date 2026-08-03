@@ -86,7 +86,7 @@ DECISION_WEIGHTS = {"routine", "normal", "high", "reserved"}
 AUTHORITY_MODES = {"ask", "recommend", "decide-notify", "autonomous"}
 CONFIDENCE_LEVELS = {"low", "medium", "high"}
 CHALLENGER_VERDICTS = {"not-run", "agree", "mixed", "disagree"}
-OWNER_VERDICTS = {"pending", "confirmed", "no-veto", "edited", "vetoed"}
+OWNER_VERDICTS = {"pending", "confirmed", "no-veto", "notified", "edited", "vetoed"}
 OUTCOME_VERDICTS = {"unknown", "supported", "mixed", "failed"}
 FRICTION_SIGNALS = {
     "owner-correction",
