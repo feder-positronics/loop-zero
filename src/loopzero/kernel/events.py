@@ -337,7 +337,53 @@ def cmd_output(args: argparse.Namespace) -> int:
     if args.notes:
         event["notes"] = args.notes[:100]
     write_event(event)
+    _enforce_review_pass_escape_hatch(args, event)
     return 0
+
+
+# Review Gate escape hatch (review-gate.mdc): 5 non-converging passes stop
+# the loop. Deterministic guard (#3106 B2): detection and the durable
+# friction record fire mechanically instead of relying on prose recall.
+REVIEW_GATE_SKILLS = frozenset(
+    {"code-review", "security-review", "review-design-doc"}
+)
+ESCAPE_HATCH_PASS = 5
+
+
+def _enforce_review_pass_escape_hatch(
+    args: argparse.Namespace, event: dict
+) -> None:
+    pass_num = getattr(args, "pass_num", None)
+    if (
+        args.skill not in REVIEW_GATE_SKILLS
+        or pass_num is None
+        or pass_num < ESCAPE_HATCH_PASS
+    ):
+        return
+    write_unique_event(
+        {
+            **common_fields(),
+            "kind": "friction",
+            "skill": args.skill,
+            "signal": "escape-hatch",
+            "status": "observed",
+            "issue_key": (
+                f"{args.skill}:5-pass-escape-hatch:{event.get('session_id')}"
+            ),
+            "summary": (
+                f"review pass {pass_num} recorded — the 5-pass "
+                "non-convergence escape hatch fired (review-gate)"
+            ),
+        },
+        key_fields=("kind", "issue_key"),
+    )
+    print(
+        f"⛔ escape hatch: pass {pass_num} on {args.skill} — review-gate "
+        "caps non-converging passes at 5. Stop fixing in place: summarize "
+        "the remaining findings and escalate to the owner "
+        "(deterministic guard, #3106 B2).",
+        file=sys.stderr,
+    )
 
 
 def cmd_tool(args: argparse.Namespace) -> int:

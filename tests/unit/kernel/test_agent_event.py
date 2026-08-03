@@ -167,6 +167,60 @@ def test_output_event_records_decision_counts_and_ids(monkeypatch) -> None:
     assert captured["reverses_decision_ids"] == ["DR-2"]
 
 
+def _output_args(skill: str, pass_num: int | None) -> argparse.Namespace:
+    return argparse.Namespace(
+        skill=skill,
+        pass_num=pass_num,
+        findings_critical=None,
+        findings_high=None,
+        findings_medium=None,
+        findings_low=None,
+        docs_created=None,
+        docs_updated=None,
+        drift_fixes=None,
+        decisions_made=None,
+        decisions_locked=None,
+        decisions_assumed=None,
+        decisions_deferred=None,
+        decision_locked_ids=None,
+        decision_assumed_ids=None,
+        decision_deferred_ids=None,
+        reverses_decision_ids=None,
+        notes=None,
+    )
+
+
+def test_five_pass_escape_hatch_fires_deterministically(
+    monkeypatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """review-gate escape hatch (#3106 B2): pass >=5 on a review skill
+    auto-records a keyed friction event and prints the stop instruction."""
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {"ts": "2026-08-03T10:00:00Z", "session_id": "session-9"},
+    )
+    monkeypatch.setattr(module, "write_event", lambda event: None)
+    unique: list[dict] = []
+    monkeypatch.setattr(
+        module,
+        "write_unique_event",
+        lambda event, key_fields: unique.append(event) or True,
+    )
+
+    assert module.cmd_output(_output_args("code-review", 5)) == 0
+
+    assert len(unique) == 1
+    assert unique[0]["signal"] == "escape-hatch"
+    assert unique[0]["issue_key"] == "code-review:5-pass-escape-hatch:session-9"
+    assert "escape hatch" in capsys.readouterr().err
+
+    # Pass 4, and non-review skills at pass 5, do not fire.
+    assert module.cmd_output(_output_args("code-review", 4)) == 0
+    assert module.cmd_output(_output_args("design-handoff", 5)) == 0
+    assert len(unique) == 1
+
+
 def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
     captured: dict = {}
     monkeypatch.setattr(module, "common_fields", lambda: {"ts": "2026-07-10T10:00:00Z"})
