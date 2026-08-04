@@ -121,6 +121,45 @@ def test_check_passes_once_the_job_is_waited_on(tmp_path: Path) -> None:
     assert _job(tmp_path, "check").returncode == 0
 
 
+def test_check_ignores_only_the_authenticated_current_wrapper(tmp_path: Path) -> None:
+    result = _job(
+        tmp_path,
+        "run",
+        "self-check",
+        "--timeout",
+        "30",
+        "--",
+        str(SCRIPT),
+        "check",
+    )
+
+    assert result.returncode == 0
+
+
+def test_authenticated_self_check_still_rejects_a_running_sibling(
+    tmp_path: Path,
+) -> None:
+    command = f"{SCRIPT} start sibling -- sleep 30 >/dev/null && {SCRIPT} check"
+    try:
+        result = _job(
+            tmp_path,
+            "run",
+            "self-check",
+            "--timeout",
+            "30",
+            "--",
+            "sh",
+            "-c",
+            command,
+        )
+
+        assert result.returncode == 1
+        assert "job 'sibling' is still RUNNING" in result.stdout
+        assert "job 'self-check' is still RUNNING" not in result.stdout
+    finally:
+        _job(tmp_path, "clean", "--all")
+
+
 def test_wait_on_unknown_job_is_a_usage_error(tmp_path: Path) -> None:
     result = _job(tmp_path, "wait", "ghost")
 

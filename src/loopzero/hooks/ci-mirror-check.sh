@@ -7,6 +7,20 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
 
+# Git exports repository-local variables to hooks. If they reach a test that
+# creates a nested repository, `git -C <temp-dir>` still targets this live
+# worktree and can rewrite its refs, index, and config. The mirror has already
+# resolved its root by path, so clear only Git's documented local variables;
+# subsequent commands rediscover this repository from the working directory.
+if ! git_local_env_names="$(git rev-parse --local-env-vars)"; then
+    echo "✗ Could not enumerate repository-local Git hook variables." >&2
+    exit 1
+fi
+while IFS= read -r git_env_name; do
+    [ -n "$git_env_name" ] && unset "$git_env_name"
+done <<< "$git_local_env_names"
+unset git_local_env_names
+
 now_ms() {
     python3 -c 'import time; print(time.monotonic_ns() // 1_000_000)'
 }
@@ -201,7 +215,12 @@ else
     emit_tool_event "blueprint-drift" "$(now_ms)" "skip"
 fi
 
-if ! has_relevant_changes_in fastapi_backend .github/workflows/ci.yml scripts/hooks/ci-mirror-check.sh; then
+if ! has_relevant_changes_in \
+    fastapi_backend \
+    .github/workflows/ci.yml \
+    .github/workflows/scheduled-ci.yml \
+    .github/actions/critical-playwright \
+    scripts/hooks/ci-mirror-check.sh; then
     echo ""
     echo "== Backend lint =="
     echo "No backend changes relative to ${base_ref}; skipping backend lint."
@@ -230,31 +249,57 @@ else
     fi
 fi
 
-if ! has_relevant_changes_in nextjs-frontend .github/workflows/ci.yml scripts/hooks/ci-mirror-check.sh; then
+if ! has_relevant_changes_in \
+    nextjs-frontend \
+    .github/workflows/ci.yml \
+    .github/workflows/scheduled-ci.yml \
+    .github/actions/critical-playwright \
+    scripts/util/frontend_validation_scope.py \
+    scripts/hooks/ci-mirror-check.sh; then
     echo ""
-    echo "== Frontend type check =="
-    echo "No frontend changes relative to ${base_ref}; skipping frontend tsc."
+    echo "== Frontend static checks =="
+    echo "No frontend or frontend-CI changes relative to ${base_ref}; skipping static checks."
 else
     echo ""
-    echo "== Frontend type check =="
+    echo "== Frontend static checks =="
     started_ms="$(now_ms)"
-    if (cd nextjs-frontend && pnpm run tsc); then
-        emit_tool_event "frontend-tsc" "$started_ms" "pass"
+    if (
+        cd nextjs-frontend
+        pnpm run tsc
+        pnpm run lint
+        pnpm exec prettier --check '**/*.{js,jsx,ts,tsx,json,css,html}'
+    ); then
+        emit_tool_event "frontend-static" "$started_ms" "pass"
     else
-        emit_tool_event "frontend-tsc" "$started_ms" "fail"
+        emit_tool_event "frontend-static" "$started_ms" "fail"
         exit 1
     fi
 fi
 
-if ! has_relevant_changes_in nextjs-frontend; then
+if ! has_relevant_changes_in \
+    nextjs-frontend \
+    .github/workflows/ci.yml \
+    .github/workflows/scheduled-ci.yml \
+    .github/actions/critical-playwright \
+    scripts/util/frontend_validation_scope.py \
+    scripts/hooks/ci-mirror-check.sh; then
     echo ""
     echo "== Frontend changed-tests =="
-    echo "No frontend changes relative to ${base_ref}; skipping vitest related run."
+    echo "No frontend or frontend-CI changes relative to ${base_ref}; skipping Vitest."
 else
     echo ""
     echo "== Frontend changed-tests =="
     mapfile -t frontend_changed_files < <(collect_changed_frontend_files)
-    if [ ${#frontend_changed_files[@]} -eq 0 ]; then
+    frontend_force=0
+    if [ "${CI_MIRROR_FULL_FRONTEND:-}" = "1" ] || has_relevant_changes_in \
+        .github/workflows/ci.yml \
+        .github/workflows/scheduled-ci.yml \
+        .github/actions/critical-playwright \
+        scripts/util/frontend_validation_scope.py \
+        scripts/hooks/ci-mirror-check.sh; then
+        frontend_force=1
+    fi
+    if [ ${#frontend_changed_files[@]} -eq 0 ] && [ "$frontend_force" = "0" ]; then
         echo "No frontend file list resolved; skipping vitest related run."
     else
         frontend_changed_args=()
@@ -263,7 +308,7 @@ else
         done
         started_ms="$(now_ms)"
         validation_scope_args=("${frontend_changed_files[@]}")
-        if [ "${CI_MIRROR_FULL_FRONTEND:-}" = "1" ]; then
+        if [ "$frontend_force" = "1" ]; then
             validation_scope_args=(--force "${validation_scope_args[@]}")
         fi
         frontend_validation_scope="$(python3 scripts/util/frontend_validation_scope.py "${validation_scope_args[@]}")"
@@ -280,6 +325,27 @@ else
         else
             emit_tool_event "$frontend_event" "$started_ms" "fail"
             exit 1
+        fi
+        if [ "$frontend_validation_scope" != "full" ]; then
+            started_ms="$(now_ms)"
+            if (
+                cd nextjs-frontend
+                shopt -s nullglob
+                guardrail_tests=(
+                    __tests__/unit/*guardrail*.test.ts
+                    __tests__/unit/*guardrail*.test.tsx
+                )
+                if [ ${#guardrail_tests[@]} -eq 0 ]; then
+                    echo "No frontend repository guardrail tests found." >&2
+                    exit 1
+                fi
+                pnpm exec vitest run "${guardrail_tests[@]}"
+            ); then
+                emit_tool_event "frontend-guardrail-tests" "$started_ms" "pass"
+            else
+                emit_tool_event "frontend-guardrail-tests" "$started_ms" "fail"
+                exit 1
+            fi
         fi
     fi
 fi

@@ -70,10 +70,13 @@ cmd_start() {
 	printf '%s\n' "$*" >"$dir/cmd"
 	date -u '+%Y-%m-%dT%H:%M:%SZ' >"$dir/started_at"
 	: >"$dir/log"
+	local token
+	token="$(tr -d '\n' </proc/sys/kernel/random/uuid)"
+	printf '%s\n' "$token" >"$dir/token"
 
 	# setsid detaches from the agent's shell session, so the job survives the
 	# exec_command timeout that would otherwise orphan or kill it.
-	setsid bash -c '
+	setsid env INTELFLO_JOB_NAME="$name" INTELFLO_JOB_TOKEN="$token" bash -c '
 		"$@" >>"$0/log" 2>&1
 		echo $? >"$0/exit_code"
 	' "$dir" "$@" </dev/null >/dev/null 2>&1 &
@@ -263,6 +266,14 @@ cmd_check() {
 		[ -d "$dir" ] || continue
 		local name
 		name="$(basename "$dir")"
+		# A detached command may run a final hygiene check itself. Ignore only
+		# its own wrapper, authenticated by the per-run token; every sibling job
+		# and every stale result remains visible.
+		if [ "$name" = "${INTELFLO_JOB_NAME:-}" ] &&
+			[ -n "${INTELFLO_JOB_TOKEN:-}" ] &&
+			[ "$(cat "$dir/token" 2>/dev/null || true)" = "$INTELFLO_JOB_TOKEN" ]; then
+			continue
+		fi
 		if job_running "$dir"; then
 			running=$((running + 1))
 			echo "job '$name' is still RUNNING (pid $(cat "$dir/pid" 2>/dev/null))" >&2
