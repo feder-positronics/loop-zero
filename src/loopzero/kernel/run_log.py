@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import platform
 import re
 import sys
 from datetime import UTC, datetime
@@ -173,8 +174,17 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
         "session_id": fields["session_id"],
         "session_source": fields["session_source"],
         "harness": fields["harness"],
+        # Which machine ran this. Agents can run on more than one host, and
+        # without it "which client is working on what" cannot be answered when
+        # they do. Consumers show it only when a window contains more than one
+        # host, so the single-machine case stays noise-free.
+        "host": platform.node() or "unknown",
         "git_branch": fields["git_branch"],
     }
+    # t3code can wrap any engine, so the orchestrator is a separate dimension
+    # from the engine — recording only one loses information either way.
+    if wrapper := fields.get("wrapper"):
+        entry["wrapper"] = wrapper
     if args.git_branch:
         entry["git_branch"] = args.git_branch
 

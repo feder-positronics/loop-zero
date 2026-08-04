@@ -491,3 +491,74 @@ def test_verdict_and_outcome_events_are_addressed_by_decision_id(monkeypatch) ->
     assert captured[0]["owner_verdict"] == "no-veto"
     assert captured[1]["kind"] == "decision-outcome"
     assert captured[1]["outcome_verdict"] == "supported"
+
+
+# --- engine vs surface: two dimensions, not one -----------------------------
+
+
+def _clear_identity(monkeypatch) -> None:
+    for name in (
+        "AGENT_HARNESS",
+        "AGENT_WRAPPER",
+        "CODEX_THREAD_ID",
+        "CODEX_MANAGED_BY_NPM",
+        "CODEX_MANAGED_PACKAGE_ROOT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CURSOR_TRACE_ID",
+        "ZED_ENVIRONMENT",
+        "T3_RUN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_zed_hosted_codex_reports_both_engine_and_surface(monkeypatch) -> None:
+    """Pins the environment observed from a live Zed agent process.
+
+    Zed's agent panel spawns Codex through `@agentclientprotocol/codex-acp`,
+    and the spawned process inherits BOTH sets of variables — exactly these
+    three, read from pid 918607 on 2026-08-04. Had Zed spawned with a clean
+    environment, detection would have silently returned a bare `codex` and the
+    surface would have been invisible, which is the failure t3code had.
+    """
+    _clear_identity(monkeypatch)
+    monkeypatch.setenv("CODEX_MANAGED_BY_NPM", "1")
+    monkeypatch.setenv("CODEX_MANAGED_PACKAGE_ROOT", "/home/u/.local/share/zed")
+    monkeypatch.setenv("ZED_ENVIRONMENT", "worktree-shell")
+
+    assert module.detect_harness() == "codex"
+    assert module.detect_wrapper() == "zed"
+
+
+def test_a_cli_run_has_no_surface(monkeypatch) -> None:
+    """A bare engine means the CLI drove it — absence is the signal."""
+    _clear_identity(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-123")
+    monkeypatch.setattr(module, "git_branch", lambda: "feature/x")
+
+    assert module.detect_harness() == "codex"
+    assert module.detect_wrapper() is None
+
+
+def test_t3code_branch_is_a_surface_over_its_engine(monkeypatch) -> None:
+    """t3code wraps any engine, so the engine must survive alongside it.
+
+    Engine-first detection previously credited 10 t3code runs to plain `codex`.
+    """
+    _clear_identity(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-123")
+    monkeypatch.setattr(module, "git_branch", lambda: "t3code/some-task")
+
+    assert module.detect_harness() == "codex"
+    assert module.detect_wrapper() == "t3code"
+
+
+def test_explicit_overrides_beat_sniffing(monkeypatch) -> None:
+    """`AGENT_HARNESS`/`AGENT_WRAPPER` are the supported way to self-identify."""
+    _clear_identity(monkeypatch)
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-123")
+    monkeypatch.setenv("ZED_ENVIRONMENT", "worktree-shell")
+    monkeypatch.setenv("AGENT_HARNESS", "claude")
+    monkeypatch.setenv("AGENT_WRAPPER", "t3code")
+
+    assert module.detect_harness() == "claude"
+    assert module.detect_wrapper() == "t3code"

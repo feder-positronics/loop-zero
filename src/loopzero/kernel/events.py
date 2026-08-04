@@ -141,6 +141,16 @@ def git_branch() -> str:
 
 
 def detect_harness() -> str:
+    """Name the ENGINE running this command (claude / codex / cursor / zed).
+
+    `AGENT_HARNESS` is the authoritative override and the supported way for any
+    client to identify itself; env sniffing is best-effort.
+
+    This is deliberately the engine, not the orchestrator. t3code can wrap ANY
+    engine, so collapsing both into one field loses information either way:
+    reporting `codex` hides that t3code drove it, and reporting `t3code` hides
+    which engine actually ran. `detect_wrapper()` carries the other dimension.
+    """
     if explicit := os.environ.get("AGENT_HARNESS"):
         return explicit
     if any(k.startswith("CODEX_") for k in os.environ):
@@ -150,6 +160,32 @@ def detect_harness() -> str:
     if any(k.startswith("CURSOR_") for k in os.environ):
         return "cursor"
     return "unknown"
+
+
+def detect_wrapper() -> str | None:
+    """Name the SURFACE the engine was driven from, when it is not the CLI.
+
+    t3code and Zed are editors/orchestrators, not engines: each can drive any
+    engine. They are therefore a separate dimension, reported alongside the
+    engine rather than instead of it — 10 t3code runs previously appeared as
+    plain `codex`, making the surface invisible in fleet views.
+
+    A bare engine with no wrapper means it ran directly from the CLI.
+    """
+    if explicit := os.environ.get("AGENT_WRAPPER"):
+        return explicit
+    if any(k.startswith("T3_") for k in os.environ):
+        return "t3code"
+    if any(k.startswith("ZED_") for k in os.environ):
+        return "zed"
+    try:
+        if str(Path.cwd()).startswith(str(Path.home() / ".t3")):
+            return "t3code"
+    except OSError:  # pragma: no cover - cwd removed underneath us
+        return None
+    if git_branch().startswith("t3code/"):
+        return "t3code"
+    return None
 
 
 def resolve_session(root: Path, branch: str) -> tuple[str, str]:
@@ -269,6 +305,8 @@ def common_fields() -> dict:
         "harness": detect_harness(),
         "git_branch": branch,
     }
+    if wrapper := detect_wrapper():
+        fields["wrapper"] = wrapper
     if cid := os.environ.get("AGENT_CORRELATION_ID"):
         fields["correlation_id"] = cid
     return fields
