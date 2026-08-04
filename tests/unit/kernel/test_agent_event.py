@@ -509,6 +509,10 @@ def _clear_identity(monkeypatch) -> None:
         "T3_RUN",
     ):
         monkeypatch.delenv(name, raising=False)
+    for name in tuple(os.environ):
+        if name.startswith("T3_"):
+            monkeypatch.delenv(name)
+    monkeypatch.setattr(module.Path, "cwd", classmethod(lambda cls: Path("/tmp")))
 
 
 def test_zed_hosted_codex_reports_both_engine_and_surface(monkeypatch) -> None:
