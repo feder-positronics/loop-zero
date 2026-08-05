@@ -21,6 +21,7 @@ from typing import Callable, Iterable
 ACTIVE_RUN_EVENT_STALE_AFTER = timedelta(hours=2)
 DIRTY_WORKTREE_STALE_AFTER = timedelta(hours=2)
 ACTIVE_LOGICAL_RUN_MAX_AGE = timedelta(hours=24)
+GIT_COMMAND_TIMEOUT_SECONDS = 10
 
 TERMINAL_OUTCOMES = {
     "merged",
@@ -30,6 +31,32 @@ TERMINAL_OUTCOMES = {
 }
 ROLLOVER_RECOMMENDATION = "re-entry capsule rollover"
 RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
+
+
+class CollectorError(RuntimeError):
+    """A liveness collector failed before it could report trustworthy state."""
+
+
+def _run_git(
+    args: list[str], *, collector: str, environment: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run one Git collector with a hard deadline and an actionable error."""
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=environment,
+            timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise CollectorError(
+            f"{collector} timed out after {GIT_COMMAND_TIMEOUT_SECONDS}s"
+        ) from exc
+    if result.returncode != 0:
+        raise CollectorError(f"{collector} failed with exit {result.returncode}")
+    return result
 
 
 @dataclass(frozen=True)
@@ -120,14 +147,12 @@ def read_jsonl(directory: Path) -> list[dict[str, object]]:
 
 def repo_root() -> Path:
     """Return the shared checkout root used by local audit telemetry."""
-    result = subprocess.run(
+    result = _run_git(
         ["git", "rev-parse", "--git-common-dir"],
-        capture_output=True,
-        text=True,
-        check=False,
+        collector="git-common-dir",
     )
-    if result.returncode != 0 or not result.stdout.strip():
-        raise RuntimeError("not inside a Git repository")
+    if not result.stdout.strip():
+        raise CollectorError("git-common-dir returned an empty path")
     return Path(result.stdout.strip()).resolve().parent
 
 
@@ -154,14 +179,10 @@ def parse_registered_worktrees(output: str) -> tuple[RegisteredWorktree, ...]:
 
 def registered_worktrees(root: Path) -> tuple[RegisteredWorktree, ...]:
     """Read all worktrees registered for the repository at ``root``."""
-    result = subprocess.run(
+    result = _run_git(
         ["git", "-C", str(root), "worktree", "list", "--porcelain"],
-        capture_output=True,
-        text=True,
-        check=False,
+        collector=f"registered-worktrees [{root}]",
     )
-    if result.returncode != 0:
-        return ()
     return parse_registered_worktrees(result.stdout)
 
 
@@ -191,11 +212,11 @@ def _mtime(path: Path) -> datetime | None:
         return None
 
 
-def _status_paths(worktree: Path) -> tuple[str, ...] | None:
-    """Return dirty paths, or ``None`` when Git cannot inspect the worktree."""
+def _status_paths(worktree: Path) -> tuple[str, ...]:
+    """Return dirty paths, failing closed when Git cannot inspect the worktree."""
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
-    result = subprocess.run(
+    result = _run_git(
         [
             "git",
             "-C",
@@ -206,13 +227,9 @@ def _status_paths(worktree: Path) -> tuple[str, ...] | None:
             "--untracked-files=all",
             "--no-renames",
         ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=environment,
+        collector=f"worktree-status [{worktree}]",
+        environment=environment,
     )
-    if result.returncode != 0:
-        return None
 
     paths: list[str] = []
     for record in result.stdout.split("\0"):
@@ -254,7 +271,7 @@ def inspect_dirty_worktree(
     index_path = _worktree_index_path(worktree.path)
     index_mtime = _mtime(index_path) if index_path is not None else None
     dirty_paths = _status_paths(worktree.path)
-    if dirty_paths is None or not dirty_paths:
+    if not dirty_paths:
         return None
 
     activity_times = [timestamp for timestamp in (index_mtime,) if timestamp]
@@ -490,9 +507,9 @@ def render(report: LivenessReport) -> str:
 def main() -> int:
     try:
         report = collect_report()
-    except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
-        print(f"🚦 Delivery liveness (read-only) unavailable: {exc}")
-        return 0
+    except (CollectorError, OSError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"🚦 Delivery liveness (read-only) unavailable: {exc}", file=sys.stderr)
+        return 1
     print(render(report))
     return 0
 

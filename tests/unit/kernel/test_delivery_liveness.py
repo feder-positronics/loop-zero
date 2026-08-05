@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import subprocess
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -268,3 +269,210 @@ def test_registered_worktree_porcelain_parser_handles_detached_entries() -> None
         module.RegisteredWorktree(Path("/repo/main"), "main"),
         module.RegisteredWorktree(Path("/repo/feature"), "(detached)"),
     )
+
+
+def test_stalled_worktree_status_fails_closed_and_names_resource(
+    tmp_path: Path, monkeypatch
+) -> None:
+    worktree = tmp_path / "stalled-worktree"
+    worktree.mkdir()
+
+    def stall(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(module.subprocess, "run", stall)
+
+    with pytest.raises(module.CollectorError, match="worktree-status") as exc_info:
+        module._status_paths(worktree)
+
+    assert str(worktree) in str(exc_info.value)
+    assert f"{module.GIT_COMMAND_TIMEOUT_SECONDS}s" in str(exc_info.value)
+
+
+def test_failed_worktree_status_is_not_reported_as_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    worktree = tmp_path / "failed-worktree"
+    worktree.mkdir()
+    completed = subprocess.CompletedProcess(
+        args=["git", "status"], returncode=128, stdout="", stderr="not a repository"
+    )
+    monkeypatch.setattr(module.subprocess, "run", lambda *args, **kwargs: completed)
+
+    with pytest.raises(module.CollectorError, match="worktree-status") as exc_info:
+        module._status_paths(worktree)
+
+    assert "exit 128" in str(exc_info.value)
+
+
+def test_main_returns_nonzero_and_names_failed_collector(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        module,
+        "collect_report",
+        lambda: (_ for _ in ()).throw(
+            module.CollectorError("worktree-status [/repo/stalled] timed out after 10s")
+        ),
+    )
+
+    assert module.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "worktree-status [/repo/stalled] timed out after 10s" in captured.err
+
+
+def test_main_renders_normal_completion(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(
+        module,
+        "collect_report",
+        lambda: module.LivenessReport((), (), ()),
+    )
+
+    assert module.main() == 0
+    captured = capsys.readouterr()
+    assert "no liveness findings" in captured.out
+    assert captured.err == ""
+
+
+def _write_executable(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _preflight_environment(
+    tmp_path: Path,
+    *,
+    make_body: str,
+    gh_body: str = "exit 0",
+    bash_body: str = "exit 0",
+) -> dict[str, str]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "gh", gh_body)
+    _write_executable(fake_bin / "make", make_body)
+    _write_executable(fake_bin / "bash", bash_body)
+    return {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "TMPDIR": "/tmp",
+        "TMP": "/tmp",
+        "TEMP": "/tmp",
+    }
+
+
+def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=_preflight_environment(tmp_path, make_body="exit 0"),
+    )
+
+    assert result.returncode == 0
+    assert "preflight: OK (#3202)" in result.stdout
+
+
+def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    environment = _preflight_environment(tmp_path, make_body="sleep 2")
+    environment["PREFLIGHT_STEP_TIMEOUT_SECONDS"] = "0.1"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "preflight: lanes collector timed out after 0.1s" in result.stderr
+    assert "== collision guard ==" not in result.stdout
+    assert "preflight: OK" not in result.stdout
+
+
+def test_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=_preflight_environment(tmp_path, make_body="exit 0", bash_body="exit 3"),
+    )
+
+    assert result.returncode == 3
+    assert "preflight: collision guard failed with exit 3" in result.stderr
+    assert "preflight: OK" not in result.stdout
+
+
+def test_preflight_collision_timeout_is_failure_not_collision(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    environment = _preflight_environment(
+        tmp_path, make_body="exit 0", bash_body="sleep 2"
+    )
+    environment["PREFLIGHT_STEP_TIMEOUT_SECONDS"] = "0.1"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "preflight: collision guard timed out after 0.1s" in result.stderr
+
+
+def test_preflight_quiet_auth_timeout_keeps_wrapper_diagnostic(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    environment = _preflight_environment(
+        tmp_path, make_body="exit 0", gh_body="sleep 2"
+    )
+    environment["PREFLIGHT_STEP_TIMEOUT_SECONDS"] = "0.1"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "preflight: GitHub auth timed out after 0.1s" in result.stderr
+    assert "GitHub auth unavailable" in result.stderr
