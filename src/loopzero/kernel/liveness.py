@@ -54,6 +54,10 @@ def _run_git(
         raise CollectorError(
             f"{collector} timed out after {GIT_COMMAND_TIMEOUT_SECONDS}s"
         ) from exc
+    except OSError as exc:
+        raise CollectorError(
+            f"{collector} could not start ({type(exc).__name__})"
+        ) from exc
     if result.returncode != 0:
         raise CollectorError(f"{collector} failed with exit {result.returncode}")
     return result

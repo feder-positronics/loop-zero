@@ -305,6 +305,19 @@ def test_failed_worktree_status_is_not_reported_as_clean(
     assert "exit 128" in str(exc_info.value)
 
 
+def test_unstartable_git_is_a_typed_collector_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            FileNotFoundError("git is unavailable")
+        ),
+    )
+
+    with pytest.raises(module.CollectorError, match="git-common-dir could not start"):
+        module.repo_root()
+
+
 def test_main_returns_nonzero_and_names_failed_collector(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         module,
