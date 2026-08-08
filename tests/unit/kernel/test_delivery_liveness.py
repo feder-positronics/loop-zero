@@ -392,6 +392,37 @@ def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
     assert "preflight: OK (#3202)" in result.stdout
 
 
+def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    environment = _preflight_environment(tmp_path, make_body="exit 9", gh_body="exit 9")
+    fake_bin = tmp_path / "bin"
+    _write_executable(fake_bin / "timeout", 'shift 3; exec "$@"')
+    environment["PATH"] = str(fake_bin)
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert (
+        "preflight: ripgrep (rg) is required but unavailable on PATH" in result.stderr
+    )
+    assert "GitHub auth unavailable" not in result.stderr
+    assert result.stdout == ""
+
+
 def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
     tmp_path: Path,
 ) -> None:
