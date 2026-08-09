@@ -196,10 +196,13 @@ def _init_guard_repo(path: Path) -> Path:
     return path
 
 
-def _guard_commit(repo: Path) -> subprocess.CompletedProcess:
+def _guard_commit(
+    repo: Path, *, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT_PATH), "guard-commit", "--worktree", str(repo)],
         capture_output=True,
+        env=env,
         text=True,
         timeout=30,
     )
@@ -211,12 +214,86 @@ def test_guard_commit_allows_free_worktree(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
+def test_guard_commit_allows_owned_descendant_after_descriptor_closes(
+    tmp_path: Path,
+) -> None:
+    repo = _init_guard_repo(tmp_path / "owned-descendant-repo")
+    descendant = (
+        "import subprocess, sys; "
+        "result = subprocess.run(sys.argv[1:], close_fds=True); "
+        "raise SystemExit(result.returncode)"
+    )
+
+    with module.worktree_lease(repo, boundary="commit-autofix", timeout_s=0.1) as lease:
+        lease_environment = lease.child_env()
+        assert module.LEASE_NONCE_ENV in lease_environment
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                descendant,
+                sys.executable,
+                str(SCRIPT_PATH),
+                "guard-commit",
+                "--worktree",
+                str(repo),
+            ],
+            capture_output=True,
+            text=True,
+            env={**os.environ, **lease_environment},
+            pass_fds=lease.pass_fds,
+            timeout=30,
+        )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("inherited_nonce", [None, "wrong-nonce"])
+def test_guard_commit_blocks_owned_descendant_without_matching_nonce(
+    tmp_path: Path,
+    inherited_nonce: str | None,
+) -> None:
+    repo = _init_guard_repo(tmp_path / "unproven-descendant-repo")
+
+    with module.worktree_lease(repo, boundary="commit-autofix", timeout_s=0.1) as lease:
+        environment = {**os.environ, **lease.child_env()}
+        if inherited_nonce is None:
+            environment.pop(module.LEASE_NONCE_ENV, None)
+        else:
+            environment[module.LEASE_NONCE_ENV] = inherited_nonce
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "guard-commit",
+                "--worktree",
+                str(repo),
+            ],
+            capture_output=True,
+            text=True,
+            env=environment,
+            close_fds=True,
+            timeout=30,
+        )
+
+    assert result.returncode == 1, result.stderr
+    assert "writer lease held" in result.stderr
+
+
 def test_guard_commit_blocks_foreign_live_writer_then_releases(
     tmp_path: Path,
 ) -> None:
     import time
 
     repo = _init_guard_repo(tmp_path / "held-repo")
+    owner_env_path = tmp_path / "owner-env"
+    publish_owner_env = (
+        "import os, pathlib, sys, time; "
+        "pathlib.Path(sys.argv[1]).write_text("
+        "os.environ['INTELFLO_WORKTREE_LEASE_FD'] + '\\n' + "
+        "os.environ['INTELFLO_WORKTREE_LEASE_NONCE']); "
+        "time.sleep(20)"
+    )
     holder = subprocess.Popen(
         [
             sys.executable,
@@ -227,20 +304,27 @@ def test_guard_commit_blocks_foreign_live_writer_then_releases(
             "--boundary",
             "test-writer",
             "--",
-            "sleep",
-            "20",
+            sys.executable,
+            "-c",
+            publish_owner_env,
+            str(owner_env_path),
         ]
     )
     try:
         deadline = time.time() + 10
-        blocked = None
-        while time.time() < deadline:
-            result = _guard_commit(repo)
-            if result.returncode == 1:
-                blocked = result
-                break
+        while time.time() < deadline and not owner_env_path.exists():
             time.sleep(0.2)
-        assert blocked is not None, "guard never observed the live writer"
+        assert owner_env_path.exists(), "writer never published its lease environment"
+        lease_fd, lease_nonce = owner_env_path.read_text(encoding="utf-8").splitlines()
+        blocked = _guard_commit(
+            repo,
+            env={
+                **os.environ,
+                module.LEASE_FD_ENV: lease_fd,
+                module.LEASE_NONCE_ENV: lease_nonce,
+            },
+        )
+        assert blocked.returncode == 1
         assert "writer lease held" in blocked.stderr
         assert "test-writer" in blocked.stderr
     finally:
