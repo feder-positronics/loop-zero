@@ -214,10 +214,36 @@ def test_guard_commit_allows_free_worktree(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_guard_commit_allows_owned_descendant_after_descriptor_closes(
+def test_guard_commit_allows_owned_descendant_after_fd_is_closed(
     tmp_path: Path,
 ) -> None:
     repo = _init_guard_repo(tmp_path / "owned-descendant-repo")
+    with module.worktree_lease(repo, boundary="commit-autofix", timeout_s=0.1) as lease:
+        environment = {**os.environ, **lease.child_env()}
+        # Model uv/pre-commit closing every non-standard descriptor while
+        # preserving the owned process environment.
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "guard-commit",
+                "--worktree",
+                str(repo),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            close_fds=True,
+        )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_guard_commit_allows_owned_descendant_after_descriptor_closes_twice(
+    tmp_path: Path,
+) -> None:
+    repo = _init_guard_repo(tmp_path / "owned-grandchild-repo")
     descendant = (
         "import subprocess, sys; "
         "result = subprocess.run(sys.argv[1:], close_fds=True); "
@@ -269,6 +295,7 @@ def test_guard_commit_blocks_owned_descendant_without_matching_nonce(
                 "--worktree",
                 str(repo),
             ],
+            check=False,
             capture_output=True,
             text=True,
             env=environment,
@@ -278,6 +305,35 @@ def test_guard_commit_blocks_owned_descendant_without_matching_nonce(
 
     assert result.returncode == 1, result.stderr
     assert "writer lease held" in result.stderr
+
+
+def test_guard_commit_rejects_mismatched_descendant_identity(
+    tmp_path: Path,
+) -> None:
+    repo = _init_guard_repo(tmp_path / "wrong-descendant-repo")
+    with module.worktree_lease(repo, boundary="foreign", timeout_s=0.1) as lease:
+        environment = {
+            **os.environ,
+            **lease.child_env(),
+            module.LEASE_NONCE_ENV: "wrong-nonce",
+        }
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_PATH),
+                "guard-commit",
+                "--worktree",
+                str(repo),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+            close_fds=True,
+        )
+
+    assert completed.returncode == 1
+    assert "writer lease held" in completed.stderr
 
 
 def test_guard_commit_blocks_foreign_live_writer_then_releases(

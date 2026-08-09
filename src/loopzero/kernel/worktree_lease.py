@@ -16,8 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LEASE_FD_ENV = "INTELFLO_WORKTREE_LEASE_FD"
-LEASE_NONCE_ENV = "INTELFLO_WORKTREE_LEASE_NONCE"
 LEASE_BOUNDARY_ENV = "INTELFLO_WORKTREE_LEASE_BOUNDARY"
+LEASE_OWNER_PID_ENV = "INTELFLO_WORKTREE_LEASE_OWNER_PID"
+LEASE_NONCE_ENV = "INTELFLO_WORKTREE_LEASE_NONCE"
 LOCK_FILENAME = "worktree-boundary.lock"
 OWNER_FILENAME = "worktree-boundary.owner.json"
 
@@ -34,6 +35,7 @@ class LeaseTimeoutError(WorktreeGuardError):
 class LeaseHandle:
     fd: int
     lock_path: Path
+    owner_pid: int | None = None
     nonce: str | None = None
 
     @property
@@ -42,6 +44,8 @@ class LeaseHandle:
 
     def child_env(self) -> dict[str, str]:
         environment = {LEASE_FD_ENV: str(self.fd)}
+        if self.owner_pid is not None:
+            environment[LEASE_OWNER_PID_ENV] = str(self.owner_pid)
         if self.nonce is not None:
             environment[LEASE_NONCE_ENV] = self.nonce
         return environment
@@ -104,11 +108,71 @@ def _inherited_lease(lock_path: Path) -> LeaseHandle | None:
     except BlockingIOError:
         return None
     os.set_inheritable(fd, True)
+    raw_owner_pid = os.environ.get(LEASE_OWNER_PID_ENV)
+    try:
+        owner_pid = int(raw_owner_pid) if raw_owner_pid is not None else None
+    except ValueError:
+        owner_pid = None
     return LeaseHandle(
         fd=fd,
         lock_path=lock_path,
+        owner_pid=owner_pid,
         nonce=os.environ.get(LEASE_NONCE_ENV),
     )
+
+
+def _matches_owned_descendant(owner_path: Path) -> bool:
+    """Match a descendant's secret nonce to the digest held by the lease owner."""
+    raw_owner_pid = os.environ.get(LEASE_OWNER_PID_ENV)
+    nonce = os.environ.get(LEASE_NONCE_ENV)
+    if raw_owner_pid is None or nonce is None:
+        return False
+    try:
+        owner_pid = int(raw_owner_pid)
+        payload = json.loads(owner_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    return (
+        payload.get("pid") == owner_pid
+        and payload.get("nonce_sha256") == hashlib.sha256(nonce.encode()).hexdigest()
+        and _has_process_ancestor(owner_pid)
+    )
+
+
+def _parent_process_id(pid: int) -> int | None:
+    try:
+        stat_fields = (
+            Path(f"/proc/{pid}/stat")
+            .read_text(encoding="utf-8")
+            .rsplit(")", 1)[1]
+            .split()
+        )
+        return int(stat_fields[1])
+    except (IndexError, OSError, ValueError):
+        completed = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        try:
+            return int(completed.stdout.strip()) if completed.returncode == 0 else None
+        except ValueError:
+            return None
+
+
+def _has_process_ancestor(expected_pid: int) -> bool:
+    current_pid = os.getpid()
+    seen: set[int] = set()
+    while current_pid > 1 and current_pid not in seen:
+        if current_pid == expected_pid:
+            return True
+        seen.add(current_pid)
+        parent_pid = _parent_process_id(current_pid)
+        if parent_pid is None:
+            return False
+        current_pid = parent_pid
+    return current_pid == expected_pid
 
 
 def _owner_summary(owner_path: Path) -> str:
@@ -123,47 +187,13 @@ def _owner_summary(owner_path: Path) -> str:
     return "unknown boundary"
 
 
-def _owned_descendant(owner_path: Path) -> bool:
-    """Return whether this process descends from the recorded lease owner."""
-    try:
-        payload = json.loads(owner_path.read_text(encoding="utf-8"))
-        owner_pid = payload["pid"]
-        owner_nonce = payload["nonce"]
-    except (KeyError, OSError, json.JSONDecodeError):
-        return False
-    inherited_nonce = os.environ.get(LEASE_NONCE_ENV)
-    if (
-        not isinstance(owner_pid, int)
-        or owner_pid <= 0
-        or not isinstance(owner_nonce, str)
-        or inherited_nonce != owner_nonce
-    ):
-        return False
-
-    current_pid = os.getpid()
-    seen: set[int] = set()
-    while current_pid > 0 and current_pid not in seen:
-        if current_pid == owner_pid:
-            return True
-        seen.add(current_pid)
-        try:
-            stat = Path(f"/proc/{current_pid}/stat").read_text(encoding="utf-8")
-            _, separator, fields = stat.rpartition(")")
-            if not separator:
-                return False
-            current_pid = int(fields.split()[1])
-        except (IndexError, OSError, ValueError):
-            return False
-    return False
-
-
 def _write_owner(owner_path: Path, *, boundary: str, nonce: str) -> None:
     temporary = owner_path.with_suffix(f".tmp-{os.getpid()}-{nonce}")
     temporary.write_text(
         json.dumps(
             {
                 "boundary": boundary,
-                "nonce": nonce,
+                "nonce_sha256": hashlib.sha256(nonce.encode()).hexdigest(),
                 "pid": os.getpid(),
                 "started_monotonic": time.monotonic(),
             },
@@ -180,7 +210,7 @@ def _clear_owner(owner_path: Path, *, nonce: str) -> None:
         payload = json.loads(owner_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    if payload.get("nonce") == nonce:
+    if payload.get("nonce_sha256") == hashlib.sha256(nonce.encode()).hexdigest():
         owner_path.unlink(missing_ok=True)
 
 
@@ -219,7 +249,12 @@ def worktree_lease(
     os.set_inheritable(fd, True)
     _write_owner(owner_path, boundary=boundary, nonce=nonce)
     try:
-        yield LeaseHandle(fd=fd, lock_path=lock_path, nonce=nonce)
+        yield LeaseHandle(
+            fd=fd,
+            lock_path=lock_path,
+            owner_pid=os.getpid(),
+            nonce=nonce,
+        )
     finally:
         _clear_owner(owner_path, nonce=nonce)
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -352,13 +387,16 @@ def _guard_commit(args: argparse.Namespace) -> int:
         # We hold (or just acquired) it — release immediately; the commit
         # proceeds under our own ownership.
         return 0
+    if _matches_owned_descendant(owner_path):
+        # Some launchers (notably uv -> pre-commit) close inherited file
+        # descriptors. The random owner identity survives only in descendants
+        # and must still match the live lease record written under the flock.
+        return 0
     fd = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC)
     try:
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            if _owned_descendant(owner_path):
-                return 0
             owner = _owner_summary(owner_path)
             print(
                 f"worktree-guard: commit blocked — writer lease held by {owner} "
