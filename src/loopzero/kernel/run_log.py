@@ -11,6 +11,9 @@ Schema (one append-only JSON object per lifecycle transition):
   "duration_s": 1834,                     # wall-clock seconds (optional)
   "outcome": "in_progress|merged|abandoned|blocked|resolved_no_change",
   "review_passes": 2,                     # cycles through review-gate (optional)
+  "tokens_in": 1200000,                   # provider-reported input tokens (optional)
+  "tokens_out": 45000,                    # provider-reported output tokens (optional)
+  "tokens_cached": 1100000,               # provider-reported cached input (optional)
   "issue": 307,                           # GitHub issue number (optional)
   "pr": 315,                              # GitHub PR number (optional)
   "footgun_bypass": false,                # primary-checkout work? (optional)
@@ -30,6 +33,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import os
 import platform
 import re
 import sys
@@ -164,6 +168,53 @@ def derive_duration_s(
     return max(0, int((end_ts - start_ts).total_seconds()))
 
 
+def derive_codex_tokens(session_id: str) -> dict[str, int] | None:
+    """Read provider-reported cumulative usage from a codex session rollout.
+
+    Codex appends `token_count` events with `total_token_usage` to its rollout
+    JSONL; the last one is the session's cumulative bill. Only exact
+    provider-reported numbers are returned — no estimates (schema contract).
+    `CODEX_HOME` overrides the default `~/.codex` (test seam + shadow homes).
+    """
+    if not session_id:
+        return None
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    matches = sorted(
+        codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl")
+    )
+    if not matches:
+        return None
+    last: dict[str, object] | None = None
+    try:
+        with matches[-1].open(encoding="utf-8") as fh:
+            for line in fh:
+                if '"token_count"' not in line:
+                    continue
+                try:
+                    payload = json.loads(line).get("payload", {})
+                except json.JSONDecodeError:
+                    continue
+                if payload.get("type") != "token_count":
+                    continue
+                usage = (payload.get("info") or {}).get("total_token_usage")
+                if isinstance(usage, dict):
+                    last = usage
+    except OSError:
+        return None
+    if not isinstance(last, dict):
+        return None
+    tokens: dict[str, int] = {}
+    for field, source in (
+        ("tokens_in", "input_tokens"),
+        ("tokens_out", "output_tokens"),
+        ("tokens_cached", "cached_input_tokens"),
+    ):
+        value = last.get(source)
+        if isinstance(value, int):
+            tokens[field] = value
+    return tokens or None
+
+
 def build_entry(args: argparse.Namespace) -> dict[str, object]:
     fields = common_fields()
     entry: dict[str, object] = {
@@ -201,6 +252,20 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
 
     if args.review_passes is not None:
         entry["review_passes"] = args.review_passes
+    # Token fields are optional: harnesses without a usage API simply omit
+    # them (the `duration_s` precedent). Only provider-reported usage lands
+    # here — a consumer must be able to trust that absence means "unmetered",
+    # never "guessed". getattr keeps programmatic Namespace callers valid.
+    explicit_tokens = False
+    for field in ("tokens_in", "tokens_out", "tokens_cached"):
+        value = getattr(args, field, None)
+        if value is not None:
+            entry[field] = value
+            explicit_tokens = True
+    if not explicit_tokens and entry.get("harness") == "codex":
+        derived_tokens = derive_codex_tokens(str(entry.get("session_id") or ""))
+        if derived_tokens:
+            entry.update(derived_tokens)
     if args.issue is not None:
         entry["issue"] = args.issue
     if args.pr is not None:
@@ -224,6 +289,21 @@ def main() -> int:
     )
     parser.add_argument("--duration-s", type=int, help="Wall-clock seconds")
     parser.add_argument("--review-passes", type=int, help="Review-gate cycles")
+    parser.add_argument(
+        "--tokens-in",
+        type=int,
+        help="Provider-reported input tokens for the run (never an estimate)",
+    )
+    parser.add_argument(
+        "--tokens-out",
+        type=int,
+        help="Provider-reported output tokens for the run (never an estimate)",
+    )
+    parser.add_argument(
+        "--tokens-cached",
+        type=int,
+        help="Provider-reported cached-input tokens for the run",
+    )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
     parser.add_argument("--pr", type=int, help="GitHub PR number")
     parser.add_argument("--git-branch", help="Explicit delivery branch identity")

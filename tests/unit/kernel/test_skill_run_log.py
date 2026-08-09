@@ -225,3 +225,146 @@ def test_conflicting_terminal_transition_is_rejected() -> None:
 )
 def test_extract_run_id_marker(body: str, expected: str | None) -> None:
     assert module.extract_run_id_marker(body) == expected
+
+
+def test_build_entry_records_provider_reported_tokens(monkeypatch, tmp_path):
+    args = argparse.Namespace(
+        skill="work-issue",
+        outcome="merged",
+        duration_s=120,
+        review_passes=None,
+        issue=None,
+        pr=None,
+        footgun_bypass=False,
+        notes=None,
+        run_id="sr_0123456789abcdef0123456789abcdef",
+        git_branch=None,
+        tokens_in=1_200_000,
+        tokens_out=45_000,
+        tokens_cached=1_100_000,
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-08-09T10:05:00Z",
+            "session_id": "thread-1",
+            "session_source": "codex_thread",
+            "harness": "codex",
+            "git_branch": "feature/x",
+        },
+    )
+
+    entry = module.build_entry(args)
+
+    assert entry["tokens_in"] == 1_200_000
+    assert entry["tokens_out"] == 45_000
+    assert entry["tokens_cached"] == 1_100_000
+
+
+def test_build_entry_omits_token_fields_when_unmetered(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty-codex-home"))
+    args = argparse.Namespace(
+        skill="work-issue",
+        outcome="merged",
+        duration_s=120,
+        review_passes=None,
+        issue=None,
+        pr=None,
+        footgun_bypass=False,
+        notes=None,
+        run_id="sr_0123456789abcdef0123456789abcdef",
+        git_branch=None,
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-08-09T10:05:00Z",
+            "session_id": "thread-1",
+            "session_source": "codex_thread",
+            "harness": "codex",
+            "git_branch": "feature/x",
+        },
+    )
+
+    entry = module.build_entry(args)
+
+    assert "tokens_in" not in entry
+    assert "tokens_out" not in entry
+    assert "tokens_cached" not in entry
+
+
+def test_build_entry_derives_codex_tokens_from_rollout(monkeypatch, tmp_path):
+    session_id = "019fe000-0000-7000-8000-000000000abc"
+    rollout_dir = tmp_path / "codex-home" / "sessions" / "2026" / "08" / "09"
+    rollout_dir.mkdir(parents=True)
+    rollout = rollout_dir / f"rollout-2026-08-09T10-00-00-{session_id}.jsonl"
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": session_id}}),
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 500,
+                            "output_tokens": 50,
+                            "cached_input_tokens": 400,
+                        }
+                    },
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 1_200_000,
+                            "output_tokens": 45_000,
+                            "cached_input_tokens": 1_100_000,
+                        }
+                    },
+                },
+            }
+        ),
+    ]
+    rollout.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-08-09T10:05:00Z",
+            "session_id": session_id,
+            "session_source": "codex_thread",
+            "harness": "codex",
+            "git_branch": "feature/x",
+        },
+    )
+    args = argparse.Namespace(
+        skill="work-issue",
+        outcome="merged",
+        duration_s=120,
+        review_passes=None,
+        issue=None,
+        pr=None,
+        footgun_bypass=False,
+        notes=None,
+        run_id="sr_0123456789abcdef0123456789abcdef",
+        git_branch=None,
+    )
+
+    entry = module.build_entry(args)
+
+    # Last cumulative token_count wins — provider-reported, never estimated.
+    assert entry["tokens_in"] == 1_200_000
+    assert entry["tokens_out"] == 45_000
+    assert entry["tokens_cached"] == 1_100_000
