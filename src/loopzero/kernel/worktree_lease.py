@@ -291,6 +291,44 @@ def _exec_command(args: argparse.Namespace) -> int:
     return 0  # pragma: no cover - os.execvpe replaces the process
 
 
+def _guard_commit(args: argparse.Namespace) -> int:
+    """Refuse a commit while another writer holds this worktree's lease.
+
+    Single-writer commit boundary (#3418 P4): a dispatched writer's
+    commit/push landing while a second agent commits in the same worktree is
+    the race behind the 2026-08 provenance-corruption incidents. Allowed:
+    the lock is free (no writer), or this process inherited the lease
+    (LEASE_FD_ENV matches the locked file). Blocked: a *foreign live*
+    process holds the lock.
+    """
+    resolved = args.worktree.resolve()
+    lock_path, owner_path = _lock_paths(resolved)
+    if not lock_path.exists():
+        return 0
+    if _inherited_lease(lock_path) is not None:
+        # We hold (or just acquired) it — release immediately; the commit
+        # proceeds under our own ownership.
+        return 0
+    fd = os.open(lock_path, os.O_RDWR | os.O_CLOEXEC)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            owner = _owner_summary(owner_path)
+            print(
+                f"worktree-guard: commit blocked — writer lease held by {owner} "
+                "in this worktree. Wait for the dispatched writer to finish "
+                "(job.sh wait-file on its terminal artifact) or run the "
+                "orphan/lease check; never commit past an active writer.",
+                file=sys.stderr,
+            )
+            return 1
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return 0
+    finally:
+        os.close(fd)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command_name", required=True)
@@ -299,8 +337,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     exec_parser.add_argument("--boundary", required=True)
     exec_parser.add_argument("--timeout", type=float, default=300.0)
     exec_parser.add_argument("command", nargs=argparse.REMAINDER)
+    guard_parser = subparsers.add_parser(
+        "guard-commit",
+        help="exit 1 when a foreign live writer holds this worktree's lease",
+    )
+    guard_parser.add_argument("--worktree", type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
     try:
+        if args.command_name == "guard-commit":
+            return _guard_commit(args)
         return _exec_command(args)
     except WorktreeGuardError as exc:
         print(f"worktree-guard error: {exc}", file=sys.stderr)

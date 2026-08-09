@@ -178,3 +178,74 @@ def test_fresh_descriptor_for_same_lock_inode_does_not_grant_reentrancy(
 
     assert completed.returncode == 2
     assert "owner" in completed.stderr
+
+
+# --- guard-commit (#3418 P4 single-writer commit boundary) ------------------
+
+
+SCRIPT_PATH = (
+    Path(__file__).resolve().parents[4] / "scripts" / "util" / "worktree_guard.py"
+)
+
+
+def _init_guard_repo(path: Path) -> Path:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    (path / "f.txt").write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "f.txt"], check=True)
+    return path
+
+
+def _guard_commit(repo: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT_PATH), "guard-commit", "--worktree", str(repo)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+def test_guard_commit_allows_free_worktree(tmp_path: Path) -> None:
+    repo = _init_guard_repo(tmp_path / "free-repo")
+    result = _guard_commit(repo)
+    assert result.returncode == 0, result.stderr
+
+
+def test_guard_commit_blocks_foreign_live_writer_then_releases(
+    tmp_path: Path,
+) -> None:
+    import time
+
+    repo = _init_guard_repo(tmp_path / "held-repo")
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "exec",
+            "--worktree",
+            str(repo),
+            "--boundary",
+            "test-writer",
+            "--",
+            "sleep",
+            "20",
+        ]
+    )
+    try:
+        deadline = time.time() + 10
+        blocked = None
+        while time.time() < deadline:
+            result = _guard_commit(repo)
+            if result.returncode == 1:
+                blocked = result
+                break
+            time.sleep(0.2)
+        assert blocked is not None, "guard never observed the live writer"
+        assert "writer lease held" in blocked.stderr
+        assert "test-writer" in blocked.stderr
+    finally:
+        holder.terminate()
+        holder.wait(timeout=10)
+    # Kernel releases the flock with the dead writer: commits flow again —
+    # a crashed writer never wedges the worktree.
+    assert _guard_commit(repo).returncode == 0
