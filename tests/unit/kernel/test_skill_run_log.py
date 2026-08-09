@@ -2,7 +2,7 @@ import argparse
 import importlib.util
 import json
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from uuid import UUID
@@ -368,3 +368,140 @@ def test_build_entry_derives_codex_tokens_from_rollout(monkeypatch, tmp_path):
     assert entry["tokens_in"] == 1_200_000
     assert entry["tokens_out"] == 45_000
     assert entry["tokens_cached"] == 1_100_000
+
+
+# --- session ceiling + stale reconcile (#3418 P3) ---------------------------
+
+
+def _iso(dt) -> str:
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _repo_with_runs(tmp_path, rows):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    (repo / ".audit" / "skill-runs").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    log = repo / ".audit" / "skill-runs" / "2026-08-01.jsonl"
+    log.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return repo
+
+
+def _run_cli(repo, *args, env_extra=None):
+    import subprocess
+    from pathlib import Path as _P
+
+    script = _P(__file__).resolve().parents[4] / "scripts" / "util" / "skill_run_log.py"
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(repo.parent),
+        "CODEX_HOME": str(repo.parent / "codex-home"),
+    }
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, str(script), *args],
+        capture_output=True,
+        text=True,
+        cwd=repo,
+        env=env,
+        timeout=60,
+    )
+
+
+def _row(run_id, skill, outcome, ts, session_id="sess-x"):
+    return {
+        "ts": ts,
+        "skill": skill,
+        "outcome": outcome,
+        "run_id": run_id,
+        "session_id": session_id,
+        "session_source": "codex_thread",
+        "harness": "codex",
+        "git_branch": "feature/x",
+    }
+
+
+RID_OLD = "sr_" + "a" * 32
+RID_LIVE = "sr_" + "b" * 32
+RID_FRESH = "sr_" + "c" * 32
+
+
+def test_check_ceiling_under_and_over(tmp_path):
+    now = datetime.now(UTC)
+    repo = _repo_with_runs(
+        tmp_path,
+        [
+            _row(
+                RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=9))
+            ),
+            _row(
+                RID_FRESH, "work-issue", "in_progress", _iso(now - timedelta(hours=1))
+            ),
+        ],
+    )
+    over = _run_cli(repo, "--skill", "backlog-drain", "--check-ceiling")
+    assert over.returncode == 3, over.stdout + over.stderr
+    assert "take-up brief" in over.stdout
+
+    under = _run_cli(repo, "--skill", "work-issue", "--check-ceiling")
+    assert under.returncode == 0, under.stdout + under.stderr
+
+    none = _run_cli(repo, "--skill", "guardian", "--check-ceiling")
+    assert none.returncode == 2
+
+
+def test_reconcile_closes_stale_but_never_live(tmp_path):
+    now = datetime.now(UTC)
+    codex_home = tmp_path / "codex-home" / "sessions" / "2026" / "08" / "01"
+    codex_home.mkdir(parents=True)
+    # RID_LIVE's session has a freshly-touched rollout: owner shows life signs.
+    (codex_home / "rollout-2026-08-01T00-00-00-sess-live.jsonl").write_text("{}\n")
+
+    repo = _repo_with_runs(
+        tmp_path,
+        [
+            _row(
+                RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=20))
+            ),
+            _row(
+                RID_LIVE,
+                "work-issue",
+                "in_progress",
+                _iso(now - timedelta(hours=20)),
+                session_id="sess-live",
+            ),
+            _row(
+                RID_FRESH, "work-issue", "in_progress", _iso(now - timedelta(hours=2))
+            ),
+        ],
+    )
+
+    dry = _run_cli(repo, "--reconcile-stale", "--dry-run")
+    assert dry.returncode == 0
+    assert RID_OLD in dry.stdout and "dry-run" in dry.stdout
+
+    real = _run_cli(repo, "--reconcile-stale")
+    assert real.returncode == 0, real.stdout + real.stderr
+    assert f"close {RID_OLD}" in real.stdout
+    assert "sess-live" in real.stdout and "recent activity" in real.stdout
+
+    # Latest states after reconcile: OLD abandoned(stale); LIVE + FRESH untouched.
+    day_files = sorted((repo / ".audit" / "skill-runs").glob("*.jsonl"))
+    rows = [
+        json.loads(line)
+        for f in day_files
+        for line in f.read_text().splitlines()
+        if line.strip()
+    ]
+    latest = {}
+    for r in rows:
+        latest[r["run_id"]] = r
+    assert latest[RID_OLD]["outcome"] == "abandoned"
+    assert "stale-reconcile" in latest[RID_OLD]["notes"]
+    assert latest[RID_LIVE]["outcome"] == "in_progress"
+    assert latest[RID_FRESH]["outcome"] == "in_progress"
+
+    again = _run_cli(repo, "--reconcile-stale")
+    assert "no stale runs to reconcile" in again.stdout

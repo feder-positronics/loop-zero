@@ -45,6 +45,11 @@ from agent_event import common_fields, repo_root
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
 VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
+# Campaign session ceiling (#3418 P3): past this wall-clock, a session emits
+# its take-up brief and terminates; the reconcile pass may close runs whose
+# owner shows no life signs for this long. One constant, tuned by run-log
+# evidence, never per-campaign.
+SESSION_CEILING_S = 8 * 3600
 RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
 RUN_ID_MARKER_RE = re.compile(
     r"<!--\s*skill-run-id:\s*(sr_[0-9a-f]{32})\s*-->", re.IGNORECASE
@@ -279,9 +284,108 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
     return entry
 
 
+def run_groups(entries: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
+    """Group valid-run-id entries by run, preserving append order."""
+    groups: dict[str, list[dict[str, object]]] = {}
+    for entry in entries:
+        run_id = entry.get("run_id")
+        if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id):
+            groups.setdefault(run_id, []).append(entry)
+    return groups
+
+
+def session_alive(session_id: str, within_s: int) -> bool:
+    """Liveness via provider evidence: a codex rollout touched recently."""
+    if not session_id:
+        return False
+    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    for path in codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"):
+        if datetime.now(UTC).timestamp() - path.stat().st_mtime < within_s:
+            return True
+    return False
+
+
+def cmd_check_ceiling(args: argparse.Namespace, entries: list[dict]) -> int:
+    """Exit 3 when the run's wall-clock exceeds the session ceiling."""
+    groups = run_groups(entries)
+    run_id = args.run_id
+    if run_id is None:
+        candidates = [
+            (rows[-1].get("ts"), rid)
+            for rid, rows in groups.items()
+            if rows[0].get("skill") == args.skill
+            and rows[-1].get("outcome") == "in_progress"
+        ]
+        if not candidates:
+            print(f"no active {args.skill} run to check")
+            return 2
+        run_id = max(candidates)[1]
+    rows = groups.get(run_id or "")
+    if not rows:
+        print(f"unknown run {run_id}")
+        return 2
+    started = parse_ts(str(rows[0].get("ts")))
+    if started is None:
+        print(f"run {run_id} has no parseable start timestamp")
+        return 2
+    elapsed = int((datetime.now(UTC) - started).total_seconds())
+    ceiling = args.ceiling_s
+    if elapsed >= ceiling:
+        print(
+            f"CEILING: run {run_id} at {elapsed}s >= {ceiling}s — emit the "
+            "take-up brief (reentry contract) and terminate this session"
+        )
+        return 3
+    print(f"run {run_id} at {elapsed}s / ceiling {ceiling}s")
+    return 0
+
+
+def cmd_reconcile_stale(args: argparse.Namespace, entries: list[dict]) -> list[dict]:
+    """Close in_progress runs with owner-absence evidence; never a live one.
+
+    Guarded, never blind (#3418 P3, cross-review 2026-08-09): a run is closed
+    only when its last run-log activity is older than the ceiling AND its
+    session shows no provider-side life signs (codex rollout mtime). The
+    caller appends the returned rows under the same lock that loaded
+    `entries`, so the latest-state check cannot race a concurrent writer.
+    """
+    now = datetime.now(UTC)
+    closures: list[dict] = []
+    for run_id, rows in run_groups(entries).items():
+        latest = rows[-1]
+        if latest.get("outcome") != "in_progress":
+            continue
+        last_ts = parse_ts(str(latest.get("ts")))
+        if last_ts is None:
+            continue
+        idle_s = int((now - last_ts).total_seconds())
+        if idle_s < args.ceiling_s:
+            continue
+        session_id = str(latest.get("session_id") or "")
+        if session_alive(session_id, args.ceiling_s):
+            print(f"skip {run_id}: session {session_id[:12]}… shows recent activity")
+            continue
+        closures.append(
+            {
+                "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "skill": latest.get("skill"),
+                "outcome": "abandoned",
+                "run_id": run_id,
+                "session_id": latest.get("session_id"),
+                "session_source": latest.get("session_source"),
+                "harness": latest.get("harness"),
+                "host": platform.node() or "unknown",
+                "git_branch": latest.get("git_branch"),
+                "notes": f"stale-reconcile: idle {idle_s // 3600}h past ceiling",
+            }
+        )
+        print(f"close {run_id}: {latest.get('skill')} idle {idle_s // 3600}h")
+    return closures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--skill", required=True, help="Canonical skill name")
+    parser.add_argument("--skill", help="Canonical skill name")
     parser.add_argument("--start", action="store_true", help="Start or reuse a run")
     parser.add_argument("--run-id", help="Stable logical run ID")
     parser.add_argument(
@@ -313,7 +417,31 @@ def main() -> int:
         help="Set when the run used the Footgun-bypass override",
     )
     parser.add_argument("--notes", help="Free-form short note (≤100 chars)")
+    parser.add_argument(
+        "--check-ceiling",
+        action="store_true",
+        help="Exit 3 when the (given or active) run exceeds the session ceiling",
+    )
+    parser.add_argument(
+        "--reconcile-stale",
+        action="store_true",
+        help="Close in_progress runs idle past the ceiling with owner-absence "
+        "evidence (guarded; live sessions survive)",
+    )
+    parser.add_argument(
+        "--ceiling-s",
+        type=int,
+        default=SESSION_CEILING_S,
+        help=f"Session ceiling in seconds (default {SESSION_CEILING_S})",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="reconcile-stale only: report closures without appending",
+    )
     args = parser.parse_args()
+    if not args.reconcile_stale and not args.skill:
+        parser.error("--skill is required except with --reconcile-stale")
     root = repo_root()
     audit_dir = root / ".audit" / "skill-runs"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -321,6 +449,24 @@ def main() -> int:
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_EX)
         entries = load_entries(audit_dir)
+
+        if args.check_ceiling:
+            return cmd_check_ceiling(args, entries)
+        if args.reconcile_stale:
+            closures = cmd_reconcile_stale(args, entries)
+            if not closures:
+                print("no stale runs to reconcile")
+                return 0
+            if args.dry_run:
+                print(f"dry-run: {len(closures)} closure(s) not appended")
+                return 0
+            day = datetime.now(UTC).strftime("%Y-%m-%d")
+            log_path = audit_dir / f"{day}.jsonl"
+            with log_path.open("a", encoding="utf-8") as f:
+                for closure in closures:
+                    f.write(json.dumps(closure) + "\n")
+            print(f"reconciled {len(closures)} stale run(s) ({log_path})")
+            return 0
 
         if args.start:
             if args.outcome not in {None, "in_progress"}:
