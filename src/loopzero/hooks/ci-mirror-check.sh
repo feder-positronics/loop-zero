@@ -424,4 +424,23 @@ else
 fi
 
 echo ""
+echo "== Wait discipline =="
+# Session-scoped poll gate (#3418 P1): fails only on model-side wait loops
+# newly active since this worktree's last passing gate — never on another
+# agent's historical sessions. Baseline lives beside the job dir.
+started_ms="$(now_ms)"
+if python3 scripts/util/poll_audit.py --gate \
+    --baseline-file "${INTELFLO_JOB_DIR:-.pid/jobs}/../poll-gate-baseline" \
+    --worktree "$(pwd)" \
+    --days 7; then
+    emit_tool_event "poll-gate" "$started_ms" "pass"
+else
+    emit_tool_event "poll-gate" "$started_ms" "fail"
+    echo ""
+    echo "✗ Model-side wait loop detected in this window (ops.mdc wait contract):" >&2
+    echo "  route external waits through job.sh wait / wait-file with a p90 deadman." >&2
+    exit 1
+fi
+
+echo ""
 echo "✅ CI mirror check passed"

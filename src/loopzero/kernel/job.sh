@@ -9,8 +9,9 @@
 #
 # Usage:
 #   scripts/util/job.sh start <name> -- <command...>
-#   scripts/util/job.sh wait  <name> [--timeout SECONDS] [--tail LINES]
+#   scripts/util/job.sh wait  <name> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh run   <name> [--timeout SECONDS] [--tail LINES] -- <command...>
+#   scripts/util/job.sh wait-file <path> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh status <name>
 #   scripts/util/job.sh log   <name> [--tail LINES] [--follow]
 #   scripts/util/job.sh list
@@ -18,6 +19,11 @@
 #   scripts/util/job.sh clean [--all]
 #
 # `wait` exits with the job's own exit code, 124 on timeout, 2 on usage error.
+# `wait-file` blocks until <path> exists (a dispatched worker's terminal
+# artifact is the wait event — #3418 P1); exit 0 on appearance, 124 on the
+# deadman timeout, which means "worker presumed dead: run the orphan/lease
+# check", never "poll again". Timeouts under 300s draw a warning unless
+# --fast-cadence states why the watched state's own cadence is faster.
 # Jobs live under $INTELFLO_JOB_DIR (default .pid/jobs/) inside the worktree, so
 # parallel worktrees never collide.
 
@@ -29,8 +35,19 @@ DEFAULT_TIMEOUT="${INTELFLO_JOB_TIMEOUT:-1800}"
 DEFAULT_TAIL=40
 
 usage() {
-	sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+	sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 	exit "${1:-2}"
+}
+
+# Sub-300s timeouts rebuild the minute-poll shape wait-file exists to remove;
+# demand a stated reason so genuine fast-cadence waits stay expressible.
+FLOOR_SECONDS=300
+warn_short_timeout() {
+	local timeout="$1" fast_cadence="$2" verb="$3"
+	if [ "$timeout" -lt "$FLOOR_SECONDS" ] && [ -z "$fast_cadence" ]; then
+		echo "job.sh: warning: $verb --timeout ${timeout}s is below the ${FLOOR_SECONDS}s wait floor (ops.mdc);" >&2
+		echo "  size the deadman from the p90, or state --fast-cadence '<why this state changes faster>'" >&2
+	fi
 }
 
 die() {
@@ -109,7 +126,7 @@ cmd_wait() {
 	local name="${1:-}"
 	shift || true
 	validate_name "$name"
-	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL"
+	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL" fast_cadence=""
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 		--timeout)
@@ -120,11 +137,16 @@ cmd_wait() {
 			tail_lines="${2:-}"
 			shift 2
 			;;
+		--fast-cadence)
+			fast_cadence="${2:-}"
+			shift 2
+			;;
 		*) die "unknown option '$1'" ;;
 		esac
 	done
 	case "$timeout" in '' | *[!0-9]*) die "--timeout must be a whole number of seconds" ;; esac
 	case "$tail_lines" in '' | *[!0-9]*) die "--tail must be a whole number of lines" ;; esac
+	warn_short_timeout "$timeout" "$fast_cadence" "wait"
 
 	local dir
 	dir="$(job_path "$name")"
@@ -164,6 +186,54 @@ cmd_wait() {
 	: >"$dir/waited"
 	emit_result "$dir" "$name" "$tail_lines" "$code"
 	return "$code"
+}
+
+# Block until a dispatched worker's terminal artifact exists (#3418 P1).
+# The model makes ONE call; this shell-side loop does the watching — the
+# event-driven wait shape, with the timeout demoted to a deadman.
+cmd_wait_file() {
+	local path="${1:-}"
+	shift || true
+	[ -n "$path" ] || die "wait-file requires a path"
+	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL" fast_cadence=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--timeout)
+			timeout="${2:-}"
+			shift 2
+			;;
+		--tail)
+			tail_lines="${2:-}"
+			shift 2
+			;;
+		--fast-cadence)
+			fast_cadence="${2:-}"
+			shift 2
+			;;
+		*) die "unknown option '$1'" ;;
+		esac
+	done
+	case "$timeout" in '' | *[!0-9]*) die "--timeout must be a whole number of seconds" ;; esac
+	case "$tail_lines" in '' | *[!0-9]*) die "--tail must be a whole number of lines" ;; esac
+	warn_short_timeout "$timeout" "$fast_cadence" "wait-file"
+
+	local waited=0
+	while [ ! -e "$path" ]; do
+		if [ "$waited" -ge "$timeout" ]; then
+			echo "wait-file: '$path' did not appear within ${timeout}s" >&2
+			echo "Deadman fired: the worker is presumed dead. Run the orphan/lease" >&2
+			echo "check for its dispatch (agent_dispatch.py doctor / finding-lease)," >&2
+			echo "do NOT re-wait blindly — a longer wait cannot revive a dead worker." >&2
+			return 124
+		fi
+		sleep 2
+		waited=$((waited + 2))
+	done
+	echo "wait-file: '$path' present ($(wc -c <"$path" 2>/dev/null || echo '?') bytes)"
+	echo "--- first $tail_lines lines ---"
+	head -n "$tail_lines" "$path" 2>/dev/null || true
+	echo "--- end (full artifact: $path) ---"
+	return 0
 }
 
 cmd_run() {
@@ -313,6 +383,7 @@ main() {
 	case "$sub" in
 	start) cmd_start "$@" ;;
 	wait) cmd_wait "$@" ;;
+	wait-file) cmd_wait_file "$@" ;;
 	run) cmd_run "$@" ;;
 	status) cmd_status "$@" ;;
 	log) cmd_log "$@" ;;
