@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from agent_event import common_fields, repo_root
+from agent_event import cmd_phase, common_fields, repo_root
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
 VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
@@ -64,6 +64,8 @@ RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
 RUN_ID_MARKER_RE = re.compile(
     r"<!--\s*skill-run-id:\s*(sr_[0-9a-f]{32})\s*-->", re.IGNORECASE
 )
+PHASES = ("implementation", "local-validation", "review", "ci-wait", "closeout")
+PHASE_SKILLS = {"work-issue", "execute-blueprint"}
 
 
 def load_entries(audit_dir: Path) -> list[dict[str, object]]:
@@ -144,6 +146,158 @@ def validate_transition(
     return True
 
 
+def load_phase_events(root: Path) -> list[dict[str, object]]:
+    """Load phase evidence without rewriting malformed or legacy JSONL rows."""
+    events: list[dict[str, object]] = []
+    audit_dir = root / ".audit" / "agent-events"
+    if not audit_dir.exists():
+        return events
+    for log_path in sorted(audit_dir.glob("*.jsonl")):
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    return events
+
+
+def _phase_index(phase: object) -> int:
+    if not isinstance(phase, str) or not phase.isdecimal():
+        raise ValueError("phase event has an unknown phase")
+    index = int(phase) - 1
+    if index < 0 or index >= len(PHASES):
+        raise ValueError("phase event has an unknown phase")
+    return index
+
+
+def _phase_history(
+    events: list[dict[str, object]], *, skill: str, run_id: str
+) -> tuple[int | None, int]:
+    """Return active and last completed phase indices for one logical run.
+
+    Run-scoped rows are a small state machine. Any contradictory row fails
+    closed instead of inventing a duration or skipping work.
+    """
+    relevant = [
+        event
+        for event in events
+        if event.get("kind") == "phase"
+        and event.get("run_id") == run_id
+        and event.get("skill") == skill
+    ]
+    active: int | None = None
+    completed = -1
+    for event in relevant:
+        index = _phase_index(event.get("phase"))
+        expected_name = PHASES[index]
+        if event.get("name") not in {None, expected_name}:
+            raise ValueError("phase event name does not match the fixed taxonomy")
+        status = event.get("status")
+        if status == "start":
+            if active is not None or index != completed + 1:
+                raise ValueError("contradictory phase history")
+            active = index
+        elif status == "complete":
+            if active != index:
+                raise ValueError("contradictory phase history")
+            completed = index
+            active = None
+        else:
+            raise ValueError("phase event has an unsupported status")
+    return active, completed
+
+
+def emit_phase_event(*, skill: str, run_id: str, phase: str, status: str) -> None:
+    """Write via the existing event primitive so session diagnostics remain."""
+    result = cmd_phase(
+        argparse.Namespace(
+            skill=skill,
+            run_id=run_id,
+            phase=str(PHASES.index(phase) + 1),
+            name=phase,
+            status=status,
+            elapsed_s=None,
+        )
+    )
+    if result != 0:
+        raise RuntimeError("phase event was not written durably")
+
+
+def transition_phase(*, root: Path, skill: str, run_id: str, target: str) -> bool:
+    """Advance one run through exactly one allowed phase boundary.
+
+    The current phase is completed and only its immediate successor starts.
+    Repeating a current phase is an idempotent no-op; gaps and reversals fail
+    closed. A recovered half-transition starts the already-authorized next
+    phase without duplicating the prior completion.
+    """
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run_id must match sr_<32 lowercase hex characters>")
+    if target not in PHASES:
+        raise ValueError(f"unknown phase: {target}")
+
+    target_index = PHASES.index(target)
+    active, completed = _phase_history(
+        load_phase_events(root), skill=skill, run_id=run_id
+    )
+    actions: list[tuple[int, str]] = []
+    if active is not None:
+        if target_index == active:
+            return False
+        if target_index != active + 1:
+            raise ValueError("phase transition must target the immediately next phase")
+        actions = [(active, "complete"), (target_index, "start")]
+    elif completed == -1:
+        if target_index != 0:
+            raise ValueError("a new run must start with implementation")
+        actions = [(target_index, "start")]
+    elif target_index == completed + 1:
+        # The completion landed before an interrupted process could append the
+        # next start. Resume that exact forward transition without a duplicate.
+        actions = [(target_index, "start")]
+    elif target_index == completed:
+        return False
+    elif target_index < completed:
+        raise ValueError("phase transition is backward")
+    else:
+        raise ValueError("phase transition skips one or more phases")
+
+    for index, status in actions:
+        emit_phase_event(
+            skill=skill,
+            run_id=run_id,
+            phase=PHASES[index],
+            status=status,
+        )
+    return True
+
+
+def complete_closeout_phase(
+    *, root: Path, skill: str, run_id: str, outcome: str, verified_merged: bool
+) -> bool:
+    """Complete phase five only after closeout has proved a merged outcome."""
+    if outcome != "merged" or not verified_merged or skill not in PHASE_SKILLS:
+        return False
+    active, completed = _phase_history(
+        load_phase_events(root), skill=skill, run_id=run_id
+    )
+    if active == len(PHASES) - 1:
+        emit_phase_event(
+            skill=skill, run_id=run_id, phase="closeout", status="complete"
+        )
+        return True
+    if completed == len(PHASES) - 1:
+        return False
+    if completed == -1 and active is None:
+        # Preserve legacy direct terminal rows that predate phase evidence.
+        return False
+    raise ValueError("verified merged closeout requires active closeout phase")
+
+
 def parse_ts(raw: str) -> datetime | None:
     try:
         return datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -194,9 +348,7 @@ def derive_codex_tokens(session_id: str) -> dict[str, int] | None:
     if not session_id:
         return None
     codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    matches = sorted(
-        codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl")
-    )
+    matches = sorted(codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"))
     if not matches:
         return None
     last: dict[str, object] | None = None
@@ -402,6 +554,11 @@ def main() -> int:
     parser.add_argument("--start", action="store_true", help="Start or reuse a run")
     parser.add_argument("--run-id", help="Stable logical run ID")
     parser.add_argument(
+        "--transition",
+        choices=PHASES,
+        help="Advance the logical run to this immediate next delivery phase",
+    )
+    parser.add_argument(
         "--outcome", choices=sorted(VALID_OUTCOMES), help="Lifecycle state"
     )
     parser.add_argument("--duration-s", type=int, help="Wall-clock seconds")
@@ -459,6 +616,11 @@ def main() -> int:
         action="store_true",
         help="reconcile-stale only: report closures without appending",
     )
+    parser.add_argument(
+        "--verified-merged",
+        action="store_true",
+        help="Permit closeout phase completion after the caller verified remote merge state",
+    )
     args = parser.parse_args()
     if not args.reconcile_stale and not args.skill:
         parser.error("--skill is required except with --reconcile-stale")
@@ -488,6 +650,32 @@ def main() -> int:
             print(f"reconciled {len(closures)} stale run(s) ({log_path})")
             return 0
 
+        if args.transition:
+            if args.start or args.outcome is not None:
+                parser.error(
+                    "--transition cannot be combined with --start or --outcome"
+                )
+            if args.run_id is None:
+                parser.error("--run-id is required for phase transitions")
+            run_rows = [
+                entry for entry in entries if entry.get("run_id") == args.run_id
+            ]
+            if not run_rows:
+                parser.error("phase transition requires an existing logical run")
+            if any(entry.get("skill") != args.skill for entry in run_rows):
+                parser.error("run_id is already owned by another skill")
+            if run_rows[-1].get("outcome") != "in_progress":
+                parser.error("phase transition requires an active logical run")
+            changed = transition_phase(
+                root=root,
+                skill=args.skill,
+                run_id=args.run_id,
+                target=args.transition,
+            )
+            action = "Transitioned" if changed else "Already in"
+            print(f"{action} {args.skill} → {args.transition}")
+            return 0
+
         if args.start:
             if args.outcome not in {None, "in_progress"}:
                 parser.error("--start only supports the in_progress outcome")
@@ -511,10 +699,35 @@ def main() -> int:
         day = datetime.now(UTC).strftime("%Y-%m-%d")
         log_path = audit_dir / f"{day}.jsonl"
         should_append = validate_transition(entries, entry)
+        if not args.start and args.outcome == "merged" and args.verified_merged:
+            # The remote merge has already been verified by the closeout
+            # adapter. Finish timing first so an interrupted lifecycle-log
+            # append can be retried without stranding an incomplete phase.
+            complete_closeout_phase(
+                root=root,
+                skill=args.skill,
+                run_id=args.run_id,
+                outcome=args.outcome,
+                verified_merged=True,
+            )
         if should_append:
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
 
+        if args.start and args.skill in PHASE_SKILLS:
+            active_phase, completed_phase = _phase_history(
+                load_phase_events(root), skill=args.skill, run_id=args.run_id
+            )
+            if active_phase is None and completed_phase == -1:
+                # A retry after the lifecycle row landed but the first phase
+                # event did not must repair that half-written start. Re-entry
+                # into a run that already progressed remains a no-op.
+                transition_phase(
+                    root=root,
+                    skill=args.skill,
+                    run_id=args.run_id,
+                    target="implementation",
+                )
     if args.start:
         print(args.run_id)
     else:

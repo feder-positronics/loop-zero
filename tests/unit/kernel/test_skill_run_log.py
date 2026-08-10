@@ -208,6 +208,249 @@ def test_conflicting_terminal_transition_is_rejected() -> None:
         )
 
 
+def test_phase_transition_is_forward_only_and_idempotent(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "1",
+            "status": "start",
+        }
+    ]
+    emitted: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+    monkeypatch.setattr(
+        module,
+        "emit_phase_event",
+        lambda *, skill, run_id, phase, status: emitted.append((phase, status, run_id)),
+    )
+
+    assert (
+        module.transition_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            target="local-validation",
+        )
+        is True
+    )
+    assert emitted == [
+        ("implementation", "complete", run_id),
+        ("local-validation", "start", run_id),
+    ]
+
+    events.extend(
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": str(module.PHASES.index(phase) + 1),
+            "status": status,
+        }
+        for phase, status, _ in emitted
+    )
+    assert (
+        module.transition_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            target="local-validation",
+        )
+        is False
+    )
+    with pytest.raises(ValueError, match="immediately next"):
+        module.transition_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            target="ci-wait",
+        )
+    with pytest.raises(ValueError, match="unknown phase"):
+        module.transition_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            target="invented-phase",
+        )
+
+
+def test_phase_transition_starts_implementation_for_a_new_run(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    emitted: list[tuple[str, str]] = []
+    monkeypatch.setattr(module, "load_phase_events", lambda root: [])
+    monkeypatch.setattr(
+        module,
+        "emit_phase_event",
+        lambda *, skill, run_id, phase, status: emitted.append((phase, status)),
+    )
+
+    assert (
+        module.transition_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            target="implementation",
+        )
+        is True
+    )
+    assert emitted == [("implementation", "start")]
+
+
+def test_phase_transition_resumes_half_written_boundary(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "1",
+            "status": status,
+        }
+        for status in ("start", "complete")
+    ]
+    emitted: list[tuple[str, str]] = []
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+    monkeypatch.setattr(
+        module,
+        "emit_phase_event",
+        lambda *, skill, run_id, phase, status: emitted.append((phase, status)),
+    )
+
+    assert module.transition_phase(
+        root=tmp_path,
+        skill="work-issue",
+        run_id=run_id,
+        target="local-validation",
+    )
+    assert emitted == [("local-validation", "start")]
+
+
+def test_completed_closeout_transition_is_an_idempotent_noop(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        event
+        for phase in range(1, 6)
+        for event in (
+            {
+                "kind": "phase",
+                "run_id": run_id,
+                "skill": "work-issue",
+                "phase": str(phase),
+                "status": "start",
+            },
+            {
+                "kind": "phase",
+                "run_id": run_id,
+                "skill": "work-issue",
+                "phase": str(phase),
+                "status": "complete",
+            },
+        )
+    ]
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+    monkeypatch.setattr(
+        module,
+        "emit_phase_event",
+        lambda **kwargs: pytest.fail("completed closeout must not emit another event"),
+    )
+
+    assert (
+        module.transition_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            target="closeout",
+        )
+        is False
+    )
+
+
+def test_emit_phase_event_fails_when_storage_is_not_durable(monkeypatch) -> None:
+    monkeypatch.setattr(module, "cmd_phase", lambda args: 1)
+
+    with pytest.raises(RuntimeError, match="not written durably"):
+        module.emit_phase_event(
+            skill="work-issue",
+            run_id="sr_0123456789abcdef0123456789abcdef",
+            phase="implementation",
+            status="start",
+        )
+
+
+def test_only_verified_merged_outcome_completes_closeout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        event
+        for phase in range(1, 5)
+        for event in (
+            {
+                "kind": "phase",
+                "run_id": run_id,
+                "skill": "work-issue",
+                "phase": str(phase),
+                "status": "start",
+            },
+            {
+                "kind": "phase",
+                "run_id": run_id,
+                "skill": "work-issue",
+                "phase": str(phase),
+                "status": "complete",
+            },
+        )
+    ] + [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "5",
+            "status": "start",
+        }
+    ]
+    emitted: list[tuple[str, str]] = []
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+    monkeypatch.setattr(
+        module,
+        "emit_phase_event",
+        lambda *, skill, run_id, phase, status: emitted.append((phase, status)),
+    )
+
+    assert (
+        module.complete_closeout_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            outcome="blocked",
+            verified_merged=False,
+        )
+        is False
+    )
+    assert emitted == []
+    assert (
+        module.complete_closeout_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            outcome="merged",
+            verified_merged=True,
+        )
+        is True
+    )
+    assert emitted == [("closeout", "complete")]
+
+
 @pytest.mark.parametrize(
     ("body", "expected"),
     [

@@ -8,13 +8,13 @@ captures the *intra-run* events that explain where time and effort went.
 
 Event kinds:
 
-1. `phase` — boundary marker for a numbered phase/step in an orchestrator skill.
-       agent_event phase --skill work-issue --phase 5 --name review-gate \\
-                         --status start|complete
+1. `phase` — boundary marker written by `skill_run_log.py --transition` for a
+   numbered phase in an outer delivery run. Direct emission remains available
+   as the storage primitive.
 
    `agent_event_stats.py` derives elapsed time from paired start/complete
-   events in the same session. `--elapsed-s` remains supported for older
-   manual stopwatch-style emission.
+   events under a stable run ID, with session pairing for historical rows.
+   `--elapsed-s` remains supported for older manual stopwatch-style emission.
 
 2. `output` — what an "additive" skill produced (code-review, security-review,
    design-handoff, resolve-findings, etc.). Drives the additive-score view.
@@ -203,7 +203,7 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def write_event(event: dict) -> None:
+def write_event(event: dict) -> bool:
     try:
         root = repo_root()
         audit_dir = root / ".audit" / "agent-events"
@@ -215,8 +215,10 @@ def write_event(event: dict) -> None:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(event) + "\n")
+        return True
     except Exception as e:
         print(f"agent_event: warning — could not write event ({e})", file=sys.stderr)
+        return False
 
 
 def write_unique_event(event: dict, *, key_fields: tuple[str, ...]) -> bool:
@@ -327,8 +329,9 @@ def cmd_phase(args: argparse.Namespace) -> int:
         event["name"] = args.name
     if args.elapsed_s is not None:
         event["elapsed_s"] = args.elapsed_s
-    write_event(event)
-    return 0
+    if args.run_id:
+        event["run_id"] = args.run_id
+    return 0 if write_event(event) is not False else 1
 
 
 def cmd_output(args: argparse.Namespace) -> int:
@@ -382,15 +385,11 @@ def cmd_output(args: argparse.Namespace) -> int:
 # Review Gate escape hatch (review-gate.mdc): 5 non-converging passes stop
 # the loop. Deterministic guard (#3106 B2): detection and the durable
 # friction record fire mechanically instead of relying on prose recall.
-REVIEW_GATE_SKILLS = frozenset(
-    {"code-review", "security-review", "review-design-doc"}
-)
+REVIEW_GATE_SKILLS = frozenset({"code-review", "security-review", "review-design-doc"})
 ESCAPE_HATCH_PASS = 5
 
 
-def _enforce_review_pass_escape_hatch(
-    args: argparse.Namespace, event: dict
-) -> None:
+def _enforce_review_pass_escape_hatch(args: argparse.Namespace, event: dict) -> None:
     pass_num = getattr(args, "pass_num", None)
     if (
         args.skill not in REVIEW_GATE_SKILLS
@@ -612,6 +611,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_phase.add_argument("--phase", required=True, help="Numbered phase id, e.g. '5'")
     p_phase.add_argument("--name", help="Short phase name, e.g. 'review-gate'")
     p_phase.add_argument("--status", required=True, choices=sorted(VALID_STATUS))
+    p_phase.add_argument(
+        "--run-id",
+        help="Stable logical run ID; preserves session fields for diagnostics",
+    )
     p_phase.add_argument(
         "--elapsed-s",
         type=int,

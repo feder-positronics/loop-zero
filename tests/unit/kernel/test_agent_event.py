@@ -82,6 +82,53 @@ def test_context_boundary_parser_has_bounded_vocabulary() -> None:
     assert args.disposition == "kept_inline"
 
 
+def test_phase_event_accepts_and_records_logical_run_id(monkeypatch) -> None:
+    captured: dict = {}
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {"ts": "2026-08-10T10:00:00Z", "session_id": "session-1"},
+    )
+    monkeypatch.setattr(module, "write_event", lambda event: captured.update(event))
+    args = module.build_parser().parse_args(
+        [
+            "phase",
+            "--skill",
+            "work-issue",
+            "--phase",
+            "1",
+            "--name",
+            "implementation",
+            "--status",
+            "start",
+            "--run-id",
+            "sr_0123456789abcdef0123456789abcdef",
+        ]
+    )
+
+    assert args.func(args) == 0
+    assert captured["run_id"] == "sr_0123456789abcdef0123456789abcdef"
+    assert captured["session_id"] == "session-1"
+
+
+def test_phase_event_reports_storage_failure(monkeypatch) -> None:
+    monkeypatch.setattr(module, "common_fields", lambda: {})
+    monkeypatch.setattr(module, "write_event", lambda event: False)
+    args = module.build_parser().parse_args(
+        [
+            "phase",
+            "--skill",
+            "work-issue",
+            "--phase",
+            "1",
+            "--status",
+            "start",
+        ]
+    )
+
+    assert args.func(args) == 1
+
+
 def test_context_boundary_common_field_failure_is_non_blocking(monkeypatch) -> None:
     monkeypatch.setattr(
         module, "common_fields", lambda: (_ for _ in ()).throw(OSError("offline"))
