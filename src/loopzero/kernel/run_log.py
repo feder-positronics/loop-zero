@@ -46,10 +46,20 @@ from agent_event import common_fields, repo_root
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
 VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
 # Campaign session ceiling (#3418 P3): past this wall-clock, a session emits
-# its take-up brief and terminates; the reconcile pass may close runs whose
-# owner shows no life signs for this long. One constant, tuned by run-log
-# evidence, never per-campaign.
-SESSION_CEILING_S = 8 * 3600
+# its take-up brief and terminates. Rationale is NOT token cost — orchestrator
+# tokens are ~99% prompt-cached and effectively free (2026-08-10 measurement).
+# The ceiling exists for context-quality drift over very long sessions and to
+# bound T3 host event-store growth (marathon threads melted state.sqlite on
+# 2026-08-09; upstream #4008/#5719 unfixed). Raised 8h → 24h on 2026-08-10:
+# the measured 8h drain session was cheap and productive, so the shorter bound
+# was over-conservative; 24h stays well under a full state.sqlite reset cycle.
+# Tune from run-log + state.sqlite-growth evidence, never per-campaign.
+SESSION_CEILING_S = 24 * 3600
+# Stale-run reconcile is DECOUPLED from the ceiling: a genuinely dead session
+# (no run-log activity AND no provider life signs) should be reaped well
+# before the handoff ceiling, so the run log reflects reality within a work
+# shift rather than a day. This is the idle-liveness window, not the ceiling.
+STALE_RECONCILE_IDLE_S = 8 * 3600
 RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
 RUN_ID_MARKER_RE = re.compile(
     r"<!--\s*skill-run-id:\s*(sr_[0-9a-f]{32})\s*-->", re.IGNORECASE
@@ -344,11 +354,14 @@ def cmd_reconcile_stale(args: argparse.Namespace, entries: list[dict]) -> list[d
     """Close in_progress runs with owner-absence evidence; never a live one.
 
     Guarded, never blind (#3418 P3, cross-review 2026-08-09): a run is closed
-    only when its last run-log activity is older than the ceiling AND its
-    session shows no provider-side life signs (codex rollout mtime). The
-    caller appends the returned rows under the same lock that loaded
-    `entries`, so the latest-state check cannot race a concurrent writer.
+    only when its last run-log activity is older than the idle window AND its
+    session shows no provider-side life signs (codex rollout mtime). The idle
+    window is DECOUPLED from the (24h) handoff ceiling — a dead session is
+    reaped within a work shift, not a day. The caller appends the returned
+    rows under the same lock that loaded `entries`, so the latest-state check
+    cannot race a concurrent writer.
     """
+    idle_window = args.idle_s
     now = datetime.now(UTC)
     closures: list[dict] = []
     for run_id, rows in run_groups(entries).items():
@@ -359,10 +372,10 @@ def cmd_reconcile_stale(args: argparse.Namespace, entries: list[dict]) -> list[d
         if last_ts is None:
             continue
         idle_s = int((now - last_ts).total_seconds())
-        if idle_s < args.ceiling_s:
+        if idle_s < idle_window:
             continue
         session_id = str(latest.get("session_id") or "")
-        if session_alive(session_id, args.ceiling_s):
+        if session_alive(session_id, idle_window):
             print(f"skip {run_id}: session {session_id[:12]}… shows recent activity")
             continue
         closures.append(
@@ -427,6 +440,13 @@ def main() -> int:
         action="store_true",
         help="Close in_progress runs idle past the ceiling with owner-absence "
         "evidence (guarded; live sessions survive)",
+    )
+    parser.add_argument(
+        "--idle-s",
+        type=int,
+        default=STALE_RECONCILE_IDLE_S,
+        help="reconcile-stale only: idle seconds before a dead run is reaped "
+        f"(default {STALE_RECONCILE_IDLE_S}; decoupled from the handoff ceiling)",
     )
     parser.add_argument(
         "--ceiling-s",

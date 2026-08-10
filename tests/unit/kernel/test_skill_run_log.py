@@ -433,11 +433,12 @@ def test_check_ceiling_under_and_over(tmp_path):
     repo = _repo_with_runs(
         tmp_path,
         [
+            # 25h > the 24h default ceiling; 9h is now UNDER it (was over at 8h).
             _row(
-                RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=9))
+                RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=25))
             ),
             _row(
-                RID_FRESH, "work-issue", "in_progress", _iso(now - timedelta(hours=1))
+                RID_FRESH, "work-issue", "in_progress", _iso(now - timedelta(hours=9))
             ),
         ],
     )
@@ -450,6 +451,25 @@ def test_check_ceiling_under_and_over(tmp_path):
 
     none = _run_cli(repo, "--skill", "guardian", "--check-ceiling")
     assert none.returncode == 2
+
+
+def test_ceiling_and_reconcile_are_decoupled(tmp_path):
+    """A 9h dead session is UNDER the 24h ceiling but past the 8h idle window:
+    check-ceiling lets it run, reconcile reaps it (decoupled thresholds)."""
+    now = datetime.now(UTC)
+    # No codex-home rollout for RID_OLD → no life signs → dead.
+    (tmp_path / "codex-home").mkdir(exist_ok=True)
+    repo = _repo_with_runs(
+        tmp_path,
+        [_row(RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=9)))],
+    )
+    # Ceiling (24h default): a 9h run is fine to keep working.
+    under = _run_cli(repo, "--skill", "backlog-drain", "--check-ceiling")
+    assert under.returncode == 0, under.stdout + under.stderr
+    # Reconcile (8h idle default): the same dead 9h run is reaped.
+    reaped = _run_cli(repo, "--reconcile-stale")
+    assert reaped.returncode == 0, reaped.stdout + reaped.stderr
+    assert f"close {RID_OLD}" in reaped.stdout
 
 
 def test_reconcile_closes_stale_but_never_live(tmp_path):
