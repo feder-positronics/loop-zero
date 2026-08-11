@@ -11,9 +11,13 @@ Schema (one append-only JSON object per lifecycle transition):
   "duration_s": 1834,                     # wall-clock seconds (optional)
   "outcome": "in_progress|merged|abandoned|blocked|resolved_no_change",
   "review_passes": 2,                     # cycles through review-gate (optional)
-  "tokens_in": 1200000,                   # provider-reported input tokens (optional)
-  "tokens_out": 45000,                    # provider-reported output tokens (optional)
-  "tokens_cached": 1100000,               # provider-reported cached input (optional)
+  "tokens_in": 1200000,                   # caller-attributed run input tokens (optional)
+  "tokens_out": 45000,                    # caller-attributed run output tokens (optional)
+  "tokens_cached": 1100000,               # caller-attributed run cached input (optional)
+  "token_scope": "run",                  # present only with explicit run tokens
+  "session_tokens_in_cumulative": 1200000, # automatic Codex session snapshot (optional)
+  "session_tokens_out_cumulative": 45000,  # automatic Codex session snapshot (optional)
+  "session_tokens_cached_cumulative": 1100000, # automatic Codex session snapshot
   "issue": 307,                           # GitHub issue number (optional)
   "pr": 315,                              # GitHub PR number (optional)
   "footgun_bypass": false,                # primary-checkout work? (optional)
@@ -21,7 +25,8 @@ Schema (one append-only JSON object per lifecycle transition):
 }
 
 When `--duration-s` is omitted, the script attempts to derive wall-clock time
-from prior `agent_event.py` entries in the same session for the same skill.
+from prior `agent_event.py` entries in the same session for the same skill and
+logical run.
 
 Storage: `.audit/skill-runs/YYYY-MM-DD.jsonl` (gitignored, local-only).
 PR deliveries hand the run ID across sessions with a hidden
@@ -306,8 +311,9 @@ def parse_ts(raw: str) -> datetime | None:
 
 
 def derive_duration_s(
-    root: Path, skill: str, session_id: str, end_ts: datetime
+    root: Path, skill: str, session_id: str, run_id: str, end_ts: datetime
 ) -> int | None:
+    """Derive duration from exact run evidence; never use a session fallback."""
     audit_dir = root / ".audit" / "agent-events"
     if not audit_dir.exists():
         return None
@@ -321,7 +327,11 @@ def derive_duration_s(
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if event.get("skill") != skill or event.get("session_id") != session_id:
+            if (
+                event.get("skill") != skill
+                or event.get("session_id") != session_id
+                or event.get("run_id") != run_id
+            ):
                 continue
             event_ts_raw = event.get("ts")
             if not isinstance(event_ts_raw, str):
@@ -337,7 +347,7 @@ def derive_duration_s(
     return max(0, int((end_ts - start_ts).total_seconds()))
 
 
-def derive_codex_tokens(session_id: str) -> dict[str, int] | None:
+def derive_codex_session_tokens(session_id: str) -> dict[str, int] | None:
     """Read provider-reported cumulative usage from a codex session rollout.
 
     Codex appends `token_count` events with `total_token_usage` to its rollout
@@ -372,9 +382,9 @@ def derive_codex_tokens(session_id: str) -> dict[str, int] | None:
         return None
     tokens: dict[str, int] = {}
     for field, source in (
-        ("tokens_in", "input_tokens"),
-        ("tokens_out", "output_tokens"),
-        ("tokens_cached", "cached_input_tokens"),
+        ("session_tokens_in_cumulative", "input_tokens"),
+        ("session_tokens_out_cumulative", "output_tokens"),
+        ("session_tokens_cached_cumulative", "cached_input_tokens"),
     ):
         value = last.get(source)
         if isinstance(value, int):
@@ -412,17 +422,21 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
         end_ts = parse_ts(str(fields["ts"]))
         if end_ts is not None:
             derived_duration = derive_duration_s(
-                repo_root(), args.skill, str(fields["session_id"]), end_ts
+                repo_root(),
+                args.skill,
+                str(fields["session_id"]),
+                args.run_id,
+                end_ts,
             )
             if derived_duration is not None:
                 entry["duration_s"] = derived_duration
 
     if args.review_passes is not None:
         entry["review_passes"] = args.review_passes
-    # Token fields are optional: harnesses without a usage API simply omit
-    # them (the `duration_s` precedent). Only provider-reported usage lands
-    # here — a consumer must be able to trust that absence means "unmetered",
-    # never "guessed". getattr keeps programmatic Namespace callers valid.
+    # Explicit CLI values are attributable only when the caller supplies
+    # run-local usage. Automatic Codex values are session-wide snapshots and
+    # retain cumulative names so consumers cannot infer a run delta.
+    # getattr keeps programmatic Namespace callers valid.
     explicit_tokens = False
     for field in ("tokens_in", "tokens_out", "tokens_cached"):
         value = getattr(args, field, None)
@@ -430,9 +444,13 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
             entry[field] = value
             explicit_tokens = True
     if not explicit_tokens and entry.get("harness") == "codex":
-        derived_tokens = derive_codex_tokens(str(entry.get("session_id") or ""))
+        derived_tokens = derive_codex_session_tokens(
+            str(entry.get("session_id") or "")
+        )
         if derived_tokens:
             entry.update(derived_tokens)
+    if explicit_tokens:
+        entry["token_scope"] = "run"
     if args.issue is not None:
         entry["issue"] = args.issue
     if args.pr is not None:
@@ -566,17 +584,17 @@ def main() -> int:
     parser.add_argument(
         "--tokens-in",
         type=int,
-        help="Provider-reported input tokens for the run (never an estimate)",
+        help="Input tokens attributable to this logical run (never an estimate)",
     )
     parser.add_argument(
         "--tokens-out",
         type=int,
-        help="Provider-reported output tokens for the run (never an estimate)",
+        help="Output tokens attributable to this logical run (never an estimate)",
     )
     parser.add_argument(
         "--tokens-cached",
         type=int,
-        help="Provider-reported cached-input tokens for the run",
+        help="Cached-input tokens attributable to this logical run",
     )
     parser.add_argument("--issue", type=int, help="GitHub issue number")
     parser.add_argument("--pr", type=int, help="GitHub PR number")

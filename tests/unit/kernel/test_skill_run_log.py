@@ -38,7 +38,7 @@ def load_module() -> ModuleType:
 module = load_module()
 
 
-def test_derive_duration_s_uses_earliest_matching_event(tmp_path: Path) -> None:
+def test_derive_duration_s_uses_earliest_event_for_exact_run(tmp_path: Path) -> None:
     audit_dir = tmp_path / ".audit" / "agent-events"
     audit_dir.mkdir(parents=True)
     log_path = audit_dir / "2026-05-14.jsonl"
@@ -50,6 +50,7 @@ def test_derive_duration_s_uses_earliest_matching_event(tmp_path: Path) -> None:
                         "ts": "2026-05-14T10:00:00Z",
                         "session_id": "thread-1",
                         "skill": "work-issue",
+                        "run_id": "sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                         "kind": "phase",
                     }
                 ),
@@ -58,6 +59,7 @@ def test_derive_duration_s_uses_earliest_matching_event(tmp_path: Path) -> None:
                         "ts": "2026-05-14T10:03:00Z",
                         "session_id": "thread-1",
                         "skill": "work-issue",
+                        "run_id": "sr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "kind": "phase",
                     }
                 ),
@@ -66,6 +68,7 @@ def test_derive_duration_s_uses_earliest_matching_event(tmp_path: Path) -> None:
                         "ts": "2026-05-14T09:50:00Z",
                         "session_id": "thread-2",
                         "skill": "work-issue",
+                        "run_id": "sr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "kind": "phase",
                     }
                 ),
@@ -78,10 +81,37 @@ def test_derive_duration_s_uses_earliest_matching_event(tmp_path: Path) -> None:
         tmp_path,
         "work-issue",
         "thread-1",
+        "sr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         datetime(2026, 5, 14, 10, 5, 0, tzinfo=UTC),
     )
 
-    assert duration == 300
+    assert duration == 120
+
+
+def test_derive_duration_s_omits_duration_without_an_exact_run(tmp_path: Path) -> None:
+    audit_dir = tmp_path / ".audit" / "agent-events"
+    audit_dir.mkdir(parents=True)
+    (audit_dir / "2026-05-14.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-05-14T10:00:00Z",
+                "session_id": "thread-1",
+                "skill": "work-issue",
+                "run_id": "sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    duration = module.derive_duration_s(
+        tmp_path,
+        "work-issue",
+        "thread-1",
+        "sr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        datetime(2026, 5, 14, 10, 5, 0, tzinfo=UTC),
+    )
+
+    assert duration is None
 
 
 def test_build_entry_auto_derives_duration(monkeypatch, tmp_path: Path) -> None:
@@ -112,7 +142,7 @@ def test_build_entry_auto_derives_duration(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         module,
         "derive_duration_s",
-        lambda root, skill, session_id, end_ts: 300,
+        lambda root, skill, session_id, run_id, end_ts: 300,
     )
 
     entry = module.build_entry(args)
@@ -504,6 +534,7 @@ def test_build_entry_records_provider_reported_tokens(monkeypatch, tmp_path):
     assert entry["tokens_in"] == 1_200_000
     assert entry["tokens_out"] == 45_000
     assert entry["tokens_cached"] == 1_100_000
+    assert entry["token_scope"] == "run"
 
 
 def test_build_entry_omits_token_fields_when_unmetered(monkeypatch, tmp_path):
@@ -608,9 +639,13 @@ def test_build_entry_derives_codex_tokens_from_rollout(monkeypatch, tmp_path):
     entry = module.build_entry(args)
 
     # Last cumulative token_count wins — provider-reported, never estimated.
-    assert entry["tokens_in"] == 1_200_000
-    assert entry["tokens_out"] == 45_000
-    assert entry["tokens_cached"] == 1_100_000
+    assert entry["session_tokens_in_cumulative"] == 1_200_000
+    assert entry["session_tokens_out_cumulative"] == 45_000
+    assert entry["session_tokens_cached_cumulative"] == 1_100_000
+    assert "tokens_in" not in entry
+    assert "tokens_out" not in entry
+    assert "tokens_cached" not in entry
+    assert "token_scope" not in entry
 
 
 # --- session ceiling + stale reconcile (#3418 P3) ---------------------------
