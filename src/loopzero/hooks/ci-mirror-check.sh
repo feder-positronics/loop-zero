@@ -41,6 +41,30 @@ emit_tool_event() {
         --result "$result" >/dev/null 2>&1 || true
 }
 
+observe_validation_receipt() {
+    local category="$1"
+    local result="$2"
+    local expected_digest="$3"
+    if [ -z "$expected_digest" ]; then
+        echo "validation-receipt: pre-validation identity unavailable; observation skipped" >&2
+        return
+    fi
+    python3 scripts/util/ci_mirror_receipts.py \
+        --category "$category" \
+        --base-ref "$base_ref" \
+        --result "$result" \
+        --expected-digest "$expected_digest" || \
+        echo "validation-receipt: observation unavailable; validation still ran" >&2
+}
+
+capture_validation_receipt_identity() {
+    local category="$1"
+    python3 scripts/util/ci_mirror_receipts.py \
+        --category "$category" \
+        --base-ref "$base_ref" \
+        --capture-digest 2>/dev/null || true
+}
+
 resolve_base_ref() {
     if [ -n "${CI_MIRROR_BASE_REF:-}" ]; then
         echo "$CI_MIRROR_BASE_REF"
@@ -262,6 +286,7 @@ if ! has_relevant_changes_in \
 else
     echo ""
     echo "== Frontend static checks =="
+    frontend_static_receipt_digest="$(capture_validation_receipt_identity "frontend-static")"
     started_ms="$(now_ms)"
     if (
         cd nextjs-frontend
@@ -269,8 +294,10 @@ else
         pnpm run lint
         pnpm exec prettier --check '**/*.{js,jsx,ts,tsx,json,css,html}'
     ); then
+        observe_validation_receipt "frontend-static" "pass" "$frontend_static_receipt_digest"
         emit_tool_event "frontend-static" "$started_ms" "pass"
     else
+        observe_validation_receipt "frontend-static" "fail" "$frontend_static_receipt_digest"
         emit_tool_event "frontend-static" "$started_ms" "fail"
         exit 1
     fi
@@ -316,13 +343,21 @@ else
             echo "Shared/broad frontend boundary changed; running the full frontend suite."
             frontend_test_cmd=(pnpm exec vitest run)
             frontend_event="frontend-full-tests"
+            frontend_test_receipt_digest="$(capture_validation_receipt_identity "$frontend_event")"
         else
             frontend_test_cmd=(pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}")
             frontend_event="frontend-changed-tests"
+            frontend_test_receipt_digest=""
         fi
         if (cd nextjs-frontend && "${frontend_test_cmd[@]}"); then
+            if [ "$frontend_event" = "frontend-full-tests" ]; then
+                observe_validation_receipt "$frontend_event" "pass" "$frontend_test_receipt_digest"
+            fi
             emit_tool_event "$frontend_event" "$started_ms" "pass"
         else
+            if [ "$frontend_event" = "frontend-full-tests" ]; then
+                observe_validation_receipt "$frontend_event" "fail" "$frontend_test_receipt_digest"
+            fi
             emit_tool_event "$frontend_event" "$started_ms" "fail"
             exit 1
         fi
@@ -401,10 +436,13 @@ else
     echo "== Agent config sync =="
     echo "Convergence-trigger changes:"
     printf '%s\n' "$semantic_changes"
+    agent_config_receipt_digest="$(capture_validation_receipt_identity "agent-config-sync")"
     started_ms="$(now_ms)"
     if make check-agent-configs; then
+        observe_validation_receipt "agent-config-sync" "pass" "$agent_config_receipt_digest"
         emit_tool_event "agent-config-sync" "$started_ms" "pass"
     else
+        observe_validation_receipt "agent-config-sync" "fail" "$agent_config_receipt_digest"
         emit_tool_event "agent-config-sync" "$started_ms" "fail"
         exit 1
     fi
