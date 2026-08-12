@@ -204,6 +204,73 @@ def test_repeated_same_state_is_idempotent() -> None:
     )
 
 
+def test_merged_outcome_requires_verified_merge_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skill_run_log.py",
+            "--skill",
+            "work-issue",
+            "--run-id",
+            "sr_0123456789abcdef0123456789abcdef",
+            "--outcome",
+            "merged",
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="2"):
+        module.main()
+
+
+def test_verified_merged_replay_does_not_append_a_second_terminal_row(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    audit_dir = tmp_path / ".audit" / "skill-runs"
+    audit_dir.mkdir(parents=True)
+    log_path = audit_dir / "2026-08-13.jsonl"
+    log_path.write_text(json.dumps(_entry(run_id, "merged")) + "\n", encoding="utf-8")
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        module,
+        "complete_closeout_phase",
+        lambda **_: pytest.fail("terminal replay must not mutate phase history"),
+    )
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-08-13T10:00:00Z",
+            "session_id": "closeout-replay",
+            "session_source": "codex_thread",
+            "harness": "codex",
+            "git_branch": "feat/2639-skill-run-lifecycle",
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skill_run_log.py",
+            "--skill",
+            "work-issue",
+            "--run-id",
+            run_id,
+            "--outcome",
+            "merged",
+            "--verified-merged",
+        ],
+    )
+
+    assert module.main() == 0
+    assert log_path.read_text(encoding="utf-8").splitlines() == [
+        json.dumps(_entry(run_id, "merged"))
+    ]
+
+
 def test_in_progress_can_transition_to_terminal_from_another_session() -> None:
     run_id = "sr_0123456789abcdef0123456789abcdef"
     existing = [_entry(run_id, "in_progress", session_id="first")]

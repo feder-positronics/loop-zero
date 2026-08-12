@@ -444,9 +444,7 @@ def build_entry(args: argparse.Namespace) -> dict[str, object]:
             entry[field] = value
             explicit_tokens = True
     if not explicit_tokens and entry.get("harness") == "codex":
-        derived_tokens = derive_codex_session_tokens(
-            str(entry.get("session_id") or "")
-        )
+        derived_tokens = derive_codex_session_tokens(str(entry.get("session_id") or ""))
         if derived_tokens:
             entry.update(derived_tokens)
     if explicit_tokens:
@@ -642,6 +640,8 @@ def main() -> int:
     args = parser.parse_args()
     if not args.reconcile_stale and not args.skill:
         parser.error("--skill is required except with --reconcile-stale")
+    if not args.start and args.outcome == "merged" and not args.verified_merged:
+        parser.error("--outcome merged requires --verified-merged")
     root = repo_root()
     audit_dir = root / ".audit" / "skill-runs"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -717,7 +717,12 @@ def main() -> int:
         day = datetime.now(UTC).strftime("%Y-%m-%d")
         log_path = audit_dir / f"{day}.jsonl"
         should_append = validate_transition(entries, entry)
-        if not args.start and args.outcome == "merged" and args.verified_merged:
+        if (
+            should_append
+            and not args.start
+            and args.outcome == "merged"
+            and args.verified_merged
+        ):
             # The remote merge has already been verified by the closeout
             # adapter. Finish timing first so an interrupted lifecycle-log
             # append can be retried without stranding an incomplete phase.
