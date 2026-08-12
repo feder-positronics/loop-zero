@@ -504,7 +504,7 @@ def render(report: LivenessReport) -> str:
             f"age={_format_age(finding.age)} recommendation={finding.recommendation}"
         )
     if report.finding_count == 0:
-        lines.append("  no liveness findings")
+        lines.append("  no anomalies — exception report, not active-work inventory")
     return "\n".join(lines)
 
 

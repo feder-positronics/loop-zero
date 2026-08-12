@@ -90,6 +90,15 @@ def test_recent_branch_event_prevents_stalled_run_finding() -> None:
     assert report.long_running == ()
 
 
+def test_empty_report_says_it_is_not_active_work_inventory() -> None:
+    report = module.build_report((), (), (), now=NOW)
+
+    rendered = module.render(report)
+
+    assert "no anomalies" in rendered
+    assert "not active-work inventory" in rendered
+
+
 def test_legacy_in_progress_row_without_run_id_is_not_actionable() -> None:
     entries = [
         {
@@ -342,7 +351,7 @@ def test_main_renders_normal_completion(monkeypatch, capsys) -> None:
 
     assert module.main() == 0
     captured = capsys.readouterr()
-    assert "no liveness findings" in captured.out
+    assert "no anomalies — exception report, not active-work inventory" in captured.out
     assert captured.err == ""
 
 
@@ -389,6 +398,7 @@ def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0
+    assert "== local worktree ownership ==" in result.stdout
     assert "preflight: OK (#3202)" in result.stdout
 
 
