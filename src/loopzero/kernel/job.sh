@@ -8,13 +8,15 @@
 # wait (one blocking call that returns the exit code and the log tail).
 #
 # Usage:
-#   scripts/util/job.sh start <name> -- <command...>
+#   scripts/util/job.sh start <name> [--run-id ID --task-id ID --terminal-artifact PATH] -- <command...>
 #   scripts/util/job.sh wait  <name> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh run   <name> [--timeout SECONDS] [--tail LINES] -- <command...>
 #   scripts/util/job.sh wait-file <path> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh status <name>
 #   scripts/util/job.sh log   <name> [--tail LINES] [--follow]
 #   scripts/util/job.sh list
+#   scripts/util/job.sh binding-files --run-id <id>
+#   scripts/util/job.sh reconcile <name> --terminal-artifact <path>
 #   scripts/util/job.sh check                 # non-zero if any job is running or unreaped
 #   scripts/util/job.sh clean [--all]
 #
@@ -70,9 +72,30 @@ cmd_start() {
 	local name="${1:-}"
 	shift || true
 	validate_name "$name"
+	local run_id="" task_id="" terminal_artifact=""
+	while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+		case "$1" in
+		--run-id | --task-id | --terminal-artifact)
+			local option="$1"
+			[ "$#" -ge 2 ] || die "$option requires a value"
+			case "$option" in
+			--run-id) run_id="$2" ;;
+			--task-id) task_id="$2" ;;
+			--terminal-artifact) terminal_artifact="$2" ;;
+			esac
+			shift 2
+			;;
+		*) die "unknown start option '$1'" ;;
+		esac
+	done
 	[ "${1:-}" = "--" ] || die "expected '--' before the command"
 	shift
 	[ "$#" -gt 0 ] || die "no command given"
+	if [ -n "$run_id$task_id$terminal_artifact" ]; then
+		[[ "$run_id" =~ ^sr_[0-9a-f]{32}$ ]] || die "bound job --run-id must match sr_<32 lowercase hex>"
+		[ -n "$task_id" ] && [ -n "$terminal_artifact" ] || die "bound jobs require --run-id, --task-id, and --terminal-artifact together"
+		terminal_artifact="$(realpath -m -- "$terminal_artifact")"
+	fi
 
 	local dir
 	dir="$(job_path "$name")"
@@ -90,6 +113,27 @@ cmd_start() {
 	local token
 	token="$(tr -d '\n' </proc/sys/kernel/random/uuid)"
 	printf '%s\n' "$token" >"$dir/token"
+	if [ -n "$run_id" ]; then
+		python3 - "$dir/binding.json" "$name" "$run_id" "$task_id" "$terminal_artifact" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+payload = {
+    "schema_version": "job-binding-v1",
+    "name": sys.argv[2],
+    "run_id": sys.argv[3],
+    "task_id": sys.argv[4],
+    "terminal_artifact": sys.argv[5],
+}
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+		if [ "$?" -ne 0 ]; then
+			rm -rf "$dir"
+			die "could not persist delivery-run job binding"
+		fi
+	fi
 
 	# setsid detaches from the agent's shell session, so the job survives the
 	# exec_command timeout that would otherwise orphan or kill it.
@@ -241,6 +285,7 @@ cmd_run() {
 	shift || true
 	validate_name "$name"
 	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL"
+	local -a binding_args=()
 	while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
 		case "$1" in
 		--timeout)
@@ -251,12 +296,17 @@ cmd_run() {
 			tail_lines="${2:-}"
 			shift 2
 			;;
+		--run-id | --task-id | --terminal-artifact)
+			[ "$#" -ge 2 ] || die "$1 requires a value"
+			binding_args+=("$1" "${2:-}")
+			shift 2
+			;;
 		*) die "unknown option '$1'" ;;
 		esac
 	done
 	[ "${1:-}" = "--" ] || die "expected '--' before the command"
 	shift
-	cmd_start "$name" -- "$@" >/dev/null || return $?
+	cmd_start "$name" "${binding_args[@]}" -- "$@" >/dev/null || return $?
 	cmd_wait "$name" --timeout "$timeout" --tail "$tail_lines"
 }
 
@@ -347,7 +397,7 @@ cmd_check() {
 		if job_running "$dir"; then
 			running=$((running + 1))
 			echo "job '$name' is still RUNNING (pid $(cat "$dir/pid" 2>/dev/null))" >&2
-		elif [ ! -f "$dir/waited" ]; then
+		elif [ ! -f "$dir/waited" ] && [ ! -f "$dir/reconciliation.json" ]; then
 			unreaped=$((unreaped + 1))
 			echo "job '$name' finished with exit $(cat "$dir/exit_code" 2>/dev/null || echo '?') but was never waited on" >&2
 		fi
@@ -360,6 +410,118 @@ cmd_check() {
 		return 1
 	fi
 	return 0
+}
+
+cmd_binding_files() {
+	[ "${1:-}" = "--run-id" ] || die "binding-files requires --run-id <id>"
+	local run_id="${2:-}"
+	[[ "$run_id" =~ ^sr_[0-9a-f]{32}$ ]] || die "binding-files --run-id must match sr_<32 lowercase hex>"
+	python3 - "$JOB_DIR" "$run_id" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+run_id = sys.argv[2]
+for path in sorted(root.glob("*/binding.json")) if root.is_dir() else ():
+    if path.is_symlink():
+        raise SystemExit(f"job.sh: invalid symlinked job binding {path}")
+    try:
+        binding = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"job.sh: invalid job binding {path}: {exc}")
+    required = {"schema_version", "name", "run_id", "task_id", "terminal_artifact"}
+    if set(binding) != required or binding.get("schema_version") != "job-binding-v1":
+        raise SystemExit(f"job.sh: invalid job binding schema at {path}")
+    if binding.get("name") != path.parent.name:
+        raise SystemExit(f"job.sh: job binding name does not match {path.parent}")
+    if binding.get("schema_version") == "job-binding-v1" and binding.get("run_id") == run_id:
+        print(path.resolve())
+PY
+}
+
+cmd_reconcile() {
+	local name="${1:-}"
+	shift || true
+	validate_name "$name"
+	[ "${1:-}" = "--terminal-artifact" ] || die "reconcile requires --terminal-artifact <path>"
+	local supplied_artifact="${2:-}"
+	[ -n "$supplied_artifact" ] || die "reconcile terminal artifact is required"
+	local dir
+	dir="$(job_path "$name")"
+	[ -d "$dir" ] || die "no such job '$name'"
+	[ ! -L "$dir" ] || die "job '$name' directory cannot be a symlink"
+	[ -f "$dir/binding.json" ] || die "job '$name' has no delivery-run binding"
+	[ ! -L "$dir/binding.json" ] || die "job '$name' binding cannot be a symlink"
+	if job_running "$dir"; then
+		die "job '$name' is still running"
+	fi
+	[ -f "$dir/exit_code" ] || die "job '$name' has no terminal exit code"
+	python3 - "$dir/binding.json" "$(realpath -m -- "$supplied_artifact")" "$dir/exit_code" "$dir/reconciliation.json" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+binding_path, artifact_path, exit_path, receipt_path = map(Path, sys.argv[1:])
+try:
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    artifact_bytes = artifact_path.read_bytes()
+    artifact = json.loads(artifact_bytes)
+    exit_code = int(exit_path.read_text(encoding="utf-8").strip())
+except (OSError, ValueError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"job.sh: authoritative terminal artifact is unreadable: {exc}")
+required = {"schema_version", "name", "run_id", "task_id", "terminal_artifact"}
+if set(binding) != required or binding.get("schema_version") != "job-binding-v1":
+    raise SystemExit("job.sh: job binding schema is invalid")
+if binding.get("name") != binding_path.parent.name:
+    raise SystemExit("job.sh: job binding name does not match its job directory")
+if not isinstance(binding.get("run_id"), str) or re.fullmatch(r"sr_[0-9a-f]{32}", binding["run_id"]) is None:
+    raise SystemExit("job.sh: job binding run_id is invalid")
+if not isinstance(binding.get("task_id"), str) or not binding["task_id"].strip():
+    raise SystemExit("job.sh: job binding task_id is invalid")
+if not isinstance(binding.get("terminal_artifact"), str):
+    raise SystemExit("job.sh: job binding terminal artifact is invalid")
+if Path(str(binding.get("terminal_artifact"))).resolve() != artifact_path.resolve():
+    raise SystemExit("job.sh: terminal artifact does not match the job binding")
+if not isinstance(artifact, dict) or artifact.get("task_id") != binding.get("task_id"):
+    raise SystemExit("job.sh: terminal artifact task_id does not match the job binding")
+status = artifact.get("status")
+terminal_statuses = {
+    "completed",
+    "needs-escalation",
+    "scope-violation",
+    "acceptance-failure",
+    "infrastructure-failure",
+    "packaging-failure",
+    "failed",
+}
+if status not in terminal_statuses:
+    raise SystemExit("job.sh: terminal artifact status is not authoritative")
+if (status == "completed") != (exit_code == 0):
+    raise SystemExit("job.sh: terminal artifact status conflicts with the wrapper exit code")
+receipt = {
+    "schema_version": "job-reconciliation-v1",
+    "name": binding["name"],
+    "run_id": binding["run_id"],
+    "task_id": binding["task_id"],
+    "exit_code": exit_code,
+    "terminal_status": status,
+    "terminal_artifact": str(artifact_path.resolve()),
+    "terminal_artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+}
+serialized = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+if receipt_path.exists() and receipt_path.read_text(encoding="utf-8") != serialized:
+    raise SystemExit("job.sh: existing job reconciliation conflicts with this artifact")
+temporary = receipt_path.with_name(receipt_path.name + ".tmp")
+temporary.write_text(serialized, encoding="utf-8")
+temporary.replace(receipt_path)
+print(json.dumps(receipt, sort_keys=True))
+PY
+	local status=$?
+	[ "$status" -eq 0 ] || return "$status"
+	: >"$dir/waited"
 }
 
 cmd_clean() {
@@ -388,6 +550,8 @@ main() {
 	status) cmd_status "$@" ;;
 	log) cmd_log "$@" ;;
 	list) cmd_list "$@" ;;
+	binding-files) cmd_binding_files "$@" ;;
+	reconcile) cmd_reconcile "$@" ;;
 	check) cmd_check "$@" ;;
 	clean) cmd_clean "$@" ;;
 	-h | --help | help) usage 0 ;;

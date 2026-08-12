@@ -1,6 +1,8 @@
 """Coverage for the detached long-running-command runner used by agents."""
 
+import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -165,3 +167,155 @@ def test_wait_on_unknown_job_is_a_usage_error(tmp_path: Path) -> None:
 
     assert result.returncode == 2
     assert "no such job" in result.stderr
+
+
+def _wait_until_done(tmp_path: Path, name: str) -> None:
+    for _ in range(100):
+        if "DONE" in _job(tmp_path, "status", name).stdout:
+            return
+        time.sleep(0.02)
+    pytest.fail(f"job {name!r} did not finish")
+
+
+def test_bound_job_reconciles_only_from_its_terminal_dispatch_artifact(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    run_id = "sr_" + "a" * 32
+    started = _job(
+        tmp_path,
+        "start",
+        "bound",
+        "--run-id",
+        run_id,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "true",
+    )
+    assert started.returncode == 0, started.stderr
+    _wait_until_done(tmp_path, "bound")
+
+    reconciled = _job(
+        tmp_path,
+        "reconcile",
+        "bound",
+        "--terminal-artifact",
+        str(artifact),
+    )
+
+    assert reconciled.returncode == 0, reconciled.stderr
+    receipt = json.loads(
+        (tmp_path / "jobs" / "bound" / "reconciliation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt["terminal_artifact_sha256"]
+    assert receipt["terminal_status"] == "completed"
+    assert _job(tmp_path, "check").returncode == 0
+    bindings = _job(tmp_path, "binding-files", "--run-id", run_id)
+    assert bindings.stdout.strip() == str(tmp_path / "jobs" / "bound" / "binding.json")
+
+
+def test_bound_job_rejects_a_different_terminal_task(tmp_path: Path) -> None:
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "foreign", "status": "completed"}),
+        encoding="utf-8",
+    )
+    started = _job(
+        tmp_path,
+        "start",
+        "bound",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "expected",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "true",
+    )
+    assert started.returncode == 0
+    _wait_until_done(tmp_path, "bound")
+
+    reconciled = _job(
+        tmp_path,
+        "reconcile",
+        "bound",
+        "--terminal-artifact",
+        str(artifact),
+    )
+
+    assert reconciled.returncode == 1
+    assert "task_id" in reconciled.stderr
+    assert _job(tmp_path, "check").returncode == 1
+
+
+def test_bound_job_rejects_a_binding_name_that_differs_from_its_job(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "expected", "status": "completed"}),
+        encoding="utf-8",
+    )
+    started = _job(
+        tmp_path,
+        "start",
+        "bound",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "expected",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "true",
+    )
+    assert started.returncode == 0
+    _wait_until_done(tmp_path, "bound")
+    binding_path = tmp_path / "jobs" / "bound" / "binding.json"
+    binding = json.loads(binding_path.read_text(encoding="utf-8"))
+    binding["name"] = "foreign"
+    binding_path.write_text(json.dumps(binding), encoding="utf-8")
+
+    reconciled = _job(
+        tmp_path,
+        "reconcile",
+        "bound",
+        "--terminal-artifact",
+        str(artifact),
+    )
+
+    assert reconciled.returncode == 1
+    assert "binding name" in reconciled.stderr
+
+
+def test_binding_enumeration_fails_closed_on_malformed_job_authority(
+    tmp_path: Path,
+) -> None:
+    binding = tmp_path / "jobs" / "broken" / "binding.json"
+    binding.parent.mkdir(parents=True)
+    binding.write_text("not json\n", encoding="utf-8")
+
+    result = _job(tmp_path, "binding-files", "--run-id", "sr_" + "a" * 32)
+
+    assert result.returncode == 1
+    assert "invalid job binding" in result.stderr
+
+
+@pytest.mark.parametrize("option", ["--run-id", "--task-id", "--terminal-artifact"])
+def test_bound_job_missing_option_value_is_a_usage_error(
+    tmp_path: Path, option: str
+) -> None:
+    result = _job(tmp_path, "start", "bound", option)
+
+    assert result.returncode == 2
+    assert "requires a value" in result.stderr
