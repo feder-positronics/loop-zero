@@ -132,6 +132,7 @@ def command(
     read_only_mounts: Sequence[tuple[Path, Path]] = (),
     preserve_fds: Sequence[int] = (),
     deny_network: bool,
+    include_model_runtime: bool = True,
 ) -> list[str]:
     """Build a namespace with no host-root or host-home visibility."""
     resolved_worktree = _validated(worktree, directory=True)
@@ -267,7 +268,7 @@ def command(
             "/run/guardian-bin/uv",
         ]
     )
-    codex = _optional_tool("codex")
+    codex = _optional_tool("codex") if include_model_runtime else None
     if codex is not None:
         built.extend(["--ro-bind", str(codex), "/run/guardian-bin/codex"])
     created: set[Path] = {
