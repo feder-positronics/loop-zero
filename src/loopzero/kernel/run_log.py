@@ -284,23 +284,28 @@ def transition_phase(*, root: Path, skill: str, run_id: str, target: str) -> boo
 def complete_closeout_phase(
     *, root: Path, skill: str, run_id: str, outcome: str, verified_merged: bool
 ) -> bool:
-    """Complete phase five only after closeout has proved a merged outcome."""
+    """Complete phase five when present; phase telemetry never blocks settlement."""
     if outcome != "merged" or not verified_merged or skill not in PHASE_SKILLS:
         return False
-    active, completed = _phase_history(
-        load_phase_events(root), skill=skill, run_id=run_id
-    )
-    if active == len(PHASES) - 1:
-        emit_phase_event(
-            skill=skill, run_id=run_id, phase="closeout", status="complete"
+    try:
+        active, completed = _phase_history(
+            load_phase_events(root), skill=skill, run_id=run_id
         )
-        return True
-    if completed == len(PHASES) - 1:
+        if active == len(PHASES) - 1:
+            emit_phase_event(
+                skill=skill, run_id=run_id, phase="closeout", status="complete"
+            )
+            return True
+        if completed == len(PHASES) - 1:
+            return False
+        # A verified merge remains authoritative when an older, interrupted,
+        # or cross-harness run has no active closeout phase.
         return False
-    if completed == -1 and active is None:
-        # Preserve legacy direct terminal rows that predate phase evidence.
+    except (OSError, RuntimeError, ValueError):
+        # Phase events are coarse observational telemetry. Contradictory input
+        # or a failed measurement write stays absent; never synthesize it or
+        # block the authoritative terminal row.
         return False
-    raise ValueError("verified merged closeout requires active closeout phase")
 
 
 def parse_ts(raw: str) -> datetime | None:
@@ -726,13 +731,18 @@ def main() -> int:
             # The remote merge has already been verified by the closeout
             # adapter. Finish timing first so an interrupted lifecycle-log
             # append can be retried without stranding an incomplete phase.
-            complete_closeout_phase(
-                root=root,
-                skill=args.skill,
-                run_id=args.run_id,
-                outcome=args.outcome,
-                verified_merged=True,
-            )
+            try:
+                complete_closeout_phase(
+                    root=root,
+                    skill=args.skill,
+                    run_id=args.run_id,
+                    outcome=args.outcome,
+                    verified_merged=True,
+                )
+            except (OSError, RuntimeError, ValueError):
+                # Timing is observational. The verified terminal row remains
+                # authoritative even if future phase readers or writers fail.
+                pass
         if should_append:
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")

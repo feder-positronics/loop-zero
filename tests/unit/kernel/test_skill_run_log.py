@@ -271,6 +271,55 @@ def test_verified_merged_replay_does_not_append_a_second_terminal_row(
     ]
 
 
+def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    audit_dir = tmp_path / ".audit" / "skill-runs"
+    audit_dir.mkdir(parents=True)
+    log_path = audit_dir / "2026-08-13.jsonl"
+    log_path.write_text(
+        json.dumps(_entry(run_id, "in_progress")) + "\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+
+    def fail_phase_completion(**kwargs) -> bool:
+        raise ValueError("contradictory phase history")
+
+    monkeypatch.setattr(module, "complete_closeout_phase", fail_phase_completion)
+    monkeypatch.setattr(
+        module,
+        "common_fields",
+        lambda: {
+            "ts": "2026-08-13T10:00:00Z",
+            "session_id": "closeout-terminal",
+            "session_source": "codex_thread",
+            "harness": "codex",
+            "git_branch": "feat/2639-skill-run-lifecycle",
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skill_run_log.py",
+            "--skill",
+            "work-issue",
+            "--run-id",
+            run_id,
+            "--outcome",
+            "merged",
+            "--verified-merged",
+        ],
+    )
+
+    assert module.main() == 0
+    rows = [
+        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [row["outcome"] for row in rows] == ["in_progress", "merged"]
+
+
 def test_in_progress_can_transition_to_terminal_from_another_session() -> None:
     run_id = "sr_0123456789abcdef0123456789abcdef"
     existing = [_entry(run_id, "in_progress", session_id="first")]
@@ -546,6 +595,110 @@ def test_only_verified_merged_outcome_completes_closeout(
         is True
     )
     assert emitted == [("closeout", "complete")]
+
+
+@pytest.mark.parametrize("early_phase_statuses", [("start",), ("start", "complete")])
+def test_verified_merge_terminalizes_without_synthesizing_missing_phase_history(
+    monkeypatch, tmp_path: Path, early_phase_statuses: tuple[str, ...]
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "1",
+            "status": status,
+        }
+        for status in early_phase_statuses
+    ]
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+    monkeypatch.setattr(
+        module,
+        "emit_phase_event",
+        lambda **kwargs: pytest.fail("missing phase history must not be synthesized"),
+    )
+
+    assert (
+        module.complete_closeout_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            outcome="merged",
+            verified_merged=True,
+        )
+        is False
+    )
+
+
+def test_verified_merge_terminalizes_despite_contradictory_phase_history(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "1",
+            "status": "start",
+        },
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "2",
+            "status": "start",
+        },
+    ]
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+
+    assert (
+        module.complete_closeout_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            outcome="merged",
+            verified_merged=True,
+        )
+        is False
+    )
+
+
+def test_verified_merge_terminalizes_when_phase_completion_write_fails(
+    monkeypatch, tmp_path: Path
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": str(index),
+            "name": name,
+            "status": status,
+        }
+        for index, name in enumerate(module.PHASES, start=1)
+        for status in ("start", "complete")
+        if name != "closeout" or status == "start"
+    ]
+    monkeypatch.setattr(module, "load_phase_events", lambda root: events)
+
+    def fail_phase_write(**kwargs) -> None:
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(module, "emit_phase_event", fail_phase_write)
+
+    assert (
+        module.complete_closeout_phase(
+            root=tmp_path,
+            skill="work-issue",
+            run_id=run_id,
+            outcome="merged",
+            verified_merged=True,
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize(
