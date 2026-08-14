@@ -277,7 +277,7 @@ def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
     run_id = "sr_0123456789abcdef0123456789abcdef"
     audit_dir = tmp_path / ".audit" / "skill-runs"
     audit_dir.mkdir(parents=True)
-    log_path = audit_dir / "2026-08-13.jsonl"
+    log_path = audit_dir / f"{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
     log_path.write_text(
         json.dumps(_entry(run_id, "in_progress")) + "\n", encoding="utf-8"
     )
