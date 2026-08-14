@@ -84,8 +84,12 @@ def git_dir(worktree: Path) -> Path:
     return Path(raw).resolve()
 
 
-def _lock_paths(worktree: Path) -> tuple[Path, Path]:
-    directory = git_dir(worktree)
+def _lock_paths(
+    worktree: Path, *, git_directory: Path | None = None
+) -> tuple[Path, Path]:
+    directory = (
+        git_directory.resolve() if git_directory is not None else git_dir(worktree)
+    )
     return directory / LOCK_FILENAME, directory / OWNER_FILENAME
 
 
@@ -220,10 +224,11 @@ def worktree_lease(
     *,
     boundary: str,
     timeout_s: float = 300.0,
+    git_directory: Path | None = None,
 ) -> Iterator[LeaseHandle]:
     """Hold the per-worktree writer lease for one repository boundary."""
     resolved = worktree.resolve()
-    lock_path, owner_path = _lock_paths(resolved)
+    lock_path, owner_path = _lock_paths(resolved, git_directory=git_directory)
     lock_path.touch(mode=0o600, exist_ok=True)
     if inherited := _inherited_lease(lock_path):
         yield inherited

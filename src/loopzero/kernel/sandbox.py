@@ -4,15 +4,20 @@
 from __future__ import annotations
 
 import os
-import shutil
 import stat
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
+from trusted_executable import TrustedExecutableError, system_executable
+
 CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
+SANDBOX_BOUNDARY_ENV = "INTELFLO_GUARDIAN_SANDBOX_BOUNDARY"
+NETWORK_DENIED_BOUNDARY = "network-denied"
+HOST_NETWORK_BOUNDARY = "host-network"
 SAFE_PASSTHROUGH_ENV = frozenset(
     {
+        SANDBOX_BOUNDARY_ENV,
         "INTELFLO_WORKTREE_LEASE_BOUNDARY",
         "INTELFLO_WORKTREE_LEASE_FD",
         "INTELFLO_WORKTREE_LEASE_NONCE",
@@ -104,17 +109,63 @@ def _validated(path: Path, *, directory: bool | None = None) -> Path:
     return resolved
 
 
-def _tool(name: str) -> Path:
-    found = shutil.which(name)
+def _tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path:
+    found = next(
+        (
+            Path(directory) / name
+            for directory in os.environ.get("PATH", os.defpath).split(os.pathsep)
+            if (Path(directory) / name).is_file()
+            and os.access(Path(directory) / name, os.X_OK)
+        ),
+        None,
+    )
     if found is None:
         raise SandboxError(f"sandbox runtime tool is unavailable: {name}")
-    return Path(found).resolve()
+    resolved = found.resolve()
+    if any(resolved.is_relative_to(root.resolve()) for root in forbidden_roots):
+        raise SandboxError(
+            f"sandbox runtime tool is under a writable sandbox source: {name}"
+        )
+    return resolved
 
 
-def _optional_tool(name: str) -> Path | None:
+def _system_tool(name: str) -> Path:
+    try:
+        return system_executable(name)
+    except TrustedExecutableError as exc:
+        raise SandboxError(str(exc)) from exc
+
+
+def _optional_tool(
+    name: str, *, forbidden_roots: Sequence[Path] = ()
+) -> Path | None:
     """Resolve an optional model runtime without weakening command isolation."""
-    found = shutil.which(name)
-    return Path(found).resolve() if found is not None else None
+    try:
+        return _tool(name, forbidden_roots=forbidden_roots)
+    except SandboxError:
+        return None
+
+
+def current_boundary_reusable(*, deny_network: bool) -> bool:
+    """Reuse an active Guardian namespace when its network policy is no weaker."""
+    advertised = os.environ.get(SANDBOX_BOUNDARY_ENV)
+    if advertised is None:
+        return False
+    compatible = (
+        {NETWORK_DENIED_BOUNDARY}
+        if deny_network
+        else {NETWORK_DENIED_BOUNDARY, HOST_NETWORK_BOUNDARY}
+    )
+    runtime_root = Path("/run/guardian-bin")
+    if (
+        advertised not in compatible
+        or not (runtime_root / "uv").is_file()
+        or stat.S_IMODE(Path("/").stat().st_mode) & 0o222
+    ):
+        raise SandboxError(
+            "active Guardian sandbox cannot satisfy the nested network boundary"
+        )
+    return True
 
 
 def command(
@@ -173,7 +224,6 @@ def command(
     )
     runtime_roots: set[tuple[Path, Path]] = set()
     for root in (
-        resolved_worktree,
         *(_validated(path, directory=True) for path in read_only_roots),
         *(_validated(source, directory=True) for source, _ in read_only_mounts),
     ):
@@ -195,8 +245,24 @@ def command(
         ("--ro-bind", source, destination)
         for source, destination in sorted(runtime_roots)
     )
+    writable_sources = tuple(
+        source
+        for mode, source, _destination in mounts
+        if mode == "--bind"
+    )
+    uv = _tool("uv", forbidden_roots=writable_sources)
+    codex = (
+        _optional_tool("codex", forbidden_roots=writable_sources)
+        if include_model_runtime
+        else None
+    )
 
-    built = ["bwrap", "--die-with-parent", "--new-session", "--unshare-pid"]
+    built = [
+        str(_system_tool("bwrap")),
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+    ]
     if preserve_fds:
         if any(not isinstance(fd, int) or fd < 3 for fd in preserve_fds):
             raise SandboxError("sandbox preserved descriptor is invalid")
@@ -264,11 +330,10 @@ def command(
             "--dir",
             "/run/guardian-bin",
             "--ro-bind",
-            str(_tool("uv")),
+            str(uv),
             "/run/guardian-bin/uv",
         ]
     )
-    codex = _optional_tool("codex") if include_model_runtime else None
     if codex is not None:
         built.extend(["--ro-bind", str(codex), "/run/guardian-bin/codex"])
     created: set[Path] = {
@@ -287,12 +352,18 @@ def command(
         built.extend([mode, str(source), str(destination)])
     built.extend(
         [
+            "--chmod",
+            "0555",
+            "/",
             "--setenv",
             "HOME",
             "/tmp/guardian-home",
             "--setenv",
             "GH_CONFIG_DIR",
             "/tmp/guardian-gh-config",
+            "--setenv",
+            SANDBOX_BOUNDARY_ENV,
+            NETWORK_DENIED_BOUNDARY if deny_network else HOST_NETWORK_BOUNDARY,
             "--cap-drop",
             "ALL",
             "--",
