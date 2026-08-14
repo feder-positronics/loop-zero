@@ -1,6 +1,8 @@
 """Coverage for the detached long-running-command runner used by agents."""
 
+import hashlib
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -12,11 +14,11 @@ SCRIPT = REPO_ROOT / "scripts" / "util" / "job.sh"
 
 
 def _job(
-    tmp_path: Path, *args: str, timeout: float = 60
+    tmp_path: Path, *args: str, timeout: float = 60, script: Path = SCRIPT
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(SCRIPT), *args],
-        cwd=REPO_ROOT,
+        [str(script), *args],
+        cwd=script.resolve().parents[2],
         env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")},
         capture_output=True,
         text=True,
@@ -169,12 +171,52 @@ def test_wait_on_unknown_job_is_a_usage_error(tmp_path: Path) -> None:
     assert "no such job" in result.stderr
 
 
-def _wait_until_done(tmp_path: Path, name: str) -> None:
+def _wait_until_done(tmp_path: Path, name: str, *, script: Path = SCRIPT) -> None:
     for _ in range(100):
-        if "DONE" in _job(tmp_path, "status", name).stdout:
+        if "DONE" in _job(tmp_path, "status", name, script=script).stdout:
             return
         time.sleep(0.02)
     pytest.fail(f"job {name!r} did not finish")
+
+
+def _isolated_job_script(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    script = repo / "scripts" / "util" / "job.sh"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(SCRIPT, script)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return script
+
+
+def _blocked_dispatch_evidence(
+    repo: Path,
+    *,
+    run_id: str,
+    task_id: str,
+    terminal_overrides: dict[str, object] | None = None,
+) -> tuple[Path, dict[str, object]]:
+    artifact = repo / ".audit" / "dispatch" / "results" / f"{task_id}.json"
+    artifact.parent.mkdir(parents=True)
+    artifact_bytes = json.dumps(
+        {"task_id": task_id, "status": "blocked"}, sort_keys=True
+    ).encode()
+    artifact.write_bytes(artifact_bytes)
+    terminal_record: dict[str, object] = {
+        "type": "attempt-terminal",
+        "schema_version": "dispatch-telemetry-v9",
+        "policy_version": "2026-08-06-v10",
+        "runtime_contract_version": 4,
+        "task_id": task_id,
+        "run_id": run_id,
+        "status": "blocked",
+        "exit_code": 0,
+        "result_artifact": f".audit/dispatch/results/{task_id}.json",
+        "result_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        **(terminal_overrides or {}),
+    }
+    telemetry = artifact.parent.parent / "2026-08-13.jsonl"
+    telemetry.write_text(json.dumps(terminal_record) + "\n", encoding="utf-8")
+    return artifact, terminal_record
 
 
 def test_bound_job_reconciles_only_from_its_terminal_dispatch_artifact(
@@ -218,9 +260,166 @@ def test_bound_job_reconciles_only_from_its_terminal_dispatch_artifact(
     )
     assert receipt["terminal_artifact_sha256"]
     assert receipt["terminal_status"] == "completed"
+    assert "terminal_authority" not in receipt
     assert _job(tmp_path, "check").returncode == 0
     bindings = _job(tmp_path, "binding-files", "--run-id", run_id)
     assert bindings.stdout.strip() == str(tmp_path / "jobs" / "bound" / "binding.json")
+    assert (
+        _job(
+            tmp_path,
+            "reconcile",
+            "bound",
+            "--terminal-artifact",
+            str(artifact),
+        ).returncode
+        == 0
+    )
+
+
+@pytest.mark.parametrize("runtime_contract_version", [4, None])
+def test_bound_job_reconciles_legacy_blocked_dispatch_from_terminal_telemetry(
+    tmp_path: Path,
+    runtime_contract_version: int | None,
+) -> None:
+    run_id = "sr_" + "a" * 32
+    task_id = "dispatch-legacy-blocked"
+    script = _isolated_job_script(tmp_path)
+    artifact, terminal_record = _blocked_dispatch_evidence(
+        script.parents[2],
+        run_id=run_id,
+        task_id=task_id,
+        terminal_overrides={"runtime_contract_version": runtime_contract_version},
+    )
+    telemetry = artifact.parent.parent / "2026-08-13.jsonl"
+    telemetry.write_text(
+        json.dumps(terminal_record) + "\n" + json.dumps(terminal_record) + "\n",
+        encoding="utf-8",
+    )
+    started = _job(
+        tmp_path,
+        "start",
+        "bound",
+        "--run-id",
+        run_id,
+        "--task-id",
+        task_id,
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "true",
+        script=script,
+    )
+    assert started.returncode == 0, started.stderr
+    _wait_until_done(tmp_path, "bound", script=script)
+
+    reconciled = _job(
+        tmp_path,
+        "reconcile",
+        "bound",
+        "--terminal-artifact",
+        str(artifact),
+        script=script,
+    )
+
+    assert reconciled.returncode == 0, reconciled.stderr
+    receipt = json.loads(reconciled.stdout)
+    assert receipt["exit_code"] == 0
+    assert receipt["terminal_status"] == "blocked"
+    assert receipt["terminal_authority"] == "dispatcher-attempt-terminal"
+    assert (
+        receipt["terminal_record_sha256"]
+        == hashlib.sha256(
+            json.dumps(terminal_record, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    )
+
+
+def test_bound_job_rejects_legacy_blocked_result_without_terminal_telemetry(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-blocked", "status": "blocked"}),
+        encoding="utf-8",
+    )
+    started = _job(
+        tmp_path,
+        "start",
+        "bound",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-blocked",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "true",
+    )
+    assert started.returncode == 0
+    _wait_until_done(tmp_path, "bound")
+
+    reconciled = _job(
+        tmp_path,
+        "reconcile",
+        "bound",
+        "--terminal-artifact",
+        str(artifact),
+    )
+
+    assert reconciled.returncode == 1
+    assert "dispatcher terminal telemetry" in reconciled.stderr
+
+
+@pytest.mark.parametrize(
+    "terminal_overrides",
+    [
+        {"schema_version": "dispatch-telemetry-v99"},
+        {"policy_version": "2099-01-01-v99"},
+        {"runtime_contract_version": 99},
+        {"exit_code": False},
+    ],
+)
+def test_bound_job_rejects_noncurrent_blocked_terminal_telemetry(
+    tmp_path: Path,
+    terminal_overrides: dict[str, object],
+) -> None:
+    run_id = "sr_" + "a" * 32
+    task_id = "dispatch-blocked"
+    script = _isolated_job_script(tmp_path)
+    artifact, _ = _blocked_dispatch_evidence(
+        script.parents[2],
+        run_id=run_id,
+        task_id=task_id,
+        terminal_overrides=terminal_overrides,
+    )
+    started = _job(
+        tmp_path,
+        "start",
+        "bound",
+        "--run-id",
+        run_id,
+        "--task-id",
+        task_id,
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "true",
+        script=script,
+    )
+    assert started.returncode == 0
+    _wait_until_done(tmp_path, "bound", script=script)
+
+    reconciled = _job(
+        tmp_path,
+        "reconcile",
+        "bound",
+        "--terminal-artifact",
+        str(artifact),
+        script=script,
+    )
+
+    assert reconciled.returncode == 1
+    assert "dispatcher terminal telemetry" in reconciled.stderr
 
 
 def test_bound_job_rejects_a_different_terminal_task(tmp_path: Path) -> None:

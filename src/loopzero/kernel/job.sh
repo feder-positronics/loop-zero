@@ -457,14 +457,21 @@ cmd_reconcile() {
 		die "job '$name' is still running"
 	fi
 	[ -f "$dir/exit_code" ] || die "job '$name' has no terminal exit code"
-	python3 - "$dir/binding.json" "$(realpath -m -- "$supplied_artifact")" "$dir/exit_code" "$dir/reconciliation.json" <<'PY'
+	local git_common_dir primary_repo dispatch_root
+	git_common_dir="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+		die "cannot resolve the primary repository for job reconciliation"
+	primary_repo="$(dirname "$git_common_dir")"
+	dispatch_root="$primary_repo/.audit/dispatch"
+	python3 - "$dir/binding.json" "$(realpath -m -- "$supplied_artifact")" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" <<'PY'
 import hashlib
 import json
 import re
 import sys
 from pathlib import Path
 
-binding_path, artifact_path, exit_path, receipt_path = map(Path, sys.argv[1:])
+binding_path, artifact_path, exit_path, receipt_path, dispatch_root = map(
+    Path, sys.argv[1:]
+)
 try:
     binding = json.loads(binding_path.read_text(encoding="utf-8"))
     artifact_bytes = artifact_path.read_bytes()
@@ -487,6 +494,7 @@ if Path(str(binding.get("terminal_artifact"))).resolve() != artifact_path.resolv
     raise SystemExit("job.sh: terminal artifact does not match the job binding")
 if not isinstance(artifact, dict) or artifact.get("task_id") != binding.get("task_id"):
     raise SystemExit("job.sh: terminal artifact task_id does not match the job binding")
+artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
 status = artifact.get("status")
 terminal_statuses = {
     "completed",
@@ -497,9 +505,82 @@ terminal_statuses = {
     "packaging-failure",
     "failed",
 }
-if status not in terminal_statuses:
+terminal_record_sha256 = None
+if status == "blocked":
+    audit_root = dispatch_root.parent
+    if (
+        artifact_path.parent.resolve() != (dispatch_root / "results").resolve()
+        or dispatch_root.name != "dispatch"
+        or audit_root.name != ".audit"
+    ):
+        raise SystemExit(
+            "job.sh: blocked result has no matching dispatcher terminal telemetry"
+        )
+    repo_root = audit_root.parent
+    # Keep this compatibility bridge aligned with agent_dispatch.py's current
+    # telemetry contract; non-current rows are forensic evidence, not authority.
+    compatible_terminal_telemetry = {
+        ("dispatch-telemetry-v9", "2026-07-24-v9"),
+        ("dispatch-telemetry-v9", "2026-08-06-v10"),
+    }
+    matching_records = []
+    for telemetry_path in sorted(dispatch_root.glob("*.jsonl")):
+        if telemetry_path.is_symlink() or not telemetry_path.is_file():
+            continue
+        try:
+            lines = telemetry_path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise SystemExit(
+                f"job.sh: dispatcher terminal telemetry is unreadable: {exc}"
+            ) from exc
+        for line in lines:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(
+                    f"job.sh: dispatcher terminal telemetry is invalid: {exc}"
+                ) from exc
+            if not isinstance(record, dict):
+                continue
+            result_artifact = record.get("result_artifact")
+            if not isinstance(result_artifact, str):
+                continue
+            recorded_path = Path(result_artifact)
+            if not recorded_path.is_absolute():
+                recorded_path = repo_root / recorded_path
+            recorded_exit_code = record.get("exit_code")
+            if (
+                record.get("type") == "attempt-terminal"
+                and (
+                    record.get("schema_version"),
+                    record.get("policy_version"),
+                )
+                in compatible_terminal_telemetry
+                and record.get("runtime_contract_version") in {None, 4}
+                and record.get("task_id") == binding["task_id"]
+                and record.get("run_id") == binding["run_id"]
+                and record.get("status") == "blocked"
+                and isinstance(recorded_exit_code, int)
+                and not isinstance(recorded_exit_code, bool)
+                and recorded_exit_code == exit_code == 0
+                and recorded_path.resolve() == artifact_path.resolve()
+                and record.get("result_sha256") == artifact_sha256
+            ):
+                matching_records.append(record)
+    matching_records_by_digest = {
+        hashlib.sha256(
+            json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(): record
+        for record in matching_records
+    }
+    if len(matching_records_by_digest) != 1:
+        raise SystemExit(
+            "job.sh: blocked result has no unique matching dispatcher terminal telemetry"
+        )
+    terminal_record_sha256 = next(iter(matching_records_by_digest))
+elif status not in terminal_statuses:
     raise SystemExit("job.sh: terminal artifact status is not authoritative")
-if (status == "completed") != (exit_code == 0):
+elif (status == "completed") != (exit_code == 0):
     raise SystemExit("job.sh: terminal artifact status conflicts with the wrapper exit code")
 receipt = {
     "schema_version": "job-reconciliation-v1",
@@ -509,8 +590,11 @@ receipt = {
     "exit_code": exit_code,
     "terminal_status": status,
     "terminal_artifact": str(artifact_path.resolve()),
-    "terminal_artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+    "terminal_artifact_sha256": artifact_sha256,
 }
+if terminal_record_sha256 is not None:
+    receipt["terminal_authority"] = "dispatcher-attempt-terminal"
+    receipt["terminal_record_sha256"] = terminal_record_sha256
 serialized = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
 if receipt_path.exists() and receipt_path.read_text(encoding="utf-8") != serialized:
     raise SystemExit("job.sh: existing job reconciliation conflicts with this artifact")
