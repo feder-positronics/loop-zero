@@ -719,7 +719,7 @@ def main() -> int:
                 parser.error("--run-id is required for lifecycle transitions")
 
         entry = build_entry(args)
-        day = datetime.now(UTC).strftime("%Y-%m-%d")
+        day = str(entry["ts"])[:10]
         log_path = audit_dir / f"{day}.jsonl"
         should_append = validate_transition(entries, entry)
         if (

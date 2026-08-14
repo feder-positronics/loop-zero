@@ -291,7 +291,7 @@ def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
         module,
         "common_fields",
         lambda: {
-            "ts": "2026-08-13T10:00:00Z",
+            "ts": f"{datetime.now(UTC).strftime('%Y-%m-%d')}T10:00:00Z",
             "session_id": "closeout-terminal",
             "session_source": "codex_thread",
             "harness": "codex",
