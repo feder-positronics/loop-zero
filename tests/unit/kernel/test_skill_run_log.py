@@ -271,6 +271,61 @@ def test_verified_merged_replay_does_not_append_a_second_terminal_row(
     ]
 
 
+def test_check_owner_is_read_only_and_rejects_a_different_skill(tmp_path: Path) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    repo = _repo_with_runs(
+        tmp_path,
+        [_row(run_id, "work-issue", "in_progress", "2026-08-13T10:00:00Z")],
+    )
+    log_path = repo / ".audit" / "skill-runs" / "2026-08-01.jsonl"
+    before = log_path.read_bytes()
+
+    accepted = _run_cli(
+        repo,
+        "--skill",
+        "work-issue",
+        "--run-id",
+        run_id,
+        "--check-owner",
+    )
+    rejected = _run_cli(
+        repo,
+        "--skill",
+        "execute-blueprint",
+        "--run-id",
+        run_id,
+        "--check-owner",
+    )
+    unknown = "sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    missing_rejected = _run_cli(
+        repo,
+        "--skill",
+        "work-issue",
+        "--run-id",
+        unknown,
+        "--check-owner",
+    )
+    historical_recovery = _run_cli(
+        repo,
+        "--skill",
+        "work-issue",
+        "--run-id",
+        unknown,
+        "--check-owner",
+        "--allow-missing-owner",
+    )
+
+    assert accepted.returncode == 0, accepted.stderr
+    assert "Owned work-issue" in accepted.stdout
+    assert rejected.returncode == 2
+    assert "run_id is already owned by work-issue" in rejected.stderr
+    assert missing_rejected.returncode == 2
+    assert "unknown run_id" in missing_rejected.stderr
+    assert historical_recovery.returncode == 0, historical_recovery.stderr
+    assert "Unowned historical run" in historical_recovery.stdout
+    assert log_path.read_bytes() == before
+
+
 def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

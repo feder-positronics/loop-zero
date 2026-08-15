@@ -151,6 +151,34 @@ def validate_transition(
     return True
 
 
+def require_run_owner(
+    entries: list[dict[str, object]],
+    *,
+    run_id: str,
+    skill: str,
+    allow_missing: bool = False,
+) -> str | None:
+    """Validate one existing run's immutable skill owner without appending."""
+    if not RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("run_id must match sr_<32 lowercase hex characters>")
+    rows = [entry for entry in entries if entry.get("run_id") == run_id]
+    if not rows:
+        if allow_missing:
+            return None
+        raise ValueError(f"unknown run_id: {run_id}")
+    owners = {
+        str(entry["skill"])
+        for entry in rows
+        if isinstance(entry.get("skill"), str) and entry.get("skill")
+    }
+    if len(owners) != 1:
+        raise ValueError(f"run_id has contradictory skill owners: {run_id}")
+    owner = owners.pop()
+    if owner != skill:
+        raise ValueError(f"run_id is already owned by {owner}")
+    return owner
+
+
 def load_phase_events(root: Path) -> list[dict[str, object]]:
     """Load phase evidence without rewriting malformed or legacy JSONL rows."""
     events: list[dict[str, object]] = []
@@ -614,6 +642,16 @@ def main() -> int:
         help="Exit 3 when the (given or active) run exceeds the session ceiling",
     )
     parser.add_argument(
+        "--check-owner",
+        action="store_true",
+        help="Validate that --skill owns the existing --run-id without appending",
+    )
+    parser.add_argument(
+        "--allow-missing-owner",
+        action="store_true",
+        help="With --check-owner, admit an explicit pre-contract recovery with no row",
+    )
+    parser.add_argument(
         "--reconcile-stale",
         action="store_true",
         help="Close in_progress runs idle past the ceiling with owner-absence "
@@ -652,9 +690,32 @@ def main() -> int:
     audit_dir.mkdir(parents=True, exist_ok=True)
     lock_path = audit_dir / ".write.lock"
     with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        fcntl.flock(lock_file, fcntl.LOCK_SH if args.check_owner else fcntl.LOCK_EX)
         entries = load_entries(audit_dir)
 
+        if args.check_owner:
+            if args.start or args.transition or args.outcome is not None:
+                parser.error(
+                    "--check-owner cannot be combined with --start, --transition, or --outcome"
+                )
+            if args.run_id is None:
+                parser.error("--run-id is required with --check-owner")
+            try:
+                owner = require_run_owner(
+                    entries,
+                    run_id=args.run_id,
+                    skill=args.skill,
+                    allow_missing=args.allow_missing_owner,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+            if owner is None:
+                print(f"Unowned historical run {args.run_id}")
+            else:
+                print(f"Owned {owner} run {args.run_id}")
+            return 0
+        if args.allow_missing_owner:
+            parser.error("--allow-missing-owner requires --check-owner")
         if args.check_ceiling:
             return cmd_check_ceiling(args, entries)
         if args.reconcile_stale:
