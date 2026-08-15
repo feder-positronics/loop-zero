@@ -16,7 +16,7 @@
 #   scripts/util/job.sh log   <name> [--tail LINES] [--follow]
 #   scripts/util/job.sh list
 #   scripts/util/job.sh binding-files --run-id <id>
-#   scripts/util/job.sh reconcile <name> [--terminal-artifact <path>]  # v1 recovery only
+#   scripts/util/job.sh reconcile <name> [--terminal-artifact <path>] [--primary <path>]
 #   scripts/util/job.sh check                 # non-zero if any job is running or unreaped
 #   scripts/util/job.sh clean [--all]
 #
@@ -32,9 +32,16 @@
 
 set -uo pipefail
 
+# The runner may cross a credential-bearing closeout boundary. Prevent Python
+# startup hooks and the caller's working directory from becoming import roots.
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE
+export PYTHONNOUSERSITE=1
+export PYTHONSAFEPATH=1
+
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-JOB_DIR="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$REPO_ROOT" --ensure-root)" || exit $?
+JOB_WORKTREE="${INTELFLO_DELIVERY_ROOT:-$REPO_ROOT}"
+JOB_DIR="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-root)" || exit $?
 JOB_ROOTS=("$JOB_DIR")
 DEFAULT_TIMEOUT="${INTELFLO_JOB_TIMEOUT:-1800}"
 DEFAULT_TAIL=40
@@ -471,7 +478,7 @@ cmd_start() {
 	fi
 	rm -rf "$dir"
 	local created_dir
-	created_dir="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$REPO_ROOT" --ensure-job-directory "$name")" ||
+	created_dir="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-job-directory "$name")" ||
 		die "cannot create protected job directory"
 	[ "$created_dir" = "$dir" ] || die "job authority path changed during creation"
 
@@ -838,7 +845,7 @@ cmd_reconcile() {
 		die "job '$name' is still running"
 	fi
 	[ -f "$dir/exit_code" ] || die "job '$name' has no terminal exit code"
-	local binding_schema supplied_artifact=""
+	local binding_schema supplied_artifact="" primary_repo=""
 	binding_schema="$(python3 - "$dir/binding.json" <<'PY'
 import json
 import sys
@@ -856,16 +863,32 @@ PY
 )" || return $?
 	case "$binding_schema" in
 	job-binding-v2)
-		[ "$#" -eq 0 ] || die "v2 reconciliation uses its durable terminal envelope; external artifact overrides are forbidden"
+		[ "${1:-}" != "--terminal-artifact" ] || die "v2 reconciliation uses its durable terminal envelope; external artifact overrides are forbidden"
 		;;
 	job-binding-v1)
-		[ "$#" -eq 2 ] && [ "${1:-}" = "--terminal-artifact" ] && [ -n "${2:-}" ] ||
+		[ "${1:-}" = "--terminal-artifact" ] && [ -n "${2:-}" ] ||
 			die "legacy v1 reconcile requires --terminal-artifact <path>"
 		supplied_artifact="$(realpath -m -- "$2")"
+		shift 2
 		;;
 	*) die "job '$name' binding schema is invalid" ;;
 	esac
-	python3 - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" <<'PY'
+	if [ "${1:-}" = "--primary" ]; then
+		primary_repo="${2:-}"
+		[ -n "$primary_repo" ] || die "reconcile --primary requires a path"
+		shift 2
+	fi
+	[ "$#" -eq 0 ] || die "reconcile received unexpected arguments"
+	local git_common_dir dispatch_root=""
+	if [ -n "$primary_repo" ]; then
+		primary_repo="$(realpath -e -- "$primary_repo")" || die "reconcile primary repository is unreadable"
+		git_common_dir="$(git -C "$primary_repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+			die "cannot resolve the primary repository for job reconciliation"
+		[ "$(dirname "$git_common_dir")" = "$primary_repo" ] ||
+			die "reconcile --primary must name the canonical primary repository"
+		dispatch_root="$primary_repo/.audit/dispatch"
+	fi
+	python3 - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" <<'PY'
 import hashlib
 import json
 import re
@@ -876,6 +899,7 @@ binding_path = Path(sys.argv[1])
 supplied_artifact = sys.argv[2]
 exit_path = Path(sys.argv[3])
 receipt_path = Path(sys.argv[4])
+declared_dispatch_root = sys.argv[5]
 try:
     binding = json.loads(binding_path.read_text(encoding="utf-8"))
     exit_code = int(exit_path.read_text(encoding="utf-8").strip())
@@ -973,10 +997,14 @@ terminal_statuses = {
 }
 terminal_record_sha256 = None
 if status == "blocked":
-    dispatch_root = artifact_path.parent.parent
+    dispatch_root = (
+        Path(declared_dispatch_root)
+        if declared_dispatch_root
+        else artifact_path.parent.parent
+    )
     audit_root = dispatch_root.parent
     if (
-        artifact_path.parent.name != "results"
+        artifact_path.parent.resolve() != (dispatch_root / "results").resolve()
         or dispatch_root.name != "dispatch"
         or audit_root.name != ".audit"
         or any(

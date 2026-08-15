@@ -61,6 +61,8 @@ def git_config_key_can_redirect(name: str) -> bool:
             "protocol.",
             "diff.",
             "filter.",
+            "alias.",
+            "gpg.",
         )
     ):
         return True
@@ -72,7 +74,10 @@ def git_config_key_can_redirect(name: str) -> bool:
         "core.fsmonitor",
         "core.gitproxy",
         "core.hookspath",
+        "core.pager",
+        "core.alternaterefscommand",
         "core.sshcommand",
+        "core.worktree",
     }:
         return True
     return normalized.startswith("remote.origin.") and normalized not in {

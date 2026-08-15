@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -13,6 +14,24 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "util" / "job.sh"
+WORKTREE_LEASE_ENVIRONMENT = (
+    "INTELFLO_WORKTREE_LEASE_FD",
+    "INTELFLO_WORKTREE_LEASE_BOUNDARY",
+    "INTELFLO_WORKTREE_LEASE_OWNER_PID",
+    "INTELFLO_WORKTREE_LEASE_NONCE",
+)
+requires_nested_user_namespace = pytest.mark.skipif(
+    os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
+    reason="bound-job protection cannot create a nested user namespace",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_job_runner_from_parent_worktree_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in WORKTREE_LEASE_ENVIRONMENT:
+        monkeypatch.delenv(name, raising=False)
 
 
 def _job(
@@ -48,6 +67,140 @@ def _default_job(
         text=True,
         timeout=timeout,
     )
+
+
+def test_job_runner_disables_hostile_python_startup_paths(tmp_path: Path) -> None:
+    version_command = [
+        "/usr/bin/python3",
+        "-c",
+        "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')",
+    ]
+    version = subprocess.run(
+        version_command,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    user_base = tmp_path / "user-base"
+    user_site = user_base / "lib" / f"python{version}" / "site-packages"
+    user_site.mkdir(parents=True)
+    probe_marker = tmp_path / "probe-user-site-executed"
+    job_marker = tmp_path / "job-user-site-executed"
+    python_path_probe_marker = tmp_path / "probe-python-path-executed"
+    python_path_job_marker = tmp_path / "job-python-path-executed"
+    startup_hook = (
+        "import os,pathlib; "
+        "pathlib.Path(os.environ['INTELFLO_TEST_USER_SITE_MARKER'])"
+        ".write_text('owned', encoding='utf-8')\n"
+    )
+    (user_site / "candidate_startup.pth").write_text(
+        startup_hook,
+        encoding="utf-8",
+    )
+    python_path = tmp_path / "python-path"
+    python_path.mkdir()
+    (python_path / "hashlib.py").write_text(
+        "import os,pathlib\n"
+        "pathlib.Path(os.environ['INTELFLO_TEST_PYTHONPATH_MARKER'])"
+        ".write_text('owned', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    hostile_environment = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": str(python_path),
+        "PYTHONUSERBASE": str(user_base),
+    }
+
+    probe = subprocess.run(
+        ["/usr/bin/python3", "-c", "import hashlib"],
+        env={
+            **hostile_environment,
+            "INTELFLO_TEST_PYTHONPATH_MARKER": str(python_path_probe_marker),
+            "INTELFLO_TEST_USER_SITE_MARKER": str(probe_marker),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert probe.returncode == 0, probe.stderr
+    assert probe_marker.exists()
+    assert python_path_probe_marker.exists()
+
+    result = _job(
+        tmp_path,
+        "list",
+        env_overrides={
+            **hostile_environment,
+            "INTELFLO_TEST_PYTHONPATH_MARKER": str(python_path_job_marker),
+            "INTELFLO_TEST_USER_SITE_MARKER": str(job_marker),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not job_marker.exists()
+    assert not python_path_job_marker.exists()
+
+
+def test_snapshot_runner_keys_authority_to_declared_delivery(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    captured = tmp_path / "job-store-args"
+    job_root = tmp_path / "jobs"
+    job_root.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$@\" > {str(captured)!r}\n"
+        f"printf '%s\\n' {str(job_root)!r}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    delivery = tmp_path / "delivery"
+    delivery.mkdir()
+
+    result = subprocess.run(
+        [str(SCRIPT), "list"],
+        cwd=delivery,
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "INTELFLO_DELIVERY_ROOT": str(delivery),
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert captured.read_text(encoding="utf-8").splitlines() == [
+        str(REPO_ROOT / "scripts/util/job_store.py"),
+        "--worktree",
+        str(delivery),
+        "--ensure-root",
+    ]
+
+
+def test_snapshot_runner_starts_job_in_declared_delivery_authority(
+    tmp_path: Path,
+) -> None:
+    delivery = tmp_path / "delivery"
+    delivery.mkdir()
+
+    result = subprocess.run(
+        [str(SCRIPT), "run", "snapshot-closeout", "--timeout", "30", "--", "true"],
+        cwd=delivery,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "INTELFLO_DELIVERY_ROOT": str(delivery),
+            "XDG_STATE_HOME": str(tmp_path / "state"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "exit code 0" in result.stdout
 
 
 def test_run_reports_success_and_log_tail(tmp_path: Path) -> None:
@@ -187,6 +340,7 @@ def test_wrapped_command_cannot_inherit_terminal_sealing_authority(
     assert not (tmp_path / "jobs" / "no-replay" / "executor.json").exists()
 
 
+@requires_nested_user_namespace
 def test_bound_wrapped_command_cannot_mutate_its_job_authority(tmp_path: Path) -> None:
     artifact = tmp_path / "terminal.json"
     artifact.write_text(
@@ -218,6 +372,7 @@ def test_bound_wrapped_command_cannot_mutate_its_job_authority(tmp_path: Path) -
     assert (tmp_path / "jobs" / "bound" / "exit_code").read_text().strip() == "0"
 
 
+@requires_nested_user_namespace
 def test_bound_job_pins_bubblewrap_outside_inherited_path(tmp_path: Path) -> None:
     attacker = tmp_path / "attacker-bin"
     attacker.mkdir()
@@ -252,6 +407,7 @@ def test_bound_job_pins_bubblewrap_outside_inherited_path(tmp_path: Path) -> Non
     assert not marker.exists()
 
 
+@requires_nested_user_namespace
 def test_bound_wrapped_command_cannot_substitute_an_authority_ancestor(
     tmp_path: Path,
 ) -> None:
@@ -290,6 +446,7 @@ def test_bound_wrapped_command_cannot_substitute_an_authority_ancestor(
     assert (job_dir / "exit_code").read_text().strip() == "0"
 
 
+@requires_nested_user_namespace
 def test_bound_dispatcher_reuses_its_own_worker_sandbox(tmp_path: Path) -> None:
     script = _isolated_job_script(tmp_path)
     dispatcher = script.with_name("agent_dispatch.py")
@@ -381,6 +538,7 @@ def test_default_authority_is_external_and_legacy_recovery_is_explicit(
     assert _default_job(script, "clean", "--all").returncode == 0
 
 
+@requires_nested_user_namespace
 def test_bound_job_rejects_replayed_executor_with_a_different_source(
     tmp_path: Path,
 ) -> None:
@@ -432,6 +590,7 @@ def test_bound_job_rejects_replayed_executor_with_a_different_source(
     assert not (job_dir / "executor.json").exists()
 
 
+@requires_nested_user_namespace
 def test_bound_job_terminal_files_are_create_once_against_executor_replay(
     tmp_path: Path,
 ) -> None:
@@ -581,6 +740,7 @@ def _blocked_dispatch_evidence(
     return artifact, terminal_record
 
 
+@requires_nested_user_namespace
 def test_bound_job_reconciles_only_from_its_terminal_dispatch_artifact(
     tmp_path: Path,
 ) -> None:
@@ -674,6 +834,7 @@ def test_v2_reconciliation_rejects_external_artifact_override(tmp_path: Path) ->
     assert "v2" in result.stderr
 
 
+@requires_nested_user_namespace
 @pytest.mark.parametrize("runtime_contract_version", [4, None])
 def test_bound_job_reconciles_blocked_dispatch_from_terminal_telemetry(
     tmp_path: Path,
@@ -725,6 +886,7 @@ def test_bound_job_reconciles_blocked_dispatch_from_terminal_telemetry(
     )
 
 
+@requires_nested_user_namespace
 def test_blocked_reconciliation_anchors_telemetry_to_the_bound_artifact(
     tmp_path: Path,
 ) -> None:
@@ -812,6 +974,7 @@ def test_legacy_v1_blocked_recovery_keeps_terminal_telemetry_authority(
     )
 
 
+@requires_nested_user_namespace
 def test_bound_job_rejects_blocked_result_without_terminal_telemetry(
     tmp_path: Path,
 ) -> None:
@@ -842,6 +1005,7 @@ def test_bound_job_rejects_blocked_result_without_terminal_telemetry(
     assert "dispatcher terminal telemetry" in reconciled.stderr
 
 
+@requires_nested_user_namespace
 @pytest.mark.parametrize(
     "terminal_overrides",
     [
@@ -983,6 +1147,7 @@ def test_bound_job_replaces_command_failure_when_terminal_sealing_fails(
     assert not (job_dir / "terminal-envelope.json").exists()
 
 
+@requires_nested_user_namespace
 def test_bound_job_rejects_tampered_terminal_envelope(tmp_path: Path) -> None:
     artifact = tmp_path / "terminal.json"
     artifact.write_text(
