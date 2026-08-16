@@ -56,6 +56,34 @@ def test_runtime_tool_cannot_come_from_writable_worktree(
         )
 
 
+def test_corepack_cannot_come_from_writable_worktree(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    corepack = worktree / "bin" / "corepack"
+    uv = tmp_path / "host-tools" / "uv"
+    _write_executable(corepack)
+    _write_executable(uv)
+    monkeypatch.setenv("PATH", f"{corepack.parent}:{uv.parent}")
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="writable sandbox source: corepack"):
+        module.command(
+            ["/usr/bin/true"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            deny_network=True,
+            include_model_runtime=False,
+            include_corepack_runtime=True,
+        )
+
+
 def test_external_user_owned_runtime_tool_remains_valid(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -80,6 +108,125 @@ def test_external_user_owned_runtime_tool_remains_valid(
     )
 
     assert str(uv) in argv
+
+
+def test_trusted_corepack_mounts_its_adjacent_node_runtime(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    runtime = tmp_path / "trusted-node"
+    corepack_home = tmp_path / "corepack-home"
+    corepack = runtime / "lib" / "node_modules" / "corepack" / "dist" / "corepack.js"
+    node = runtime / "bin" / "node"
+    uv = tmp_path / "host-tools" / "uv"
+    worktree.mkdir()
+    corepack_home.mkdir()
+    _write_executable(corepack)
+    _write_executable(node)
+    _write_executable(uv)
+    (runtime / "bin" / "corepack").symlink_to(corepack)
+    monkeypatch.setenv("PATH", f"{runtime / 'bin'}:{uv.parent}")
+    monkeypatch.setenv("COREPACK_HOME", str(corepack_home))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    argv = module.command(
+        ["/usr/bin/bash", "-c", "corepack pnpm test"],
+        worktree=worktree,
+        writable_worktree=True,
+        audit_source=None,
+        audit_destination=None,
+        git_source=None,
+        git_destination=None,
+        writable_git=False,
+        deny_network=True,
+        include_model_runtime=False,
+        include_corepack_runtime=True,
+    )
+
+    assert ["--ro-bind", str(runtime), str(module.GUARDIAN_NODE_ROOT)] == argv[
+        argv.index(str(runtime)) - 1 : argv.index(str(runtime)) + 2
+    ]
+    assert [
+        "--ro-bind",
+        str(corepack_home),
+        str(module.GUARDIAN_COREPACK_HOME),
+    ] == argv[argv.index(str(corepack_home)) - 1 : argv.index(str(corepack_home)) + 2]
+    path_index = argv.index("PATH")
+    assert argv[path_index - 1 : path_index + 2] == [
+        "--setenv",
+        "PATH",
+        f"{module.GUARDIAN_NODE_ROOT / 'bin'}:/run/guardian-bin:/usr/bin:/bin",
+    ]
+    home_index = argv.index("COREPACK_HOME")
+    assert argv[home_index - 1 : home_index + 2] == [
+        "--setenv",
+        "COREPACK_HOME",
+        str(module.GUARDIAN_COREPACK_HOME),
+    ]
+
+
+def test_corepack_without_an_owning_node_distribution_is_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    host_tools = tmp_path / "host-tools"
+    worktree.mkdir()
+    _write_executable(host_tools / "corepack")
+    _write_executable(host_tools / "uv")
+    monkeypatch.setenv("PATH", str(host_tools))
+    monkeypatch.delenv("COREPACK_HOME", raising=False)
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="Corepack runtime is unavailable"):
+        module.command(
+            ["/usr/bin/bash", "-c", "corepack pnpm test"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            deny_network=True,
+            include_model_runtime=False,
+            include_corepack_runtime=True,
+        )
+
+
+def test_corepack_without_a_trusted_home_is_rejected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    runtime = tmp_path / "trusted-node"
+    empty_home = tmp_path / "empty-home"
+    corepack = runtime / "lib" / "node_modules" / "corepack" / "dist" / "corepack.js"
+    node = runtime / "bin" / "node"
+    uv = tmp_path / "host-tools" / "uv"
+    worktree.mkdir()
+    empty_home.mkdir()
+    _write_executable(corepack)
+    _write_executable(node)
+    _write_executable(uv)
+    (runtime / "bin" / "corepack").symlink_to(corepack)
+    monkeypatch.setenv("PATH", f"{runtime / 'bin'}:{uv.parent}")
+    monkeypatch.setenv("HOME", str(empty_home))
+    monkeypatch.delenv("COREPACK_HOME", raising=False)
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="Corepack home is unavailable"):
+        module.command(
+            ["/usr/bin/bash", "-c", "corepack pnpm test"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            deny_network=True,
+            include_model_runtime=False,
+            include_corepack_runtime=True,
+        )
 
 
 def test_candidate_python_symlink_cannot_select_a_host_mount(

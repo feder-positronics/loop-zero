@@ -15,6 +15,10 @@ CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
 SANDBOX_BOUNDARY_ENV = "INTELFLO_GUARDIAN_SANDBOX_BOUNDARY"
 NETWORK_DENIED_BOUNDARY = "network-denied"
 HOST_NETWORK_BOUNDARY = "host-network"
+GUARDIAN_NODE_ROOT = Path("/run/guardian-node")
+GUARDIAN_BIN_ROOT = Path("/run/guardian-bin")
+GUARDIAN_COREPACK_HOME = Path("/run/guardian-corepack-home")
+_DEFAULT_SANDBOX_PATH = f"{GUARDIAN_BIN_ROOT}:/usr/bin:/bin"
 SAFE_PASSTHROUGH_ENV = frozenset(
     {
         SANDBOX_BOUNDARY_ENV,
@@ -65,7 +69,7 @@ def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     selected.update(
         {
             "HOME": "/tmp/guardian-home",
-            "PATH": "/run/guardian-bin:/usr/bin:/bin",
+            "PATH": _sandbox_path(),
             "GIT_CONFIG_COUNT": "3",
             "GIT_CONFIG_KEY_0": "core.hooksPath",
             "GIT_CONFIG_VALUE_0": "/dev/null",
@@ -84,6 +88,8 @@ def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
             "XDG_CACHE_HOME": "/tmp/guardian-xdg-cache",
         }
     )
+    if _mounted_corepack_home_available():
+        selected["COREPACK_HOME"] = str(GUARDIAN_COREPACK_HOME)
     return selected
 
 
@@ -146,6 +152,108 @@ def _optional_tool(
         return None
 
 
+def _sandbox_path(*, corepack_runtime: Path | None = None) -> str:
+    """Sanitized PATH: optional Node/Corepack bin, then Guardian tools, then OS."""
+    if corepack_runtime is not None or _mounted_corepack_runtime_available():
+        return f"{GUARDIAN_NODE_ROOT / 'bin'}:{_DEFAULT_SANDBOX_PATH}"
+    return _DEFAULT_SANDBOX_PATH
+
+
+def _corepack_runtime_root(
+    corepack: Path, *, forbidden_roots: Sequence[Path] = ()
+) -> Path:
+    """Locate the Node distribution that owns a resolved Corepack entrypoint."""
+    for candidate in corepack.parents:
+        node = candidate / "bin" / "node"
+        entrypoint = candidate / "bin" / "corepack"
+        packaged = (
+            candidate / "lib" / "node_modules" / "corepack" / "dist" / "corepack.js"
+        )
+        if not (
+            node.is_file()
+            and os.access(node, os.X_OK)
+            and entrypoint.is_file()
+            and entrypoint.resolve() == corepack
+            and packaged.is_file()
+            and packaged.resolve() == corepack
+        ):
+            continue
+        resolved_candidate = candidate.resolve()
+        resolved_node = node.resolve()
+        if not resolved_node.is_relative_to(resolved_candidate):
+            continue
+        if any(
+            resolved_node.is_relative_to(root.resolve())
+            or resolved_candidate.is_relative_to(root.resolve())
+            for root in forbidden_roots
+        ):
+            raise SandboxError(
+                "sandbox runtime tool is under a writable sandbox source: node"
+            )
+        return resolved_candidate
+    raise SandboxError("sandbox Corepack runtime is unavailable")
+
+
+def _mounted_corepack_runtime_available() -> bool:
+    mounted_corepack = GUARDIAN_NODE_ROOT / "bin" / "corepack"
+    mounted_node = GUARDIAN_NODE_ROOT / "bin" / "node"
+    return (
+        mounted_corepack.is_file()
+        and os.access(mounted_corepack, os.X_OK)
+        and mounted_node.is_file()
+        and os.access(mounted_node, os.X_OK)
+    )
+
+
+def _mounted_corepack_home_available() -> bool:
+    return GUARDIAN_COREPACK_HOME.is_dir()
+
+
+def _resolve_corepack_home(
+    *, required: bool, forbidden_roots: Sequence[Path]
+) -> Path | None:
+    """Locate a trusted Corepack package-manager cache for offline pnpm use."""
+    if _mounted_corepack_home_available():
+        return GUARDIAN_COREPACK_HOME
+    configured = os.environ.get("COREPACK_HOME")
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.append(Path.home() / ".cache" / "node" / "corepack")
+    for home in candidates:
+        if not home.is_dir():
+            continue
+        resolved = home.resolve()
+        if any(resolved.is_relative_to(root.resolve()) for root in forbidden_roots):
+            continue
+        return resolved
+    if required:
+        raise SandboxError("sandbox Corepack home is unavailable")
+    return None
+
+
+def _resolve_corepack_runtime(
+    *, required: bool, forbidden_roots: Sequence[Path]
+) -> Path | None:
+    """Resolve from PATH first; fall back to an already-mounted Node root."""
+    try:
+        corepack = _tool("corepack", forbidden_roots=forbidden_roots)
+    except SandboxError as exc:
+        if "writable sandbox source" in str(exc):
+            raise
+        if _mounted_corepack_runtime_available():
+            return GUARDIAN_NODE_ROOT
+        if required:
+            raise SandboxError("sandbox Corepack runtime is unavailable") from None
+        return None
+    try:
+        return _corepack_runtime_root(corepack, forbidden_roots=forbidden_roots)
+    except SandboxError:
+        if required:
+            raise
+        return None
+
+
 def current_boundary_reusable(*, deny_network: bool) -> bool:
     """Reuse an active Guardian namespace when its network policy is no weaker."""
     advertised = os.environ.get(SANDBOX_BOUNDARY_ENV)
@@ -156,10 +264,9 @@ def current_boundary_reusable(*, deny_network: bool) -> bool:
         if deny_network
         else {NETWORK_DENIED_BOUNDARY, HOST_NETWORK_BOUNDARY}
     )
-    runtime_root = Path("/run/guardian-bin")
     if (
         advertised not in compatible
-        or not (runtime_root / "uv").is_file()
+        or not (GUARDIAN_BIN_ROOT / "uv").is_file()
         or stat.S_IMODE(Path("/").stat().st_mode) & 0o222
     ):
         raise SandboxError(
@@ -184,6 +291,7 @@ def command(
     preserve_fds: Sequence[int] = (),
     deny_network: bool,
     include_model_runtime: bool = True,
+    include_corepack_runtime: bool = False,
 ) -> list[str]:
     """Build a namespace with no host-root or host-home visibility."""
     resolved_worktree = _validated(worktree, directory=True)
@@ -251,6 +359,22 @@ def command(
         if mode == "--bind"
     )
     uv = _tool("uv", forbidden_roots=writable_sources)
+    corepack_runtime = (
+        _resolve_corepack_runtime(
+            required=True,
+            forbidden_roots=writable_sources,
+        )
+        if include_corepack_runtime
+        else None
+    )
+    corepack_home = (
+        _resolve_corepack_home(
+            required=True,
+            forbidden_roots=writable_sources,
+        )
+        if corepack_runtime is not None
+        else None
+    )
     codex = (
         _optional_tool("codex", forbidden_roots=writable_sources)
         if include_model_runtime
@@ -328,21 +452,29 @@ def command(
             "--dir",
             "/run",
             "--dir",
-            "/run/guardian-bin",
+            str(GUARDIAN_BIN_ROOT),
             "--ro-bind",
             str(uv),
-            "/run/guardian-bin/uv",
+            str(GUARDIAN_BIN_ROOT / "uv"),
         ]
     )
+    if corepack_runtime is not None:
+        built.extend(
+            ["--ro-bind", str(corepack_runtime), str(GUARDIAN_NODE_ROOT)]
+        )
+    if corepack_home is not None:
+        built.extend(
+            ["--ro-bind", str(corepack_home), str(GUARDIAN_COREPACK_HOME)]
+        )
     if codex is not None:
-        built.extend(["--ro-bind", str(codex), "/run/guardian-bin/codex"])
+        built.extend(["--ro-bind", str(codex), str(GUARDIAN_BIN_ROOT / "codex")])
     created: set[Path] = {
         Path("/"),
         Path("/etc"),
         Path("/mnt"),
         Path("/mnt/wsl"),
         Path("/run"),
-        Path("/run/guardian-bin"),
+        GUARDIAN_BIN_ROOT,
     }
     for mode, source, destination in mounts:
         for parent in _parents(destination):
@@ -350,17 +482,26 @@ def command(
                 built.extend(["--dir", str(parent)])
                 created.add(parent)
         built.extend([mode, str(source), str(destination)])
-    built.extend(
+    env_bindings: list[str] = [
+        "--chmod",
+        "0555",
+        "/",
+        "--setenv",
+        "HOME",
+        "/tmp/guardian-home",
+        "--setenv",
+        "GH_CONFIG_DIR",
+        "/tmp/guardian-gh-config",
+        "--setenv",
+        "PATH",
+        _sandbox_path(corepack_runtime=corepack_runtime),
+    ]
+    if corepack_home is not None:
+        env_bindings.extend(
+            ["--setenv", "COREPACK_HOME", str(GUARDIAN_COREPACK_HOME)]
+        )
+    env_bindings.extend(
         [
-            "--chmod",
-            "0555",
-            "/",
-            "--setenv",
-            "HOME",
-            "/tmp/guardian-home",
-            "--setenv",
-            "GH_CONFIG_DIR",
-            "/tmp/guardian-gh-config",
             "--setenv",
             SANDBOX_BOUNDARY_ENV,
             NETWORK_DENIED_BOUNDARY if deny_network else HOST_NETWORK_BOUNDARY,
@@ -370,4 +511,5 @@ def command(
             *argv,
         ]
     )
+    built.extend(env_bindings)
     return built
