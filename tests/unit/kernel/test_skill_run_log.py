@@ -1078,3 +1078,37 @@ def test_reconcile_closes_stale_but_never_live(tmp_path):
 
     again = _run_cli(repo, "--reconcile-stale")
     assert "no stale runs to reconcile" in again.stdout
+
+
+def test_start_rejects_reuse_on_a_different_branch(tmp_path):
+    now = datetime.now(UTC)
+    repo = _repo_with_runs(
+        tmp_path,
+        [_row(RID_LIVE, "resolve-findings", "in_progress", _iso(now))],
+    )
+
+    same = _run_cli(
+        repo,
+        "--start",
+        "--skill",
+        "resolve-findings",
+        "--run-id",
+        RID_LIVE,
+        "--git-branch",
+        "feature/x",
+    )
+    assert same.returncode == 0, same.stdout + same.stderr
+    assert same.stdout.strip() == RID_LIVE
+
+    other = _run_cli(
+        repo,
+        "--start",
+        "--skill",
+        "resolve-findings",
+        "--run-id",
+        RID_LIVE,
+        "--git-branch",
+        "feature/y",
+    )
+    assert other.returncode == 2, other.stdout + other.stderr
+    assert "bound to branch 'feature/x'" in other.stderr

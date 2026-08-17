@@ -125,6 +125,17 @@ def resolve_start_run_id(
     return f"sr_{uuid4().hex}"
 
 
+def latest_run_branch(
+    entries: list[dict[str, object]], *, run_id: str
+) -> str | None:
+    """Return the branch recorded on the latest entry of one run, if any."""
+    for entry in reversed(entries):
+        if entry.get("run_id") == run_id:
+            branch = entry.get("git_branch")
+            return branch if isinstance(branch, str) and branch else None
+    return None
+
+
 def validate_transition(
     entries: list[dict[str, object]], new_entry: dict[str, object]
 ) -> bool:
@@ -767,6 +778,14 @@ def main() -> int:
             fields = common_fields()
             branch = args.git_branch or str(fields["git_branch"])
             args.git_branch = branch
+            if args.run_id:
+                bound_branch = latest_run_branch(entries, run_id=args.run_id)
+                if bound_branch is not None and bound_branch != branch:
+                    parser.error(
+                        f"run {args.run_id} is bound to branch {bound_branch!r}; "
+                        f"cannot reuse it on {branch!r} — start a new run or pass "
+                        "the matching --git-branch"
+                    )
             args.run_id = args.run_id or resolve_start_run_id(
                 entries,
                 skill=args.skill,
