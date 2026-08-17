@@ -46,6 +46,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
+# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from agent_event import cmd_phase, common_fields, repo_root
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}

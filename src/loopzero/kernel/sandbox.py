@@ -5,9 +5,13 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
+
+# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from trusted_executable import TrustedExecutableError, system_executable
 
