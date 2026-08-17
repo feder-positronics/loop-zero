@@ -369,9 +369,7 @@ def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
     )
 
     assert module.main() == 0
-    rows = [
-        json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
-    ]
+    rows = module.load_entries(audit_dir)
     assert [row["outcome"] for row in rows] == ["in_progress", "merged"]
 
 
