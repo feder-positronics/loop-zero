@@ -1016,11 +1016,12 @@ if status == "blocked":
             "job.sh: blocked result has no matching dispatcher terminal telemetry"
         )
     repo_root = audit_root.parent
-    # Keep this compatibility bridge aligned with agent_dispatch.py's current
-    # telemetry contract; non-current rows are forensic evidence, not authority.
+    # Keep this explicit allowlist aligned with agent_dispatch.py's compatible
+    # telemetry contract; every other row is forensic evidence, not authority.
     compatible_terminal_telemetry = {
         ("dispatch-telemetry-v9", "2026-07-24-v9"),
         ("dispatch-telemetry-v9", "2026-08-06-v10"),
+        ("dispatch-telemetry-v9", "2026-08-17-v11"),
     }
     matching_records = []
     for telemetry_path in sorted(dispatch_root.glob("*.jsonl")):

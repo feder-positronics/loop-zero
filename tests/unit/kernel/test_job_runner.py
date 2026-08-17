@@ -928,14 +928,22 @@ def test_blocked_reconciliation_anchors_telemetry_to_the_bound_artifact(
     assert json.loads(reconciled.stdout)["terminal_status"] == "blocked"
 
 
+@pytest.mark.parametrize(
+    "compatible_policy",
+    ["2026-07-24-v9", "2026-08-06-v10", "2026-08-17-v11"],
+)
 def test_legacy_v1_blocked_recovery_keeps_terminal_telemetry_authority(
     tmp_path: Path,
+    compatible_policy: str,
 ) -> None:
     run_id = "sr_" + "a" * 32
     task_id = "dispatch-legacy-blocked"
     script = _isolated_job_script(tmp_path)
     artifact, terminal_record = _blocked_dispatch_evidence(
-        script.parents[2], run_id=run_id, task_id=task_id
+        script.parents[2],
+        run_id=run_id,
+        task_id=task_id,
+        terminal_overrides={"policy_version": compatible_policy},
     )
     job_dir = tmp_path / "jobs" / "legacy-blocked"
     job_dir.mkdir(parents=True)
