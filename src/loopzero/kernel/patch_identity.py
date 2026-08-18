@@ -37,7 +37,9 @@ RANGE_DIFF_FLAGS = (
 )
 _OID_RE = re.compile(r"[0-9a-f]{40,64}")
 _PAIRING_RE = re.compile(r"^\d+:\s+[0-9a-f]+\s+[=!]\s+\d+:\s+[0-9a-f]+(?:\s|$)")
-_UNPAIRED_RE = re.compile(r"^(?:\d+:\s+[0-9a-f]+\s+<\s+-:|-:\s+-------\s+>\s+\d+:)")
+_UNPAIRED_RE = re.compile(
+    r"^(?:\d+:\s+[0-9a-f]+\s+<\s+-:\s+-{7,}(?:\s|$)|" r"-:\s+-{7,}\s+>\s+\d+:)"
+)
 _FILE_SECTION_RE = re.compile(
     r"^(?:[^@\s]+|.+ \((?:new|deleted)\)|.+:\d+(?:,\d+)? .+:\d+(?:,\d+)? @@|.+: .+)$"
 )
@@ -555,9 +557,9 @@ def parse_range_diff_churn(output: bytes) -> int | None:
             and raw_line[4:5] in {b"+", b"-"}
         ):
             next_line = lines[index + 1] if index + 1 < len(lines) else b""
-            if not next_line.startswith((b"    + ## ", b"    - ## ", b"    @@ ")) and not (
-                not next_line and file_payload_seen
-            ):
+            if not next_line.startswith(
+                (b"    + ## ", b"    - ## ", b"    @@ ")
+            ) and not (not next_line and file_payload_seen):
                 return None
         elif (
             section != "metadata"

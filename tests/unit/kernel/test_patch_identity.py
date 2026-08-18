@@ -441,6 +441,13 @@ def test_range_diff_parser_counts_only_file_payload_and_rejects_ambiguity() -> N
     assert module.parse_range_diff_churn(b"1: aaaaaaa < -: ------- removed\n") is None
     assert (
         module.parse_range_diff_churn(
+            b"1:  aaaaaaa = 1:  bbbbbbb reviewed\n"
+            b" -:  --------- > 9:  ccccccc added after reviewed series\n"
+        )
+        is None
+    )
+    assert (
+        module.parse_range_diff_churn(
             b"1:  aaaaaaa ! 1:  bbbbbbb subject\n    +-outside-file\n"
         )
         is None
