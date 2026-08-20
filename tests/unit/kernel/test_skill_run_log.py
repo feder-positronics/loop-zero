@@ -168,6 +168,52 @@ def _entry(run_id: str, outcome: str, **extra: object) -> dict[str, object]:
     }
 
 
+def test_active_run_uses_the_exact_branch_identity_and_start() -> None:
+    active = "sr_0123456789abcdef0123456789abcdef"
+    completed = "sr_fedcba9876543210fedcba9876543210"
+    entries = [
+        _entry(completed, "in_progress", ts="2026-08-20T08:00:00Z"),
+        _entry(completed, "merged", ts="2026-08-20T09:00:00Z"),
+        _entry(active, "in_progress", ts="2026-08-20T10:00:00Z"),
+        _entry(
+            "sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "in_progress",
+            ts="2026-08-20T07:00:00Z",
+            git_branch="feat/another-task",
+        ),
+    ]
+
+    assert module.active_run(entries, git_branch="feat/2639-skill-run-lifecycle") == (
+        active,
+        "2026-08-20T10:00:00Z",
+    )
+
+
+def test_active_run_returns_none_without_an_owner() -> None:
+    assert module.active_run([], git_branch="feat/2639-skill-run-lifecycle") is None
+
+
+def test_active_run_preserves_legacy_owner_without_a_start_timestamp() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    entry = _entry(run_id, "in_progress")
+    entry.pop("ts")
+
+    assert module.active_run([entry], git_branch=entry["git_branch"]) == (
+        run_id,
+        None,
+    )
+
+
+def test_active_run_fails_closed_with_multiple_owners() -> None:
+    entries = [
+        _entry("sr_0123456789abcdef0123456789abcdef", "in_progress"),
+        _entry("sr_fedcba9876543210fedcba9876543210", "in_progress"),
+    ]
+
+    with pytest.raises(ValueError, match="multiple active logical runs"):
+        module.active_run(entries, git_branch="feat/2639-skill-run-lifecycle")
+
+
 def test_start_reuses_exact_active_run_identity() -> None:
     run_id = "sr_0123456789abcdef0123456789abcdef"
     entries = [_entry(run_id, "in_progress")]
@@ -180,6 +226,25 @@ def test_start_reuses_exact_active_run_identity() -> None:
     )
 
     assert resolved == run_id
+
+
+@pytest.mark.parametrize(
+    ("skill", "issue"),
+    [("execute-blueprint", 2639), ("work-issue", 2640)],
+)
+def test_start_rejects_a_second_owner_for_the_same_branch(
+    skill: str, issue: int
+) -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    entries = [_entry(run_id, "in_progress")]
+
+    with pytest.raises(ValueError, match="is already owned by active run"):
+        module.resolve_start_run_id(
+            entries,
+            skill=skill,
+            issue=issue,
+            git_branch="feat/2639-skill-run-lifecycle",
+        )
 
 
 def test_start_generates_opaque_run_id_without_active_match() -> None:
@@ -1110,3 +1175,25 @@ def test_start_rejects_reuse_on_a_different_branch(tmp_path):
     )
     assert other.returncode == 2, other.stdout + other.stderr
     assert "bound to branch 'feature/x'" in other.stderr
+
+
+def test_start_rejects_an_explicit_second_run_on_an_owned_branch(tmp_path):
+    now = datetime.now(UTC)
+    repo = _repo_with_runs(
+        tmp_path,
+        [_row(RID_LIVE, "resolve-findings", "in_progress", _iso(now))],
+    )
+
+    result = _run_cli(
+        repo,
+        "--start",
+        "--skill",
+        "work-issue",
+        "--run-id",
+        RID_FRESH,
+        "--git-branch",
+        "feature/x",
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert f"already owned by active run {RID_LIVE}" in result.stderr

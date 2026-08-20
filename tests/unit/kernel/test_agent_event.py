@@ -151,6 +151,15 @@ def test_detect_harness_prefers_codex_env(monkeypatch) -> None:
     assert module.detect_harness() == "codex"
 
 
+def test_runtime_kind_reuses_harness_and_wrapper_identity(monkeypatch) -> None:
+    monkeypatch.setattr(module, "detect_harness", lambda: "unknown")
+    monkeypatch.setattr(module, "detect_wrapper", lambda: None)
+    assert module.runtime_kind() == "human"
+
+    monkeypatch.setattr(module, "detect_wrapper", lambda: "t3code")
+    assert module.runtime_kind() == "agent"
+
+
 def test_resolve_session_prefers_codex_thread_id(monkeypatch) -> None:
     monkeypatch.delenv("AGENT_SESSION_ID", raising=False)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-xyz")

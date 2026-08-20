@@ -94,6 +94,40 @@ def load_entries(audit_dir: Path) -> list[dict[str, object]]:
     return entries
 
 
+def active_run(
+    entries: list[dict[str, object]], *, git_branch: str
+) -> tuple[str, str | None] | None:
+    """Return the ID and optional start timestamp of the active branch run.
+
+    The run identity is usable by ownership consumers even for legacy rows
+    without timestamps. Consumers that need a temporal boundary must reject
+    a missing timestamp rather than silently choosing "now".
+    """
+    latest_by_run: dict[str, dict[str, object]] = {}
+    start_by_run: dict[str, str] = {}
+    for entry in entries:
+        run_id = entry.get("run_id")
+        if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
+            continue
+        latest_by_run[run_id] = entry
+        timestamp = entry.get("ts")
+        if run_id not in start_by_run and isinstance(timestamp, str):
+            start_by_run[run_id] = timestamp
+    matches = [
+        run_id
+        for run_id, entry in latest_by_run.items()
+        if entry.get("git_branch") == git_branch
+        and entry.get("outcome") == "in_progress"
+    ]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        raise ValueError(f"multiple active logical runs for branch {git_branch!r}")
+    timestamp = start_by_run.get(matches[0])
+    parsed_timestamp = parse_ts(timestamp) if timestamp is not None else None
+    return matches[0], timestamp if parsed_timestamp is not None else None
+
+
 def extract_run_id_marker(body: str) -> str | None:
     """Read the portable logical-run handoff marker from a PR body."""
     matches = {match.lower() for match in RUN_ID_MARKER_RE.findall(body)}
@@ -107,24 +141,28 @@ def resolve_start_run_id(
     issue: int | None,
     git_branch: str,
 ) -> str:
-    """Reuse one exact active start or mint a new opaque logical identity."""
+    """Reuse one exact active start or mint one branch-exclusive identity."""
     latest_by_run: dict[str, dict[str, object]] = {}
     for entry in entries:
         run_id = entry.get("run_id")
         if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id):
             latest_by_run[run_id] = entry
-    matches = [
+    branch_matches = [
         run_id
         for run_id, entry in latest_by_run.items()
-        if entry.get("skill") == skill
-        and entry.get("issue") == issue
-        and entry.get("git_branch") == git_branch
+        if entry.get("git_branch") == git_branch
         and entry.get("outcome") == "in_progress"
     ]
-    if len(matches) > 1:
-        raise ValueError("multiple active logical runs match this start identity")
-    if matches:
-        return matches[0]
+    if len(branch_matches) > 1:
+        raise ValueError(f"multiple active logical runs own branch {git_branch!r}")
+    if branch_matches:
+        run_id = branch_matches[0]
+        owner = latest_by_run[run_id]
+        if owner.get("skill") == skill and owner.get("issue") == issue:
+            return run_id
+        raise ValueError(
+            f"branch {git_branch!r} is already owned by active run {run_id}"
+        )
     return f"sr_{uuid4().hex}"
 
 
@@ -782,6 +820,15 @@ def main() -> int:
             branch = args.git_branch or str(fields["git_branch"])
             args.git_branch = branch
             if args.run_id:
+                try:
+                    branch_owner = active_run(entries, git_branch=branch)
+                except ValueError as exc:
+                    parser.error(str(exc))
+                if branch_owner is not None and branch_owner[0] != args.run_id:
+                    parser.error(
+                        f"branch {branch!r} is already owned by active run "
+                        f"{branch_owner[0]}"
+                    )
                 bound_branch = latest_run_branch(entries, run_id=args.run_id)
                 if bound_branch is not None and bound_branch != branch:
                     parser.error(

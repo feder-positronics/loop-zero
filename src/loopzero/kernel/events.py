@@ -188,6 +188,15 @@ def detect_wrapper() -> str | None:
     return None
 
 
+def runtime_kind() -> str:
+    """Classify the caller through the canonical harness/wrapper contract."""
+    return (
+        "agent"
+        if detect_harness() != "unknown" or detect_wrapper() is not None
+        else "human"
+    )
+
+
 def resolve_session(root: Path, branch: str) -> tuple[str, str]:
     """Return (session_id, source). Prefer env, else derived hash."""
     if env_id := os.environ.get("AGENT_SESSION_ID"):
@@ -602,6 +611,12 @@ def cmd_context_boundary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_runtime_kind(_args: argparse.Namespace) -> int:
+    """Print the stable agent/human classification for shell gate composition."""
+    print(runtime_kind())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="kind", required=True)
@@ -786,6 +801,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_boundary.add_argument("--issue", type=int)
     p_boundary.add_argument("--pr", type=int)
     p_boundary.set_defaults(func=cmd_context_boundary)
+
+    p_runtime = sub.add_parser(
+        "runtime-kind", help="Print agent or human from the canonical runtime identity"
+    )
+    p_runtime.set_defaults(func=cmd_runtime_kind)
 
     return parser
 

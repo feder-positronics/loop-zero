@@ -253,6 +253,17 @@ if ! has_relevant_changes_in \
     echo "No backend changes relative to ${base_ref}; skipping backend mypy."
 else
     echo ""
+    echo "== Backend complexity ratchet =="
+    echo "Local comparison uses ${base_ref}; hosted CI remains authoritative for the immutable PR base SHA."
+    started_ms="$(now_ms)"
+    if make guardian-complexity-check BASE_SHA="$base_ref"; then
+        emit_tool_event "backend-complexity" "$started_ms" "pass"
+    else
+        emit_tool_event "backend-complexity" "$started_ms" "fail"
+        exit 1
+    fi
+
+    echo ""
     echo "== Backend lint =="
     started_ms="$(now_ms)"
     if (cd fastapi_backend && uv run ruff check .); then
@@ -463,19 +474,34 @@ fi
 
 echo ""
 echo "== Wait discipline =="
-# Session-scoped poll gate (#3418 P1): fails only on model-side wait loops
-# newly active since this worktree's last passing gate — never on another
-# agent's historical sessions. Baseline lives beside the job dir.
+# The first agent push starts at its logical-run boundary; later clean pushes
+# advance the existing baseline. Human pushes use the same baseline without
+# requiring an agent lifecycle. Canonical runtime identity lives in agent_event.
 started_ms="$(now_ms)"
+skill_runs_dir="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.audit/skill-runs"
+if ! runtime_kind="$(python3 scripts/util/agent_event.py runtime-kind)"; then
+    emit_tool_event "poll-gate" "$started_ms" "fail"
+    echo "✗ Cannot classify this push as an agent or human runtime." >&2
+    exit 1
+fi
+git_branch="$(git symbolic-ref --quiet --short HEAD || true)"
+if [ -z "$git_branch" ]; then
+    emit_tool_event "poll-gate" "$started_ms" "fail"
+    echo "✗ Wait-discipline checks require a named branch; detached HEAD is unsupported." >&2
+    exit 1
+fi
 if python3 scripts/util/poll_audit.py --gate \
     --baseline-file "${INTELFLO_JOB_DIR:-.pid/jobs}/../poll-gate-baseline" \
     --worktree "$(pwd)" \
+    --skill-runs-dir "$skill_runs_dir" \
+    --git-branch "$git_branch" \
+    --caller-kind "$runtime_kind" \
     --days 7; then
     emit_tool_event "poll-gate" "$started_ms" "pass"
 else
     emit_tool_event "poll-gate" "$started_ms" "fail"
     echo ""
-    echo "✗ Model-side wait loop detected in this window (ops.mdc wait contract):" >&2
+    echo "✗ Wait discipline or agent lifecycle ownership failed (ops.mdc):" >&2
     echo "  route external waits through job.sh wait / wait-file with a p90 deadman." >&2
     exit 1
 fi
