@@ -6,9 +6,19 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
+
+# Keep direct module loading and isolated script execution sibling-import safe.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from trusted_executable import (
+    TrustedExecutableError,
+    system_executable,
+    trusted_subprocess_environment,
+)
 
 PATCH_IDENTITY_SCHEMA = "patch-identity-v1"
 PATCH_EQUIVALENCE_SCHEMA = "patch-equivalence-v1"
@@ -35,6 +45,8 @@ RANGE_DIFF_FLAGS = (
     "--diff-algorithm=myers",
     "--no-indent-heuristic",
 )
+APPEND_ONLY_MAX_COMMITS = 64
+APPEND_ONLY_GIT_TIMEOUT_S = 30
 _OID_RE = re.compile(r"[0-9a-f]{40,64}")
 _PAIRING_RE = re.compile(r"^\d+:\s+[0-9a-f]+\s+[=!]\s+\d+:\s+[0-9a-f]+(?:\s|$)")
 _UNPAIRED_RE = re.compile(
@@ -50,7 +62,7 @@ class PatchIdentityError(RuntimeError):
 
 
 def _git_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
-    environment = dict(os.environ)
+    environment = trusted_subprocess_environment(os.environ)
     hostile_names = {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES",
         "GIT_COMMON_DIR",
@@ -58,6 +70,7 @@ def _git_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
         "GIT_CONFIG_PARAMETERS",
         "GIT_DIFF_OPTS",
         "GIT_DIR",
+        "GIT_EXEC_PATH",
         "GIT_INDEX_FILE",
         "GIT_OBJECT_DIRECTORY",
         "GIT_REPLACE_REF_BASE",
@@ -82,7 +95,7 @@ def _git_environment(extra: Mapping[str, str] | None = None) -> dict[str, str]:
     )
     if extra:
         environment.update(extra)
-    return environment
+    return trusted_subprocess_environment(environment)
 
 
 def _git(
@@ -90,13 +103,19 @@ def _git(
     *args: str,
     input_bytes: bytes | None = None,
     env: Mapping[str, str] | None = None,
+    timeout_s: int | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
+    try:
+        git = system_executable("git")
+    except TrustedExecutableError as exc:
+        raise PatchIdentityError(f"cannot resolve trusted git: {exc}") from exc
     return subprocess.run(
-        ["git", "-C", str(repo.resolve()), *args],
+        [str(git), "-C", str(repo.resolve()), *args],
         input=input_bytes,
         capture_output=True,
         check=False,
         env=_git_environment(env),
+        timeout=timeout_s,
     )
 
 
@@ -574,10 +593,97 @@ def parse_range_diff_churn(output: bytes) -> int | None:
     return churn if paired_commit else None
 
 
+def _append_only_churn(
+    repo: Path,
+    left: Mapping[str, object],
+    right: Mapping[str, object],
+    churn_ceiling: int | None = None,
+) -> int | None:
+    """Count a linear repair tail without range-diff's unpaired ambiguity."""
+    if left.get("base_sha") != right.get("base_sha"):
+        return None
+    left_candidate = str(left["candidate_sha"])
+    right_candidate = str(right["candidate_sha"])
+    try:
+        ancestor = _git(
+            repo,
+            "merge-base",
+            "--is-ancestor",
+            left_candidate,
+            right_candidate,
+            timeout_s=APPEND_ONLY_GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if ancestor.returncode != 0:
+        return None
+    try:
+        revisions = _git(
+            repo,
+            "rev-list",
+            "--reverse",
+            "--parents",
+            f"--max-count={APPEND_ONLY_MAX_COMMITS + 1}",
+            f"{left_candidate}..{right_candidate}",
+            timeout_s=APPEND_ONLY_GIT_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if revisions.returncode != 0:
+        return None
+    parent = left_candidate
+    churn = 0
+    saw_commit = False
+    revision_rows = revisions.stdout.splitlines()
+    if len(revision_rows) > APPEND_ONLY_MAX_COMMITS:
+        return None
+    for raw_revision in revision_rows:
+        fields = raw_revision.decode("ascii", errors="strict").split()
+        if len(fields) != 2 or fields[1] != parent:
+            return None
+        commit = fields[0]
+        try:
+            numstat = _git(
+                repo,
+                "diff-tree",
+                "--no-commit-id",
+                "--numstat",
+                "-r",
+                "--no-renames",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--diff-algorithm=myers",
+                "--no-indent-heuristic",
+                parent,
+                commit,
+                timeout_s=APPEND_ONLY_GIT_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired:
+            return None
+        if numstat.returncode != 0:
+            return None
+        for raw_row in numstat.stdout.splitlines():
+            columns = raw_row.split(b"\t", 2)
+            if len(columns) != 3 or not all(
+                value.isdigit() for value in columns[:2]
+            ):
+                return None
+            churn += int(columns[0]) + int(columns[1])
+            if churn_ceiling is not None and churn > churn_ceiling:
+                return churn
+        saw_commit = True
+        parent = commit
+    if not saw_commit or parent != right_candidate:
+        return None
+    return churn
+
+
 def patch_delta_churn(
     repo: Path,
     left: Mapping[str, object],
     right: Mapping[str, object],
+    *,
+    churn_ceiling: int | None = None,
 ) -> tuple[int, dict[str, object] | None] | None:
     """Return cumulative author-patch churn, or None for mandatory full review."""
     equivalence = prove_patch_equivalence(repo, left, right)
@@ -588,6 +694,11 @@ def patch_delta_churn(
         _validate_identity(repo, right)
     except PatchIdentityError:
         return None
+    append_only = _append_only_churn(
+        repo, left, right, churn_ceiling=churn_ceiling
+    )
+    if append_only is not None:
+        return append_only, None
     completed = _git(
         repo,
         "range-diff",

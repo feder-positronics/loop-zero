@@ -43,6 +43,73 @@ def commit_all(repo: Path, message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
+def test_patch_identity_git_ignores_hostile_path(
+    patch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    hostile = tmp_path / "hostile"
+    hostile.mkdir()
+    marker = tmp_path / "fake-git-ran"
+    fake_git = hostile / "git"
+    fake_git.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 91\n", encoding="utf-8")
+    fake_git.chmod(fake_git.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", str(hostile))
+
+    completed = module._git(patch_repo, "rev-parse", "HEAD")
+
+    assert completed.returncode == 0
+    assert not marker.exists()
+
+
+def test_patch_identity_git_ignores_hostile_exec_path(
+    patch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    base = git(patch_repo, "rev-parse", "HEAD")
+    (patch_repo / "shared.txt").write_text("changed\n", encoding="utf-8")
+    candidate = commit_all(patch_repo, "candidate")
+    hostile = tmp_path / "hostile-git-core"
+    hostile.mkdir()
+    marker = tmp_path / "fake-patch-id-ran"
+    fake_patch_id = hostile / "git-patch-id"
+    fake_patch_id.write_text(
+        f"#!/bin/sh\ntouch '{marker}'\nprintf '%040d %040d\\n' 0 0\n",
+        encoding="utf-8",
+    )
+    fake_patch_id.chmod(fake_patch_id.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("GIT_EXEC_PATH", str(hostile))
+
+    identity = module.compute_patch_identity(
+        patch_repo, base_sha=base, candidate_sha=candidate
+    )
+
+    assert identity["patch_id_verbatim"] != "0" * 40
+    assert not marker.exists()
+
+
+def test_patch_identity_git_scrubs_exec_path(
+    patch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observed: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["env"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setenv("GIT_EXEC_PATH", "/attacker/git-core")
+    monkeypatch.setenv("LD_PRELOAD", "/attacker/preload.so")
+    monkeypatch.setenv("DYLD_INSERT_LIBRARIES", "/attacker/inject.dylib")
+    monkeypatch.setattr(module, "system_executable", lambda _name: Path("/usr/bin/git"))
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+
+    module._git(patch_repo, "status")
+
+    environment = observed["env"]
+    assert isinstance(environment, dict)
+    assert "GIT_EXEC_PATH" not in environment
+    assert "LD_PRELOAD" not in environment
+    assert "DYLD_INSERT_LIBRARIES" not in environment
+
+
 @pytest.fixture
 def patch_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
@@ -247,6 +314,87 @@ def test_conflict_edited_patch_owes_churn_and_large_edit_exceeds_cap(
 
     delta = module.patch_delta_churn(repo, left, right)
     assert delta is None or delta[0] > 300
+
+
+def test_append_only_repair_commits_owe_exact_cumulative_churn(
+    patch_repo: Path,
+) -> None:
+    repo = patch_repo
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "author.txt").write_text("reviewed\n", encoding="utf-8")
+    reviewed = commit_all(repo, "reviewed patch")
+    left = module.compute_patch_identity(repo, base_sha=base, candidate_sha=reviewed)
+
+    (repo / "author.txt").write_text("reviewed\nrepair\n", encoding="utf-8")
+    commit_all(repo, "first repair")
+    (repo / "author.txt").write_text("reviewed\nfixed\n", encoding="utf-8")
+    repaired = commit_all(repo, "second repair")
+    right = module.compute_patch_identity(repo, base_sha=base, candidate_sha=repaired)
+    git(repo, "config", "diff.algorithm", "histogram")
+
+    delta = module.patch_delta_churn(repo, left, right)
+
+    assert delta == (3, None)
+
+
+def test_append_only_merge_tail_stays_ambiguous(patch_repo: Path) -> None:
+    repo = patch_repo
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "author.txt").write_text("reviewed\n", encoding="utf-8")
+    reviewed = commit_all(repo, "reviewed patch")
+    left = module.compute_patch_identity(repo, base_sha=base, candidate_sha=reviewed)
+
+    git(repo, "checkout", "-qb", "repair-side")
+    (repo / "side.txt").write_text("side\n", encoding="utf-8")
+    commit_all(repo, "side repair")
+    git(repo, "checkout", "-q", "main")
+    (repo / "main.txt").write_text("main\n", encoding="utf-8")
+    commit_all(repo, "main repair")
+    git(repo, "merge", "--no-ff", "-m", "merge repairs", "repair-side")
+    merged = git(repo, "rev-parse", "HEAD")
+    right = module.compute_patch_identity(repo, base_sha=base, candidate_sha=merged)
+
+    assert module.patch_delta_churn(repo, left, right) is None
+
+
+def test_append_only_timeout_stays_ambiguous(
+    patch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base = git(patch_repo, "rev-parse", "HEAD")
+    (patch_repo / "author.txt").write_text("reviewed\n", encoding="utf-8")
+    reviewed = commit_all(patch_repo, "reviewed patch")
+    left = module.compute_patch_identity(
+        patch_repo, base_sha=base, candidate_sha=reviewed
+    )
+    (patch_repo / "author.txt").write_text("repaired\n", encoding="utf-8")
+    repaired = commit_all(patch_repo, "repair")
+    right = module.compute_patch_identity(
+        patch_repo, base_sha=base, candidate_sha=repaired
+    )
+
+    monkeypatch.setattr(
+        module,
+        "_git",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired("git", 30)
+        ),
+    )
+
+    assert module._append_only_churn(patch_repo, left, right) is None
+
+
+def test_append_only_binary_repair_stays_ambiguous(patch_repo: Path) -> None:
+    repo = patch_repo
+    base = git(repo, "rev-parse", "HEAD")
+    (repo / "author.txt").write_text("reviewed\n", encoding="utf-8")
+    reviewed = commit_all(repo, "reviewed patch")
+    left = module.compute_patch_identity(repo, base_sha=base, candidate_sha=reviewed)
+
+    (repo / "binary.bin").write_bytes(bytes(range(256)))
+    repaired = commit_all(repo, "binary repair")
+    right = module.compute_patch_identity(repo, base_sha=base, candidate_sha=repaired)
+
+    assert module.patch_delta_churn(repo, left, right) is None
 
 
 def test_whitespace_patch_is_stable_and_large_rewrite_counts_or_fails_closed(

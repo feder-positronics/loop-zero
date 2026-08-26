@@ -5,11 +5,24 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Mapping
 from pathlib import Path
 
 
 class TrustedExecutableError(RuntimeError):
     """A required system executable is absent or writable by this account."""
+
+
+def trusted_subprocess_environment(
+    source: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Remove inherited dynamic-loader injection from a trusted executable."""
+    original = os.environ if source is None else source
+    return {
+        name: value
+        for name, value in original.items()
+        if not name.startswith(("LD_", "DYLD_"))
+    }
 
 
 def _writable_by_current_account(metadata: os.stat_result) -> bool:

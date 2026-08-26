@@ -58,11 +58,12 @@ VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
 # tokens are ~99% prompt-cached and effectively free (2026-08-10 measurement).
 # The ceiling exists for context-quality drift over very long sessions and to
 # bound T3 host event-store growth (marathon threads melted state.sqlite on
-# 2026-08-09; upstream #4008/#5719 unfixed). Raised 8h → 24h on 2026-08-10:
-# the measured 8h drain session was cheap and productive, so the shorter bound
-# was over-conservative; 24h stays well under a full state.sqlite reset cycle.
-# Tune from run-log + state.sqlite-growth evidence, never per-campaign.
-SESSION_CEILING_S = 24 * 3600
+# 2026-08-09; upstream #4008/#5719 unfixed). Raised 8h → 24h on 2026-08-10,
+# then narrowed to 12h after issue #3812 ran for 22h22m without reaching a
+# natural boundary. The delivery controller now requires an earlier checkpoint;
+# this remains the context-rollover backstop and never terminalizes the logical
+# run or consumes an authorized critical repair edge.
+SESSION_CEILING_S = 12 * 3600
 # Stale-run reconcile is DECOUPLED from the ceiling: a genuinely dead session
 # (no run-log activity AND no provider life signs) should be reaped well
 # before the handoff ceiling, so the run log reflects reality within a work
@@ -294,6 +295,17 @@ def _phase_history(
         else:
             raise ValueError("phase event has an unsupported status")
     return active, completed
+
+
+def phase_state(
+    events: list[dict[str, object]], *, skill: str, run_id: str
+) -> tuple[str | None, str | None]:
+    """Return public active/completed phase names for authority consumers."""
+    active, completed = _phase_history(events, skill=skill, run_id=run_id)
+    return (
+        PHASES[active] if active is not None else None,
+        PHASES[completed] if completed >= 0 else None,
+    )
 
 
 def emit_phase_event(*, skill: str, run_id: str, phase: str, status: str) -> None:

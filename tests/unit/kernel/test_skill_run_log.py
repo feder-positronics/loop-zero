@@ -542,6 +542,36 @@ def test_phase_transition_is_forward_only_and_idempotent(
         )
 
 
+def test_phase_state_exposes_public_active_and_completed_names() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    events = [
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "1",
+            "name": "implementation",
+            "status": status,
+        }
+        for status in ("start", "complete")
+    ]
+    events.append(
+        {
+            "kind": "phase",
+            "run_id": run_id,
+            "skill": "work-issue",
+            "phase": "2",
+            "name": "local-validation",
+            "status": "start",
+        }
+    )
+
+    assert module.phase_state(events, skill="work-issue", run_id=run_id) == (
+        "local-validation",
+        "implementation",
+    )
+
+
 def test_phase_transition_starts_implementation_for_a_new_run(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -1049,7 +1079,7 @@ def test_check_ceiling_under_and_over(tmp_path):
     repo = _repo_with_runs(
         tmp_path,
         [
-            # 25h > the 24h default ceiling; 9h is now UNDER it (was over at 8h).
+            # 25h > the 12h default ceiling; 9h remains under it.
             _row(
                 RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=25))
             ),
@@ -1070,7 +1100,7 @@ def test_check_ceiling_under_and_over(tmp_path):
 
 
 def test_ceiling_and_reconcile_are_decoupled(tmp_path):
-    """A 9h dead session is UNDER the 24h ceiling but past the 8h idle window:
+    """A 9h dead session is under the 12h ceiling but past the 8h idle window:
     check-ceiling lets it run, reconcile reaps it (decoupled thresholds)."""
     now = datetime.now(UTC)
     # No codex-home rollout for RID_OLD → no life signs → dead.
@@ -1079,7 +1109,7 @@ def test_ceiling_and_reconcile_are_decoupled(tmp_path):
         tmp_path,
         [_row(RID_OLD, "backlog-drain", "in_progress", _iso(now - timedelta(hours=9)))],
     )
-    # Ceiling (24h default): a 9h run is fine to keep working.
+    # Ceiling (12h default): a 9h run is fine to keep working.
     under = _run_cli(repo, "--skill", "backlog-drain", "--check-ceiling")
     assert under.returncode == 0, under.stdout + under.stderr
     # Reconcile (8h idle default): the same dead 9h run is reaped.
