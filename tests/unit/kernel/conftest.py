@@ -8,6 +8,14 @@ import pytest
 _AGENT_TOOLING_TEST_DIR = Path(__file__).resolve().parent
 
 
+@pytest.fixture(scope="session")
+def isolated_ptrace_scope_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Provide a stable Yama contract outside per-test Git repositories."""
+    ptrace_scope = tmp_path_factory.mktemp("kernel-contract") / "ptrace_scope"
+    ptrace_scope.write_text("1\n", encoding="ascii")
+    return ptrace_scope
+
+
 @pytest.fixture(autouse=True)
 def _isolate_git_config_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     """Give nested secure Git runners no inherited outer configuration."""
