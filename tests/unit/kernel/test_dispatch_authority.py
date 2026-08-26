@@ -26,10 +26,18 @@ module = load_module()
 
 @pytest.fixture(autouse=True)
 def isolated_process_memory_contract(
-    monkeypatch: pytest.MonkeyPatch, isolated_ptrace_scope_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_ptrace_scope_path: Path,
+    tmp_path: Path,
 ) -> None:
     """Keep unit tests independent of the runner's Yama configuration."""
     monkeypatch.setattr(module, "PTRACE_SCOPE_PATH", isolated_ptrace_scope_path)
+    monkeypatch.setattr(
+        module,
+        "_coordinator_state_directory",
+        lambda: tmp_path / "dispatch-authority",
+        raising=False,
+    )
 
 
 def terminal_record() -> dict[str, object]:
@@ -219,20 +227,37 @@ def test_coordinator_proof_carries_only_public_material() -> None:
     }
 
 
-def test_host_coordinator_requires_ssh_agent(
-    monkeypatch: pytest.MonkeyPatch,
+def test_host_coordinator_creates_private_local_key_without_ssh_agent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
 
-    with pytest.raises(module.TerminalAuthorityError, match="SSH agent"):
-        module.CoordinatorAuthority.from_ssh_agent()
+    signer = module.CoordinatorAuthority.from_local_state()
+    sealed = signer.seal(terminal_record(), authority_kind="coordinator")
+
+    module.verify_terminal_authority(
+        sealed, registration=None, expected_kind="coordinator"
+    )
+    key_path = tmp_path / "dispatch-authority" / "coordinator-ed25519.pem"
+    assert key_path.stat().st_mode & 0o777 == 0o600
+    assert "PRIVATE KEY" not in repr(signer)
 
 
-def test_host_coordinator_signing_timeout_fails_closed(
+def test_host_coordinator_requires_kernel_process_memory_isolation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv("SSH_AUTH_SOCK", str(tmp_path / "agent.sock"))
-    monkeypatch.setattr(module, "_ssh_keygen", lambda: tmp_path / "ssh-keygen")
+    ptrace_scope = tmp_path / "ptrace_scope"
+    ptrace_scope.write_text("0\n", encoding="ascii")
+    monkeypatch.setattr(module, "PTRACE_SCOPE_PATH", ptrace_scope)
+
+    with pytest.raises(module.TerminalAuthorityError, match="process memory isolation"):
+        module.CoordinatorAuthority.from_local_state()
+
+
+def test_host_coordinator_provider_timeout_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(module, "_openssl", lambda: tmp_path / "openssl")
     monkeypatch.setattr(
         module.subprocess,
         "run",
@@ -241,34 +266,62 @@ def test_host_coordinator_signing_timeout_fails_closed(
         ),
     )
 
-    with pytest.raises(module.TerminalAuthorityError, match="signing timed out"):
-        module._ssh_sign(b"payload", module.COORDINATOR_PUBLIC_KEY)
+    with pytest.raises(module.TerminalAuthorityError, match="timed out"):
+        module._run_openssl([], input_bytes=b"")
 
 
-def test_host_coordinator_verification_timeout_is_invalid(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(module, "_ssh_keygen", lambda: tmp_path / "ssh-keygen")
-    monkeypatch.setattr(
-        module.subprocess,
-        "run",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-        ),
-    )
-    module._coordinator_signature_is_valid.cache_clear()
-
-    assert not module._coordinator_signature_is_valid(b"signature", b"payload")
-
-
-def test_host_coordinator_proof_is_bound_to_pinned_public_key(
+def test_host_coordinator_verification_timeout_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(module, "_ssh_sign", lambda payload, public_key: b"signed")
-    monkeypatch.setattr(
-        module, "_coordinator_signature_is_valid", lambda signature, payload: True
-    )
-    signer = module.CoordinatorAuthority()
+    signer = module.TerminalAuthority.generate()
+    sealed = signer.seal(terminal_record(), authority_kind="dispatcher")
+    module._signature_is_valid.cache_clear()
+    observed: dict[str, object] = {}
+    calls = 0
+
+    def timeout(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        observed.update(kwargs)
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(module.subprocess, "run", timeout)
+
+    for _ in range(2):
+        with pytest.raises(module.TerminalAuthorityError, match="timed out"):
+            module.verify_terminal_authority(
+                sealed,
+                registration=signer.registration(),
+                expected_kind="dispatcher",
+            )
+
+    assert observed["timeout"] == module.AUTHORITY_PROVIDER_TIMEOUT_S
+    assert calls == 2
+
+
+def test_host_coordinator_verifier_requires_kernel_process_memory_isolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    signer = module.CoordinatorAuthority.from_local_state()
+    sealed = signer.seal(terminal_record(), authority_kind="coordinator")
+    ptrace_scope = tmp_path / "ptrace_scope"
+    ptrace_scope.write_text("0\n", encoding="ascii")
+    monkeypatch.setattr(module, "PTRACE_SCOPE_PATH", ptrace_scope)
+
+    with pytest.raises(
+        module.TerminalAuthorityError, match="coordinator authority key is unavailable"
+    ) as caught:
+        module.verify_terminal_authority(
+            sealed, registration=None, expected_kind="coordinator"
+        )
+    assert caught.value.__cause__ is not None
+    assert "process memory isolation" in str(caught.value.__cause__)
+
+
+def test_host_coordinator_proof_is_bound_to_local_trust_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    signer = module.CoordinatorAuthority.from_local_state()
     sealed = signer.seal(terminal_record(), authority_kind="coordinator")
 
     module.verify_terminal_authority(
@@ -276,9 +329,13 @@ def test_host_coordinator_proof_is_bound_to_pinned_public_key(
     )
     proof = sealed["terminal_authority_proof"]
     assert proof["scheme"] == module.COORDINATOR_AUTHORITY_SCHEME
-    assert proof["public_key"] == module.COORDINATOR_PUBLIC_KEY
+    assert proof["public_key"] == module.base64.b64encode(signer.public_key).decode(
+        "ascii"
+    )
 
-    proof["public_key"] = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIForged"
+    other_state = tmp_path / "other-authority"
+    monkeypatch.setattr(module, "_coordinator_state_directory", lambda: other_state)
+    module.CoordinatorAuthority.from_local_state()
     with pytest.raises(
         module.TerminalAuthorityError, match="coordinator authority key"
     ):
@@ -287,25 +344,15 @@ def test_host_coordinator_proof_is_bound_to_pinned_public_key(
         )
 
 
-def test_host_coordinator_cannot_seal_dispatcher_record(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(module, "_ssh_sign", lambda payload, public_key: b"signed")
-
+def test_host_coordinator_cannot_seal_dispatcher_record() -> None:
     with pytest.raises(module.TerminalAuthorityError, match="cannot seal dispatcher"):
-        module.CoordinatorAuthority().seal(
+        module.CoordinatorAuthority.from_local_state().seal(
             terminal_record(), authority_kind="dispatcher"
         )
 
 
-def test_host_coordinator_proof_binds_authority_kind(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(module, "_ssh_sign", lambda payload, public_key: b"signed")
-    monkeypatch.setattr(
-        module, "_coordinator_signature_is_valid", lambda signature, payload: True
-    )
-    sealed = module.CoordinatorAuthority().seal(
+def test_host_coordinator_proof_binds_authority_kind() -> None:
+    sealed = module.CoordinatorAuthority.from_local_state().seal(
         terminal_record(), authority_kind="coordinator"
     )
     sealed["terminal_authority_proof"]["authority_kind"] = "dispatcher"

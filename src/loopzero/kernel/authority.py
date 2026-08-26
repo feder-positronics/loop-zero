@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import base64
 import binascii
+import fcntl
 import hashlib
 import json
 import os
+import pwd
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,15 +27,11 @@ from trusted_executable import TrustedExecutableError, system_executable
 LEGACY_AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v1"
 AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v2"
 SUPPORTED_AUTHORITY_SCHEMES = frozenset({LEGACY_AUTHORITY_SCHEME, AUTHORITY_SCHEME})
-COORDINATOR_AUTHORITY_SCHEME = "dispatch-coordinator-ssh-ed25519-v1"
-COORDINATOR_SIGNATURE_NAMESPACE = "intelflo-dispatch-coordinator"
-COORDINATOR_SSH_TIMEOUT_S = 10.0
-# Owner-controlled SSH-agent key. The public half is a trust anchor, not a
-# secret; dispatched workers receive neither SSH_AUTH_SOCK nor the private key.
-COORDINATOR_PUBLIC_KEY = (
-    "ssh-ed25519 "
-    "AAAAC3NzaC1lZDI1NTE5AAAAIKw0FlrqA1ha584PV/saNa70na108hSaJmrNZEFUMvvG"
-)
+COORDINATOR_AUTHORITY_SCHEME = "dispatch-coordinator-ed25519-v2"
+COORDINATOR_KEY_FILENAME = "coordinator-ed25519.pem"
+COORDINATOR_LOCK_FILENAME = ".coordinator-key.lock"
+MAX_COORDINATOR_KEY_BYTES = 4096
+AUTHORITY_PROVIDER_TIMEOUT_S = 10.0
 PROOF_FIELD = "terminal_authority_proof"
 PTRACE_SCOPE_PATH = Path("/proc/sys/kernel/yama/ptrace_scope")
 AuthorityKind = Literal["dispatcher", "coordinator"]
@@ -56,15 +55,19 @@ def _run_openssl(
     input_bytes: bytes,
     inherited: tuple[int, ...] = (),
 ) -> bytes:
-    completed = subprocess.run(
-        [str(_openssl()), *arguments],
-        input=input_bytes,
-        capture_output=True,
-        check=False,
-        close_fds=True,
-        pass_fds=inherited,
-        env={"LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
-    )
+    try:
+        completed = subprocess.run(
+            [str(_openssl()), *arguments],
+            input=input_bytes,
+            capture_output=True,
+            check=False,
+            close_fds=True,
+            pass_fds=inherited,
+            env={"LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
+            timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TerminalAuthorityError("Ed25519 authority operation timed out") from exc
     if completed.returncode != 0:
         raise TerminalAuthorityError("Ed25519 authority operation failed")
     return completed.stdout
@@ -72,7 +75,11 @@ def _run_openssl(
 
 def _with_read_descriptor(payload: bytes, operation):
     if not hasattr(os, "memfd_create"):
-        raise TerminalAuthorityError("sealed in-memory authority is unavailable")
+        with tempfile.TemporaryFile(prefix="intelflo-dispatch-authority-") as handle:
+            handle.write(payload)
+            handle.flush()
+            handle.seek(0)
+            return operation(handle.fileno())
     read_fd = os.memfd_create("intelflo-dispatch-authority", os.MFD_CLOEXEC)
     try:
         os.write(read_fd, payload)
@@ -121,8 +128,8 @@ def _key_id(public_key: bytes) -> str:
     return hashlib.sha256(public_key).hexdigest()
 
 
-def _coordinator_key_id(public_key: str) -> str:
-    return hashlib.sha256(public_key.encode("ascii")).hexdigest()
+def _coordinator_key_id(public_key: bytes) -> str:
+    return _key_id(public_key)
 
 
 def _require_process_memory_isolation() -> None:
@@ -145,7 +152,7 @@ class TerminalAuthority:
     _private_key: bytes = field(repr=False)
 
     @classmethod
-    def generate(cls) -> "TerminalAuthority":
+    def generate(cls) -> TerminalAuthority:
         _require_process_memory_isolation()
         private_key = _run_openssl(
             ["genpkey", "-algorithm", "Ed25519"], input_bytes=b""
@@ -244,16 +251,19 @@ class TerminalAuthority:
 
 @dataclass(frozen=True)
 class CoordinatorAuthority:
-    """Host-anchored coordinator signer backed by the protected SSH agent."""
+    """Host signer whose persistent private key stays outside worker mounts."""
 
-    public_key: str = COORDINATOR_PUBLIC_KEY
+    public_key: bytes = field(repr=False)
+    _private_key: bytes = field(repr=False)
 
     @classmethod
-    def from_ssh_agent(cls) -> "CoordinatorAuthority":
-        socket_path = os.environ.get("SSH_AUTH_SOCK")
-        if not socket_path:
-            raise TerminalAuthorityError("coordinator SSH agent is unavailable")
-        return cls()
+    def from_local_state(cls) -> CoordinatorAuthority:
+        _require_process_memory_isolation()
+        private_key = _coordinator_private_key(create=True)
+        return cls(
+            public_key=_public_key_from_private(private_key),
+            _private_key=private_key,
+        )
 
     def seal(
         self,
@@ -262,9 +272,10 @@ class CoordinatorAuthority:
         authority_kind: AuthorityKind,
         include_public_key: bool = False,
     ) -> dict[str, object]:
+        del include_public_key
         if authority_kind != "coordinator":
             raise TerminalAuthorityError(
-                "SSH coordinator authority cannot seal dispatcher records"
+                "coordinator authority cannot seal dispatcher records"
             )
         if PROOF_FIELD in record:
             raise TerminalAuthorityError("terminal authority proof already exists")
@@ -273,111 +284,161 @@ class CoordinatorAuthority:
             authority_kind="coordinator",
             scheme=COORDINATOR_AUTHORITY_SCHEME,
         )
-        signature = _ssh_sign(payload, self.public_key)
+        signature = _sign_ed25519(self._private_key, payload)
         return {
             **record,
             PROOF_FIELD: {
                 "scheme": COORDINATOR_AUTHORITY_SCHEME,
                 "authority_kind": "coordinator",
                 "key_id": _coordinator_key_id(self.public_key),
-                "public_key": self.public_key,
+                "public_key": base64.b64encode(self.public_key).decode("ascii"),
                 "signature": base64.b64encode(signature).decode("ascii"),
             },
         }
 
 
-def _ssh_environment(*, require_agent: bool) -> dict[str, str]:
-    environment = {"LANG": "C", "LC_ALL": "C", "PATH": os.defpath}
-    socket_path = os.environ.get("SSH_AUTH_SOCK")
-    if require_agent:
-        if not socket_path:
-            raise TerminalAuthorityError("coordinator SSH agent is unavailable")
-        environment["SSH_AUTH_SOCK"] = socket_path
-    return environment
-
-
-def _ssh_keygen() -> Path:
+def _coordinator_state_directory() -> Path:
     try:
-        return system_executable("ssh-keygen")
-    except TrustedExecutableError as exc:
-        raise TerminalAuthorityError("trusted SSH signer is unavailable") from exc
+        account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError) as exc:
+        raise TerminalAuthorityError("coordinator account home is unavailable") from exc
+    if not account_home.is_absolute():
+        raise TerminalAuthorityError("coordinator account home is unsafe")
+    return account_home / ".local" / "state" / "intelflo" / "dispatch-authority"
 
 
-def _ssh_sign(payload: bytes, public_key: str) -> bytes:
-    with tempfile.TemporaryDirectory(prefix="intelflo-coordinator-sign-") as raw:
-        directory = Path(raw)
-        key_path = directory / "key.pub"
-        payload_path = directory / "payload"
-        key_path.write_text(public_key + "\n", encoding="ascii")
-        payload_path.write_bytes(payload)
+def _private_directory(path: Path) -> Path:
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = path.lstat()
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator state is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or path.is_symlink()
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o077
+    ):
+        raise TerminalAuthorityError("coordinator state is unsafe")
+    return path
+
+
+def _read_private_key(path: Path) -> bytes:
+    try:
+        metadata = path.lstat()
+        if (
+            path.is_symlink()
+            or not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o777 != 0o600
+            or metadata.st_size <= 0
+            or metadata.st_size > MAX_COORDINATOR_KEY_BYTES
+        ):
+            raise TerminalAuthorityError("coordinator private key is unsafe")
+        private_key = path.read_bytes()
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator private key is unavailable") from exc
+    if b"PRIVATE KEY" not in private_key:
+        raise TerminalAuthorityError("coordinator private key is invalid")
+    return private_key
+
+
+def _coordinator_private_key(*, create: bool) -> bytes:
+    directory = _private_directory(_coordinator_state_directory())
+    key_path = directory / COORDINATOR_KEY_FILENAME
+    lock_path = directory / COORDINATOR_LOCK_FILENAME
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        lock_fd = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator key lock is unavailable") from exc
+    try:
+        lock_metadata = os.fstat(lock_fd)
+        if (
+            not stat.S_ISREG(lock_metadata.st_mode)
+            or lock_metadata.st_uid != os.getuid()
+            or lock_metadata.st_mode & 0o777 != 0o600
+        ):
+            raise TerminalAuthorityError("coordinator key lock is unsafe")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            completed = subprocess.run(
-                [
-                    str(_ssh_keygen()),
-                    "-Y",
-                    "sign",
-                    "-q",
-                    "-f",
-                    str(key_path),
-                    "-n",
-                    COORDINATOR_SIGNATURE_NAMESPACE,
-                    str(payload_path),
-                ],
-                capture_output=True,
-                check=False,
-                close_fds=True,
-                env=_ssh_environment(require_agent=True),
-                timeout=COORDINATOR_SSH_TIMEOUT_S,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TerminalAuthorityError("coordinator SSH signing timed out") from exc
-        signature_path = payload_path.with_suffix(".sig")
-        try:
-            signature = signature_path.read_bytes()
-        except OSError as exc:
-            raise TerminalAuthorityError(
-                "coordinator SSH signing failed"
-            ) from exc
-        if completed.returncode != 0 or not signature or len(signature) > 4096:
-            raise TerminalAuthorityError("coordinator SSH signing failed")
-        return signature
-
-
-@lru_cache(maxsize=4096)
-def _coordinator_signature_is_valid(signature: bytes, payload: bytes) -> bool:
-    with tempfile.TemporaryDirectory(prefix="intelflo-coordinator-verify-") as raw:
-        directory = Path(raw)
-        allowed_path = directory / "allowed-signers"
-        signature_path = directory / "signature"
-        allowed_path.write_text(
-            f"coordinator {COORDINATOR_PUBLIC_KEY}\n", encoding="ascii"
+            return _read_private_key(key_path)
+        except FileNotFoundError as exc:
+            if not create:
+                raise TerminalAuthorityError(
+                    "coordinator trust root is unavailable"
+                ) from exc
+        private_key = _run_openssl(
+            ["genpkey", "-algorithm", "Ed25519"], input_bytes=b""
         )
-        signature_path.write_bytes(signature)
+        if b"PRIVATE KEY" not in private_key or len(private_key) > MAX_COORDINATOR_KEY_BYTES:
+            raise TerminalAuthorityError("coordinator private key generation failed")
+        with tempfile.NamedTemporaryFile(dir=directory, delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(private_key)
+            handle.flush()
+            os.fsync(handle.fileno())
         try:
-            completed = subprocess.run(
+            temporary.chmod(0o600)
+            temporary.replace(key_path)
+        finally:
+            temporary.unlink(missing_ok=True)
+        return _read_private_key(key_path)
+    finally:
+        os.close(lock_fd)
+
+
+@lru_cache(maxsize=4)
+def _public_key_from_private(private_key: bytes) -> bytes:
+    def derive(read_fd: int) -> bytes:
+        return _run_openssl(
+            [
+                "pkey",
+                "-in",
+                f"/proc/self/fd/{read_fd}",
+                "-pubout",
+                "-outform",
+                "DER",
+            ],
+            input_bytes=b"",
+            inherited=(read_fd,),
+        )
+
+    public_key = _with_read_descriptor(private_key, derive)
+    if not public_key or len(public_key) > 1024:
+        raise TerminalAuthorityError("coordinator public key is invalid")
+    return public_key
+
+
+def _trusted_coordinator_public_key() -> bytes:
+    _require_process_memory_isolation()
+    return _public_key_from_private(_coordinator_private_key(create=False))
+
+
+def _sign_ed25519(private_key: bytes, payload: bytes) -> bytes:
+    def sign(key_fd: int) -> bytes:
+        def sign_payload(payload_fd: int) -> bytes:
+            return _run_openssl(
                 [
-                    str(_ssh_keygen()),
-                    "-Y",
-                    "verify",
-                    "-f",
-                    str(allowed_path),
-                    "-I",
-                    "coordinator",
-                    "-n",
-                    COORDINATOR_SIGNATURE_NAMESPACE,
-                    "-s",
-                    str(signature_path),
+                    "pkeyutl",
+                    "-sign",
+                    "-rawin",
+                    "-inkey",
+                    f"/proc/self/fd/{key_fd}",
+                    "-in",
+                    f"/proc/self/fd/{payload_fd}",
                 ],
-                input=payload,
-                capture_output=True,
-                check=False,
-                close_fds=True,
-                env=_ssh_environment(require_agent=False),
-                timeout=COORDINATOR_SSH_TIMEOUT_S,
+                input_bytes=b"",
+                inherited=(key_fd, payload_fd),
             )
-        except subprocess.TimeoutExpired:
-            return False
-        return completed.returncode == 0
+
+        return _with_read_descriptor(payload, sign_payload)
+
+    return _with_read_descriptor(private_key, sign)
 
 
 def _validated_registration(
@@ -402,29 +463,37 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) -> 
     def verify_key(key_fd: int) -> bool:
         def verify_payload(payload_fd: int) -> bool:
             def verify_signature(signature_fd: int) -> bool:
-                completed = subprocess.run(
-                    [
-                        str(_openssl()),
-                        "pkeyutl",
-                        "-verify",
-                        "-rawin",
-                        "-pubin",
-                        "-keyform",
-                        "DER",
-                        "-inkey",
-                        f"/proc/self/fd/{key_fd}",
-                        "-in",
-                        f"/proc/self/fd/{payload_fd}",
-                        "-sigfile",
-                        f"/proc/self/fd/{signature_fd}",
-                    ],
-                    input=b"",
-                    capture_output=True,
-                    check=False,
-                    close_fds=True,
-                    pass_fds=(key_fd, payload_fd, signature_fd),
-                    env={"LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
-                )
+                try:
+                    completed = subprocess.run(
+                        [
+                            str(_openssl()),
+                            "pkeyutl",
+                            "-verify",
+                            "-rawin",
+                            "-pubin",
+                            "-keyform",
+                            "DER",
+                            "-inkey",
+                            f"/proc/self/fd/{key_fd}",
+                            "-in",
+                            f"/proc/self/fd/{payload_fd}",
+                            "-sigfile",
+                            f"/proc/self/fd/{signature_fd}",
+                        ],
+                        input=b"",
+                        capture_output=True,
+                        check=False,
+                        close_fds=True,
+                        pass_fds=(key_fd, payload_fd, signature_fd),
+                        env={"LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
+                        timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    # Exceptions are not retained by lru_cache. A transient
+                    # provider stall must retry rather than poison this proof.
+                    raise TerminalAuthorityError(
+                        "terminal authority provider timed out"
+                    ) from exc
                 return completed.returncode == 0
 
             return _with_read_descriptor(signature, verify_signature)
@@ -451,10 +520,18 @@ def verify_terminal_authority(
             or proof.get("authority_kind") != "coordinator"
         ):
             raise TerminalAuthorityError("coordinator authority kind is invalid")
-        public_key = proof.get("public_key")
-        if public_key != COORDINATOR_PUBLIC_KEY or proof.get(
+        public_key = _decode(
+            proof.get("public_key"), label="public key", maximum=2048
+        )
+        try:
+            trusted_public_key = _trusted_coordinator_public_key()
+        except TerminalAuthorityError as exc:
+            raise TerminalAuthorityError(
+                "coordinator authority key is unavailable"
+            ) from exc
+        if public_key != trusted_public_key or proof.get(
             "key_id"
-        ) != _coordinator_key_id(COORDINATOR_PUBLIC_KEY):
+        ) != _coordinator_key_id(trusted_public_key):
             raise TerminalAuthorityError("coordinator authority key is invalid")
         signature = _decode(
             proof.get("signature"), label="signature", maximum=8192
@@ -464,7 +541,7 @@ def verify_terminal_authority(
             authority_kind="coordinator",
             scheme=COORDINATOR_AUTHORITY_SCHEME,
         )
-        if not _coordinator_signature_is_valid(signature, payload):
+        if not _signature_is_valid(public_key, signature, payload):
             raise TerminalAuthorityError(
                 "coordinator authority signature is invalid"
             )
