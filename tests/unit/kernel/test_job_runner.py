@@ -705,8 +705,395 @@ def _isolated_job_script(tmp_path: Path) -> Path:
     shutil.copy2(
         REPO_ROOT / "scripts" / "util" / "trusted_executable.py", script.parent
     )
+    shutil.copy2(
+        REPO_ROOT / "scripts" / "util" / "repro_connect_guard.py", script.parent
+    )
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     return script
+
+
+def _write_final_ci_repro_stub(
+    script: Path,
+    *,
+    signed: bool,
+    probe_provider_sandbox: bool = False,
+    substitute_authority: bool = False,
+    spawn_delayed_descendant: bool = False,
+    probe_manager_escape: bool = False,
+    delay_seconds: int = 0,
+) -> Path:
+    final_ci_gate = script.with_name("final_ci_gate.py")
+    provider_probe = (
+        "completed = subprocess.run([\n"
+        "    '/usr/bin/bwrap', '--die-with-parent', '--new-session',\n"
+        "    '--unshare-user', '--unshare-pid', '--ro-bind', '/usr', '/usr',\n"
+        "    '--symlink', 'usr/bin', '/bin', '--proc', '/proc', '--dev', '/dev',\n"
+        "    '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',\n"
+        "    '--', '/usr/bin/true',\n"
+        "], check=False)\n"
+        "exit_code = completed.returncode\n"
+        if probe_provider_sandbox
+        else "exit_code = 0\n"
+    )
+    delayed_descendant = (
+        "subprocess.Popen([\n"
+        "    sys.executable, '-c',\n"
+        '    "import os,time; from pathlib import Path; time.sleep(0.4); "\n'
+        "    \"Path(os.environ['INTELFLO_TEST_DELAYED_MARKER']).write_text('escaped')\",\n"
+        "])\n"
+        if spawn_delayed_descendant
+        else ""
+    )
+    authority_substitution = (
+        "protected_root = Path(os.environ.pop(\n"
+        "    'INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT'\n"
+        "))\n"
+        "moved_root = protected_root.with_name(protected_root.name + '-moved')\n"
+        "protected_root.rename(moved_root)\n"
+        "protected_root.mkdir()\n"
+        "fake_job = protected_root / os.environ['INTELFLO_JOB_NAME']\n"
+        "fake_job.mkdir()\n"
+        "(fake_job / 'pid').write_text('999999\\n')\n"
+        "(fake_job / 'exit_code').write_text('0\\n')\n"
+        if substitute_authority
+        else "os.environ.pop('INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT')\n"
+    )
+    manager_escape_probe = (
+        "manager_environment = dict(os.environ)\n"
+        "manager_environment['XDG_RUNTIME_DIR'] = f'/run/user/{os.getuid()}'\n"
+        "manager_environment['DBUS_SESSION_BUS_ADDRESS'] = (\n"
+        '    f"unix:path=/run/user/{os.getuid()}/bus"\n'
+        ")\n"
+        "escaped = subprocess.run([\n"
+        "    '/usr/bin/systemd-run', '--user', '--wait', '--collect', '--quiet',\n"
+        "    '/usr/bin/true',\n"
+        "], check=False, env=manager_environment)\n"
+        "if escaped.returncode == 0:\n"
+        "    raise SystemExit(92)\n"
+        "manager_alias = artifact.with_name('manager-bus-alias')\n"
+        "manager_alias.symlink_to(f'/run/user/{os.getuid()}/bus')\n"
+        "alias_client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)\n"
+        "try:\n"
+        "    alias_client.connect(manager_alias.name)\n"
+        "except OSError:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise SystemExit(93)\n"
+        "finally:\n"
+        "    alias_client.close()\n"
+        if probe_manager_escape
+        else ""
+    )
+    delay = (
+        f"subprocess.run(['/usr/bin/sleep', '{delay_seconds}'], check=False)\n"
+        if delay_seconds
+        else ""
+    )
+    signature_line = (
+        "terminal['job_authorization_hmac_sha256'] = "
+        "hmac.new(key, canonical, hashlib.sha256).hexdigest()"
+        if signed
+        else "pass"
+    )
+    final_ci_gate.write_text(
+        f"""import hashlib
+import hmac
+import json
+import os
+import socket
+import subprocess
+import sys
+from pathlib import Path
+
+fd = int(os.environ.pop("INTELFLO_FINAL_CI_REPRO_AUTH_FD"))
+try:
+    key = os.read(fd, 33)
+finally:
+    os.close(fd)
+assert len(key) == 32
+assert "INTELFLO_JOB_EXECUTOR_PID" not in os.environ
+{authority_substitution}
+assert sys.argv[1:3] == ["--pr", "42"]
+signature = sys.argv[sys.argv.index("--execute-repro") + 1]
+artifact = Path(sys.argv[sys.argv.index("--terminal-artifact") + 1])
+{manager_escape_probe}{delayed_descendant}{delay}{provider_probe}terminal = {{
+    "schema_version": "final-ci-repro-terminal-v2",
+    "task_id": f"final-ci-repro:{{signature}}",
+    "status": "completed" if exit_code == 0 else "failed",
+    "pr": 42,
+    "failure_signature": signature,
+    "head_sha_before": "c" * 40,
+    "head_tree_before": "d" * 40,
+    "head_sha_after": "c" * 40,
+    "head_tree_after": "d" * 40,
+    "prescribed_local_command_digest": "e" * 64,
+    "exit_code": exit_code,
+    "outcome": "not_reproduced" if exit_code == 0 else "reproduced",
+}}
+canonical = json.dumps(
+    terminal, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+).encode()
+{signature_line}
+artifact.write_text(json.dumps(terminal, sort_keys=True) + "\\n", encoding="utf-8")
+raise SystemExit(exit_code)
+""",
+        encoding="utf-8",
+    )
+    return final_ci_gate
+
+
+def _deny_outer_bubblewrap(script: Path, *, allow_systemd: bool = True) -> None:
+    fake_systemd = script.with_name("test_systemd_run.py")
+    fake_systemd.write_text(
+        """#!/usr/bin/python3
+import os
+import signal
+import subprocess
+import sys
+
+environment = dict(os.environ)
+environment.pop("INTELFLO_JOB_EXECUTOR_PID", None)
+working_directory = None
+index = 1
+while index < len(sys.argv) and sys.argv[index].startswith("--"):
+    argument = sys.argv[index]
+    if argument.startswith("--setenv="):
+        assignment = argument.removeprefix("--setenv=")
+        if "=" in assignment:
+            name, value = assignment.split("=", 1)
+        else:
+            name = assignment
+            value = os.environ[name]
+        environment[name] = value
+    elif argument.startswith("--working-directory="):
+        working_directory = argument.split("=", 1)[1]
+    index += 1
+
+completed = subprocess.Popen(
+    sys.argv[index:],
+    cwd=working_directory,
+    env=environment,
+    start_new_session=True,
+)
+exit_code = completed.wait()
+try:
+    os.killpg(completed.pid, signal.SIGKILL)
+except ProcessLookupError:
+    pass
+raise SystemExit(exit_code if exit_code >= 0 else 128 + abs(exit_code))
+""",
+        encoding="utf-8",
+    )
+    fake_systemd.chmod(0o755)
+    systemd_path = (
+        fake_systemd
+        if os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None
+        else Path("/usr/bin/systemd-run")
+    )
+    systemd_case = (
+        '    if name == "systemd-run":\n'
+        f"        return Path({str(systemd_path)!r})\n"
+        if allow_systemd
+        else ""
+    )
+    script.with_name("trusted_executable.py").write_text(
+        f"""from pathlib import Path
+
+class TrustedExecutableError(RuntimeError):
+    pass
+
+def system_executable(name):
+{systemd_case}    raise TrustedExecutableError(f"unexpected outer sandbox: {{name}}")
+""",
+        encoding="utf-8",
+    )
+
+
+def _run_final_ci_repro_job(
+    tmp_path: Path,
+    *,
+    signed: bool,
+    probe_provider_sandbox: bool = False,
+    substitute_authority: bool = False,
+    spawn_delayed_descendant: bool = False,
+    probe_manager_escape: bool = False,
+    delay_seconds: int = 0,
+    allow_systemd: bool = True,
+    run_timeout: str = "30",
+    extra_args: tuple[str, ...] = (),
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    final_ci_gate = _write_final_ci_repro_stub(
+        script,
+        signed=signed,
+        probe_provider_sandbox=probe_provider_sandbox,
+        substitute_authority=substitute_authority,
+        spawn_delayed_descendant=spawn_delayed_descendant,
+        probe_manager_escape=probe_manager_escape,
+        delay_seconds=delay_seconds,
+    )
+    _deny_outer_bubblewrap(script, allow_systemd=allow_systemd)
+    failure_signature = "a" * 64
+    artifact = repo / "repro-result.json"
+    name = "final-ci-repro-test"
+    result = _job(
+        tmp_path,
+        "run",
+        name,
+        "--timeout",
+        run_timeout,
+        "--run-id",
+        "sr_" + "b" * 32,
+        "--task-id",
+        f"final-ci-repro:{failure_signature}",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "/usr/bin/python3",
+        str(final_ci_gate),
+        "--pr",
+        "42",
+        "--repo",
+        str(repo),
+        "--execute-repro",
+        failure_signature,
+        "--terminal-artifact",
+        str(artifact),
+        *extra_args,
+        script=script,
+        env_overrides={
+            **{
+                name: os.environ[name]
+                for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR")
+                if name in os.environ
+            },
+            **(
+                {"INTELFLO_TEST_DELAYED_MARKER": str(repo / "delayed-descendant")}
+                if spawn_delayed_descendant
+                else {}
+            ),
+        },
+    )
+    return result, artifact, tmp_path / "jobs" / name
+
+
+@requires_nested_user_namespace
+def test_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespace(
+    tmp_path: Path,
+) -> None:
+    result, _, job_dir = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        probe_provider_sandbox=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    envelope = json.loads(
+        (job_dir / "terminal-envelope.json").read_text(encoding="utf-8")
+    )
+    terminal = envelope["terminal"]
+    assert len(terminal["job_authorization_hmac_sha256"]) == 64
+    assert envelope["command_exit_code"] == 0
+    assert terminal["outcome"] == "not_reproduced"
+
+
+def test_signed_final_ci_repro_reaps_delayed_descendants(tmp_path: Path) -> None:
+    result, artifact, _ = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        spawn_delayed_descendant=True,
+        extra_args=(),
+    )
+    marker = artifact.parent / "delayed-descendant"
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    time.sleep(0.6)
+    assert not marker.exists()
+
+
+def test_signed_final_ci_repro_timeout_reaps_its_secure_executor(
+    tmp_path: Path,
+) -> None:
+    result, artifact, job_dir = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        delay_seconds=10,
+        run_timeout="1",
+    )
+    executor_pid = int((job_dir / "pid").read_text(encoding="ascii"))
+
+    assert result.returncode == 124, result.stdout + result.stderr
+    with pytest.raises(ProcessLookupError):
+        os.kill(executor_pid, 0)
+    assert not artifact.exists()
+    assert not (job_dir / "terminal-envelope.json").exists()
+
+
+def test_signed_final_ci_repro_rejects_authority_path_substitution(
+    tmp_path: Path,
+) -> None:
+    result, _, job_dir = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        substitute_authority=True,
+    )
+
+    assert result.returncode == 125, result.stdout + result.stderr
+    assert not (job_dir / "terminal-envelope.json").exists()
+    moved_log = (
+        job_dir.parent.with_name(job_dir.parent.name + "-moved") / job_dir.name / "log"
+    )
+    assert "authority path changed" in moved_log.read_text(encoding="utf-8")
+
+
+def test_signed_final_ci_repro_blocks_user_manager_escape(tmp_path: Path) -> None:
+    result, _, job_dir = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        probe_manager_escape=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (job_dir / "terminal-envelope.json").exists()
+
+
+def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path: Path) -> None:
+    result, _, job_dir = _run_final_ci_repro_job(tmp_path, signed=False)
+
+    assert result.returncode == 125, result.stdout + result.stderr
+    assert not (job_dir / "terminal-envelope.json").exists()
+    assert "authorization" in (job_dir / "log").read_text(encoding="utf-8")
+
+
+def test_final_ci_repro_fails_closed_without_systemd_boundary(tmp_path: Path) -> None:
+    result, artifact, job_dir = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        allow_systemd=False,
+    )
+
+    assert result.returncode == 125, result.stdout + result.stderr
+    assert not artifact.exists()
+    assert not (job_dir / "terminal-envelope.json").exists()
+    assert "requires protected systemd-run" in (job_dir / "log").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_final_ci_repro_task_refuses_noncanonical_command_authority(
+    tmp_path: Path,
+) -> None:
+    result, artifact, job_dir = _run_final_ci_repro_job(
+        tmp_path,
+        signed=True,
+        extra_args=("--unexpected-command-authority",),
+    )
+
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not artifact.exists()
+    log = (job_dir / "log").read_text(encoding="utf-8")
+    assert "canonical executor command" in log
 
 
 def _blocked_dispatch_evidence(

@@ -21,6 +21,8 @@
 #   scripts/util/job.sh clean [--all]
 #
 # `wait` exits with the job's own exit code, 124 on timeout, 2 on usage error.
+# A bound final-CI reproduction `run` treats 124 as terminal: it stops and reaps
+# the secure executor before releasing its held job-directory authority.
 # `wait-file` blocks until <path> exists (a dispatched worker's terminal
 # artifact is the wait event — #3418 P1); exit 0 on appearance, 124 on the
 # deadman timeout, which means "worker presumed dead: run the orphan/lease
@@ -45,6 +47,8 @@ JOB_DIR="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKT
 JOB_ROOTS=("$JOB_DIR")
 DEFAULT_TIMEOUT="${INTELFLO_JOB_TIMEOUT:-1800}"
 DEFAULT_TAIL=40
+RUN_AUTHORITY_FD=""
+RUN_EXECUTOR_PID=""
 
 usage() {
 	sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -107,13 +111,18 @@ cmd_execute() {
 	# process that holds every sealing descriptor. The wrapped command receives
 	# no token, claim file, directory descriptor, or pending-artifact descriptor.
 	exec python3 - "$dir" "$source_artifact" "$name" "$REPO_ROOT" "$@" <<'PY'
+import ctypes
 import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
+import signal
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -125,6 +134,9 @@ source_path = Path(sys.argv[2])
 job_name = sys.argv[3]
 repo_root = Path(sys.argv[4]).resolve()
 command = sys.argv[5:]
+FINAL_CI_REPRO_TASK_PREFIX = "final-ci-repro:"
+FINAL_CI_REPRO_AUTH_FD_ENV = "INTELFLO_FINAL_CI_REPRO_AUTH_FD"
+FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = "INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT"
 
 directory_flags = os.O_RDONLY
 if hasattr(os, "O_DIRECTORY"):
@@ -132,6 +144,11 @@ if hasattr(os, "O_DIRECTORY"):
 if hasattr(os, "O_NOFOLLOW"):
     directory_flags |= os.O_NOFOLLOW
 directory_fd = os.open(job_dir, directory_flags)
+authority_chain: list[tuple[Path, int]] = []
+for authority_path in (job_dir.resolve(), *job_dir.resolve().parents):
+    authority_chain.append(
+        (authority_path, os.open(authority_path, directory_flags))
+    )
 
 def open_at(name: str, flags: int, mode: int = 0o400) -> int:
     if hasattr(os, "O_NOFOLLOW"):
@@ -251,6 +268,8 @@ try:
             raise RuntimeError("terminal envelope does not match the job binding")
 
     dispatcher = repo_root / "scripts" / "util" / "agent_dispatch.py"
+    final_ci_gate = repo_root / "scripts" / "util" / "final_ci_gate.py"
+    repro_connect_guard = repo_root / "scripts" / "util" / "repro_connect_guard.py"
     executable = shutil.which(command[0]) if command else None
     command_script = Path(command[1]) if len(command) > 1 else None
     trusted_dispatcher = (
@@ -266,8 +285,39 @@ try:
         and not job_dir.resolve().is_relative_to(repo_root)
         and not source_path.resolve().is_relative_to(repo_root)
     )
+
+    repro_signature = None
+    if (
+        binding is not None
+        and len(command) == 10
+        and executable is not None
+        and Path(executable).resolve() == Path(sys.executable).resolve()
+        and not final_ci_gate.is_symlink()
+        and final_ci_gate.is_file()
+        and command_script is not None
+        and command_script.resolve() == final_ci_gate.resolve()
+        and command[2] == "--pr"
+        and re.fullmatch(r"[1-9][0-9]*", command[3]) is not None
+        and command[4] == "--repo"
+        and Path(command[5]).resolve() == repo_root
+        and command[6] == "--execute-repro"
+        and re.fullmatch(r"[0-9a-f]{64}", command[7]) is not None
+        and command[8] == "--terminal-artifact"
+        and Path(command[9]).resolve() == source_path.resolve()
+        and binding["task_id"]
+        == f"{FINAL_CI_REPRO_TASK_PREFIX}{command[7]}"
+    ):
+        repro_signature = command[7]
+    final_ci_repro_task = (
+        binding is not None
+        and binding["task_id"].startswith(FINAL_CI_REPRO_TASK_PREFIX)
+    )
+    if final_ci_repro_task and repro_signature is None:
+        raise RuntimeError(
+            "bound final-CI reproduction requires the canonical executor command"
+        )
     bwrap = None
-    if binding is not None and not trusted_dispatcher:
+    if binding is not None and not trusted_dispatcher and repro_signature is None:
         try:
             bwrap = str(system_executable("bwrap"))
         except TrustedExecutableError as exc:
@@ -289,10 +339,99 @@ try:
 
     child_env = dict(os.environ)
     child_env.pop("INTELFLO_JOB_TOKEN", None)
+    child_env.pop(FINAL_CI_REPRO_AUTH_FD_ENV, None)
     child_env["INTELFLO_JOB_NAME"] = job_name
     child_env["INTELFLO_JOB_EXECUTOR_PID"] = str(os.getpid())
     wrapped_command = command
-    if binding is not None and not trusted_dispatcher:
+    repro_authorization_key = None
+    repro_lifetime_token = None
+    repro_lifetime_listener = None
+    repro_lifetime_connections = []
+    repro_lifetime_thread = None
+    repro_lifetime_stopping = threading.Event()
+
+    def stop_repro_service(_signum, _frame) -> None:
+        repro_lifetime_stopping.set()
+        if repro_lifetime_listener is not None:
+            repro_lifetime_listener.close()
+        for connection in repro_lifetime_connections:
+            connection.close()
+
+    if repro_signature is not None:
+        repro_authorization_key = os.urandom(32)
+        repro_lifetime_token = os.urandom(32)
+        repro_lifetime_name = f"@intelflo-repro-{os.urandom(16).hex()}"
+        repro_lifetime_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        repro_lifetime_listener.bind("\0" + repro_lifetime_name[1:])
+        repro_lifetime_listener.listen(1)
+
+        def accept_repro_lifetime() -> None:
+            try:
+                connection, _ = repro_lifetime_listener.accept()
+                supplied = b""
+                while len(supplied) < len(repro_lifetime_token):
+                    chunk = connection.recv(len(repro_lifetime_token) - len(supplied))
+                    if not chunk:
+                        break
+                    supplied += chunk
+                if not hmac.compare_digest(supplied, repro_lifetime_token):
+                    connection.close()
+                    return
+                repro_lifetime_connections.append(connection)
+                if repro_lifetime_stopping.is_set():
+                    connection.close()
+            except OSError:
+                return
+
+        repro_lifetime_thread = threading.Thread(
+            target=accept_repro_lifetime,
+            name="repro-lifetime-authority",
+            daemon=True,
+        )
+        repro_lifetime_thread.start()
+        signal.signal(signal.SIGTERM, stop_repro_service)
+        try:
+            systemd_run = str(system_executable("systemd-run"))
+        except TrustedExecutableError as exc:
+            raise RuntimeError(
+                "bound final-CI reproduction requires protected systemd-run"
+            ) from exc
+        protected_authority_root = job_dir.resolve().parent
+        if repro_connect_guard.is_symlink() or not repro_connect_guard.is_file():
+            raise RuntimeError("bound final-CI reproduction connect guard is unavailable")
+        service_environment = [
+            f"--setenv={name}"
+            for name in sorted(child_env)
+            if name not in {
+                "DBUS_SESSION_BUS_ADDRESS",
+                "XDG_RUNTIME_DIR",
+                "INTELFLO_JOB_EXECUTOR_PID",
+            }
+        ]
+        wrapped_command = [
+            systemd_run,
+            "--user",
+            "--wait",
+            "--collect",
+            "--quiet",
+            "--pipe",
+            "--expand-environment=no",
+            "--service-type=exec",
+            "--property=KillMode=control-group",
+            f"--working-directory={os.getcwd()}",
+            *service_environment,
+            "--setenv=DBUS_SESSION_BUS_ADDRESS=",
+            "--setenv=XDG_RUNTIME_DIR=",
+            f"--setenv={FINAL_CI_REPRO_AUTH_FD_ENV}=0",
+            f"--setenv={FINAL_CI_REPRO_AUTHORITY_ROOT_ENV}={protected_authority_root}",
+            str(sys.executable),
+            str(repro_connect_guard),
+            "--lifetime-socket",
+            repro_lifetime_name,
+            "--",
+            *command,
+        ]
+    if binding is not None and not trusted_dispatcher and repro_signature is None:
         assert bwrap is not None
         # Keep the delegated command's normal host view, but turn every
         # ancestor of the job collection into a mount point before making the
@@ -330,16 +469,41 @@ try:
             "--",
             *command,
         ]
-    completed = subprocess.run(
-        wrapped_command,
-        check=False,
-        stdin=subprocess.DEVNULL,
-        stdout=log,
-        stderr=subprocess.STDOUT,
-        env=child_env,
-        close_fds=True,
-    )
+    run_arguments = {
+        "check": False,
+        "stdout": log,
+        "stderr": subprocess.STDOUT,
+        "env": child_env,
+        "close_fds": True,
+    }
+    if repro_authorization_key is None:
+        run_arguments["stdin"] = subprocess.DEVNULL
+    else:
+        run_arguments["input"] = repro_authorization_key + repro_lifetime_token
+    # A same-account child must not be able to reopen the supervisor's held
+    # authority or sealing descriptors through /proc.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    try:
+        completed = subprocess.run(wrapped_command, **run_arguments)
+    finally:
+        if repro_lifetime_listener is not None:
+            repro_lifetime_listener.close()
+        for connection in repro_lifetime_connections:
+            connection.close()
+        if repro_lifetime_thread is not None:
+            repro_lifetime_thread.join(timeout=1)
     final_code = completed.returncode
+
+    for authority_path, authority_fd in authority_chain:
+        held = os.fstat(authority_fd)
+        current = os.stat(authority_path, follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            raise RuntimeError(
+                "durable job authority path changed during execution"
+            )
 
     if not held_path_matches("pid", pid_fd):
         raise RuntimeError("launched job PID authority changed during execution")
@@ -369,6 +533,30 @@ try:
             raise RuntimeError(
                 f"authoritative terminal artifact is unreadable: {exc}"
             ) from exc
+        if repro_authorization_key is not None:
+            if not isinstance(terminal, dict):
+                raise RuntimeError(
+                    "final-CI reproduction terminal authorization is invalid"
+                )
+            authorization = terminal.get("job_authorization_hmac_sha256")
+            unsigned_terminal = dict(terminal)
+            unsigned_terminal.pop("job_authorization_hmac_sha256", None)
+            expected_authorization = hmac.new(
+                repro_authorization_key,
+                json.dumps(
+                    unsigned_terminal,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            if not isinstance(authorization, str) or not hmac.compare_digest(
+                authorization, expected_authorization
+            ):
+                raise RuntimeError(
+                    "final-CI reproduction terminal authorization is invalid"
+                )
         if not isinstance(terminal, dict) or terminal.get("task_id") != binding["task_id"]:
             raise RuntimeError("terminal artifact task_id does not match the job binding")
         status = terminal.get("status")
@@ -435,6 +623,11 @@ finally:
                 os.close(descriptor)
             except OSError:
                 pass
+    for _, descriptor in authority_chain:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
     os.close(directory_fd)
     log.close()
 
@@ -508,6 +701,9 @@ PY
 			die "could not persist delivery-run job binding"
 		fi
 	fi
+	if [ "${HOLD_AUTHORITY_FOR_RUN:-0}" = "1" ]; then
+		exec {RUN_AUTHORITY_FD}<"$dir" || die "cannot hold job authority for run"
+	fi
 
 	# setsid detaches from the agent's shell session, so the job survives the
 	# exec_command timeout that would otherwise orphan or kill it.
@@ -515,6 +711,7 @@ PY
 		"$JOB_SCRIPT" _execute "$dir" "$terminal_artifact" -- "$@" \
 		</dev/null >/dev/null 2>&1 &
 	local pid=$!
+	RUN_EXECUTOR_PID="$pid"
 	printf '%s\n' "$pid" >"$dir/pid"
 	disown "$pid" 2>/dev/null || true
 
@@ -546,6 +743,7 @@ cmd_wait() {
 	shift || true
 	validate_name "$name"
 	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL" fast_cadence=""
+	local authority_fd="" expected_pid=""
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 		--timeout)
@@ -560,6 +758,14 @@ cmd_wait() {
 			fast_cadence="${2:-}"
 			shift 2
 			;;
+		--authority-fd)
+			authority_fd="${2:-}"
+			shift 2
+			;;
+		--expected-pid)
+			expected_pid="${2:-}"
+			shift 2
+			;;
 		*) die "unknown option '$1'" ;;
 		esac
 	done
@@ -568,12 +774,21 @@ cmd_wait() {
 	warn_short_timeout "$timeout" "$fast_cadence" "wait"
 
 	local dir
-	dir="$(job_path "$name")" || return $?
+	if [ -n "$authority_fd" ]; then
+		[[ "$authority_fd" =~ ^[0-9]+$ ]] || die "internal authority fd is invalid"
+		[[ "$expected_pid" =~ ^[1-9][0-9]*$ ]] || die "internal executor pid is invalid"
+		dir="/proc/$$/fd/$authority_fd"
+	else
+		dir="$(job_path "$name")" || return $?
+	fi
 	[ -d "$dir" ] || die "no such job '$name' (try 'job.sh list')"
 
 	# Local sleep loop: cheap (no model round-trip), unlike write_stdin polling.
+	# The launched PID is the completion authority for an internal run. Do not
+	# trust an early exit_code pathname that the same-account command can create;
+	# the noninteractive parent reaps the detached executor after it terminates.
 	local waited=0
-	while job_running "$dir"; do
+	while { if [ -n "$expected_pid" ]; then kill -0 "$expected_pid" 2>/dev/null; else job_running "$dir"; fi; }; do
 		if [ "$waited" -ge "$timeout" ]; then
 			# Re-waiting at the same too-short timeout rebuilds the poll loop
 			# this tool exists to remove, so suggest a concrete larger value
@@ -587,7 +802,7 @@ cmd_wait() {
 			fi
 			suggest=$((elapsed * 2))
 			[ "$suggest" -lt 60 ] && suggest=60
-			echo "job '$name' still running after ${timeout}s (alive ${elapsed}s, pid $(cat "$dir/pid" 2>/dev/null))" >&2
+			echo "job '$name' still running after ${timeout}s (alive ${elapsed}s, pid ${expected_pid:-$(cat "$dir/pid" 2>/dev/null)})" >&2
 			echo "--- last $tail_lines log lines ---" >&2
 			tail -n "$tail_lines" "$dir/log" >&2 2>/dev/null || true
 			echo "Do NOT re-wait at --timeout $timeout; that is a poll loop. Use:" >&2
@@ -660,6 +875,8 @@ cmd_run() {
 	shift || true
 	validate_name "$name"
 	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL"
+	local secure_repro_run=0
+	local bound_task_id="" bound_terminal_artifact=""
 	local -a binding_args=()
 	while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
 		case "$1" in
@@ -673,6 +890,8 @@ cmd_run() {
 			;;
 		--run-id | --task-id | --terminal-artifact)
 			[ "$#" -ge 2 ] || die "$1 requires a value"
+			[ "$1" != "--task-id" ] || bound_task_id="${2:-}"
+			[ "$1" != "--terminal-artifact" ] || bound_terminal_artifact="${2:-}"
 			binding_args+=("$1" "${2:-}")
 			shift 2
 			;;
@@ -681,8 +900,36 @@ cmd_run() {
 	done
 	[ "${1:-}" = "--" ] || die "expected '--' before the command"
 	shift
+	if [ "$#" -eq 10 ] &&
+		[[ "$bound_task_id" == final-ci-repro:* ]] &&
+		[ "$(realpath -e -- "$(command -v -- "${1:-}" 2>/dev/null)" 2>/dev/null)" = "$(realpath -e -- "$(command -v python3)" 2>/dev/null)" ] &&
+		[ ! -L "${2:-}" ] &&
+		[ "$(realpath -e -- "${2:-}" 2>/dev/null)" = "$REPO_ROOT/scripts/util/final_ci_gate.py" ] &&
+		[ "${3:-}" = "--pr" ] && [[ "${4:-}" =~ ^[1-9][0-9]*$ ]] &&
+		[ "${5:-}" = "--repo" ] && [ "$(realpath -m -- "${6:-}")" = "$REPO_ROOT" ] &&
+		[ "${7:-}" = "--execute-repro" ] && [[ "${8:-}" =~ ^[0-9a-f]{64}$ ]] &&
+		[ "$bound_task_id" = "final-ci-repro:${8:-}" ] &&
+		[ "${9:-}" = "--terminal-artifact" ] &&
+		[ "$(realpath -m -- "${10:-}")" = "$(realpath -m -- "$bound_terminal_artifact")" ]; then
+		secure_repro_run=1
+	fi
+	HOLD_AUTHORITY_FOR_RUN=1
 	cmd_start "$name" "${binding_args[@]}" -- "$@" >/dev/null || return $?
-	cmd_wait "$name" --timeout "$timeout" --tail "$tail_lines"
+	HOLD_AUTHORITY_FOR_RUN=0
+	cmd_wait "$name" --timeout "$timeout" --tail "$tail_lines" \
+		--authority-fd "$RUN_AUTHORITY_FD" --expected-pid "$RUN_EXECUTOR_PID"
+	local result=$?
+	if [ "$result" -eq 124 ] && [ "$secure_repro_run" -eq 1 ]; then
+		# A bound reproduction cannot be resumed after its caller releases the
+		# held directory authority. Killing the executor closes the authenticated
+		# lifetime channel, which makes the transient service kill its whole group.
+		kill -TERM "$RUN_EXECUTOR_PID" 2>/dev/null || true
+		wait "$RUN_EXECUTOR_PID" 2>/dev/null || true
+		while kill -0 "$RUN_EXECUTOR_PID" 2>/dev/null; do sleep 0.1; done
+	fi
+	exec {RUN_AUTHORITY_FD}<&-
+	RUN_EXECUTOR_PID=""
+	return "$result"
 }
 
 cmd_status() {
