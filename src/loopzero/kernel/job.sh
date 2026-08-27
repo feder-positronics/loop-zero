@@ -43,12 +43,18 @@ export PYTHONSAFEPATH=1
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 JOB_WORKTREE="${INTELFLO_DELIVERY_ROOT:-$REPO_ROOT}"
-JOB_DIR="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-root)" || exit $?
+PYTHON_BIN="/usr/bin/python3"
+[ -x "$PYTHON_BIN" ] || {
+	echo "job.sh: trusted Python interpreter is unavailable at $PYTHON_BIN" >&2
+	exit 2
+}
+JOB_DIR="$("$PYTHON_BIN" "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-root)" || exit $?
 JOB_ROOTS=("$JOB_DIR")
 DEFAULT_TIMEOUT="${INTELFLO_JOB_TIMEOUT:-1800}"
 DEFAULT_TAIL=40
 RUN_AUTHORITY_FD=""
 RUN_EXECUTOR_PID=""
+RUN_INTERNAL_WAIT=0
 
 usage() {
 	sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -98,9 +104,219 @@ executor_matches() {
 		[ "$(cat "$dir/pid" 2>/dev/null || true)" = "$executor_pid" ]
 }
 
+job_lease_path() {
+	local name="$1"
+	"$PYTHON_BIN" "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-job-lease "$name"
+}
+
+# Open and acquire the stable per-name lease into the caller-named descriptor
+# variable.  The Python lock operation acts on the shell's inherited open-file
+# description, so the lock remains held after the helper exits.
+acquire_job_lease() {
+	local name="$1" output_variable="$2" lease_path held_fd
+	lease_path="$(job_lease_path "$name")" || return $?
+	exec {held_fd}<>"$lease_path" || return 1
+	if ! "$PYTHON_BIN" - "$held_fd" "$lease_path" <<'PY'
+import fcntl
+import os
+import sys
+import time
+
+descriptor = int(sys.argv[1])
+path = sys.argv[2]
+deadline = time.monotonic() + 0.1
+while True:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            raise SystemExit(1)
+        time.sleep(0.005)
+    except OSError:
+        raise SystemExit(1)
+try:
+    held = os.fstat(descriptor)
+    current = os.stat(path, follow_symlinks=False)
+except OSError:
+    raise SystemExit(1)
+if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+    raise SystemExit(1)
+PY
+	then
+		eval "exec ${held_fd}>&-"
+		return 1
+	fi
+	printf -v "$output_variable" '%s' "$held_fd"
+}
+
+close_job_lease() {
+	local lease_fd="$1"
+	[ -n "$lease_fd" ] || return 0
+	eval "exec ${lease_fd}>&-"
+}
+
+write_waited_marker() {
+	local dir="$1"
+	"$PYTHON_BIN" - "$dir" <<'PY'
+import os
+import stat
+import sys
+
+directory_flags = os.O_RDONLY
+if hasattr(os, "O_DIRECTORY"):
+    directory_flags |= os.O_DIRECTORY
+try:
+    directory_fd = os.open(sys.argv[1], directory_flags)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    marker_fd = os.open("waited", flags, 0o600, dir_fd=directory_fd)
+    marker = os.fstat(marker_fd)
+    if not stat.S_ISREG(marker.st_mode) or marker.st_uid != os.getuid():
+        raise OSError("invalid waited marker")
+    os.fchmod(marker_fd, 0o600)
+except OSError:
+    raise SystemExit(1)
+finally:
+    if "marker_fd" in locals():
+        os.close(marker_fd)
+    if "directory_fd" in locals():
+        os.close(directory_fd)
+PY
+}
+
+job_reaped() {
+	local dir="$1"
+	if [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; then
+		[ -f "$dir/reconciliation.json" ] && [ ! -L "$dir/reconciliation.json" ] || return 1
+		"$PYTHON_BIN" - "$dir/binding.json" "$dir/reconciliation.json" <<'PY' >/dev/null 2>&1
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+binding_path = Path(sys.argv[1])
+try:
+    binding_bytes = binding_path.read_bytes()
+    binding = json.loads(binding_bytes)
+    receipt = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if not isinstance(binding, dict) or not isinstance(receipt, dict):
+    raise SystemExit(1)
+for key in ("name", "run_id", "task_id"):
+    if receipt.get(key) != binding.get(key):
+        raise SystemExit(1)
+schema = receipt.get("schema_version")
+if schema in {"job-reconciliation-v1", "job-reconciliation-v2"}:
+    raise SystemExit(0)
+required = {
+    "schema_version", "name", "run_id", "task_id", "failure_class",
+    "reason", "binding_sha256",
+}
+if (
+    schema != "job-supervisor-loss-v1"
+    or set(receipt) != required
+    or receipt.get("failure_class") != "supervisor-loss"
+    or receipt.get("reason") not in {"startup-failure", "supervisor-loss"}
+    or receipt.get("binding_sha256") != hashlib.sha256(binding_bytes).hexdigest()
+):
+    raise SystemExit(1)
+PY
+		return $?
+	fi
+	if [ -f "$dir/waited" ] && [ ! -L "$dir/waited" ]; then
+		return 0
+	fi
+	return 1
+}
+
+terminate_job_lease_owner() {
+	local pid_path="$1" identity_path="$2" lease_path="$3"
+	"$PYTHON_BIN" - "$pid_path" "$identity_path" "$lease_path" <<'PY'
+import json
+import os
+import re
+import signal
+import stat
+import sys
+from pathlib import Path
+
+pid_path = Path(sys.argv[1])
+identity_path = Path(sys.argv[2])
+lease_path = Path(sys.argv[3])
+try:
+    pid_text = pid_path.read_text(encoding="ascii").strip()
+    if re.fullmatch(r"[1-9][0-9]*", pid_text) is None:
+        raise OSError("invalid pid")
+    pid = int(pid_text)
+    if identity_path.is_symlink():
+        raise OSError("invalid pid identity")
+    identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    lease = lease_path.lstat()
+    if lease_path.is_symlink() or not stat.S_ISREG(lease.st_mode):
+        raise OSError("invalid lease")
+    required = {
+        "schema_version", "name", "pid", "starttime", "lease_dev", "lease_ino"
+    }
+    if (
+        not isinstance(identity, dict)
+        or set(identity) != required
+        or identity.get("schema_version") != "job-pid-identity-v1"
+        or identity.get("name") != pid_path.parent.name
+        or identity.get("pid") != pid
+        or not isinstance(identity.get("starttime"), str)
+        or re.fullmatch(r"[0-9]+", identity["starttime"]) is None
+        or identity.get("lease_dev") != lease.st_dev
+        or identity.get("lease_ino") != lease.st_ino
+    ):
+        raise OSError("pid identity does not match job authority")
+    pidfd = os.pidfd_open(pid)
+    stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rpartition(") ")[2].split()
+    if len(stat_fields) < 20 or stat_fields[19] != identity["starttime"]:
+        raise OSError("pid identity is stale")
+except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(1)
+
+try:
+    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+except OSError:
+    raise SystemExit(1)
+finally:
+    os.close(pidfd)
+PY
+}
+
+# Advisory locks are usable only when an independent open-file description is
+# excluded by the held lease.  Run this before publishing a v2 binding.
+prove_job_lease_exclusion() {
+	local lease_path="$1"
+	"$PYTHON_BIN" - "$lease_path" <<'PY'
+import fcntl
+import os
+import sys
+
+flags = os.O_RDWR
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    descriptor = os.open(sys.argv[1], flags)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        raise SystemExit(0)
+    finally:
+        os.close(descriptor)
+except OSError:
+    raise SystemExit(2)
+raise SystemExit(1)
+PY
+}
+
 cmd_execute() {
-	local dir="${1:-}" source_artifact="${2:-}"
-	shift 2 || true
+	local dir="${1:-}" source_artifact="${2:-}" lease_fd="${3:-}"
+	shift 3 || true
 	[ "${1:-}" = "--" ] || die "internal executor expected '--' before the command"
 	shift
 	local name="${INTELFLO_JOB_NAME:-}"
@@ -110,8 +326,9 @@ cmd_execute() {
 	# Replace this shell with the supervisor so the recorded PID is also the
 	# process that holds every sealing descriptor. The wrapped command receives
 	# no token, claim file, directory descriptor, or pending-artifact descriptor.
-	exec python3 - "$dir" "$source_artifact" "$name" "$REPO_ROOT" "$@" <<'PY'
+	exec "$PYTHON_BIN" - "$dir" "$source_artifact" "$name" "$REPO_ROOT" "$lease_fd" "$@" <<'PY'
 import ctypes
+import fcntl
 import hashlib
 import hmac
 import json
@@ -133,10 +350,20 @@ job_dir = Path(sys.argv[1])
 source_path = Path(sys.argv[2])
 job_name = sys.argv[3]
 repo_root = Path(sys.argv[4]).resolve()
-command = sys.argv[5:]
+lease_fd = int(sys.argv[5])
+command = sys.argv[6:]
 FINAL_CI_REPRO_TASK_PREFIX = "final-ci-repro:"
 FINAL_CI_REPRO_AUTH_FD_ENV = "INTELFLO_FINAL_CI_REPRO_AUTH_FD"
 FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = "INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT"
+
+try:
+    fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.fstat(lease_fd)
+except (BlockingIOError, OSError) as exc:
+    raise SystemExit(f"job lifecycle lease handoff is invalid: {exc}") from exc
+# The supervisor retains the lease, but the wrapped child and every descendant
+# must receive no descriptor capable of extending the lifecycle authority.
+fcntl.fcntl(lease_fd, fcntl.F_SETFD, fcntl.FD_CLOEXEC)
 
 directory_flags = os.O_RDONLY
 if hasattr(os, "O_DIRECTORY"):
@@ -266,6 +493,30 @@ try:
         raw_envelope = binding.get("terminal_envelope")
         if not isinstance(raw_envelope, str) or Path(raw_envelope).resolve() != expected_envelope:
             raise RuntimeError("terminal envelope does not match the job binding")
+
+    lease_identity = os.fstat(lease_fd)
+    process_stat = Path(f"/proc/{os.getpid()}/stat").read_text(
+        encoding="ascii"
+    ).rpartition(") ")[2].split()
+    if len(process_stat) < 20:
+        raise RuntimeError("executor process identity is unreadable")
+    pid_identity = {
+        "schema_version": "job-pid-identity-v1",
+        "name": job_name,
+        "pid": os.getpid(),
+        "starttime": process_stat[19],
+        "lease_dev": lease_identity.st_dev,
+        "lease_ino": lease_identity.st_ino,
+    }
+    pid_identity_fd = reserve("pid-identity.json")
+    try:
+        write_all(
+            pid_identity_fd,
+            (json.dumps(pid_identity, sort_keys=True) + "\n").encode("utf-8"),
+        )
+        os.fsync(directory_fd)
+    finally:
+        os.close(pid_identity_fd)
 
     dispatcher = repo_root / "scripts" / "util" / "agent_dispatch.py"
     final_ci_gate = repo_root / "scripts" / "util" / "final_ci_gate.py"
@@ -617,7 +868,7 @@ finally:
         except BaseException as exc:
             report(f"terminal exit code could not be sealed: {exc}")
             final_code = 125
-    for descriptor in (pid_fd, binding_fd, exit_fd, envelope_fd, digest_fd):
+    for descriptor in (pid_fd, binding_fd, exit_fd, envelope_fd, digest_fd, lease_fd):
         if descriptor is not None:
             try:
                 os.close(descriptor)
@@ -664,14 +915,22 @@ cmd_start() {
 		terminal_artifact="$(realpath -m -- "$terminal_artifact")"
 	fi
 
-	local dir
+	local dir lease_fd="" lease_path
 	dir="$(job_path "$name")" || return $?
-	if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid" 2>/dev/null)" 2>/dev/null; then
-		die "job '$name' is already running (pid $(cat "$dir/pid")); use 'wait' or pick another name"
+	if ! acquire_job_lease "$name" lease_fd; then
+		die "job '$name' is already running under an active launcher or supervisor; use 'wait' or pick another name"
+	fi
+	lease_path="$(job_lease_path "$name")" || die "cannot resolve stable job lease"
+	if ! prove_job_lease_exclusion "$lease_path"; then
+		die "job '$name' cannot prove independent lifecycle-lock exclusion"
+	fi
+	if [ -d "$dir" ] && ! job_reaped "$dir" &&
+		{ [ -f "$dir/binding.json" ] || [ -f "$dir/pid" ] || [ -f "$dir/exit_code" ]; }; then
+		die "job '$name' has an unreaped result; use 'wait' or 'reconcile' before reusing its name"
 	fi
 	rm -rf "$dir"
 	local created_dir
-	created_dir="$(python3 "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-job-directory "$name")" ||
+	created_dir="$("$PYTHON_BIN" "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-job-directory "$name")" ||
 		die "cannot create protected job directory"
 	[ "$created_dir" = "$dir" ] || die "job authority path changed during creation"
 
@@ -681,7 +940,7 @@ cmd_start() {
 	date -u '+%Y-%m-%dT%H:%M:%SZ' >"$dir/started_at"
 	: >"$dir/log"
 	if [ -n "$run_id" ]; then
-		python3 - "$dir/binding.json" "$name" "$run_id" "$task_id" "$dir/terminal-envelope.json" <<'PY'
+		"$PYTHON_BIN" - "$dir/binding.json" "$name" "$run_id" "$task_id" "$dir/terminal-envelope.json" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -708,12 +967,13 @@ PY
 	# setsid detaches from the agent's shell session, so the job survives the
 	# exec_command timeout that would otherwise orphan or kill it.
 	setsid env INTELFLO_JOB_NAME="$name" \
-		"$JOB_SCRIPT" _execute "$dir" "$terminal_artifact" -- "$@" \
+		"$JOB_SCRIPT" _execute "$dir" "$terminal_artifact" "$lease_fd" -- "$@" \
 		</dev/null >/dev/null 2>&1 &
 	local pid=$!
 	RUN_EXECUTOR_PID="$pid"
 	printf '%s\n' "$pid" >"$dir/pid"
 	disown "$pid" 2>/dev/null || true
+	close_job_lease "$lease_fd"
 
 	echo "started job '$name' (pid $pid)"
 	echo "  log:  $dir/log"
@@ -722,20 +982,60 @@ PY
 
 job_running() {
 	local dir="$1"
-	local pid
-	pid="$(cat "$dir/pid" 2>/dev/null || echo '')"
-	if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+	local name lease_path lease_fd=""
+	name="$(basename "$dir")"
+	lease_path="$(dirname "$dir")/.leases/$name.lock"
+	# A read-only probe must neither create the lifecycle authority nor take its
+	# exclusive owner lock.  Shared acquisition succeeds only when no launcher or
+	# supervisor holds the exclusive lease.  Lifecycle writers tolerate this
+	# sub-millisecond reader through acquire_job_lease's bounded retry.
+	if [ ! -e "$lease_path" ]; then
+		# Pre-lease state from an upgrade or external authority loss is ambiguous
+		# when durable live-job evidence exists, so status fails closed as active.
+		{ [ -f "$dir/pid" ] && [ ! -L "$dir/pid" ]; } ||
+			{ [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; } || return 1
 		return 0
 	fi
-	return 1
+	[ -f "$lease_path" ] && [ ! -L "$lease_path" ] && [ -O "$lease_path" ] || return 0
+	exec {lease_fd}<>"$lease_path" || return 0
+	if "$PYTHON_BIN" - "$lease_fd" <<'PY'
+import fcntl
+import sys
+
+descriptor = int(sys.argv[1])
+try:
+    fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+except (BlockingIOError, OSError):
+    raise SystemExit(1)
+fcntl.flock(descriptor, fcntl.LOCK_UN)
+PY
+	then
+		close_job_lease "$lease_fd"
+		return 1
+	fi
+	close_job_lease "$lease_fd"
+	return 0
+}
+
+missing_lease_terminal_hint() {
+	local dir="$1" name="$2" lease_path
+	lease_path="$(dirname "$dir")/.leases/$name.lock"
+	[ ! -e "$lease_path" ] || return 1
+	{ [ -f "$dir/exit_code" ] && [ ! -L "$dir/exit_code" ]; } ||
+		{ [ -f "$dir/waited" ] && [ ! -L "$dir/waited" ]; } || return 1
+	if [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; then
+		echo "lifecycle lease is missing despite terminal evidence; run 'reconcile $name'"
+	else
+		echo "lifecycle lease is missing despite terminal evidence; inspect the job, then clean --all if the result is not needed"
+	fi
 }
 
 emit_result() {
-	local dir="$1" name="$2" tail_lines="$3" code="$4"
+	local dir="$1" name="$2" tail_lines="$3" code="$4" display_dir="${5:-$1}"
 	echo "job '$name' finished with exit code $code"
 	echo "--- last $tail_lines log lines ---"
 	tail -n "$tail_lines" "$dir/log" 2>/dev/null || true
-	echo "--- end of log ($(wc -l <"$dir/log" 2>/dev/null || echo 0) lines total, full log: $dir/log) ---"
+	echo "--- end of log ($(wc -l <"$dir/log" 2>/dev/null || echo 0) lines total, full log: $display_dir/log) ---"
 }
 
 cmd_wait() {
@@ -773,15 +1073,49 @@ cmd_wait() {
 	case "$tail_lines" in '' | *[!0-9]*) die "--tail must be a whole number of lines" ;; esac
 	warn_short_timeout "$timeout" "$fast_cadence" "wait"
 
-	local dir
-	if [ -n "$authority_fd" ]; then
+	local dir waited_generation="" observed_job_fd="" display_dir
+	if [ -n "$authority_fd" ] || [ -n "$expected_pid" ]; then
 		[[ "$authority_fd" =~ ^[0-9]+$ ]] || die "internal authority fd is invalid"
 		[[ "$expected_pid" =~ ^[1-9][0-9]*$ ]] || die "internal executor pid is invalid"
+		# These arguments are a same-shell capability passed only by cmd_run;
+		# public callers cannot mint directory authority by naming an open FD.
+		[ "$RUN_INTERNAL_WAIT" -eq 1 ] &&
+			[ "$authority_fd" = "$RUN_AUTHORITY_FD" ] &&
+			[ "$expected_pid" = "$RUN_EXECUTOR_PID" ] ||
+			die "internal wait authority is unavailable"
 		dir="/proc/$$/fd/$authority_fd"
 	else
 		dir="$(job_path "$name")" || return $?
 	fi
 	[ -d "$dir" ] || die "no such job '$name' (try 'job.sh list')"
+	if [ -n "$authority_fd" ]; then
+		display_dir="$(job_path "$name")" || return $?
+	else
+		display_dir="$dir"
+	fi
+	if [ -z "$authority_fd" ]; then
+		exec {observed_job_fd}<"$dir" || die "cannot pin job '$name' generation"
+		waited_generation="$("$PYTHON_BIN" - "$observed_job_fd" "$dir" <<'PY'
+import os
+import stat
+import sys
+
+descriptor = int(sys.argv[1])
+path = sys.argv[2]
+try:
+    held = os.fstat(descriptor)
+    current = os.stat(path, follow_symlinks=False)
+except OSError:
+    raise SystemExit(1)
+if not stat.S_ISDIR(held.st_mode) or (held.st_dev, held.st_ino) != (
+    current.st_dev,
+    current.st_ino,
+):
+    raise SystemExit(1)
+print(f"{held.st_dev}:{held.st_ino}")
+PY
+)" || die "cannot identify job '$name' generation"
+	fi
 
 	# Local sleep loop: cheap (no model round-trip), unlike write_stdin polling.
 	# The launched PID is the completion authority for an internal run. Do not
@@ -805,6 +1139,7 @@ cmd_wait() {
 			echo "job '$name' still running after ${timeout}s (alive ${elapsed}s, pid ${expected_pid:-$(cat "$dir/pid" 2>/dev/null)})" >&2
 			echo "--- last $tail_lines log lines ---" >&2
 			tail -n "$tail_lines" "$dir/log" >&2 2>/dev/null || true
+			echo "full log: $display_dir/log" >&2
 			echo "Do NOT re-wait at --timeout $timeout; that is a poll loop. Use:" >&2
 			echo "  scripts/util/job.sh wait $name --timeout $suggest" >&2
 			return 124
@@ -813,12 +1148,39 @@ cmd_wait() {
 		waited=$((waited + 2))
 	done
 
-	local code
-	code="$(cat "$dir/exit_code" 2>/dev/null || echo 1)"
-	# Mark the result as read so `check` can distinguish a reaped job from one
-	# whose exit code nobody ever looked at.
-	: >"$dir/waited"
-	emit_result "$dir" "$name" "$tail_lines" "$code"
+	local wait_lease_fd="" current_dir current_generation code=1
+	if [ -z "$authority_fd" ]; then
+		if ! acquire_job_lease "$name" wait_lease_fd; then
+			die "job '$name' lifecycle changed before its result could be reaped; retry wait"
+		fi
+		current_dir="$(job_path "$name")" || {
+			close_job_lease "$wait_lease_fd"
+			return 2
+		}
+		current_generation="$(stat -Lc '%d:%i' -- "$current_dir" 2>/dev/null || true)"
+		if [ -z "$current_generation" ] || [ "$current_generation" != "$waited_generation" ] ||
+			[ "$(stat -Lc '%d:%i' -- "/proc/$$/fd/$observed_job_fd" 2>/dev/null || true)" != "$waited_generation" ]; then
+			close_job_lease "$wait_lease_fd"
+			die "job '$name' generation changed before its result could be reaped; retry wait"
+		fi
+		display_dir="$current_dir"
+		dir="/proc/$$/fd/$observed_job_fd"
+	fi
+	if [ -f "$dir/exit_code" ] && [ ! -L "$dir/exit_code" ]; then
+		code="$(cat "$dir/exit_code" 2>/dev/null || echo 1)"
+		# Only a sealed terminal may be reaped by waiting.  Supervisor loss stays
+		# visible and unreaped until reconcile seals its typed recovery receipt.
+		write_waited_marker "$dir" || die "job '$name' waited marker is unsafe"
+	else
+		if [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; then
+			echo "job '$name' has no sealed exit code; run 'reconcile $name' to classify supervisor loss" >&2
+		else
+			echo "job '$name' has no sealed exit code or delivery binding; inspect its log, then clean --all if the result is not needed" >&2
+		fi
+	fi
+	emit_result "$dir" "$name" "$tail_lines" "$code" "$display_dir"
+	close_job_lease "$wait_lease_fd"
+	[ -z "$observed_job_fd" ] || eval "exec ${observed_job_fd}>&-"
 	return "$code"
 }
 
@@ -902,7 +1264,7 @@ cmd_run() {
 	shift
 	if [ "$#" -eq 10 ] &&
 		[[ "$bound_task_id" == final-ci-repro:* ]] &&
-		[ "$(realpath -e -- "$(command -v -- "${1:-}" 2>/dev/null)" 2>/dev/null)" = "$(realpath -e -- "$(command -v python3)" 2>/dev/null)" ] &&
+		[ "$(realpath -e -- "$(command -v -- "${1:-}" 2>/dev/null)" 2>/dev/null)" = "$(realpath -e -- "$PYTHON_BIN" 2>/dev/null)" ] &&
 		[ ! -L "${2:-}" ] &&
 		[ "$(realpath -e -- "${2:-}" 2>/dev/null)" = "$REPO_ROOT/scripts/util/final_ci_gate.py" ] &&
 		[ "${3:-}" = "--pr" ] && [[ "${4:-}" =~ ^[1-9][0-9]*$ ]] &&
@@ -916,9 +1278,11 @@ cmd_run() {
 	HOLD_AUTHORITY_FOR_RUN=1
 	cmd_start "$name" "${binding_args[@]}" -- "$@" >/dev/null || return $?
 	HOLD_AUTHORITY_FOR_RUN=0
+	RUN_INTERNAL_WAIT=1
 	cmd_wait "$name" --timeout "$timeout" --tail "$tail_lines" \
 		--authority-fd "$RUN_AUTHORITY_FD" --expected-pid "$RUN_EXECUTOR_PID"
 	local result=$?
+	RUN_INTERNAL_WAIT=0
 	if [ "$result" -eq 124 ] && [ "$secure_repro_run" -eq 1 ]; then
 		# A bound reproduction cannot be resumed after its caller releases the
 		# held directory authority. Killing the executor closes the authenticated
@@ -939,7 +1303,9 @@ cmd_status() {
 	dir="$(job_path "$name")" || return $?
 	[ -d "$dir" ] || die "no such job '$name'"
 	if job_running "$dir"; then
-		echo "job '$name': RUNNING (pid $(cat "$dir/pid" 2>/dev/null), started $(cat "$dir/started_at" 2>/dev/null))"
+		local hint=""
+		hint="$(missing_lease_terminal_hint "$dir" "$name" || true)"
+		echo "job '$name': RUNNING (pid $(cat "$dir/pid" 2>/dev/null), started $(cat "$dir/started_at" 2>/dev/null))${hint:+; $hint}"
 		return 0
 	fi
 	local code
@@ -1020,7 +1386,10 @@ cmd_check() {
 			if job_running "$dir"; then
 				running=$((running + 1))
 				echo "job '$name' is still RUNNING (pid $(cat "$dir/pid" 2>/dev/null))" >&2
-			elif [ ! -f "$dir/waited" ] && [ ! -f "$dir/reconciliation.json" ]; then
+				local hint=""
+				hint="$(missing_lease_terminal_hint "$dir" "$name" || true)"
+				[ -z "$hint" ] || echo "  $hint" >&2
+			elif ! job_reaped "$dir"; then
 				unreaped=$((unreaped + 1))
 				echo "job '$name' finished with exit $(cat "$dir/exit_code" 2>/dev/null || echo '?') but was never waited on" >&2
 			fi
@@ -1040,7 +1409,7 @@ cmd_binding_files() {
 	[ "${1:-}" = "--run-id" ] || die "binding-files requires --run-id <id>"
 	local run_id="${2:-}"
 	[[ "$run_id" =~ ^sr_[0-9a-f]{32}$ ]] || die "binding-files --run-id must match sr_<32 lowercase hex>"
-	python3 - "$run_id" "${JOB_ROOTS[@]}" <<'PY'
+	"$PYTHON_BIN" - "$run_id" "${JOB_ROOTS[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -1082,25 +1451,42 @@ cmd_reconcile() {
 	local name="${1:-}"
 	shift || true
 	validate_name "$name"
-	local dir
+	local dir lease_fd=""
 	dir="$(job_path "$name")" || return $?
+	# Avoid allocating a permanent per-name lease for a typo or unknown job.
+	# A concurrent start after this check owns the new job and this reconcile
+	# still fails without touching it.
+	[ -d "$dir" ] || die "no such job '$name'"
+	if ! acquire_job_lease "$name" lease_fd; then
+		die "job '$name' still has an active launcher or supervisor"
+	fi
+	# The directory and every durable terminal file are read only after the
+	# lifecycle lease is acquired; PID state alone is never terminal authority.
 	[ -d "$dir" ] || die "no such job '$name'"
 	[ ! -L "$dir" ] || die "job '$name' directory cannot be a symlink"
 	[ -f "$dir/binding.json" ] || die "job '$name' has no delivery-run binding"
 	[ ! -L "$dir/binding.json" ] || die "job '$name' binding cannot be a symlink"
-	if job_running "$dir"; then
-		die "job '$name' is still running"
-	fi
-	[ -f "$dir/exit_code" ] || die "job '$name' has no terminal exit code"
 	local binding_schema supplied_artifact="" primary_repo=""
-	binding_schema="$(python3 - "$dir/binding.json" <<'PY'
+	binding_schema="$("$PYTHON_BIN" - "$dir/binding.json" <<'PY'
 import json
+import os
+import stat
 import sys
-from pathlib import Path
 
 try:
-    binding = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError) as exc:
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(sys.argv[1], flags)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise SystemExit("job.sh: job binding is not a safe file")
+        with os.fdopen(os.dup(descriptor), "r", encoding="utf-8") as stream:
+            binding = json.load(stream)
+    finally:
+        os.close(descriptor)
+except (OSError, UnicodeError, json.JSONDecodeError) as exc:
     raise SystemExit(f"job.sh: invalid job binding: {exc}") from exc
 schema = binding.get("schema_version")
 if not isinstance(schema, str):
@@ -1135,10 +1521,13 @@ PY
 			die "reconcile --primary must name the canonical primary repository"
 		dispatch_root="$primary_repo/.audit/dispatch"
 	fi
-	python3 - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" <<'PY'
+	"$PYTHON_BIN" - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" <<'PY'
 import hashlib
+import errno
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 
@@ -1147,11 +1536,121 @@ supplied_artifact = sys.argv[2]
 exit_path = Path(sys.argv[3])
 receipt_path = Path(sys.argv[4])
 declared_dispatch_root = sys.argv[5]
+
+def read_safe_bytes(path: Path, label: str) -> bytes:
+    flags = os.O_RDONLY | os.O_NONBLOCK
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise SystemExit(f"job.sh: {label} cannot be a symlink") from exc
+        raise SystemExit(f"job.sh: {label} is unreadable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+            raise SystemExit(f"job.sh: {label} is not a safe file")
+        with os.fdopen(os.dup(descriptor), "rb") as stream:
+            return stream.read()
+    finally:
+        os.close(descriptor)
+
+def commit_receipt(serialized: str, conflict_message: str) -> None:
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    directory_fd = os.open(receipt_path.parent, directory_flags)
+    receipt_name = receipt_path.name
+    temporary_name = receipt_name + ".tmp"
+
+    def read_existing() -> bytes | None:
+        flags = os.O_RDONLY | os.O_NONBLOCK
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(receipt_name, flags, dir_fd=directory_fd)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise SystemExit(
+                    "job.sh: reconciliation path cannot be a symlink"
+                ) from exc
+            raise SystemExit("job.sh: reconciliation path is unreadable") from exc
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise SystemExit("job.sh: reconciliation path is not a safe file")
+            with os.fdopen(os.dup(descriptor), "rb") as stream:
+                return stream.read()
+        finally:
+            os.close(descriptor)
+
+    encoded = serialized.encode("utf-8")
+    try:
+        existing = read_existing()
+        if existing is not None:
+            if existing != encoded:
+                raise SystemExit(conflict_message)
+            return
+
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            temporary_fd = os.open(
+                temporary_name, flags, 0o600, dir_fd=directory_fd
+            )
+        except FileExistsError as exc:
+            metadata = os.stat(
+                temporary_name, dir_fd=directory_fd, follow_symlinks=False
+            )
+            if stat.S_ISLNK(metadata.st_mode):
+                raise SystemExit(
+                    "job.sh: reconciliation temporary path cannot be a symlink"
+                ) from exc
+            raise SystemExit(
+                "job.sh: reconciliation temporary path already exists"
+            ) from exc
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise SystemExit(
+                    "job.sh: reconciliation temporary path cannot be a symlink"
+                ) from exc
+            raise
+        try:
+            with os.fdopen(temporary_fd, "wb", closefd=False) as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(temporary_fd)
+
+        try:
+            os.link(
+                temporary_name,
+                receipt_name,
+                src_dir_fd=directory_fd,
+                dst_dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            os.fsync(directory_fd)
+        except FileExistsError:
+            existing = read_existing()
+            if existing != encoded:
+                raise SystemExit(conflict_message)
+        finally:
+            os.unlink(temporary_name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
 try:
-    binding = json.loads(binding_path.read_text(encoding="utf-8"))
-    exit_code = int(exit_path.read_text(encoding="utf-8").strip())
-except (OSError, ValueError, json.JSONDecodeError) as exc:
-    raise SystemExit(f"job.sh: authoritative terminal artifact is unreadable: {exc}")
+    binding_bytes = read_safe_bytes(binding_path, "job binding")
+    binding = json.loads(binding_bytes)
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"job.sh: job binding is unreadable: {exc}")
 schema = binding.get("schema_version")
 required_by_schema = {
     "job-binding-v1": {
@@ -1171,6 +1670,51 @@ if not isinstance(binding.get("run_id"), str) or re.fullmatch(r"sr_[0-9a-f]{32}"
 if not isinstance(binding.get("task_id"), str) or not binding["task_id"].strip():
     raise SystemExit("job.sh: job binding task_id is invalid")
 
+exit_code = None
+if exit_path.is_symlink():
+    raise SystemExit("job.sh: terminal exit code cannot be a symlink")
+if not exit_path.exists():
+    if schema != "job-binding-v2":
+        raise SystemExit("job.sh: legacy job has no terminal exit code")
+    envelope_path = binding_path.parent / "terminal-envelope.json"
+    digest_path = binding_path.parent / "terminal-envelope.sha256"
+    if envelope_path.is_symlink() or digest_path.is_symlink():
+        raise SystemExit(
+            "job.sh: durable terminal files cannot be symlinks"
+        )
+    envelope_exists = envelope_path.exists()
+    digest_exists = digest_path.exists()
+    if envelope_exists != digest_exists:
+        raise SystemExit(
+            "job.sh: unsealed job has conflicting partial durable terminal files"
+        )
+    if not envelope_exists:
+        receipt = {
+            "schema_version": "job-supervisor-loss-v1",
+            "name": binding["name"],
+            "run_id": binding["run_id"],
+            "task_id": binding["task_id"],
+            "failure_class": "supervisor-loss",
+            "reason": (
+                "startup-failure"
+                if not (binding_path.parent / "pid").exists()
+                else "supervisor-loss"
+            ),
+            "binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+        }
+        serialized = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        commit_receipt(
+            serialized,
+            "job.sh: existing job reconciliation conflicts with supervisor loss",
+        )
+        print(json.dumps(receipt, sort_keys=True))
+        raise SystemExit(0)
+else:
+    try:
+        exit_code = int(read_safe_bytes(exit_path, "terminal exit code").decode("utf-8").strip())
+    except (UnicodeError, ValueError) as exc:
+        raise SystemExit(f"job.sh: authoritative terminal artifact is unreadable: {exc}")
+
 envelope_path = None
 envelope_sha256 = None
 if schema == "job-binding-v1":
@@ -1182,7 +1726,9 @@ if schema == "job-binding-v1":
     if artifact_path.is_symlink():
         raise SystemExit("job.sh: terminal artifact cannot be a symlink")
     try:
-        artifact_bytes = artifact_path.read_bytes()
+        artifact_bytes = read_safe_bytes(
+            artifact_path, "authoritative terminal artifact"
+        )
         artifact = json.loads(artifact_bytes)
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"job.sh: authoritative terminal artifact is unreadable: {exc}") from exc
@@ -1199,8 +1745,10 @@ else:
     if envelope_path.is_symlink() or digest_path.is_symlink():
         raise SystemExit("job.sh: durable terminal envelope cannot be a symlink")
     try:
-        envelope_bytes = envelope_path.read_bytes()
-        recorded_digest = digest_path.read_text(encoding="ascii").strip()
+        envelope_bytes = read_safe_bytes(envelope_path, "durable terminal envelope")
+        recorded_digest = read_safe_bytes(
+            digest_path, "durable terminal envelope digest"
+        ).decode("ascii").strip()
         envelope = json.loads(envelope_bytes)
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise SystemExit(f"job.sh: durable terminal envelope is unreadable: {exc}") from exc
@@ -1224,8 +1772,11 @@ else:
         or re.fullmatch(r"[0-9a-f]{64}", envelope["terminal_artifact_sha256"]) is None
         or not isinstance(envelope.get("command_exit_code"), int)
         or isinstance(envelope.get("command_exit_code"), bool)
-        or envelope["command_exit_code"] != exit_code
     ):
+        raise SystemExit("job.sh: durable terminal envelope authority is invalid")
+    if exit_code is None:
+        exit_code = envelope["command_exit_code"]
+    elif envelope["command_exit_code"] != exit_code:
         raise SystemExit("job.sh: durable terminal envelope authority is invalid")
     artifact_path = Path(envelope["source_terminal_artifact"])
     artifact_sha256 = envelope["terminal_artifact_sha256"]
@@ -1275,8 +1826,10 @@ if status == "blocked":
         if telemetry_path.is_symlink() or not telemetry_path.is_file():
             continue
         try:
-            lines = telemetry_path.read_text(encoding="utf-8").splitlines()
-        except OSError as exc:
+            lines = read_safe_bytes(
+                telemetry_path, "dispatcher terminal telemetry"
+            ).decode("utf-8").splitlines()
+        except UnicodeError as exc:
             raise SystemExit(
                 f"job.sh: dispatcher terminal telemetry is unreadable: {exc}"
             ) from exc
@@ -1348,34 +1901,71 @@ if terminal_record_sha256 is not None:
     receipt["terminal_authority"] = "dispatcher-attempt-terminal"
     receipt["terminal_record_sha256"] = terminal_record_sha256
 serialized = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
-if receipt_path.exists() and receipt_path.read_text(encoding="utf-8") != serialized:
-    raise SystemExit("job.sh: existing job reconciliation conflicts with this artifact")
-temporary = receipt_path.with_name(receipt_path.name + ".tmp")
-temporary.write_text(serialized, encoding="utf-8")
-temporary.replace(receipt_path)
+commit_receipt(
+    serialized,
+    "job.sh: existing job reconciliation conflicts with this artifact",
+)
 print(json.dumps(receipt, sort_keys=True))
 PY
 	local status=$?
 	[ "$status" -eq 0 ] || return "$status"
-	: >"$dir/waited"
+	write_waited_marker "$dir" || die "job '$name' waited marker is unsafe"
 }
 
 cmd_clean() {
 	local all=0
 	[ "${1:-}" = "--all" ] && all=1
-	local root dir
+	local root dir failures=0
 	for root in "${JOB_ROOTS[@]}"; do
 		[ -d "$root" ] || continue
 		for dir in "$root"/*/; do
 			[ -d "$dir" ] || continue
-			if job_running "$dir"; then
+			local name lease_fd="" lease_path attempt=0
+			name="$(basename "$dir")"
+			lease_path="$(dirname "$dir")/.leases/$name.lock"
+			if [ ! -e "$lease_path" ] && [ ! -L "$lease_path" ] &&
+				! job_reaped "$dir" &&
+				{ { [ -f "$dir/pid" ] && [ ! -L "$dir/pid" ]; } ||
+					{ [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; }; }; then
+				if [ "$all" = "1" ]; then
+					echo "job '$name' has live evidence but its lifecycle lease is missing; refusing forced cleanup" >&2
+					failures=$((failures + 1))
+				fi
+				continue
+			fi
+			if ! acquire_job_lease "$name" lease_fd; then
 				[ "$all" = "1" ] || continue
-				kill -TERM "$(cat "$dir/pid" 2>/dev/null)" 2>/dev/null || true
+				if ! lease_path="$(job_lease_path "$name")"; then
+					echo "job '$name' cannot resolve its stable lifecycle lease for forced cleanup" >&2
+					failures=$((failures + 1))
+					continue
+				fi
+				if ! terminate_job_lease_owner "$dir/pid" "$dir/pid-identity.json" "$lease_path"; then
+					echo "job '$name' cannot authenticate its lifecycle lease owner for forced cleanup" >&2
+					failures=$((failures + 1))
+					continue
+				fi
+				while ! acquire_job_lease "$name" lease_fd; do
+					attempt=$((attempt + 1))
+					if [ "$attempt" -ge 200 ]; then
+						echo "job '$name' supervisor did not release its lifecycle lease" >&2
+						failures=$((failures + 1))
+						break
+					fi
+					sleep 0.05
+				done
+				[ -n "$lease_fd" ] || continue
+			fi
+			if [ "$all" != "1" ] && ! job_reaped "$dir"; then
+				close_job_lease "$lease_fd"
+				continue
 			fi
 			rm -rf "$dir"
+			close_job_lease "$lease_fd"
 		done
 	done
 	echo "cleaned ${JOB_ROOTS[*]}"
+	[ "$failures" -eq 0 ] || return 2
 }
 
 main() {

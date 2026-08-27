@@ -17,6 +17,7 @@ class JobStoreError(RuntimeError):
 
 
 _PRIVATE_MODE = 0o700
+_LEASE_MODE = 0o600
 _JOB_NAME = re.compile(r"(?![.-])[A-Za-z0-9._-]+\Z")
 
 
@@ -143,15 +144,69 @@ def ensure_job_directory(
     return directory
 
 
+def ensure_job_lease(
+    worktree: Path, name: str, *, configured: str | None = None
+) -> Path:
+    """Return one stable private lease inode for a job name.
+
+    Job directories are replaceable after their result is reaped.  The lease
+    authority therefore lives in a sibling directory that cleanup never
+    removes, so every launcher, supervisor, reconciler, and cleaner contends on
+    the same inode across job-directory generations.
+    """
+    if not _JOB_NAME.fullmatch(name):
+        raise JobStoreError("job name is invalid")
+    lease_root = ensure_job_root(worktree, configured=configured) / ".leases"
+    _ensure_directory(lease_root, private=True)
+    lease = lease_root / f"{name}.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lease, flags, _LEASE_MODE)
+    except OSError as exc:
+        raise JobStoreError(f"cannot open stable job lease: {lease}") from exc
+    try:
+        state = os.fstat(descriptor)
+        if not stat.S_ISREG(state.st_mode):
+            raise JobStoreError(f"job lease is not a regular file: {lease}")
+        if state.st_uid != os.getuid():
+            raise JobStoreError(f"job lease is not owned by this account: {lease}")
+        if stat.S_IMODE(state.st_mode) != _LEASE_MODE:
+            try:
+                os.fchmod(descriptor, _LEASE_MODE)
+            except OSError as exc:
+                raise JobStoreError(
+                    f"cannot protect stable job lease: {lease}"
+                ) from exc
+            state = os.fstat(descriptor)
+            if (
+                state.st_uid != os.getuid()
+                or stat.S_IMODE(state.st_mode) != _LEASE_MODE
+            ):
+                raise JobStoreError(f"job lease permissions are invalid: {lease}")
+        current = lease.lstat()
+        if (state.st_dev, state.st_ino) != (current.st_dev, current.st_ino):
+            raise JobStoreError(f"job lease pathname changed while opening: {lease}")
+    finally:
+        os.close(descriptor)
+    return lease
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worktree", type=Path, required=True)
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--ensure-root", action="store_true")
     action.add_argument("--ensure-job-directory")
+    action.add_argument("--ensure-job-lease")
     args = parser.parse_args()
     try:
-        if args.ensure_job_directory:
+        if args.ensure_job_lease:
+            path = ensure_job_lease(args.worktree, args.ensure_job_lease)
+        elif args.ensure_job_directory:
             path = ensure_job_directory(args.worktree, args.ensure_job_directory)
         elif args.ensure_root:
             path = ensure_job_root(args.worktree)
