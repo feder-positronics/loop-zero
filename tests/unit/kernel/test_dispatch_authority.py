@@ -120,11 +120,13 @@ def test_v1_dispatcher_proof_cannot_be_relabelled_as_coordinator() -> None:
     proof = sealed["terminal_authority_proof"]
     proof["authority_kind"] = "coordinator"
     proof["public_key"] = module.base64.b64encode(signer.public_key).decode("ascii")
+    registration = signer.registration()
+    registration["scheme"] = module.LEGACY_AUTHORITY_SCHEME
 
-    with pytest.raises(module.TerminalAuthorityError, match="legacy"):
+    with pytest.raises(module.TerminalAuthorityError, match="dispatcher"):
         module.verify_terminal_authority(
             sealed,
-            registration=None,
+            registration=registration,
             expected_kind="coordinator",
         )
 
@@ -243,6 +245,29 @@ def test_host_coordinator_creates_private_local_key_without_ssh_agent(
     assert "PRIVATE KEY" not in repr(signer)
 
 
+def test_host_verifier_caches_only_derived_public_material(monkeypatch) -> None:
+    signer = module.CoordinatorAuthority.from_local_state()
+    sealed = signer.seal(terminal_record(), authority_kind="coordinator")
+    module._trusted_public_key_from_file.cache_clear()
+    original_read = module._read_private_key
+    reads = 0
+
+    def counted_read(path: Path) -> bytes:
+        nonlocal reads
+        reads += 1
+        return original_read(path)
+
+    monkeypatch.setattr(module, "_read_private_key", counted_read)
+
+    for _ in range(2):
+        module.verify_terminal_authority(
+            sealed, registration=None, expected_kind="coordinator"
+        )
+
+    assert reads == 1
+    assert not hasattr(module._public_key_from_private, "cache_info")
+
+
 def test_host_coordinator_requires_kernel_process_memory_isolation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -299,6 +324,102 @@ def test_host_coordinator_verification_timeout_fails_closed(
     assert calls == 2
 
 
+def test_host_coordinator_verification_provider_failure_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signer = module.TerminalAuthority.generate()
+    sealed = signer.seal(terminal_record(), authority_kind="dispatcher")
+    module._signature_is_valid.cache_clear()
+    calls = 0
+
+    def provider_failure(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(args[0], 2, stdout=b"", stderr=b"failed")
+
+    monkeypatch.setattr(module.subprocess, "run", provider_failure)
+
+    for _ in range(2):
+        with pytest.raises(module.TerminalAuthorityError, match="provider failed"):
+            module.verify_terminal_authority(
+                sealed,
+                registration=signer.registration(),
+                expected_kind="dispatcher",
+            )
+
+    assert calls == 2
+
+
+def test_legacy_coordinator_verification_provider_failure_is_not_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module._legacy_coordinator_signature_is_valid.cache_clear()
+    calls = 0
+
+    def provider_failure(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(args[0], 2, stdout=b"", stderr=b"failed")
+
+    monkeypatch.setattr(module.subprocess, "run", provider_failure)
+
+    for _ in range(2):
+        with pytest.raises(module.TerminalAuthorityError, match="provider failed"):
+            module._legacy_coordinator_signature_is_valid(b"signature", b"payload")
+
+    assert calls == 2
+
+
+def test_legacy_coordinator_invalid_signature_uses_real_cli_mismatch_semantics(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    key_path = tmp_path / "legacy-key"
+    payload_path = tmp_path / "payload"
+    payload_path.write_bytes(b"signed payload")
+    subprocess.run(
+        ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key_path)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "ssh-keygen",
+            "-Y",
+            "sign",
+            "-f",
+            str(key_path),
+            "-n",
+            module.LEGACY_COORDINATOR_SIGNATURE_NAMESPACE,
+            str(payload_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    public_key = " ".join(
+        (tmp_path / "legacy-key.pub").read_text(encoding="ascii").split()[:2]
+    )
+    signature = (tmp_path / "payload.sig").read_bytes()
+    monkeypatch.setattr(module, "LEGACY_COORDINATOR_PUBLIC_KEY", public_key)
+    module._legacy_coordinator_signature_is_valid.cache_clear()
+    real_run = subprocess.run
+    calls = 0
+
+    def counted_run(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(module.subprocess, "run", counted_run)
+
+    assert not module._legacy_coordinator_signature_is_valid(
+        signature, b"altered payload"
+    )
+    assert not module._legacy_coordinator_signature_is_valid(
+        signature, b"altered payload"
+    )
+    assert calls == 1
+
+
 def test_host_coordinator_verifier_requires_kernel_process_memory_isolation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -339,6 +460,43 @@ def test_host_coordinator_proof_is_bound_to_local_trust_root(
     with pytest.raises(
         module.TerminalAuthorityError, match="coordinator authority key"
     ):
+        module.verify_terminal_authority(
+            sealed, registration=None, expected_kind="coordinator"
+        )
+
+
+def test_legacy_coordinator_proof_is_available_only_to_explicit_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = terminal_record()
+    proof = {
+        "scheme": module.LEGACY_COORDINATOR_AUTHORITY_SCHEME,
+        "authority_kind": "coordinator",
+        "key_id": module._legacy_coordinator_key_id(
+            module.LEGACY_COORDINATOR_PUBLIC_KEY
+        ),
+        "public_key": module.LEGACY_COORDINATOR_PUBLIC_KEY,
+        "signature": module.base64.b64encode(b"legacy-signature").decode("ascii"),
+    }
+    sealed = {**record, "terminal_authority_proof": proof}
+    observed: dict[str, bytes] = {}
+
+    def verify(signature: bytes, payload: bytes) -> bool:
+        observed["signature"] = signature
+        observed["payload"] = payload
+        return True
+
+    monkeypatch.setattr(module, "_legacy_coordinator_signature_is_valid", verify)
+
+    module.verify_legacy_coordinator_authority(sealed)
+
+    assert observed["signature"] == b"legacy-signature"
+    assert observed["payload"] == module._canonical_payload(
+        sealed,
+        authority_kind="coordinator",
+        scheme=module.LEGACY_COORDINATOR_AUTHORITY_SCHEME,
+    )
+    with pytest.raises(module.TerminalAuthorityError, match="scheme"):
         module.verify_terminal_authority(
             sealed, registration=None, expected_kind="coordinator"
         )

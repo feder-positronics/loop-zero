@@ -28,6 +28,12 @@ LEGACY_AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v1"
 AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v2"
 SUPPORTED_AUTHORITY_SCHEMES = frozenset({LEGACY_AUTHORITY_SCHEME, AUTHORITY_SCHEME})
 COORDINATOR_AUTHORITY_SCHEME = "dispatch-coordinator-ed25519-v2"
+LEGACY_COORDINATOR_AUTHORITY_SCHEME = "dispatch-coordinator-ssh-ed25519-v1"
+LEGACY_COORDINATOR_SIGNATURE_NAMESPACE = "intelflo-dispatch-coordinator"
+LEGACY_COORDINATOR_PUBLIC_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIKw0FlrqA1ha584PV/saNa70na108hSaJmrNZEFUMvvG"
+)
 COORDINATOR_KEY_FILENAME = "coordinator-ed25519.pem"
 COORDINATOR_LOCK_FILENAME = ".coordinator-key.lock"
 MAX_COORDINATOR_KEY_BYTES = 4096
@@ -130,6 +136,10 @@ def _key_id(public_key: bytes) -> str:
 
 def _coordinator_key_id(public_key: bytes) -> str:
     return _key_id(public_key)
+
+
+def _legacy_coordinator_key_id(public_key: str) -> str:
+    return hashlib.sha256(public_key.encode("ascii")).hexdigest()
 
 
 def _require_process_memory_isolation() -> None:
@@ -392,7 +402,6 @@ def _coordinator_private_key(*, create: bool) -> bytes:
         os.close(lock_fd)
 
 
-@lru_cache(maxsize=4)
 def _public_key_from_private(private_key: bytes) -> bytes:
     def derive(read_fd: int) -> bytes:
         return _run_openssl(
@@ -414,9 +423,120 @@ def _public_key_from_private(private_key: bytes) -> bytes:
     return public_key
 
 
+@lru_cache(maxsize=4)
+def _trusted_public_key_from_file(
+    key_path: str,
+    device: int,
+    inode: int,
+    mode: int,
+    owner: int,
+    size: int,
+    modified_ns: int,
+    changed_ns: int,
+) -> bytes:
+    """Cache only derived public material, keyed by exact private-file identity."""
+    del device, inode, mode, owner, size, modified_ns, changed_ns
+    return _public_key_from_private(_read_private_key(Path(key_path)))
+
+
 def _trusted_coordinator_public_key() -> bytes:
     _require_process_memory_isolation()
-    return _public_key_from_private(_coordinator_private_key(create=False))
+    key_path = (
+        _private_directory(_coordinator_state_directory()) / COORDINATOR_KEY_FILENAME
+    )
+    try:
+        metadata = key_path.lstat()
+    except FileNotFoundError as exc:
+        raise TerminalAuthorityError("coordinator trust root is unavailable") from exc
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator private key is unavailable") from exc
+    return _trusted_public_key_from_file(
+        str(key_path),
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_uid,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+@lru_cache(maxsize=4096)
+def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) -> bool:
+    """Verify the retired SSH-agent proof used before the v2 host cutover."""
+    try:
+        ssh_keygen = system_executable("ssh-keygen")
+    except TrustedExecutableError as exc:
+        raise TerminalAuthorityError("trusted SSH verifier is unavailable") from exc
+    with tempfile.TemporaryDirectory(prefix="intelflo-coordinator-verify-") as raw:
+        directory = Path(raw)
+        allowed_path = directory / "allowed-signers"
+        signature_path = directory / "signature"
+        allowed_path.write_text(
+            f"coordinator {LEGACY_COORDINATOR_PUBLIC_KEY}\n", encoding="ascii"
+        )
+        signature_path.write_bytes(signature)
+        try:
+            completed = subprocess.run(
+                [
+                    str(ssh_keygen),
+                    "-Y",
+                    "verify",
+                    "-f",
+                    str(allowed_path),
+                    "-I",
+                    "coordinator",
+                    "-n",
+                    LEGACY_COORDINATOR_SIGNATURE_NAMESPACE,
+                    "-s",
+                    str(signature_path),
+                ],
+                input=payload,
+                capture_output=True,
+                check=False,
+                close_fds=True,
+                env={"LANG": "C", "LC_ALL": "C", "PATH": os.defpath},
+                timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TerminalAuthorityError(
+                "legacy coordinator verification timed out"
+            ) from exc
+        if completed.returncode == 0:
+            return True
+        if completed.returncode == 1 or (
+            completed.returncode == 255
+            and completed.stderr.startswith(b"Signature verification failed:")
+        ):
+            return False
+        raise TerminalAuthorityError(
+            "legacy coordinator verification provider failed"
+        )
+
+
+def verify_legacy_coordinator_authority(record: Mapping[str, object]) -> None:
+    """Verify one retired SSH coordinator proof for cutover adoption only."""
+    proof = record.get(PROOF_FIELD)
+    if (
+        not isinstance(proof, dict)
+        or proof.get("scheme") != LEGACY_COORDINATOR_AUTHORITY_SCHEME
+        or proof.get("authority_kind") != "coordinator"
+        or proof.get("public_key") != LEGACY_COORDINATOR_PUBLIC_KEY
+        or proof.get("key_id")
+        != _legacy_coordinator_key_id(LEGACY_COORDINATOR_PUBLIC_KEY)
+    ):
+        raise TerminalAuthorityError("legacy coordinator authority proof is invalid")
+    signature = _decode(proof.get("signature"), label="signature", maximum=8192)
+    payload = _canonical_payload(
+        record,
+        authority_kind="coordinator",
+        scheme=LEGACY_COORDINATOR_AUTHORITY_SCHEME,
+    )
+    if not _legacy_coordinator_signature_is_valid(signature, payload):
+        raise TerminalAuthorityError(
+            "legacy coordinator authority signature is invalid"
+        )
 
 
 def _sign_ed25519(private_key: bytes, payload: bytes) -> bytes:
@@ -494,7 +614,16 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) -> 
                     raise TerminalAuthorityError(
                         "terminal authority provider timed out"
                     ) from exc
-                return completed.returncode == 0
+                if completed.returncode == 0:
+                    return True
+                if completed.returncode == 1:
+                    return False
+                # Only OpenSSL's documented verification-mismatch result is
+                # durable invalidity. Provider/runtime failures must remain
+                # retryable and therefore must not enter the LRU cache.
+                raise TerminalAuthorityError(
+                    "terminal authority provider failed"
+                )
 
             return _with_read_descriptor(signature, verify_signature)
 
@@ -551,6 +680,10 @@ def verify_terminal_authority(
         or proof_scheme not in SUPPORTED_AUTHORITY_SCHEMES
     ):
         raise TerminalAuthorityError("terminal authority scheme is invalid")
+    if proof_scheme == LEGACY_AUTHORITY_SCHEME and expected_kind != "dispatcher":
+        raise TerminalAuthorityError(
+            "legacy terminal authority is valid only for a dispatcher"
+        )
     if proof.get("authority_kind") != expected_kind:
         raise TerminalAuthorityError("terminal authority kind is invalid")
     if proof_scheme == LEGACY_AUTHORITY_SCHEME and registration is None:
