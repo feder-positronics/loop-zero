@@ -70,11 +70,18 @@ SESSION_CEILING_S = 12 * 3600
 # shift rather than a day. This is the idle-liveness window, not the ceiling.
 STALE_RECONCILE_IDLE_S = 8 * 3600
 RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
+CODEX_SESSION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
 RUN_ID_MARKER_RE = re.compile(
     r"<!--\s*skill-run-id:\s*(sr_[0-9a-f]{32})\s*-->", re.IGNORECASE
 )
 PHASES = ("implementation", "local-validation", "review", "ci-wait", "closeout")
 PHASE_SKILLS = {"work-issue", "execute-blueprint"}
+
+
+class RolloutEvidenceError(ValueError):
+    """A provider rollout cannot safely support continuity reconciliation."""
 
 
 def load_entries(audit_dir: Path) -> list[dict[str, object]]:
@@ -454,13 +461,15 @@ def derive_codex_session_tokens(session_id: str) -> dict[str, int] | None:
     """
     if not session_id:
         return None
-    codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    matches = sorted(codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"))
-    if not matches:
+    try:
+        rollout = codex_rollout_path(session_id)
+    except RolloutEvidenceError:
+        return None
+    if rollout is None:
         return None
     last: dict[str, object] | None = None
     try:
-        with matches[-1].open(encoding="utf-8") as fh:
+        with rollout.open(encoding="utf-8") as fh:
             for line in fh:
                 if '"token_count"' not in line:
                     continue
@@ -569,15 +578,194 @@ def run_groups(entries: list[dict[str, object]]) -> dict[str, list[dict[str, obj
     return groups
 
 
-def session_alive(session_id: str, within_s: int) -> bool:
-    """Liveness via provider evidence: a codex rollout touched recently."""
+def _rollout_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _rollout_iso(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _rollout_lines(rollout: Path):
+    """Yield rollout rows without materializing a potentially large session."""
+    try:
+        with rollout.open(encoding="utf-8") as stream:
+            yield from stream
+    except OSError as exc:
+        raise RolloutEvidenceError(f"cannot read rollout evidence: {exc}") from exc
+
+
+def codex_turn_evidence(
+    rollout: Path,
+    *,
+    run_started_at: datetime,
+    first_turn_after: datetime | None = None,
+    idle_s: int,
+    now: datetime,
+) -> dict[str, object]:
+    """Read structural turn boundaries without trusting mutable rollout mtime.
+
+    A new ``task_started`` before the preceding turn's terminal event is the
+    provider-side evidence that the prior turn was interrupted. The interval
+    begins at that turn's last recorded event and ends at the new turn start.
+    Model/tool content is never retained or inspected.
+    """
+    if (
+        run_started_at.tzinfo is None
+        or now.tzinfo is None
+        or (first_turn_after is not None and first_turn_after.tzinfo is None)
+        or idle_s < 0
+    ):
+        raise RolloutEvidenceError("rollout evidence bounds are invalid")
+    open_turn_id: str | None = None
+    open_turn_started_at: datetime | None = None
+    first_turn_started_at: datetime | None = None
+    last_activity: datetime | None = None
+    previous_timestamp: datetime | None = None
+    interruptions: list[dict[str, object]] = []
+    boundary = run_started_at.astimezone(UTC)
+    first_turn_floor = (
+        first_turn_after.astimezone(UTC)
+        if first_turn_after is not None
+        else boundary
+    )
+    for line_number, line in enumerate(_rollout_lines(rollout), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RolloutEvidenceError(
+                f"rollout evidence is malformed at line {line_number}"
+            ) from exc
+        if not isinstance(row, dict):
+            raise RolloutEvidenceError(
+                f"rollout evidence is malformed at line {line_number}"
+            )
+        timestamp = _rollout_timestamp(row.get("timestamp"))
+        if timestamp is None:
+            raise RolloutEvidenceError(
+                f"rollout evidence has an invalid timestamp at line {line_number}"
+            )
+        if previous_timestamp is not None and timestamp < previous_timestamp:
+            raise RolloutEvidenceError("rollout evidence timestamps are not ordered")
+        previous_timestamp = timestamp
+        payload = row.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        event_type = payload.get("type") if row.get("type") == "event_msg" else None
+        if event_type == "task_started":
+            turn_id = payload.get("turn_id")
+            if not isinstance(turn_id, str) or not turn_id:
+                raise RolloutEvidenceError("task_started has no structural turn_id")
+            if open_turn_id is not None and last_activity is not None:
+                interruption_start = max(last_activity, boundary)
+                if (
+                    timestamp >= boundary
+                    and (timestamp - interruption_start).total_seconds() >= idle_s
+                ):
+                    interruptions.append(
+                        {
+                            "turn_id": open_turn_id,
+                            "started_at": _rollout_iso(interruption_start),
+                            "resumed_at": _rollout_iso(timestamp),
+                        }
+                    )
+            open_turn_id = turn_id
+            open_turn_started_at = timestamp
+            if first_turn_started_at is None and (
+                timestamp > first_turn_floor
+                if first_turn_after is not None
+                else timestamp >= first_turn_floor
+            ):
+                first_turn_started_at = timestamp
+            last_activity = timestamp
+            continue
+        if event_type in {"task_complete", "turn_aborted"}:
+            turn_id = payload.get("turn_id")
+            if open_turn_id is None or turn_id != open_turn_id:
+                raise RolloutEvidenceError("turn terminal does not match the open turn")
+            last_activity = timestamp
+            open_turn_id = None
+            open_turn_started_at = None
+            continue
+        # A resume writes thread settings immediately before its new
+        # task_started boundary. It belongs to the incoming turn, so treating
+        # it as activity by the abandoned turn would collapse the exact gap.
+        if open_turn_id is not None and event_type != "thread_settings_applied":
+            last_activity = timestamp
+
+    return {
+        "interruptions": interruptions,
+        "open_turn_id": open_turn_id,
+        "first_turn_started_at": (
+            _rollout_iso(first_turn_started_at)
+            if first_turn_started_at is not None
+            else None
+        ),
+        "open_turn_started_at": (
+            _rollout_iso(open_turn_started_at)
+            if open_turn_started_at is not None
+            else None
+        ),
+        "last_activity_at": (
+            _rollout_iso(last_activity) if last_activity is not None else None
+        ),
+        "open_turn_stale": bool(
+            open_turn_id is not None
+            and last_activity is not None
+            and (now.astimezone(UTC) - last_activity).total_seconds() >= idle_s
+        ),
+    }
+
+
+def codex_rollout_path(session_id: str) -> Path | None:
+    """Return the unique rollout for one Codex session, or fail closed."""
     if not session_id:
-        return False
+        return None
+    if CODEX_SESSION_ID_RE.fullmatch(session_id) is None:
+        return None
     codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    for path in codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"):
-        if datetime.now(UTC).timestamp() - path.stat().st_mtime < within_s:
-            return True
-    return False
+    matches = sorted(
+        codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl")
+    )
+    if len(matches) > 1:
+        raise RolloutEvidenceError("multiple rollout files match one session")
+    return matches[0] if matches else None
+
+
+def session_alive(session_id: str, within_s: int) -> bool:
+    """Liveness via the newest structural provider event, never file mtime."""
+    if CODEX_SESSION_ID_RE.fullmatch(session_id) is None:
+        # Non-Codex/legacy session labels cannot name a live provider rollout.
+        return False
+    try:
+        path = codex_rollout_path(session_id)
+        if path is None:
+            return False
+        evidence = codex_turn_evidence(
+            path,
+            run_started_at=datetime.min.replace(tzinfo=UTC),
+            idle_s=within_s,
+            now=datetime.now(UTC),
+        )
+    except RolloutEvidenceError:
+        # Stale reconciliation is destructive. Ambiguous provider evidence
+        # must keep the run alive for owner re-entry instead of terminalizing it.
+        return True
+    raw_last = evidence.get("last_activity_at")
+    last_activity = _rollout_timestamp(raw_last)
+    return bool(
+        last_activity is not None
+        and (datetime.now(UTC) - last_activity).total_seconds() < within_s
+    )
 
 
 def cmd_check_ceiling(args: argparse.Namespace, entries: list[dict]) -> int:
@@ -620,7 +808,7 @@ def cmd_reconcile_stale(args: argparse.Namespace, entries: list[dict]) -> list[d
 
     Guarded, never blind (#3418 P3, cross-review 2026-08-09): a run is closed
     only when its last run-log activity is older than the idle window AND its
-    session shows no provider-side life signs (codex rollout mtime). The idle
+    session shows no recent structural provider event in its Codex rollout. The idle
     window is DECOUPLED from the (24h) handoff ceiling — a dead session is
     reaped within a work shift, not a day. The caller appends the returned
     rows under the same lock that loaded `entries`, so the latest-state check

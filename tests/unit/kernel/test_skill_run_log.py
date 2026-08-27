@@ -114,6 +114,186 @@ def test_derive_duration_s_omits_duration_without_an_exact_run(tmp_path: Path) -
     assert duration is None
 
 
+def test_codex_turn_evidence_preserves_same_session_interruption(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    rollout.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {
+                    "timestamp": "2026-08-26T21:00:00Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-1"},
+                },
+                {
+                    "timestamp": "2026-08-26T21:19:24Z",
+                    "type": "event_msg",
+                    "payload": {"type": "token_count"},
+                },
+                {
+                    "timestamp": "2026-08-27T06:14:55Z",
+                    "type": "event_msg",
+                    "payload": {"type": "thread_settings_applied"},
+                },
+                {
+                    "timestamp": "2026-08-27T06:14:56Z",
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-2"},
+                },
+            )
+        ),
+        encoding="utf-8",
+    )
+    # A same-session resume refreshes the file mtime. Structural timestamps,
+    # not that mutable filesystem timestamp, must retain the historical gap.
+    rollout.touch()
+
+    evidence = module.codex_turn_evidence(
+        rollout,
+        run_started_at=datetime(2026, 8, 26, 20, 0, tzinfo=UTC),
+        idle_s=2 * 3600,
+        now=datetime(2026, 8, 27, 6, 20, tzinfo=UTC),
+    )
+
+    assert evidence["interruptions"] == [
+        {
+            "turn_id": "turn-1",
+            "started_at": "2026-08-26T21:19:24Z",
+            "resumed_at": "2026-08-27T06:14:56Z",
+        }
+    ]
+    assert evidence["open_turn_id"] == "turn-2"
+    assert evidence["first_turn_started_at"] == "2026-08-26T21:00:00Z"
+    assert evidence["last_activity_at"] == "2026-08-27T06:14:56Z"
+
+
+def test_codex_turn_evidence_selects_first_turn_after_resume_floor(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    rollout.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": turn_id},
+                }
+            )
+            for timestamp, turn_id in (
+                ("2026-08-26T20:00:00Z", "earlier-turn"),
+                ("2026-08-27T06:14:56Z", "resume-turn"),
+                ("2026-08-27T07:00:00Z", "later-turn"),
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    evidence = module.codex_turn_evidence(
+        rollout,
+        run_started_at=datetime(2026, 8, 26, 19, 0, tzinfo=UTC),
+        first_turn_after=datetime(2026, 8, 26, 21, 19, 24, tzinfo=UTC),
+        idle_s=2 * 3600,
+        now=datetime(2026, 8, 27, 7, 1, tzinfo=UTC),
+    )
+
+    assert evidence["first_turn_started_at"] == "2026-08-27T06:14:56Z"
+
+
+def test_codex_turn_evidence_streams_rollout_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-26T21:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-1"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda *_args, **_kwargs: pytest.fail("rollout must be streamed"),
+    )
+
+    evidence = module.codex_turn_evidence(
+        rollout,
+        run_started_at=datetime(2026, 8, 26, 20, 0, tzinfo=UTC),
+        idle_s=2 * 3600,
+        now=datetime(2026, 8, 27, 21, 0, tzinfo=UTC),
+    )
+
+    assert evidence["open_turn_id"] == "turn-1"
+
+
+def test_session_alive_treats_invalid_rollout_as_conservatively_alive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = "019fe000-0000-7000-8000-000000000abc"
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    rollout.write_text("{broken\n", encoding="utf-8")
+    monkeypatch.setattr(module, "codex_rollout_path", lambda _session_id: rollout)
+
+    assert module.session_alive(session_id, within_s=60) is True
+
+
+def test_codex_rollout_path_rejects_glob_steering_without_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda *_args, **_kwargs: pytest.fail("invalid identity must not reach glob"),
+    )
+
+    assert module.codex_rollout_path("*crafted*") is None
+
+
+def test_derive_codex_tokens_rejects_glob_steering_without_lookup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        Path,
+        "glob",
+        lambda *_args, **_kwargs: pytest.fail("invalid identity must not reach glob"),
+    )
+
+    assert module.derive_codex_session_tokens("*crafted*") is None
+
+
+def test_codex_turn_evidence_fails_closed_on_malformed_active_history(
+    tmp_path: Path,
+) -> None:
+    rollout = tmp_path / "rollout-session-1.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "timestamp": "2026-08-26T21:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "turn-1"},
+            }
+        )
+        + "\n{broken\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.RolloutEvidenceError, match="malformed"):
+        module.codex_turn_evidence(
+            rollout,
+            run_started_at=datetime(2026, 8, 26, 20, 0, tzinfo=UTC),
+            idle_s=2 * 3600,
+            now=datetime(2026, 8, 27, 6, 20, tzinfo=UTC),
+        )
+
+
 def test_build_entry_auto_derives_duration(monkeypatch, tmp_path: Path) -> None:
     args = argparse.Namespace(
         skill="work-issue",
@@ -1120,10 +1300,21 @@ def test_ceiling_and_reconcile_are_decoupled(tmp_path):
 
 def test_reconcile_closes_stale_but_never_live(tmp_path):
     now = datetime.now(UTC)
+    live_session = "019fe000-0000-7000-8000-000000000abc"
     codex_home = tmp_path / "codex-home" / "sessions" / "2026" / "08" / "01"
     codex_home.mkdir(parents=True)
-    # RID_LIVE's session has a freshly-touched rollout: owner shows life signs.
-    (codex_home / "rollout-2026-08-01T00-00-00-sess-live.jsonl").write_text("{}\n")
+    # RID_LIVE's session has a recent structural provider event. File mtime is
+    # deliberately not the authority because a later resume can refresh it.
+    (codex_home / f"rollout-2026-08-01T00-00-00-{live_session}.jsonl").write_text(
+        json.dumps(
+            {
+                "timestamp": _iso(now - timedelta(minutes=1)),
+                "type": "event_msg",
+                "payload": {"type": "task_started", "turn_id": "live-turn"},
+            }
+        )
+        + "\n"
+    )
 
     repo = _repo_with_runs(
         tmp_path,
@@ -1136,7 +1327,7 @@ def test_reconcile_closes_stale_but_never_live(tmp_path):
                 "work-issue",
                 "in_progress",
                 _iso(now - timedelta(hours=20)),
-                session_id="sess-live",
+                session_id=live_session,
             ),
             _row(
                 RID_FRESH, "work-issue", "in_progress", _iso(now - timedelta(hours=2))
@@ -1151,7 +1342,7 @@ def test_reconcile_closes_stale_but_never_live(tmp_path):
     real = _run_cli(repo, "--reconcile-stale")
     assert real.returncode == 0, real.stdout + real.stderr
     assert f"close {RID_OLD}" in real.stdout
-    assert "sess-live" in real.stdout and "recent activity" in real.stdout
+    assert live_session[:8] in real.stdout and "recent activity" in real.stdout
 
     # Latest states after reconcile: OLD abandoned(stale); LIVE + FRESH untouched.
     day_files = sorted((repo / ".audit" / "skill-runs").glob("*.jsonl"))
