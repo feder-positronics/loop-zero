@@ -1,6 +1,7 @@
 """Coverage for the detached long-running-command runner used by agents."""
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -14,6 +15,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "util" / "job.sh"
+REPRO_CONNECT_GUARD_PATH = REPO_ROOT / "scripts" / "util" / "repro_connect_guard.py"
+REPRO_CONNECT_GUARD_SPEC = importlib.util.spec_from_file_location(
+    "job_runner_repro_connect_guard", REPRO_CONNECT_GUARD_PATH
+)
+assert REPRO_CONNECT_GUARD_SPEC is not None
+assert REPRO_CONNECT_GUARD_SPEC.loader is not None
+REPRO_CONNECT_GUARD = importlib.util.module_from_spec(REPRO_CONNECT_GUARD_SPEC)
+REPRO_CONNECT_GUARD_SPEC.loader.exec_module(REPRO_CONNECT_GUARD)
 WORKTREE_LEASE_ENVIRONMENT = (
     "INTELFLO_WORKTREE_LEASE_FD",
     "INTELFLO_WORKTREE_LEASE_BOUNDARY",
@@ -24,6 +33,17 @@ requires_nested_user_namespace = pytest.mark.skipif(
     os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
     reason="bound-job protection cannot create a nested user namespace",
 )
+REPRO_GUARD_UNAVAILABLE_ERRORS = (
+    REPRO_CONNECT_GUARD.SECCOMP_NOTIFY_UNAVAILABLE_ERROR,
+    REPRO_CONNECT_GUARD.MANAGER_SOCKET_AUTHORITY_UNAVAILABLE_ERROR,
+)
+
+
+def test_final_ci_repro_unavailability_signatures_match_guard() -> None:
+    assert REPRO_GUARD_UNAVAILABLE_ERRORS == (
+        REPRO_CONNECT_GUARD.SECCOMP_NOTIFY_UNAVAILABLE_ERROR,
+        REPRO_CONNECT_GUARD.MANAGER_SOCKET_AUTHORITY_UNAVAILABLE_ERROR,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -1254,7 +1274,14 @@ def _run_final_ci_repro_job(
             ),
         },
     )
-    return result, artifact, tmp_path / "jobs" / name
+    job_dir = tmp_path / "jobs" / name
+    log_path = job_dir / "log"
+    if log_path.exists():
+        log = log_path.read_text(encoding="utf-8")
+        if any(signature in log for signature in REPRO_GUARD_UNAVAILABLE_ERRORS):
+            pytest.skip("reproduction guard prerequisites are unavailable on this host")
+
+    return result, artifact, job_dir
 
 
 @requires_nested_user_namespace
