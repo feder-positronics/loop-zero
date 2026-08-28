@@ -42,11 +42,17 @@ class SandboxError(RuntimeError):
     """The untrusted execution namespace could not be constructed safely."""
 
 
+class UnsafeCredentialError(SandboxError):
+    """A provider credential exists but violates the owner-only safety contract."""
+
+
 @contextmanager
 def codex_subscription_credential():
     """Pass one protected ChatGPT login descriptor without mounting host state."""
     path = Path.home() / ".codex" / "auth.json"
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink():
+        raise UnsafeCredentialError("Codex subscription credential is unsafe")
+    if not path.is_file():
         raise SandboxError("Codex subscription credential is unavailable")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(path, flags)
@@ -59,7 +65,7 @@ def codex_subscription_credential():
             or metadata.st_size <= 2
             or metadata.st_size > 1024 * 1024
         ):
-            raise SandboxError("Codex subscription credential is unsafe")
+            raise UnsafeCredentialError("Codex subscription credential is unsafe")
         yield fd
     finally:
         os.close(fd)

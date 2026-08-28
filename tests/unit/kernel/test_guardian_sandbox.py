@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
@@ -29,6 +30,43 @@ def _write_executable(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(0o755)
+
+
+def test_codex_subscription_credential_opens_and_closes_owner_only_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    auth = tmp_path / ".codex" / "auth.json"
+    auth.parent.mkdir()
+    auth.write_text('{"auth_mode":"chatgpt"}', encoding="utf-8")
+    auth.chmod(0o600)
+    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
+
+    with module.codex_subscription_credential() as descriptor:
+        assert os.pread(descriptor, auth.stat().st_size, 0) == auth.read_bytes()
+
+    with pytest.raises(OSError):
+        os.fstat(descriptor)
+
+
+@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "empty"])
+def test_codex_subscription_credential_rejects_unsafe_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_kind: str
+) -> None:
+    auth = tmp_path / ".codex" / "auth.json"
+    auth.parent.mkdir()
+    if unsafe_kind == "symlink":
+        target = tmp_path / "elsewhere.json"
+        target.write_text('{"auth_mode":"chatgpt"}', encoding="utf-8")
+        target.chmod(0o600)
+        auth.symlink_to(target)
+    else:
+        auth.write_text("" if unsafe_kind == "empty" else '{"auth_mode":"chatgpt"}')
+        auth.chmod(0o644 if unsafe_kind == "mode" else 0o600)
+    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
+
+    with pytest.raises(module.UnsafeCredentialError):
+        with module.codex_subscription_credential():
+            pass
 
 
 def test_runtime_tool_cannot_come_from_writable_worktree(
