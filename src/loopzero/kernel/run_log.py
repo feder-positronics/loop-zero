@@ -1,7 +1,8 @@
 """Append an idempotent lifecycle event for one logical skill run.
 
-Called by orchestrator skills (work-issue, execute-blueprint) on exit to record
-how a session went. The aggregator at `skill_stats.py` reads these logs.
+Called by outer mutating skills, including standalone delivery leaves, to record
+how a logical run progresses and ends. The aggregator at `skill_stats.py` reads
+these logs.
 
 Schema (one append-only JSON object per lifecycle transition):
 {
