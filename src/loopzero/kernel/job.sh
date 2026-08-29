@@ -591,6 +591,9 @@ try:
     child_env = dict(os.environ)
     child_env.pop("INTELFLO_JOB_TOKEN", None)
     child_env.pop(FINAL_CI_REPRO_AUTH_FD_ENV, None)
+    # The supervisor's trusted Python helpers need safe-path mode, but a
+    # wrapped Python script must retain its own directory as an import root.
+    child_env.pop("PYTHONSAFEPATH", None)
     child_env["INTELFLO_JOB_NAME"] = job_name
     child_env["INTELFLO_JOB_EXECUTOR_PID"] = str(os.getpid())
     wrapped_command = command

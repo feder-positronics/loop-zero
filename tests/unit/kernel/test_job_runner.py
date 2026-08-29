@@ -224,6 +224,22 @@ def test_run_propagates_the_job_exit_code(tmp_path: Path) -> None:
     assert "exit code 7" in result.stdout
 
 
+def test_run_preserves_wrapped_python_script_directory_imports(tmp_path: Path) -> None:
+    result = _job(
+        tmp_path,
+        "run",
+        "generate-indexes",
+        "--timeout",
+        "30",
+        "--",
+        "/usr/bin/python3",
+        str(REPO_ROOT / "scripts" / "docs" / "generate_indexes.py"),
+        "--check",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_wait_times_out_without_killing_the_job(tmp_path: Path) -> None:
     started = _job(tmp_path, "start", "slow", "--", "sleep", "30")
     assert started.returncode == 0
