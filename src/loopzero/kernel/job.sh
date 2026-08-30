@@ -355,6 +355,7 @@ command = sys.argv[6:]
 FINAL_CI_REPRO_TASK_PREFIX = "final-ci-repro:"
 FINAL_CI_REPRO_AUTH_FD_ENV = "INTELFLO_FINAL_CI_REPRO_AUTH_FD"
 FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = "INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT"
+CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
 
 try:
     fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -519,23 +520,50 @@ try:
         os.close(pid_identity_fd)
 
     dispatcher = repo_root / "scripts" / "util" / "agent_dispatch.py"
+    host_dispatcher = repo_root / "scripts" / "util" / "agent_dispatch_host.py"
     final_ci_gate = repo_root / "scripts" / "util" / "final_ci_gate.py"
     repro_connect_guard = repo_root / "scripts" / "util" / "repro_connect_guard.py"
     executable = shutil.which(command[0]) if command else None
     command_script = Path(command[1]) if len(command) > 1 else None
-    trusted_dispatcher = (
+    trusted_dispatch_context = (
         binding is not None
         and len(command) >= 3
         and executable is not None
         and Path(executable).resolve() == Path(sys.executable).resolve()
-        and not dispatcher.is_symlink()
-        and dispatcher.is_file()
         and command_script is not None
-        and command_script.resolve() == dispatcher.resolve()
-        and command[2] == "run"
+        and not command_script.is_symlink()
         and not job_dir.resolve().is_relative_to(repo_root)
         and not source_path.resolve().is_relative_to(repo_root)
     )
+    trusted_dispatcher = False
+    if trusted_dispatch_context:
+        assert command_script is not None
+        if (
+            not dispatcher.is_symlink()
+            and dispatcher.is_file()
+            and command_script.resolve() == dispatcher.resolve()
+        ):
+            trusted_dispatcher = command[2] == "run"
+        elif (
+            not host_dispatcher.is_symlink()
+            and host_dispatcher.is_file()
+            and command_script.resolve() == host_dispatcher.resolve()
+        ):
+            host_arguments = command[2:]
+            trusted_dispatcher = host_arguments[0] == "run"
+            if host_arguments[0] == "--repo":
+                trusted_dispatcher = (
+                    len(host_arguments) >= 3
+                    and bool(host_arguments[1])
+                    and not host_arguments[1].startswith("-")
+                    and host_arguments[2] == "run"
+                )
+            elif host_arguments[0].startswith("--repo="):
+                trusted_dispatcher = (
+                    len(host_arguments) >= 2
+                    and bool(host_arguments[0].partition("=")[2])
+                    and host_arguments[1] == "run"
+                )
 
     repro_signature = None
     if (
@@ -591,6 +619,11 @@ try:
     child_env = dict(os.environ)
     child_env.pop("INTELFLO_JOB_TOKEN", None)
     child_env.pop(FINAL_CI_REPRO_AUTH_FD_ENV, None)
+    if CODEX_AUTH_FD_ENV in child_env:
+        # close_fds invalidates the inherited descriptor. Preserve an explicit
+        # unusable capability so the host wrapper cannot mistake its absence
+        # for permission to reopen owner credential state.
+        child_env[CODEX_AUTH_FD_ENV] = "-1"
     # The supervisor's trusted Python helpers need safe-path mode, but a
     # wrapped Python script must retain its own directory as an import root.
     child_env.pop("PYTHONSAFEPATH", None)

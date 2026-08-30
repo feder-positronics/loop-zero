@@ -15,6 +15,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "util" / "job.sh"
+TRUSTED_JOB_PYTHON = "/usr/bin/python3"
 REPRO_CONNECT_GUARD_PATH = REPO_ROOT / "scripts" / "util" / "repro_connect_guard.py"
 REPRO_CONNECT_GUARD_SPEC = importlib.util.spec_from_file_location(
     "job_runner_repro_connect_guard", REPRO_CONNECT_GUARD_PATH
@@ -510,6 +511,223 @@ raise SystemExit(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("repo_style", ("default", "separate", "equals"))
+@requires_nested_user_namespace
+def test_bound_host_dispatcher_reuses_its_own_worker_sandbox(
+    tmp_path: Path,
+    repo_style: str,
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    host_dispatcher = script.with_name("agent_dispatch_host.py")
+    host_dispatcher.write_text(
+        """import os
+import subprocess
+
+assert "INTELFLO_CODEX_AUTH_FD" not in os.environ
+raise SystemExit(
+    subprocess.run(
+        ["bwrap", "--die-with-parent", "--ro-bind", "/", "/", "--", "true"],
+        check=False,
+    ).returncode
+)
+""",
+        encoding="utf-8",
+    )
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    dispatcher_arguments = ["run"]
+    if repo_style == "separate":
+        dispatcher_arguments = ["--repo", str(repo), "run"]
+    elif repo_style == "equals":
+        dispatcher_arguments = [f"--repo={repo}", "run"]
+
+    result = _job(
+        tmp_path,
+        "run",
+        "bound-host-dispatch",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        TRUSTED_JOB_PYTHON,
+        str(host_dispatcher),
+        *dispatcher_arguments,
+        script=script,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "variant",
+    (
+        "untrusted-executable",
+        "lookalike-path",
+        "arbitrary-script",
+        "other-subcommand",
+        "missing-subcommand",
+        "repo-other-subcommand",
+        "repo-missing-path",
+        "repo-option-as-path",
+        "empty-repo-equals",
+        "symlink-path",
+        "internal-authority",
+        "internal-artifact",
+    ),
+)
+def test_bound_host_dispatcher_trust_predicate_fails_closed(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    host_dispatcher = script.with_name("agent_dispatch_host.py")
+    host_dispatcher.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    arbitrary_script = script.with_name("arbitrary.py")
+    arbitrary_script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    lookalike = repo / "other" / "agent_dispatch_host.py"
+    lookalike.parent.mkdir()
+    lookalike.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    symlink = script.with_name("host-dispatcher-link.py")
+    symlink.symlink_to(host_dispatcher.name)
+    artifact = tmp_path / "terminal.json"
+    if variant == "internal-artifact":
+        artifact = repo / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    command = [TRUSTED_JOB_PYTHON, str(host_dispatcher), "run"]
+    if variant == "untrusted-executable":
+        command[0] = "/bin/sh"
+    elif variant == "lookalike-path":
+        command[1] = str(lookalike)
+    elif variant == "arbitrary-script":
+        command[1] = str(arbitrary_script)
+    elif variant == "other-subcommand":
+        command[2] = "preflight"
+    elif variant == "missing-subcommand":
+        command.pop()
+    elif variant == "repo-other-subcommand":
+        command[2:] = ["--repo", str(repo), "preflight"]
+    elif variant == "repo-missing-path":
+        command[2:] = ["--repo", "run"]
+    elif variant == "repo-option-as-path":
+        command[2:] = ["--repo", "--worktree", "run"]
+    elif variant == "empty-repo-equals":
+        command[2:] = ["--repo=", "run"]
+    elif variant == "symlink-path":
+        command[1] = str(symlink)
+    env_overrides = None
+    if variant == "internal-authority":
+        env_overrides = {"INTELFLO_JOB_DIR": str(repo / ".pid" / "jobs")}
+    _deny_outer_bubblewrap(script)
+
+    result = _job(
+        tmp_path,
+        "run",
+        f"bound-host-{variant}",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        *command,
+        script=script,
+        env_overrides=env_overrides,
+    )
+
+    assert result.returncode != 0
+    assert "bound job supervision requires protected bubblewrap" in result.stdout
+
+
+def test_inherited_codex_descriptor_is_invalidated_without_host_reacquisition(
+    tmp_path: Path,
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    host_dispatcher = script.with_name("agent_dispatch_host.py")
+    host_dispatcher.write_text(
+        """import os
+
+auth_fd = int(os.environ["INTELFLO_CODEX_AUTH_FD"])
+assert auth_fd == -1
+try:
+    os.fstat(auth_fd)
+except OSError:
+    pass
+else:
+    raise AssertionError("invalid descriptor sentinel unexpectedly became live")
+""",
+        encoding="utf-8",
+    )
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    _deny_outer_bubblewrap(script)
+
+    result = _job(
+        tmp_path,
+        "run",
+        "bound-host-inherited-auth",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        TRUSTED_JOB_PYTHON,
+        str(host_dispatcher),
+        "run",
+        script=script,
+        env_overrides={"INTELFLO_CODEX_AUTH_FD": "23"},
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_unbound_host_dispatcher_gets_no_terminal_binding(tmp_path: Path) -> None:
+    script = _isolated_job_script(tmp_path)
+    host_dispatcher = script.with_name("agent_dispatch_host.py")
+    host_dispatcher.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    _deny_outer_bubblewrap(script)
+
+    result = _job(
+        tmp_path,
+        "run",
+        "unbound-host-dispatch",
+        "--timeout",
+        "30",
+        "--",
+        TRUSTED_JOB_PYTHON,
+        str(host_dispatcher),
+        "run",
+        script=script,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    job_dir = tmp_path / "jobs" / "unbound-host-dispatch"
+    assert not (job_dir / "binding.json").exists()
+    assert not (job_dir / "terminal-envelope.json").exists()
 
 
 def test_default_authority_is_external_and_legacy_recovery_is_explicit(
