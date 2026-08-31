@@ -13,6 +13,11 @@ from pathlib import Path
 # Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent_runtimes.codex_credential import (
+    CodexCredentialError,
+    UnsafeCodexCredential,
+    codex_subscription_credential as brokered_codex_subscription_credential,
+)
 from trusted_executable import TrustedExecutableError, system_executable
 
 CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
@@ -47,28 +52,17 @@ class UnsafeCredentialError(SandboxError):
 
 
 @contextmanager
-def codex_subscription_credential():
-    """Pass one protected ChatGPT login descriptor without mounting host state."""
-    path = Path.home() / ".codex" / "auth.json"
-    if path.is_symlink():
-        raise UnsafeCredentialError("Codex subscription credential is unsafe")
-    if not path.is_file():
-        raise SandboxError("Codex subscription credential is unavailable")
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+def codex_subscription_credential(*, requested_runtime_s: float):
+    """Pass one renewed ChatGPT login snapshot without mounting host state."""
     try:
-        metadata = os.fstat(fd)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
-            or metadata.st_mode & 0o077
-            or metadata.st_size <= 2
-            or metadata.st_size > 1024 * 1024
-        ):
-            raise UnsafeCredentialError("Codex subscription credential is unsafe")
-        yield fd
-    finally:
-        os.close(fd)
+        with brokered_codex_subscription_credential(
+            requested_runtime_s=requested_runtime_s
+        ) as descriptor:
+            yield descriptor
+    except UnsafeCodexCredential as exc:
+        raise UnsafeCredentialError("Codex subscription credential is unsafe") from exc
+    except CodexCredentialError as exc:
+        raise SandboxError("Codex subscription credential is unavailable") from exc
 
 
 def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -152,9 +146,7 @@ def _system_tool(name: str) -> Path:
         raise SandboxError(str(exc)) from exc
 
 
-def _optional_tool(
-    name: str, *, forbidden_roots: Sequence[Path] = ()
-) -> Path | None:
+def _optional_tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path | None:
     """Resolve an optional model runtime without weakening command isolation."""
     try:
         return _tool(name, forbidden_roots=forbidden_roots)
@@ -364,9 +356,7 @@ def command(
         for source, destination in sorted(runtime_roots)
     )
     writable_sources = tuple(
-        source
-        for mode, source, _destination in mounts
-        if mode == "--bind"
+        source for mode, source, _destination in mounts if mode == "--bind"
     )
     uv = _tool("uv", forbidden_roots=writable_sources)
     corepack_runtime = (
@@ -469,13 +459,9 @@ def command(
         ]
     )
     if corepack_runtime is not None:
-        built.extend(
-            ["--ro-bind", str(corepack_runtime), str(GUARDIAN_NODE_ROOT)]
-        )
+        built.extend(["--ro-bind", str(corepack_runtime), str(GUARDIAN_NODE_ROOT)])
     if corepack_home is not None:
-        built.extend(
-            ["--ro-bind", str(corepack_home), str(GUARDIAN_COREPACK_HOME)]
-        )
+        built.extend(["--ro-bind", str(corepack_home), str(GUARDIAN_COREPACK_HOME)])
     if codex is not None:
         built.extend(["--ro-bind", str(codex), str(GUARDIAN_BIN_ROOT / "codex")])
     created: set[Path] = {
@@ -507,9 +493,7 @@ def command(
         _sandbox_path(corepack_runtime=corepack_runtime),
     ]
     if corepack_home is not None:
-        env_bindings.extend(
-            ["--setenv", "COREPACK_HOME", str(GUARDIAN_COREPACK_HOME)]
-        )
+        env_bindings.extend(["--setenv", "COREPACK_HOME", str(GUARDIAN_COREPACK_HOME)])
     env_bindings.extend(
         [
             "--setenv",

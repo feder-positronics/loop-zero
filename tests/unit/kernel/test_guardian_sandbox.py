@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import importlib.util
+import json
 import os
 import sys
 from pathlib import Path
@@ -26,6 +28,27 @@ def load_module():
 module = load_module()
 
 
+def _codex_credential(*, expires_at_s: int = 4_000_000_000) -> str:
+    claims = (
+        base64.urlsafe_b64encode(json.dumps({"exp": expires_at_s}).encode())
+        .rstrip(b"=")
+        .decode()
+    )
+    token = f"header.{claims}.signature"
+    return json.dumps(
+        {
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": None,
+            "tokens": {
+                "access_token": token,
+                "id_token": token,
+                "refresh_token": "refresh",
+                "account_id": "account-1",
+            },
+        }
+    )
+
+
 def _write_executable(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
@@ -37,12 +60,19 @@ def test_codex_subscription_credential_opens_and_closes_owner_only_file(
 ) -> None:
     auth = tmp_path / ".codex" / "auth.json"
     auth.parent.mkdir()
-    auth.write_text('{"auth_mode":"chatgpt"}', encoding="utf-8")
+    auth.write_text(_codex_credential(), encoding="utf-8")
     auth.chmod(0o600)
     monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
 
-    with module.codex_subscription_credential() as descriptor:
-        assert os.pread(descriptor, auth.stat().st_size, 0) == auth.read_bytes()
+    with module.codex_subscription_credential(requested_runtime_s=900) as descriptor:
+        host_payload = json.loads(auth.read_text(encoding="utf-8"))
+        snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
+        assert snapshot["tokens"]["refresh_token"] == snapshot["tokens"]["access_token"]
+        assert (
+            snapshot["tokens"]["refresh_token"]
+            != host_payload["tokens"]["refresh_token"]
+        )
+        assert json.loads(auth.read_text(encoding="utf-8")) == host_payload
 
     with pytest.raises(OSError):
         os.fstat(descriptor)
@@ -65,6 +95,12 @@ def test_codex_subscription_credential_rejects_unsafe_file(
     monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
 
     with pytest.raises(module.UnsafeCredentialError):
+        with module.codex_subscription_credential(requested_runtime_s=900):
+            pass
+
+
+def test_codex_subscription_credential_requires_the_callers_runtime() -> None:
+    with pytest.raises(TypeError):
         with module.codex_subscription_credential():
             pass
 
