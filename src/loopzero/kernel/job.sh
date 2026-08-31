@@ -1850,6 +1850,9 @@ if status == "blocked":
             "job.sh: blocked result has no matching dispatcher terminal telemetry"
         )
     repo_root = audit_root.parent
+    sys.path.insert(0, str(repo_root / "scripts" / "util"))
+    from agent_dispatch import DispatchError, load_authority_records
+
     # Keep this explicit allowlist aligned with agent_dispatch.py's compatible
     # telemetry contract; every other row is forensic evidence, not authority.
     compatible_terminal_telemetry = {
@@ -1858,26 +1861,13 @@ if status == "blocked":
         ("dispatch-telemetry-v9", "2026-08-17-v11"),
     }
     matching_records = []
-    for telemetry_path in sorted(dispatch_root.glob("*.jsonl")):
-        if telemetry_path.is_symlink() or not telemetry_path.is_file():
-            continue
-        try:
-            lines = read_safe_bytes(
-                telemetry_path, "dispatcher terminal telemetry"
-            ).decode("utf-8").splitlines()
-        except UnicodeError as exc:
-            raise SystemExit(
-                f"job.sh: dispatcher terminal telemetry is unreadable: {exc}"
-            ) from exc
-        for line in lines:
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise SystemExit(
-                    f"job.sh: dispatcher terminal telemetry is invalid: {exc}"
-                ) from exc
-            if not isinstance(record, dict):
-                continue
+    try:
+        authority_records = load_authority_records(repo_root, 30)
+    except DispatchError as exc:
+        raise SystemExit(
+            f"job.sh: dispatcher terminal telemetry is invalid: {exc}"
+        ) from exc
+    for record in authority_records:
             result_artifact = record.get("result_artifact")
             if not isinstance(result_artifact, str):
                 continue

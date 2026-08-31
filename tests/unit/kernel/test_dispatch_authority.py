@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -85,7 +86,7 @@ def test_authority_kind_is_bound_inside_v2_signature() -> None:
     proof["authority_kind"] = "coordinator"
     proof["public_key"] = module.base64.b64encode(signer.public_key).decode("ascii")
 
-    with pytest.raises(module.TerminalAuthorityError, match="signature"):
+    with pytest.raises(module.TerminalAuthorityError, match="scheme"):
         module.verify_terminal_authority(
             sealed,
             registration=None,
@@ -207,26 +208,18 @@ def test_invalid_signature_verification_is_cached(monkeypatch) -> None:
     assert calls == 1
 
 
-def test_coordinator_proof_carries_only_public_material() -> None:
+def test_ephemeral_terminal_key_cannot_self_assert_coordinator_authority() -> None:
     signer = module.TerminalAuthority.generate()
     sealed = signer.seal(
         terminal_record(), authority_kind="coordinator", include_public_key=True
     )
 
-    module.verify_terminal_authority(
-        sealed,
-        registration=None,
-        expected_kind="coordinator",
-    )
-    rendered = repr({"signer": signer, "sealed": sealed})
-    assert "PRIVATE KEY" not in rendered
-    assert set(sealed["terminal_authority_proof"]) == {
-        "authority_kind",
-        "key_id",
-        "public_key",
-        "scheme",
-        "signature",
-    }
+    with pytest.raises(module.TerminalAuthorityError, match="scheme"):
+        module.verify_terminal_authority(
+            sealed,
+            registration=None,
+            expected_kind="coordinator",
+        )
 
 
 def test_host_coordinator_creates_private_local_key_without_ssh_agent(
@@ -243,6 +236,140 @@ def test_host_coordinator_creates_private_local_key_without_ssh_agent(
     key_path = tmp_path / "dispatch-authority" / "coordinator-ed25519.pem"
     assert key_path.stat().st_mode & 0o777 == 0o600
     assert "PRIVATE KEY" not in repr(signer)
+
+
+def test_coordinator_ledger_state_round_trip_is_private_and_generation_guarded(
+    tmp_path: Path,
+) -> None:
+    binding = "a" * 64
+    initial = {
+        "scheme": "dispatch-authority-ledger-host-state-v1",
+        "repository_binding": binding,
+        "ledger_id": "b" * 32,
+        "generation": 1,
+        "checkpoint_digest": "c" * 64,
+    }
+
+    module.commit_coordinator_ledger_state(binding, initial, expected_generation=None)
+
+    assert module.load_coordinator_ledger_state(binding) == initial
+    path = tmp_path / "dispatch-authority" / "ledgers" / f"{binding}.json"
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert path.parent.stat().st_mode & 0o777 == 0o700
+
+    advanced = {**initial, "generation": 2, "checkpoint_digest": "d" * 64}
+    module.commit_coordinator_ledger_state(binding, advanced, expected_generation=1)
+    assert module.load_coordinator_ledger_state(binding) == advanced
+
+    with pytest.raises(module.TerminalAuthorityError, match="generation changed"):
+        module.commit_coordinator_ledger_state(binding, advanced, expected_generation=1)
+
+
+def test_coordinator_ledger_state_refuses_foreign_binding() -> None:
+    binding = "a" * 64
+
+    with pytest.raises(module.TerminalAuthorityError, match="binding"):
+        module.commit_coordinator_ledger_state(
+            binding,
+            {
+                "repository_binding": "b" * 64,
+                "generation": 1,
+            },
+            expected_generation=None,
+        )
+
+
+def test_coordinator_ledger_state_refuses_initial_generation_skip() -> None:
+    binding = "a" * 64
+
+    with pytest.raises(module.TerminalAuthorityError, match="generation"):
+        module.commit_coordinator_ledger_state(
+            binding,
+            {
+                "scheme": "dispatch-authority-ledger-host-state-v1",
+                "repository_binding": binding,
+                "generation": 2,
+            },
+            expected_generation=None,
+        )
+
+
+def test_coordinator_ledger_state_refuses_unsafe_file(
+    tmp_path: Path,
+) -> None:
+    binding = "a" * 64
+    ledgers = tmp_path / "dispatch-authority" / "ledgers"
+    ledgers.mkdir(parents=True, mode=0o700)
+    ledgers.parent.chmod(0o700)
+    ledgers.chmod(0o700)
+    state_path = ledgers / f"{binding}.json"
+    state_path.write_text("{}\n", encoding="utf-8")
+    state_path.chmod(0o644)
+
+    with pytest.raises(module.TerminalAuthorityError, match="state is unsafe"):
+        module.load_coordinator_ledger_state(binding)
+
+
+def test_coordinator_ledger_state_refuses_symlink(
+    tmp_path: Path,
+) -> None:
+    binding = "a" * 64
+    ledgers = tmp_path / "dispatch-authority" / "ledgers"
+    ledgers.mkdir(parents=True, mode=0o700)
+    ledgers.parent.chmod(0o700)
+    ledgers.chmod(0o700)
+    target = tmp_path / "foreign.json"
+    target.write_text("{}\n", encoding="utf-8")
+    (ledgers / f"{binding}.json").symlink_to(target)
+
+    with pytest.raises(module.TerminalAuthorityError, match="state is unsafe"):
+        module.load_coordinator_ledger_state(binding)
+
+
+def test_coordinator_ledger_state_refuses_partial_json(
+    tmp_path: Path,
+) -> None:
+    binding = "a" * 64
+    ledgers = tmp_path / "dispatch-authority" / "ledgers"
+    ledgers.mkdir(parents=True, mode=0o700)
+    ledgers.parent.chmod(0o700)
+    ledgers.chmod(0o700)
+    state_path = ledgers / f"{binding}.json"
+    state_path.write_text('{"generation":', encoding="utf-8")
+    state_path.chmod(0o600)
+
+    with pytest.raises(module.TerminalAuthorityError, match="state is invalid"):
+        module.load_coordinator_ledger_state(binding)
+
+
+def test_coordinator_ledger_state_cas_does_not_overwrite_malformed_current_state(
+    tmp_path: Path,
+) -> None:
+    binding = "a" * 64
+    ledgers = tmp_path / "dispatch-authority" / "ledgers"
+    ledgers.mkdir(parents=True, mode=0o700)
+    ledgers.parent.chmod(0o700)
+    ledgers.chmod(0o700)
+    state_path = ledgers / f"{binding}.json"
+    malformed = {
+        "scheme": "foreign-state-v1",
+        "repository_binding": binding,
+        "generation": 1,
+    }
+    state_path.write_text(json.dumps(malformed), encoding="utf-8")
+    state_path.chmod(0o600)
+    replacement = {
+        "scheme": "dispatch-authority-ledger-host-state-v1",
+        "repository_binding": binding,
+        "generation": 2,
+    }
+
+    with pytest.raises(module.TerminalAuthorityError, match="state is invalid"):
+        module.commit_coordinator_ledger_state(
+            binding, replacement, expected_generation=1
+        )
+
+    assert json.loads(state_path.read_text(encoding="utf-8")) == malformed
 
 
 def test_host_verifier_caches_only_derived_public_material(monkeypatch) -> None:
@@ -266,6 +393,20 @@ def test_host_verifier_caches_only_derived_public_material(monkeypatch) -> None:
 
     assert reads == 1
     assert not hasattr(module._public_key_from_private, "cache_info")
+
+
+def test_private_key_reader_uses_validated_descriptor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module.CoordinatorAuthority.from_local_state()
+    key_path = module._coordinator_state_directory() / module.COORDINATOR_KEY_FILENAME
+
+    def reject_path_read(_path: Path) -> bytes:
+        pytest.fail("private key must be read through its validated descriptor")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_path_read)
+
+    assert b"PRIVATE KEY" in module._read_private_key(key_path)
 
 
 def test_host_coordinator_requires_kernel_process_memory_isolation(

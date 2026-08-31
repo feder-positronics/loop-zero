@@ -1223,14 +1223,10 @@ def _wait_until_done(tmp_path: Path, name: str, *, script: Path = SCRIPT) -> Non
 def _isolated_job_script(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     script = repo / "scripts" / "util" / "job.sh"
-    script.parent.mkdir(parents=True)
-    shutil.copy2(SCRIPT, script)
-    shutil.copy2(REPO_ROOT / "scripts" / "util" / "job_store.py", script.parent)
-    shutil.copy2(
-        REPO_ROOT / "scripts" / "util" / "trusted_executable.py", script.parent
-    )
-    shutil.copy2(
-        REPO_ROOT / "scripts" / "util" / "repro_connect_guard.py", script.parent
+    shutil.copytree(
+        REPO_ROOT / "scripts" / "util",
+        script.parent,
+        dirs_exist_ok=True,
     )
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     return script

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import pwd
+import re
 import stat
 import subprocess
 import sys
@@ -37,9 +38,16 @@ LEGACY_COORDINATOR_PUBLIC_KEY = (
 COORDINATOR_KEY_FILENAME = "coordinator-ed25519.pem"
 COORDINATOR_LOCK_FILENAME = ".coordinator-key.lock"
 MAX_COORDINATOR_KEY_BYTES = 4096
+MAX_COORDINATOR_LEDGER_STATE_BYTES = 1024 * 1024
+COORDINATOR_LEDGER_DIRECTORY = "ledgers"
+COORDINATOR_LEDGER_LOCK_FILENAME = ".ledger-state.lock"
+_LEDGER_BINDING_RE = re.compile(r"[0-9a-f]{64}")
 AUTHORITY_PROVIDER_TIMEOUT_S = 10.0
 PROOF_FIELD = "terminal_authority_proof"
 PTRACE_SCOPE_PATH = Path("/proc/sys/kernel/yama/ptrace_scope")
+GUARDIAN_COORDINATOR_PUBLIC_KEY_PATH = Path(
+    "/run/guardian-authority/coordinator-public-key.der"
+)
 AuthorityKind = Literal["dispatcher", "coordinator"]
 
 
@@ -333,23 +341,303 @@ def _private_directory(path: Path) -> Path:
     return path
 
 
-def _read_private_key(path: Path) -> bytes:
+def _coordinator_ledger_directory() -> Path:
+    return _private_directory(
+        _private_directory(_coordinator_state_directory())
+        / COORDINATOR_LEDGER_DIRECTORY
+    )
+
+
+def _coordinator_ledger_state_path(repository_binding: str) -> Path:
+    if _LEDGER_BINDING_RE.fullmatch(repository_binding) is None:
+        raise TerminalAuthorityError("coordinator ledger binding is invalid")
+    return _coordinator_ledger_directory() / f"{repository_binding}.json"
+
+
+def _read_coordinator_ledger_state(path: Path) -> dict[str, object]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
     try:
-        metadata = path.lstat()
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator ledger state is unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
         if (
-            path.is_symlink()
-            or not stat.S_ISREG(metadata.st_mode)
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o777 != 0o600
+            or metadata.st_size <= 0
+            or metadata.st_size > MAX_COORDINATOR_LEDGER_STATE_BYTES
+        ):
+            raise TerminalAuthorityError("coordinator ledger state is unsafe")
+        payload = bytearray()
+        while len(payload) <= MAX_COORDINATOR_LEDGER_STATE_BYTES:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if len(payload) > MAX_COORDINATOR_LEDGER_STATE_BYTES:
+            raise TerminalAuthorityError("coordinator ledger state is unsafe")
+    finally:
+        os.close(descriptor)
+    try:
+        parsed = json.loads(payload)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise TerminalAuthorityError("coordinator ledger state is invalid") from exc
+    if not isinstance(parsed, dict):
+        raise TerminalAuthorityError("coordinator ledger state is invalid")
+    return parsed
+
+
+def load_coordinator_ledger_state(
+    repository_binding: str,
+) -> dict[str, object] | None:
+    """Read one protected per-repository ledger head without creating it."""
+    path = _coordinator_ledger_state_path(repository_binding)
+    try:
+        state = _read_coordinator_ledger_state(path)
+    except FileNotFoundError:
+        return None
+    _validate_coordinator_ledger_state(state, repository_binding)
+    return state
+
+
+def _validate_coordinator_ledger_state(
+    state: Mapping[str, object], repository_binding: str
+) -> int:
+    if state.get("repository_binding") != repository_binding:
+        raise TerminalAuthorityError("coordinator ledger binding does not match")
+    generation = state.get("generation")
+    if (
+        state.get("scheme") != "dispatch-authority-ledger-host-state-v1"
+        or isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 1
+    ):
+        raise TerminalAuthorityError("coordinator ledger state is invalid")
+    return generation
+
+
+def _open_coordinator_ledger_lock(directory: Path) -> int:
+    lock_path = directory / COORDINATOR_LEDGER_LOCK_FILENAME
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator ledger lock is unavailable") from exc
+    metadata = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o777 != 0o600
+    ):
+        os.close(descriptor)
+        raise TerminalAuthorityError("coordinator ledger lock is unsafe")
+    return descriptor
+
+
+def _fsync_private_directory(directory: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    try:
+        descriptor = os.open(directory, flags)
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator state sync is unavailable") from exc
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator state sync failed") from exc
+    finally:
+        os.close(descriptor)
+
+
+def commit_coordinator_ledger_state(
+    repository_binding: str,
+    state: Mapping[str, object],
+    *,
+    expected_generation: int | None,
+    allow_same_generation_reseal: bool = False,
+    allow_same_generation_append: bool = False,
+    appended_record_count: int = 1,
+) -> None:
+    """Atomically advance one protected ledger head with generation CAS."""
+    path = _coordinator_ledger_state_path(repository_binding)
+    if state.get("repository_binding") != repository_binding:
+        raise TerminalAuthorityError("coordinator ledger binding does not match")
+    generation = state.get("generation")
+    if (
+        isinstance(generation, bool)
+        or not isinstance(generation, int)
+        or generation < 0
+    ):
+        raise TerminalAuthorityError("coordinator ledger generation is invalid")
+    if allow_same_generation_reseal and allow_same_generation_append:
+        raise TerminalAuthorityError("coordinator ledger state update is invalid")
+    if (
+        isinstance(appended_record_count, bool)
+        or not isinstance(appended_record_count, int)
+        or appended_record_count < 1
+        or (not allow_same_generation_append and appended_record_count != 1)
+    ):
+        raise TerminalAuthorityError("coordinator ledger state update is invalid")
+    same_generation = allow_same_generation_reseal or allow_same_generation_append
+    expected_next_generation = (
+        expected_generation
+        if same_generation
+        else expected_generation + 1
+        if expected_generation is not None
+        else None
+    )
+    if expected_generation is not None and (
+        isinstance(expected_generation, bool)
+        or not isinstance(expected_generation, int)
+        or expected_generation < 0
+        or generation != expected_next_generation
+    ):
+        raise TerminalAuthorityError("coordinator ledger generation is invalid")
+    if expected_generation is None and generation != 1:
+        raise TerminalAuthorityError("coordinator ledger generation is invalid")
+    if state.get("scheme") != "dispatch-authority-ledger-host-state-v1":
+        raise TerminalAuthorityError("coordinator ledger state is invalid")
+    try:
+        payload = (
+            json.dumps(
+                dict(state),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, UnicodeEncodeError) as exc:
+        raise TerminalAuthorityError("coordinator ledger state is invalid") from exc
+    if not payload or len(payload) > MAX_COORDINATOR_LEDGER_STATE_BYTES:
+        raise TerminalAuthorityError("coordinator ledger state is invalid")
+
+    directory = path.parent
+    lock_descriptor = _open_coordinator_ledger_lock(directory)
+    temporary: Path | None = None
+    try:
+        fcntl.flock(lock_descriptor, fcntl.LOCK_EX)
+        try:
+            current = _read_coordinator_ledger_state(path)
+        except FileNotFoundError:
+            current = None
+        current_generation = (
+            _validate_coordinator_ledger_state(current, repository_binding)
+            if current is not None
+            else None
+        )
+        if expected_generation is None:
+            if current is not None:
+                raise TerminalAuthorityError("coordinator ledger generation changed")
+        elif current_generation != expected_generation:
+            raise TerminalAuthorityError("coordinator ledger generation changed")
+        if allow_same_generation_reseal:
+            assert current is not None
+            immutable_current = dict(current)
+            immutable_next = dict(state)
+            immutable_current.pop("archive_stat_seals", None)
+            immutable_next.pop("archive_stat_seals", None)
+            if immutable_current != immutable_next:
+                raise TerminalAuthorityError(
+                    "coordinator ledger reseal changed logical head"
+                )
+        if allow_same_generation_append:
+            assert current is not None
+            immutable_current = dict(current)
+            immutable_next = dict(state)
+            active_fields = {
+                "active_record_count",
+                "active_records_sha256",
+                "active_byte_size",
+            }
+            for field_name in active_fields:
+                immutable_current.pop(field_name, None)
+                immutable_next.pop(field_name, None)
+            current_count = current.get("active_record_count")
+            next_count = state.get("active_record_count")
+            current_size = current.get("active_byte_size")
+            next_size = state.get("active_byte_size")
+            if (
+                immutable_current != immutable_next
+                or not isinstance(current_count, int)
+                or not isinstance(next_count, int)
+                or next_count != current_count + appended_record_count
+                or not isinstance(current_size, int)
+                or not isinstance(next_size, int)
+                or next_size <= current_size
+                or state.get("active_records_sha256")
+                == current.get("active_records_sha256")
+            ):
+                raise TerminalAuthorityError(
+                    "coordinator ledger append changed logical head"
+                )
+
+        with tempfile.NamedTemporaryFile(
+            dir=directory,
+            prefix=f".{repository_binding}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            temporary.chmod(0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(path)
+        temporary = None
+        _fsync_private_directory(directory)
+        if _read_coordinator_ledger_state(path) != dict(state):
+            raise TerminalAuthorityError("coordinator ledger state did not persist")
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        os.close(lock_descriptor)
+
+
+def _read_private_key(path: Path) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise TerminalAuthorityError("coordinator private key is unavailable") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != os.getuid()
             or metadata.st_mode & 0o777 != 0o600
             or metadata.st_size <= 0
             or metadata.st_size > MAX_COORDINATOR_KEY_BYTES
         ):
             raise TerminalAuthorityError("coordinator private key is unsafe")
-        private_key = path.read_bytes()
-    except FileNotFoundError:
-        raise
+        chunks: list[bytes] = []
+        remaining = MAX_COORDINATOR_KEY_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        private_key = b"".join(chunks)
     except OSError as exc:
         raise TerminalAuthorityError("coordinator private key is unavailable") from exc
+    finally:
+        os.close(descriptor)
+    if not private_key or len(private_key) > MAX_COORDINATOR_KEY_BYTES:
+        raise TerminalAuthorityError("coordinator private key is unsafe")
     if b"PRIVATE KEY" not in private_key:
         raise TerminalAuthorityError("coordinator private key is invalid")
     return private_key
@@ -385,7 +673,10 @@ def _coordinator_private_key(*, create: bool) -> bytes:
         private_key = _run_openssl(
             ["genpkey", "-algorithm", "Ed25519"], input_bytes=b""
         )
-        if b"PRIVATE KEY" not in private_key or len(private_key) > MAX_COORDINATOR_KEY_BYTES:
+        if (
+            b"PRIVATE KEY" not in private_key
+            or len(private_key) > MAX_COORDINATOR_KEY_BYTES
+        ):
             raise TerminalAuthorityError("coordinator private key generation failed")
         with tempfile.NamedTemporaryFile(dir=directory, delete=False) as handle:
             temporary = Path(handle.name)
@@ -439,8 +730,69 @@ def _trusted_public_key_from_file(
     return _public_key_from_private(_read_private_key(Path(key_path)))
 
 
+def _guardian_projection_parent_is_safe(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISDIR(metadata.st_mode)
+        and metadata.st_uid == os.getuid()
+        and metadata.st_mode & 0o022 == 0
+    )
+
+
+def _guardian_projection_is_read_only(descriptor: int) -> bool:
+    """Bind the kernel-enforced read-only proof to the opened trust-root file."""
+    try:
+        return bool(os.fstatvfs(descriptor).f_flag & os.ST_RDONLY)
+    except OSError:
+        return False
+
+
 def _trusted_coordinator_public_key() -> bytes:
     _require_process_memory_isolation()
+    guardian_projection = GUARDIAN_COORDINATOR_PUBLIC_KEY_PATH
+    if (
+        os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY")
+        in {"network-denied", "host-network"}
+        and guardian_projection.is_file()
+    ):
+        if not _guardian_projection_parent_is_safe(guardian_projection.parent):
+            raise TerminalAuthorityError(
+                "Guardian coordinator public key projection parent is unsafe"
+            )
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(guardian_projection, flags)
+            try:
+                metadata = os.fstat(descriptor)
+                if not _guardian_projection_is_read_only(descriptor):
+                    raise TerminalAuthorityError(
+                        "Guardian coordinator public key projection is not read-only"
+                    )
+                if (
+                    not stat.S_ISREG(metadata.st_mode)
+                    or metadata.st_uid != os.getuid()
+                    or metadata.st_mode & 0o777 != 0o600
+                    or metadata.st_size <= 0
+                    or metadata.st_size > 2048
+                ):
+                    raise TerminalAuthorityError(
+                        "Guardian coordinator public key is unsafe"
+                    )
+                public_key = os.read(descriptor, 2049)
+            finally:
+                os.close(descriptor)
+        except OSError as exc:
+            raise TerminalAuthorityError(
+                "Guardian coordinator public key is unavailable"
+            ) from exc
+        if not public_key or len(public_key) > 2048:
+            raise TerminalAuthorityError("Guardian coordinator public key is invalid")
+        return public_key
     key_path = (
         _private_directory(_coordinator_state_directory()) / COORDINATOR_KEY_FILENAME
     )
@@ -510,9 +862,7 @@ def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) -> 
             and completed.stderr.startswith(b"Signature verification failed:")
         ):
             return False
-        raise TerminalAuthorityError(
-            "legacy coordinator verification provider failed"
-        )
+        raise TerminalAuthorityError("legacy coordinator verification provider failed")
 
 
 def verify_legacy_coordinator_authority(record: Mapping[str, object]) -> None:
@@ -621,9 +971,7 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) -> 
                 # Only OpenSSL's documented verification-mismatch result is
                 # durable invalidity. Provider/runtime failures must remain
                 # retryable and therefore must not enter the LRU cache.
-                raise TerminalAuthorityError(
-                    "terminal authority provider failed"
-                )
+                raise TerminalAuthorityError("terminal authority provider failed")
 
             return _with_read_descriptor(signature, verify_signature)
 
@@ -649,9 +997,7 @@ def verify_terminal_authority(
             or proof.get("authority_kind") != "coordinator"
         ):
             raise TerminalAuthorityError("coordinator authority kind is invalid")
-        public_key = _decode(
-            proof.get("public_key"), label="public key", maximum=2048
-        )
+        public_key = _decode(proof.get("public_key"), label="public key", maximum=2048)
         try:
             trusted_public_key = _trusted_coordinator_public_key()
         except TerminalAuthorityError as exc:
@@ -662,18 +1008,14 @@ def verify_terminal_authority(
             "key_id"
         ) != _coordinator_key_id(trusted_public_key):
             raise TerminalAuthorityError("coordinator authority key is invalid")
-        signature = _decode(
-            proof.get("signature"), label="signature", maximum=8192
-        )
+        signature = _decode(proof.get("signature"), label="signature", maximum=8192)
         payload = _canonical_payload(
             record,
             authority_kind="coordinator",
             scheme=COORDINATOR_AUTHORITY_SCHEME,
         )
         if not _signature_is_valid(public_key, signature, payload):
-            raise TerminalAuthorityError(
-                "coordinator authority signature is invalid"
-            )
+            raise TerminalAuthorityError("coordinator authority signature is invalid")
         return
     if (
         not isinstance(proof_scheme, str)
@@ -684,6 +1026,8 @@ def verify_terminal_authority(
         raise TerminalAuthorityError(
             "legacy terminal authority is valid only for a dispatcher"
         )
+    if expected_kind == "coordinator":
+        raise TerminalAuthorityError("coordinator authority scheme is invalid")
     if proof.get("authority_kind") != expected_kind:
         raise TerminalAuthorityError("terminal authority kind is invalid")
     if proof_scheme == LEGACY_AUTHORITY_SCHEME and registration is None:
