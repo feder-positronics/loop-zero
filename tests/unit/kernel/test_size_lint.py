@@ -242,11 +242,20 @@ def test_baseline_entries_are_still_over_their_hard_limit() -> None:
     )
 
 
-def _precommit_size_lint_scope() -> tuple[str, str]:
-    """Extract the size-lint hook's files/exclude regexes from pre-commit config."""
+def _precommit_hook_block(hook_id: str) -> str:
+    """Extract one hook's config block from .pre-commit-config.yaml."""
     repo_root = Path(__file__).resolve().parents[4]
     config = (repo_root / ".pre-commit-config.yaml").read_text(encoding="utf-8")
-    hook_block = config.split("id: size-lint", 1)[1].split("- id:", 1)[0]
+    # Anchor on the full "- id: <hook>" line so one hook id being a prefix of
+    # another cannot select the wrong block.
+    anchor = f"- id: {hook_id}\n"
+    assert anchor in config, f"hook {hook_id} missing from pre-commit config"
+    return config.split(anchor, 1)[1].split("- id:", 1)[0]
+
+
+def _precommit_size_lint_scope() -> tuple[str, str]:
+    """Extract the size-lint hook's files/exclude regexes from pre-commit config."""
+    hook_block = _precommit_hook_block("size-lint")
     files_re = exclude_re = ""
     for line in hook_block.splitlines():
         stripped = line.strip()
@@ -256,6 +265,29 @@ def _precommit_size_lint_scope() -> tuple[str, str]:
             exclude_re = stripped.removeprefix("exclude:").strip().strip("\"'")
     assert files_re and exclude_re
     return files_re, exclude_re
+
+
+def test_warn_capable_precommit_hooks_are_verbose() -> None:
+    """Hooks that print non-blocking notices and exit 0 need verbose: true,
+    or pre-commit suppresses their output in passing runs."""
+    import re
+
+    for hook_id in (
+        "size-lint",
+        "staging-base-check",
+        "docs-link-check",
+        "commit-author-check",
+    ):
+        # Match a real config line, not a comment mentioning the attribute
+        # (the extracted block absorbs the next hook's leading comments).
+        assert re.search(
+            r"^\s*verbose: true\s*$",
+            _precommit_hook_block(hook_id),
+            re.MULTILINE,
+        ), (
+            f"{hook_id} must set verbose: true or its exit-0 notices are "
+            "invisible in passing runs"
+        )
 
 
 def test_precommit_filter_agrees_with_hook_classifier() -> None:
