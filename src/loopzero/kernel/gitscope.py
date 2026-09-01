@@ -120,3 +120,17 @@ def task_contract_hash(task: dict[str, object]) -> str:
         immutable_task_contract(task), sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _deterministic_identifier_sha256(value: object) -> str:
+    """Hash untrusted identifiers without failing on JSON-valid lone surrogates."""
+    if isinstance(value, str):
+        payload = value.encode("utf-8", "surrogatepass")
+    else:
+        try:
+            payload = json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8", "surrogatepass")
+        except (TypeError, ValueError):
+            payload = type(value).__qualname__.encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
