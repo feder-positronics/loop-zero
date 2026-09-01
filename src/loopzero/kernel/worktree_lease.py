@@ -352,7 +352,38 @@ def identities_match(
 ) -> bool:
     """Compare v1 telemetry or a complete V2 identity without rewriting it."""
     if expected.get("version") == 2:
-        return dict(expected) == dict(current)
+        if dict(expected) == dict(current):
+            return True
+        # Governed write identities historically advertised an always-null
+        # index_sha256 even though their tree/path payload did not calculate an
+        # index digest.  Accept that exact truthful-shape transition only when
+        # both derived status digests validate and the underlying payloads are
+        # otherwise identical.  Ordinary V2 source identities have
+        # state_sha256 instead and remain exact-match only.
+        if "tree_sha" not in expected or "tree_sha" not in current:
+            return False
+
+        def governed_payload(
+            identity: Mapping[str, object],
+        ) -> dict[str, object] | None:
+            payload = dict(identity)
+            status_digest = payload.pop("status_sha256", None)
+            if not isinstance(status_digest, str):
+                return None
+            if (
+                hashlib.sha256(
+                    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                != status_digest
+            ):
+                return None
+            if payload.get("index_sha256") is None:
+                payload.pop("index_sha256", None)
+            return payload
+
+        expected_payload = governed_payload(expected)
+        current_payload = governed_payload(current)
+        return expected_payload is not None and expected_payload == current_payload
     legacy_keys = {"head", "state_sha256"}
     if not expected or not set(expected).issubset(legacy_keys):
         return False
