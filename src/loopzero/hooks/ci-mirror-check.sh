@@ -506,5 +506,25 @@ else
     exit 1
 fi
 
+# Advisory push-batching signal (#4014): each ready-PR push fires ~3 hosted
+# workflow runs and invalidates the per-SHA final-CI verdict. Local counter
+# only; never changes the hook's exit status.
+push_count_root="${INTELFLO_JOB_DIR:-.pid/jobs}/../push-counts"
+if mkdir -p "$push_count_root" 2>/dev/null; then
+    push_count_file="$push_count_root/$(printf '%s' "$git_branch" | tr -c 'A-Za-z0-9._-' '_')"
+    previous_pushes="$(cat "$push_count_file" 2>/dev/null || true)"
+    case "$previous_pushes" in
+    '' | *[!0-9]*) previous_pushes=0 ;;
+    esac
+    push_count=$((10#$previous_pushes + 1))
+    printf '%s\n' "$push_count" >"$push_count_file" 2>/dev/null || true
+    if [ "$push_count" -ge 3 ]; then
+        echo ""
+        echo "ℹ Pre-push mirror run #$push_count for '$git_branch' on this checkout. Each ready-PR push"
+        echo "  fires ~3 hosted workflow runs and invalidates the per-SHA ci-final verdict;"
+        echo "  batch review and CI fixes into ONE push per round (branch-workflow.mdc)."
+    fi
+fi
+
 echo ""
 echo "✅ CI mirror check passed"
