@@ -35,6 +35,10 @@ requires_nested_user_namespace = pytest.mark.skipif(
     os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
     reason="bound-job protection cannot create a nested user namespace",
 )
+requires_host_job_authority = pytest.mark.skipif(
+    os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
+    reason="default job authority is outside the Guardian sandbox",
+)
 REPRO_GUARD_UNAVAILABLE_ERRORS = (
     REPRO_CONNECT_GUARD.SECCOMP_NOTIFY_UNAVAILABLE_ERROR,
     REPRO_CONNECT_GUARD.MANAGER_SOCKET_AUTHORITY_UNAVAILABLE_ERROR,
@@ -186,6 +190,7 @@ def test_snapshot_runner_keys_authority_to_declared_delivery(tmp_path: Path) -> 
     assert not (REPO_ROOT / "snapshot-jobs").exists()
 
 
+@requires_host_job_authority
 def test_snapshot_runner_starts_job_in_declared_delivery_authority(
     tmp_path: Path,
 ) -> None:
@@ -894,6 +899,7 @@ def test_unbound_host_dispatcher_gets_no_terminal_binding(tmp_path: Path) -> Non
     assert not (job_dir / "terminal-envelope.json").exists()
 
 
+@requires_host_job_authority
 def test_default_authority_is_external_and_legacy_recovery_is_explicit(
     tmp_path: Path,
 ) -> None:

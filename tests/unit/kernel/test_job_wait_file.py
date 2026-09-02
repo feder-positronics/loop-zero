@@ -20,6 +20,7 @@ def run_wait_file(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=cwd,
+        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(cwd / "jobs")},
         timeout=60,
     )
 
@@ -47,6 +48,7 @@ def test_wait_file_wakes_when_artifact_appears(tmp_path: Path) -> None:
     assert elapsed < 30
     assert "terminal.json" in result.stdout
     assert '"mode": "terminal"' in result.stdout
+    assert (tmp_path / "jobs").is_dir()
 
 
 def test_wait_file_deadman_routes_to_orphan_path(tmp_path: Path) -> None:
