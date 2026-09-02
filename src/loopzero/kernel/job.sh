@@ -1009,6 +1009,7 @@ PY
 	echo "started job '$name' (pid $pid)"
 	echo "  log:  $dir/log"
 	echo "  wait: scripts/util/job.sh wait $name --timeout <seconds>"
+	echo "  note: ONE blocking wait sized from p90; under a harness foreground cap run the wait as a background task (completion notifies) — never drain stdin at short intervals"
 }
 
 job_running() {
