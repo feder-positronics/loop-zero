@@ -993,6 +993,7 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "alias-availability",
         "attempt-abort",
         "attempt-checkpoint",
+        "attempt-cleanup-failure",
         "attempt-owner",
         "attempt-patch-identity-carry",
         "attempt-progress",
@@ -1004,10 +1005,12 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "delivery-control",
         "deposit-verification",
         "evidence-cleanup",
+        "evidence-cleanup-friction",
         "inline",
         "review-chain-advisory",
         "review-recovery-verification",
         "route",
+        "scratch-cleanup",
         "verdict",
     }
 )
