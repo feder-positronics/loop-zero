@@ -1012,6 +1012,52 @@ def _publish_prepared_directory(source: Path, target: Path) -> None:
     _replace_synced(source, target)
 
 
+def _preserve_uncommitted_active_tail(
+    repo: Path,
+    active: Path,
+    payload: bytes,
+    protected_size: int,
+    generation: int,
+) -> None:
+    tail = payload[protected_size:]
+    parent = repo / AUTHORITY_LEDGER_DIRECTORY / "uncommitted-tail-recovery"
+    try:
+        parent.mkdir(mode=0o700, exist_ok=True)
+        metadata = parent.lstat()
+        if (
+            parent.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise DispatchError("uncommitted-tail recovery directory is unsafe")
+        recovery = parent / f"generation-{generation}-{uuid.uuid4().hex}"
+        recovery.mkdir(mode=0o700)
+        _write_synced(recovery / "tail.bin", tail)
+        manifest = {
+            "schema_version": 1,
+            "active_relative_path": str(active.relative_to(repo)),
+            "generation": generation,
+            "protected_size": protected_size,
+            "original_size": len(payload),
+            "protected_sha256": hashlib.sha256(payload[:protected_size]).hexdigest(),
+            "tail_sha256": hashlib.sha256(tail).hexdigest(),
+            "original_sha256": hashlib.sha256(payload).hexdigest(),
+        }
+        _write_synced(
+            recovery / "manifest.json",
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+            + b"\n",
+        )
+        _fsync_directory(recovery)
+        _fsync_directory(parent)
+        _fsync_directory(parent.parent)
+    except OSError as exc:
+        raise DispatchError(
+            f"cannot preserve uncommitted authority tail: {exc}"
+        ) from exc
+
+
 def _recover_uncommitted_active_tail(repo: Path) -> bool:
     binding = _authority_repository_binding(repo)
     try:
@@ -1056,6 +1102,9 @@ def _recover_uncommitted_active_tail(repo: Path) -> bool:
             )
     except (authority_ledger.DispatchLedgerError, TerminalAuthorityError) as exc:
         raise DispatchError(f"authority active-tail recovery failed: {exc}") from exc
+    _preserve_uncommitted_active_tail(
+        repo, active, payload, state.active_byte_size, state.generation
+    )
     temporary = active.with_name(f".{active.name}.{uuid.uuid4().hex}.recover")
     _write_synced(temporary, protected_payload)
     _replace_synced(temporary, active)

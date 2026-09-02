@@ -51,6 +51,7 @@ from dispatch_common import (
     trusted_git_command,
 )
 from dispatch_review_authority import (
+    _latest_attempt_settlement_indices,
     accepted_review_terminals,
     authenticated_retry_outcomes,
     authenticated_review_terminals,
@@ -70,8 +71,7 @@ from dispatch_routing import (
 )
 from finding_ledger import canonical_record_digest
 from guardian_sandbox import environment as sandbox_environment
-from skill_run_log import active_run
-from skill_run_log import load_entries as load_skill_run_entries
+from skill_run_log import active_run, load_entries as load_skill_run_entries
 
 _ATTEMPT_LOCK_STATE = threading.local()
 _AUTHORITY_LEDGER_LOCK_STATE = threading.local()
@@ -716,6 +716,7 @@ def authority_projection_bundle_v1(
             continue
         units = open_units_by_worktree.setdefault(str(worktree), {})
         _apply_open_write_record(units, record)
+    latest_settlement_indices = _latest_attempt_settlement_indices(governed)
     return AuthorityProjectionBundleV1(
         coordinator=_stable_record_digests(
             [
@@ -782,6 +783,21 @@ def authority_projection_bundle_v1(
                 )
             )
             is not None
+        ),
+        attempt_settlements=tuple(
+            sorted(
+                (
+                    str(record["task_id"]),
+                    int(
+                        record.get("attempt_index")
+                        if record.get("attempt_index") is not None
+                        else (0 if record.get("type") == "inline" else -1)
+                    ),
+                    canonical_record_digest(record),
+                )
+                for index, record in enumerate(governed)
+                if index in latest_settlement_indices
+            )
         ),
     )
 
@@ -856,6 +872,7 @@ def retained_authority_projection(
             )
             latest_contract_anchor[(work_unit_id, normalized)] = index
     contract_anchor_indices = frozenset(latest_contract_anchor.values())
+    settlement_indices = _latest_attempt_settlement_indices(governed)
     retained: list[dict[str, object]] = []
     for index, record in enumerate(governed):
         record_type = record.get("type")
@@ -871,6 +888,7 @@ def retained_authority_projection(
             record.get("run_id") in active_runs or context in open_contexts
         )
         preserves_work_unit_contract = index in contract_anchor_indices
+        preserves_attempt_settlement = index in settlement_indices
         standing_key = (
             record_type,
             record.get("task_id"),
@@ -880,6 +898,7 @@ def retained_authority_projection(
         if (
             not belongs_to_live_chain
             and not preserves_work_unit_contract
+            and not preserves_attempt_settlement
             and (
                 isinstance(record.get("run_id"), str)
                 or latest_standing.get(standing_key) != index
@@ -1012,21 +1031,26 @@ class AuthorityProjectionBundleV1:
     work_unit_contracts: tuple[tuple[str, tuple[str, ...]], ...]
     open_write_units: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...]
     alias_availability: tuple[tuple[str, str], ...]
+    attempt_settlements: tuple[tuple[str, int, str], ...]
 
 
-AUTHORITY_PROJECTION_CONSUMERS_V1 = (
-    "authenticated_coordinator_record_ids",
-    "authenticated_registration_starts",
-    "authenticated_open_before",
-    "authenticated_open_dispatch_attempts",
-    "authenticated_supersessions",
-    "authenticated_review_terminals",
-    "accepted_review_terminals",
-    "accepted_advisory_review_terminals",
-    "authenticated_verdicts",
-    "delivery_controller_records",
-    "authenticated_retry_outcomes",
-    "validate_work_unit_contract",
-    "open_write_units",
-    "latest_explicit_alias_availability",
+AUTHORITY_PROJECTION_REGISTRY_V1 = (
+    ("coordinator", "authenticated_coordinator_record_ids"),
+    ("registration_starts", "authenticated_registration_starts"),
+    ("open_before", "authenticated_open_before"),
+    ("open_attempts", "authenticated_open_dispatch_attempts"),
+    ("supersessions", "authenticated_supersessions"),
+    ("review_terminals", "authenticated_review_terminals"),
+    ("accepted_review_terminals", "accepted_review_terminals"),
+    ("advisory_review_terminals", "accepted_advisory_review_terminals"),
+    ("verdicts", "authenticated_verdicts"),
+    ("delivery_controller", "delivery_controller_records"),
+    ("retry_outcomes", "authenticated_retry_outcomes"),
+    ("work_unit_contracts", "validate_work_unit_contract"),
+    ("open_write_units", "open_write_units"),
+    ("alias_availability", "latest_explicit_alias_availability"),
+    ("attempt_settlements", "winning_attempt_settlements"),
+)
+AUTHORITY_PROJECTION_CONSUMERS_V1 = tuple(
+    consumer for _field, consumer in AUTHORITY_PROJECTION_REGISTRY_V1
 )
