@@ -630,6 +630,180 @@ def test_in_progress_can_transition_to_terminal_from_another_session() -> None:
     assert should_append is True
 
 
+def test_stale_abandoned_run_can_recover_only_from_matching_frozen_closeout() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    prior = [
+        _entry(
+            run_id,
+            "in_progress",
+            pr=3702,
+            issue=3691,
+            git_branch="feat/test",
+        ),
+        _entry(
+            run_id,
+            "abandoned",
+            issue=3691,
+            git_branch="feat/test",
+            notes="hygiene sweep 2026-08-28: session dead, no branch events",
+        ),
+    ]
+    merged = _entry(run_id, "merged", pr=3702, issue=3691, git_branch="feat/test")
+    operation_id = "delivery-closeout:" + "a" * 64
+    plan = {
+        "schema_version": "delivery-settlement-plan-v1",
+        "run_id": run_id,
+        "pr": 3702,
+        "reviewed_head": "b" * 40,
+        "merge_commit": "c" * 40,
+        "operations": [
+            {
+                "operation_id": operation_id,
+                "kind": "terminalize-run",
+                "target": run_id,
+                "details": {
+                    "skill": "work-issue",
+                    "pr": 3702,
+                    "issue": 3691,
+                    "branch": "feat/test",
+                },
+            }
+        ],
+    }
+    plan["plan_digest"] = module._canonical_digest(plan)
+    capsule = {
+        "schema_version": "delivery-closeout-v2",
+        "run_id": run_id,
+        "pr": 3702,
+        "reviewed_head": "b" * 40,
+        "merge_commit": "c" * 40,
+        "plan_digest": plan["plan_digest"],
+        "plan": plan,
+        "completed": [],
+        "remaining": [operation_id],
+        "receipts": {},
+        "status": "in_progress",
+    }
+    capsule["capsule_digest"] = module._canonical_digest(capsule)
+
+    assert (
+        module.validate_stale_abandoned_merge_recovery(prior, merged, capsule) is True
+    )
+    assert (
+        module.validate_transition(prior, merged, allow_stale_abandoned_merge=True)
+        is True
+    )
+
+    mismatched_history = [{**prior[0], "pr": 3600}, prior[1]]
+    with pytest.raises(ValueError, match="conflicts with run history"):
+        module.validate_stale_abandoned_merge_recovery(
+            mismatched_history, merged, capsule
+        )
+
+
+def test_stale_abandoned_recovery_rejects_mismatched_capsule() -> None:
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    prior = [
+        _entry(run_id, "in_progress", issue=3691, git_branch="feat/test"),
+        _entry(
+            run_id,
+            "abandoned",
+            issue=3691,
+            git_branch="feat/test",
+            notes="hygiene sweep 2026-08-28: session dead, no branch events",
+        ),
+    ]
+    merged = _entry(run_id, "merged", pr=3702, issue=3691, git_branch="feat/test")
+
+    with pytest.raises(ValueError, match="frozen closeout capsule"):
+        module.validate_stale_abandoned_merge_recovery(
+            prior,
+            merged,
+            {
+                "schema_version": "delivery-closeout-v2",
+                "run_id": run_id,
+                "pr": 9999,
+            },
+        )
+
+
+def test_canonical_closeout_capsule_rejects_hard_link_alias(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common_dir = tmp_path / ".git"
+    common_dir.mkdir()
+    capsule_dir = tmp_path / ".audit" / "delivery-closeout"
+    capsule_dir.mkdir(parents=True)
+    capsule = capsule_dir / "pr-3702-sr_0123456789abcdef0123456789abcdef.json"
+    capsule.write_text("{}\n", encoding="utf-8")
+    capsule_stat = capsule_dir.stat()
+    (common_dir / "intelflo-delivery-closeout.lock").write_text(
+        f"{capsule_stat.st_dev}:{capsule_stat.st_ino}\n", encoding="ascii"
+    )
+    (tmp_path / "capsule-alias.json").hardlink_to(capsule)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: module.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(common_dir), stderr=""
+        ),
+    )
+
+    with pytest.raises(ValueError, match="hard links"):
+        module.load_canonical_closeout_capsule(tmp_path, capsule)
+
+
+def test_canonical_closeout_capsule_rejects_symlinked_audit_ancestor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common_dir = tmp_path / ".git"
+    common_dir.mkdir()
+    outside_audit = tmp_path / "outside-audit"
+    capsule_dir = outside_audit / "delivery-closeout"
+    capsule_dir.mkdir(parents=True)
+    capsule = capsule_dir / "capsule.json"
+    (tmp_path / ".audit").symlink_to(outside_audit, target_is_directory=True)
+    capsule.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: module.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(common_dir), stderr=""
+        ),
+    )
+
+    with pytest.raises(ValueError, match="canonical primary artifact"):
+        module.load_canonical_closeout_capsule(tmp_path, capsule)
+
+
+def test_canonical_closeout_capsule_rejects_replaced_locked_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common_dir = tmp_path / ".git"
+    common_dir.mkdir()
+    capsule_dir = tmp_path / ".audit" / "delivery-closeout"
+    capsule_dir.mkdir(parents=True)
+    original_stat = capsule_dir.stat()
+    (common_dir / "intelflo-delivery-closeout.lock").write_text(
+        f"{original_stat.st_dev}:{original_stat.st_ino}\n", encoding="ascii"
+    )
+    moved = tmp_path / ".audit" / "delivery-closeout-moved"
+    capsule_dir.rename(moved)
+    capsule_dir.mkdir()
+    capsule = capsule_dir / "pr-3702-sr_0123456789abcdef0123456789abcdef.json"
+    capsule.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: module.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(common_dir), stderr=""
+        ),
+    )
+
+    with pytest.raises(ValueError, match="directory identity changed"):
+        module.load_canonical_closeout_capsule(tmp_path, capsule)
+
+
 def test_resolved_no_change_is_a_truthful_terminal_outcome() -> None:
     run_id = "sr_0123456789abcdef0123456789abcdef"
 

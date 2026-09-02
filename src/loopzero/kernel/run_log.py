@@ -38,10 +38,13 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import platform
 import re
+import stat
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -187,7 +190,10 @@ def latest_run_branch(
 
 
 def validate_transition(
-    entries: list[dict[str, object]], new_entry: dict[str, object]
+    entries: list[dict[str, object]],
+    new_entry: dict[str, object],
+    *,
+    allow_stale_abandoned_merge: bool = False,
 ) -> bool:
     """Return whether to append; reject contradictory lifecycle evidence."""
     run_id = new_entry.get("run_id")
@@ -202,6 +208,12 @@ def validate_transition(
     requested = new_entry.get("outcome")
     if previous == requested:
         return False
+    if (
+        previous == "abandoned"
+        and requested == "merged"
+        and allow_stale_abandoned_merge
+    ):
+        return True
     if previous in TERMINAL_OUTCOMES:
         raise ValueError(
             f"contradictory terminal transition for {run_id}: "
@@ -210,6 +222,226 @@ def validate_transition(
     if previous != "in_progress" or requested not in TERMINAL_OUTCOMES:
         raise ValueError(f"invalid lifecycle transition for {run_id}")
     return True
+
+
+def _canonical_digest(payload: object) -> str:
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def validate_stale_abandoned_merge_recovery(
+    entries: list[dict[str, object]],
+    new_entry: dict[str, object],
+    capsule: dict[str, object],
+) -> bool:
+    """Authorize one hygiene-abandoned run from its exact frozen closeout."""
+    run_id = new_entry.get("run_id")
+    prior = [entry for entry in entries if entry.get("run_id") == run_id]
+    if not prior or prior[-1].get("outcome") != "abandoned":
+        raise ValueError("stale recovery requires an abandoned logical run")
+    notes = prior[-1].get("notes")
+    if not isinstance(notes, str) or not (
+        (notes.startswith("hygiene sweep ") and "session dead" in notes)
+        or notes.startswith("stale-reconcile:")
+    ):
+        raise ValueError("stale recovery requires canonical abandonment evidence")
+    if new_entry.get("outcome") != "merged":
+        raise ValueError("stale recovery requires a merged terminal outcome")
+
+    unsigned_capsule = dict(capsule)
+    capsule_digest = unsigned_capsule.pop("capsule_digest", None)
+    plan = capsule.get("plan")
+    if not isinstance(plan, dict):
+        raise ValueError("frozen closeout capsule plan is invalid")
+    unsigned_plan = dict(plan)
+    plan_digest = unsigned_plan.pop("plan_digest", None)
+    if (
+        capsule.get("schema_version") != "delivery-closeout-v2"
+        or capsule.get("status") != "in_progress"
+        or capsule_digest != _canonical_digest(unsigned_capsule)
+        or not isinstance(plan_digest, str)
+        or plan_digest != _canonical_digest(unsigned_plan)
+        or capsule.get("plan_digest") != plan_digest
+        or any(
+            capsule.get(key) != plan.get(key)
+            for key in ("run_id", "pr", "reviewed_head", "merge_commit")
+        )
+        or capsule.get("run_id") != run_id
+        or capsule.get("pr") != new_entry.get("pr")
+        or re.fullmatch(r"[0-9a-f]{40}", str(capsule.get("merge_commit") or "")) is None
+    ):
+        raise ValueError("frozen closeout capsule identity is invalid")
+
+    raw_operations = plan.get("operations")
+    completed = capsule.get("completed")
+    remaining = capsule.get("remaining")
+    receipts = capsule.get("receipts")
+    if (
+        not isinstance(raw_operations, list)
+        or not all(isinstance(operation, dict) for operation in raw_operations)
+        or not isinstance(completed, list)
+        or not isinstance(remaining, list)
+        or not remaining
+        or not isinstance(receipts, dict)
+    ):
+        raise ValueError("frozen closeout capsule operation state is invalid")
+    operation_ids = [operation.get("operation_id") for operation in raw_operations]
+    if completed + remaining != operation_ids or set(receipts) != set(completed):
+        raise ValueError("frozen closeout capsule operation state is invalid")
+    operation = raw_operations[len(completed)]
+    details = operation.get("details")
+    if (
+        operation.get("operation_id") != remaining[0]
+        or operation.get("kind") != "terminalize-run"
+        or operation.get("target") != run_id
+        or not isinstance(details, dict)
+        or details.get("skill") != new_entry.get("skill")
+        or details.get("pr") != new_entry.get("pr")
+        or details.get("branch") != new_entry.get("git_branch")
+        or details.get("issue") != new_entry.get("issue")
+    ):
+        raise ValueError("frozen closeout capsule terminal operation is invalid")
+    historical_issues = {
+        entry.get("issue") for entry in prior if entry.get("issue") is not None
+    }
+    historical_prs = {entry.get("pr") for entry in prior if entry.get("pr") is not None}
+    historical_branches = {
+        entry.get("git_branch")
+        for entry in prior
+        if entry.get("git_branch") is not None
+    }
+    if historical_issues not in (
+        set(),
+        {new_entry.get("issue")},
+    ) or historical_prs not in (
+        set(),
+        {new_entry.get("pr")},
+    ) or historical_branches != {new_entry.get("git_branch")}:
+        raise ValueError("frozen closeout capsule conflicts with run history")
+    return True
+
+
+def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]:
+    """Load only the canonical primary worktree's closeout capsule."""
+    completed = subprocess.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError("canonical closeout capsule root is unavailable")
+    common_dir = Path(completed.stdout.strip()).resolve()
+    audit_dir = common_dir.parent / ".audit"
+    expected_parent = audit_dir / "delivery-closeout"
+    if (
+        not path.is_absolute()
+        or path.is_symlink()
+        or audit_dir.is_symlink()
+        or path.parent.is_symlink()
+        or path.parent != expected_parent
+    ):
+        raise ValueError("closeout capsule must be the canonical primary artifact")
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    try:
+        audit_descriptor = os.open(audit_dir, directory_flags)
+    except OSError as exc:
+        raise ValueError("closeout capsule is unreadable") from exc
+    try:
+        parent_descriptor = os.open(
+            expected_parent.name, directory_flags, dir_fd=audit_descriptor
+        )
+    except OSError as exc:
+        os.close(audit_descriptor)
+        raise ValueError("closeout capsule is unreadable") from exc
+    lock_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        lock_descriptor = os.open(
+            common_dir / "intelflo-delivery-closeout.lock", lock_flags
+        )
+    except OSError as exc:
+        os.close(parent_descriptor)
+        os.close(audit_descriptor)
+        raise ValueError("closeout capsule directory identity is unavailable") from exc
+    try:
+        lock_before = os.fstat(lock_descriptor)
+        if not stat.S_ISREG(lock_before.st_mode) or lock_before.st_nlink != 1:
+            raise ValueError("closeout capsule directory identity is invalid")
+        identity_payload = os.read(lock_descriptor, 129)
+        lock_after = os.fstat(lock_descriptor)
+        lock_current = os.stat(  # noqa: PTH116 - compare opened lock to its name.
+            common_dir / "intelflo-delivery-closeout.lock", follow_symlinks=False
+        )
+        if (
+            len(identity_payload) > 128
+            or (lock_before.st_dev, lock_before.st_ino, lock_before.st_size)
+            != (lock_after.st_dev, lock_after.st_ino, lock_after.st_size)
+            or (lock_current.st_dev, lock_current.st_ino)
+            != (lock_after.st_dev, lock_after.st_ino)
+            or lock_after.st_nlink != 1
+            or lock_current.st_nlink != 1
+        ):
+            raise ValueError("closeout capsule directory identity changed")
+        match = re.fullmatch(rb"([0-9]+):([0-9]+)\n", identity_payload)
+        if match is None:
+            raise ValueError("closeout capsule directory identity is invalid")
+        parent_stat = os.fstat(parent_descriptor)
+        expected_identity = (int(match.group(1)), int(match.group(2)))
+        if (parent_stat.st_dev, parent_stat.st_ino) != expected_identity:
+            raise ValueError("closeout capsule directory identity changed")
+    except OSError as exc:
+        os.close(parent_descriptor)
+        os.close(audit_descriptor)
+        raise ValueError("closeout capsule directory identity is unreadable") from exc
+    except ValueError:
+        os.close(parent_descriptor)
+        os.close(audit_descriptor)
+        raise
+    finally:
+        os.close(lock_descriptor)
+    file_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path.name, file_flags, dir_fd=parent_descriptor)
+    except OSError as exc:
+        os.close(parent_descriptor)
+        os.close(audit_descriptor)
+        raise ValueError("closeout capsule is unreadable") from exc
+    try:
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError("closeout capsule must be a regular file")
+            if before.st_nlink != 1:
+                raise ValueError("closeout capsule cannot use hard links")
+            try:
+                payload = json.load(handle)
+            except json.JSONDecodeError as exc:
+                raise ValueError("closeout capsule is unreadable") from exc
+            after = os.fstat(handle.fileno())
+            current = os.stat(  # noqa: PTH116 - dir_fd pins canonical ancestry.
+                path.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            if (
+                any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+                or after.st_nlink != 1
+                or current.st_nlink != 1
+                or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino)
+            ):
+                raise ValueError("closeout capsule changed while being read")
+    except OSError as exc:
+        raise ValueError("closeout capsule is unreadable") from exc
+    finally:
+        os.close(parent_descriptor)
+        os.close(audit_descriptor)
+    if not isinstance(payload, dict):
+        raise ValueError("closeout capsule is invalid")
+    return payload
 
 
 def require_run_owner(
@@ -933,11 +1165,20 @@ def main() -> int:
         action="store_true",
         help="Permit closeout phase completion after the caller verified remote merge state",
     )
+    parser.add_argument(
+        "--closeout-capsule",
+        type=Path,
+        help="Canonical frozen closeout capsule authorizing stale-abandoned recovery",
+    )
     args = parser.parse_args()
     if not args.reconcile_stale and not args.skill:
         parser.error("--skill is required except with --reconcile-stale")
     if not args.start and args.outcome == "merged" and not args.verified_merged:
         parser.error("--outcome merged requires --verified-merged")
+    if args.closeout_capsule is not None and (
+        args.start or args.outcome != "merged" or not args.verified_merged
+    ):
+        parser.error("--closeout-capsule requires a verified merged transition")
     root = repo_root()
     audit_dir = root / ".audit" / "skill-runs"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -1052,7 +1293,30 @@ def main() -> int:
         entry = build_entry(args)
         day = str(entry["ts"])[:10]
         log_path = audit_dir / f"{day}.jsonl"
-        should_append = validate_transition(entries, entry)
+        allow_stale_abandoned_merge = False
+        run_rows = [row for row in entries if row.get("run_id") == args.run_id]
+        if (
+            args.closeout_capsule is not None
+            and run_rows
+            and run_rows[-1].get("outcome") == "abandoned"
+        ):
+            try:
+                expected_capsule_name = (
+                    f"pr-{entry.get('pr')}-{entry.get('run_id')}.json"
+                )
+                if args.closeout_capsule.name != expected_capsule_name:
+                    raise ValueError("closeout capsule filename does not match the run")
+                capsule = load_canonical_closeout_capsule(root, args.closeout_capsule)
+                allow_stale_abandoned_merge = validate_stale_abandoned_merge_recovery(
+                    entries, entry, capsule
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
+        should_append = validate_transition(
+            entries,
+            entry,
+            allow_stale_abandoned_merge=allow_stale_abandoned_merge,
+        )
         if (
             should_append
             and not args.start
