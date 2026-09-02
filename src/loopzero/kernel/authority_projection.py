@@ -24,6 +24,7 @@ from dispatch_authority import (
     COORDINATOR_AUTHORITY_SCHEME,
     LEGACY_COORDINATOR_AUTHORITY_SCHEME,
     TerminalAuthorityError,
+    TerminalAuthorityOperationalError,
     verify_legacy_coordinator_authority,
     verify_terminal_authority,
 )
@@ -440,8 +441,14 @@ class AuthorityRecordView(list[dict[str, object]]):
         accumulator_head: authority_ledger.LedgerAccumulatorV3 | None = None,
     ) -> None:
         super().__init__(records)
-        self.trusted_checkpoint_id = trusted_checkpoint_id
-        self.trusted_retained_ids = frozenset(trusted_retained_ids)
+        # Trust fields are ids of contained records at every construction
+        # site; enforce that structurally so a foreign id can never survive
+        # into a view (and, downstream, into an authentication cache entry).
+        contained = {id(record) for record in self}
+        self.trusted_checkpoint_id = (
+            trusted_checkpoint_id if trusted_checkpoint_id in contained else None
+        )
+        self.trusted_retained_ids = frozenset(trusted_retained_ids) & contained
         self.checkpoint_prefix = (
             dict(checkpoint_prefix) if checkpoint_prefix is not None else None
         )
@@ -471,11 +478,90 @@ def _authority_record_list(
     return copied
 
 
+# One CLI invocation recomputes the identical authentication projection many
+# times over the same loaded history (measured: 18 calls / 92.5s in one
+# delivery-control status on the legacy stream, #4016). The projection is
+# deterministic over the exact record objects, their order, and the view's
+# trust fields, so memoize on those identities. Entries hold strong references
+# to the authenticated records, so a cached object id can never be recycled by
+# a different object; appending to a history changes the key and therefore
+# self-invalidates. In-place mutation of an already-authenticated record is
+# outside the append-only authority contract.
+_AUTHENTICATION_CACHE_LIMIT = 8
+_authentication_cache: dict[
+    tuple[object, ...], tuple[object, frozenset[int]]
+] = {}
+
+
+def _authentication_cache_key(
+    records: Sequence[dict[str, object]],
+) -> tuple[object, ...]:
+    if isinstance(records, AuthorityRecordView):
+        # The prefix dict is rebuilt by every filtered() derivation, so key it
+        # by canonical content, not identity; identity keys made checkpoint-
+        # backed (v3) histories miss on every derived view. The accumulator
+        # head participates for the same reason even though the current
+        # prefix-match path list-slices views before reaching its v3 branch.
+        prefix = records.checkpoint_prefix
+        try:
+            prefix_key: object = (
+                None
+                if prefix is None
+                else json.dumps(prefix, sort_keys=True, separators=(",", ":"))
+            )
+        except (TypeError, ValueError):
+            prefix_key = object()  # unique: never matches, always recomputes
+        head = records.accumulator_head
+        head_key = (
+            None
+            if head is None
+            else (
+                head.ledger_id,
+                head.repository_binding,
+                head.record_count,
+                head.records_sha256,
+            )
+        )
+        return (
+            tuple(map(id, records)),
+            records.trusted_checkpoint_id,
+            records.trusted_retained_ids,
+            prefix_key,
+            head_key,
+        )
+    return (tuple(map(id, records)), None, frozenset(), None, None)
+
+
 def _authenticated_coordinator_record_ids(
     records: Sequence[dict[str, object]],
 ) -> frozenset[int]:
+    """Authenticate coordinator rows, memoized per exact loaded history."""
+    key = _authentication_cache_key(records)
+    cached = _authentication_cache.get(key)
+    if cached is not None:
+        return cached[1]
+    result, operational_failure = _authenticate_coordinator_record_ids_uncached(
+        records
+    )
+    if operational_failure:
+        # A transient provider failure (for example an Ed25519 timeout) means
+        # some proofs were skipped without being judged; never cache that
+        # partial projection as if it were a durable rejection.
+        return result
+    if len(_authentication_cache) >= _AUTHENTICATION_CACHE_LIMIT:
+        # Evict the oldest entry (insertion order); each entry pins only its
+        # own values, so partial eviction cannot unpin another entry's ids.
+        _authentication_cache.pop(next(iter(_authentication_cache)))
+    _authentication_cache[key] = ((tuple(records), records), result)
+    return result
+
+
+def _authenticate_coordinator_record_ids_uncached(
+    records: Sequence[dict[str, object]],
+) -> tuple[frozenset[int], bool]:
     """Authenticate coordinator rows with an ordered host-authority cutover."""
     accepted: set[int] = set()
+    operational_failure = False
     pending_host: set[int] = set()
     cutover_seen = False
     host_authority_active = False
@@ -501,7 +587,9 @@ def _authenticated_coordinator_record_ids(
                 verify_terminal_authority(
                     record, registration=None, expected_kind="coordinator"
                 )
-        except TerminalAuthorityError:
+        except TerminalAuthorityError as exc:
+            if isinstance(exc, TerminalAuthorityOperationalError):
+                operational_failure = True
             if cutover_attempt:
                 cutover_seen = True
                 pending_host.clear()
@@ -535,7 +623,7 @@ def _authenticated_coordinator_record_ids(
             pending_host.add(id(record))
         elif not host_proof:
             accepted.add(id(record))
-    return frozenset(accepted)
+    return frozenset(accepted), operational_failure
 
 
 def authenticated_coordinator_record_ids(

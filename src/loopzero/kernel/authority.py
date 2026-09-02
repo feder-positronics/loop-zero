@@ -55,6 +55,15 @@ class TerminalAuthorityError(RuntimeError):
     """A terminal record has no valid dispatcher/coordinator authority proof."""
 
 
+class TerminalAuthorityOperationalError(TerminalAuthorityError):
+    """The verification provider failed transiently; the proof was not judged.
+
+    Consumers that skip or reject records on TerminalAuthorityError must not
+    treat this subclass as durable evidence of an invalid proof (for example,
+    by caching the rejection).
+    """
+
+
 @lru_cache(maxsize=1)
 def _openssl() -> Path:
     try:
@@ -81,7 +90,9 @@ def _run_openssl(
             timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired as exc:
-        raise TerminalAuthorityError("Ed25519 authority operation timed out") from exc
+        raise TerminalAuthorityOperationalError(
+            "Ed25519 authority operation timed out"
+        ) from exc
     if completed.returncode != 0:
         raise TerminalAuthorityError("Ed25519 authority operation failed")
     return completed.stdout
@@ -852,7 +863,7 @@ def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) -> 
                 timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
             )
         except subprocess.TimeoutExpired as exc:
-            raise TerminalAuthorityError(
+            raise TerminalAuthorityOperationalError(
                 "legacy coordinator verification timed out"
             ) from exc
         if completed.returncode == 0:
@@ -862,7 +873,12 @@ def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) -> 
             and completed.stderr.startswith(b"Signature verification failed:")
         ):
             return False
-        raise TerminalAuthorityError("legacy coordinator verification provider failed")
+        # Anything other than success or a documented signature mismatch is a
+        # provider/runtime failure: the proof was not judged, so the rejection
+        # must stay retryable and uncacheable.
+        raise TerminalAuthorityOperationalError(
+            "legacy coordinator verification provider failed"
+        )
 
 
 def verify_legacy_coordinator_authority(record: Mapping[str, object]) -> None:
@@ -961,7 +977,7 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) -> 
                 except subprocess.TimeoutExpired as exc:
                     # Exceptions are not retained by lru_cache. A transient
                     # provider stall must retry rather than poison this proof.
-                    raise TerminalAuthorityError(
+                    raise TerminalAuthorityOperationalError(
                         "terminal authority provider timed out"
                     ) from exc
                 if completed.returncode == 0:
@@ -971,7 +987,9 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) -> 
                 # Only OpenSSL's documented verification-mismatch result is
                 # durable invalidity. Provider/runtime failures must remain
                 # retryable and therefore must not enter the LRU cache.
-                raise TerminalAuthorityError("terminal authority provider failed")
+                raise TerminalAuthorityOperationalError(
+                    "terminal authority provider failed"
+                )
 
             return _with_read_descriptor(signature, verify_signature)
 
@@ -1000,6 +1018,10 @@ def verify_terminal_authority(
         public_key = _decode(proof.get("public_key"), label="public key", maximum=2048)
         try:
             trusted_public_key = _trusted_coordinator_public_key()
+        except TerminalAuthorityOperationalError as exc:
+            raise TerminalAuthorityOperationalError(
+                "coordinator authority key is unavailable"
+            ) from exc
         except TerminalAuthorityError as exc:
             raise TerminalAuthorityError(
                 "coordinator authority key is unavailable"
