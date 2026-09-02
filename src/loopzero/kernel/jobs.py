@@ -9,6 +9,7 @@ import os
 import pwd
 import re
 import stat
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 
@@ -193,6 +194,131 @@ def ensure_job_lease(
     finally:
         os.close(descriptor)
     return lease
+
+
+def build_bound_sandbox_arguments(
+    bubblewrap: str,
+    *,
+    protected_authority_root: Path,
+    working_directory: Path,
+    command: Sequence[str],
+    account_home: Path | None = None,
+    list_directory: Callable[[Path], list[str]] | None = None,
+    read_symlink_target: Callable[[Path], str | None] | None = None,
+) -> list[str]:
+    """Build the bound-job bubblewrap invocation over a synthesized root.
+
+    Unprivileged bubblewrap always runs in a single-uid user namespace, so
+    binding the real ``/`` surfaces root-owned components such as ``/`` and
+    ``/home`` as the unmapped overflow uid, which correctly fails the
+    authority ledger's descriptor-anchored ancestor-ownership walk and the
+    trusted-executable ancestor-writability walk. Instead, ``/`` becomes a
+    0555 tmpfs remounted read-only, each strict ancestor of the account home
+    becomes an owned 0555 directory whose real sibling entries are bound
+    back, and every other top-level entry keeps its normal host bind, so
+    both walks stay sound inside the sandbox without relaxing either check.
+    Anti-forgery is preserved: every ancestor of the job collection is either
+    a bind mount point or a directory inside the read-only tmpfs root, so a
+    child cannot rename an ancestor, recreate the lexical job path, and feed
+    reconciliation forged files.
+    """
+    if account_home is None:
+        try:
+            account_home = _account_home().resolve(strict=True)
+        except OSError as exc:
+            raise JobStoreError("OS account home is unavailable") from exc
+    if not account_home.is_absolute() or account_home == Path("/"):
+        raise JobStoreError("bound job supervision requires a private account home")
+
+    if list_directory is None:
+
+        def list_directory(path: Path) -> list[str]:
+            return sorted(os.listdir(path))
+
+    if read_symlink_target is None:
+
+        def read_symlink_target(path: Path) -> str | None:
+            return os.readlink(path) if path.is_symlink() else None
+
+    def bind_entry(source: Path) -> list[str]:
+        target = read_symlink_target(source)
+        if target is not None:
+            return ["--symlink", target, str(source)]
+        return ["--bind", str(source), str(source)]
+
+    home_chain = [
+        *(ancestor for ancestor in reversed(account_home.parents) if ancestor != Path("/")),
+        account_home,
+    ]
+    home_top = home_chain[0]
+    try:
+        root_entries = list_directory(Path("/"))
+    except OSError as exc:
+        raise JobStoreError("cannot enumerate the host root for the bound sandbox") from exc
+    root_view: list[str] = []
+    for entry in root_entries:
+        entry_path = Path("/", entry)
+        if entry_path in (Path("/proc"), Path("/dev")):
+            continue  # replaced by --proc and --dev-bind below
+        if entry_path == home_top:
+            continue  # synthesized with its real entries below
+        root_view.extend(bind_entry(entry_path))
+    for index, ancestor in enumerate(home_chain[:-1]):
+        root_view.extend(("--perms", "0555", "--dir", str(ancestor)))
+        next_component = home_chain[index + 1]
+        try:
+            entry_names = list_directory(ancestor)
+        except OSError as exc:
+            raise JobStoreError(
+                f"cannot enumerate a home ancestor for the bound sandbox: {ancestor}"
+            ) from exc
+        for name in entry_names:
+            entry_path = ancestor / name
+            if entry_path == next_component:
+                continue
+            root_view.extend(bind_entry(entry_path))
+    root_view.extend(("--bind", str(account_home), str(account_home)))
+
+    authority_mounts: list[str] = []
+    for ancestor in reversed(protected_authority_root.parents):
+        if (
+            ancestor == Path("/")
+            or ancestor == account_home
+            or ancestor in account_home.parents
+        ):
+            # Already unrenameable: the account home is a bind mount point and
+            # its strict ancestors live in the read-only tmpfs root.
+            continue
+        authority_mounts.extend(("--bind", str(ancestor), str(ancestor)))
+    return [
+        bubblewrap,
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+        # 0555 keeps synthesized components outside every ancestor
+        # account-writability walk (trusted_executable.py); the trailing
+        # --remount-ro is the enforcement, the mode is the attestation.
+        "--perms",
+        "0555",
+        "--tmpfs",
+        "/",
+        *root_view,
+        *authority_mounts,
+        "--ro-bind",
+        str(protected_authority_root),
+        str(protected_authority_root),
+        "--proc",
+        "/proc",
+        "--dev-bind",
+        "/dev",
+        "/dev",
+        "--remount-ro",
+        "/",
+        "--chdir",
+        str(working_directory),
+        "--",
+        *command,
+    ]
 
 
 def main() -> int:

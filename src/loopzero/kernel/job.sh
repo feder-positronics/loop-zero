@@ -344,6 +344,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(sys.argv[4]).resolve() / "scripts" / "util"))
+import job_store
 from trusted_executable import TrustedExecutableError, system_executable
 
 job_dir = Path(sys.argv[1])
@@ -603,6 +604,21 @@ try:
             raise RuntimeError(
                 "bound job supervision requires protected bubblewrap"
             ) from exc
+        capability_probe = subprocess.run(
+            [bwrap, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        capability_surface = capability_probe.stdout + capability_probe.stderr
+        if (
+            "--perms" not in capability_surface
+            or "--remount-ro" not in capability_surface
+        ):
+            raise RuntimeError(
+                "bound job supervision requires bubblewrap with --perms and "
+                "--remount-ro support"
+            )
 
     durable_names = ["exit_code"]
     if binding is not None:
@@ -720,42 +736,21 @@ try:
         ]
     if binding is not None and not trusted_dispatcher and repro_signature is None:
         assert bwrap is not None
-        # Keep the delegated command's normal host view, but turn every
-        # ancestor of the job collection into a mount point before making the
-        # collection read-only. A child therefore cannot rename an ancestor,
-        # recreate the lexical job path, and feed reconciliation forged files.
-        # The parent keeps the only writable authority descriptors, and the
-        # private PID namespace plus --die-with-parent removes delayed peers.
-        # job_store.py resolves exactly one authority root. Legacy recovery is
-        # explicit, so the fallback never leaves a second discovered root writable.
-        protected_authority_root = job_dir.resolve().parent
-        authority_mounts: list[str] = []
-        for ancestor in reversed(protected_authority_root.parents):
-            if ancestor == Path("/"):
-                continue
-            authority_mounts.extend(("--bind", str(ancestor), str(ancestor)))
-        wrapped_command = [
-            bwrap,
-            "--die-with-parent",
-            "--new-session",
-            "--unshare-pid",
-            "--bind",
-            "/",
-            "/",
-            *authority_mounts,
-            "--ro-bind",
-            str(protected_authority_root),
-            str(protected_authority_root),
-            "--proc",
-            "/proc",
-            "--dev-bind",
-            "/dev",
-            "/dev",
-            "--chdir",
-            os.getcwd(),
-            "--",
-            *command,
-        ]
+        # The synthesized-root rationale and invariants live on
+        # job_store.build_bound_sandbox_arguments. The parent keeps the only
+        # writable authority descriptors, and the private PID namespace plus
+        # --die-with-parent removes delayed peers. job_store.py resolves
+        # exactly one authority root. Legacy recovery is explicit, so the
+        # fallback never leaves a second discovered root writable.
+        try:
+            wrapped_command = job_store.build_bound_sandbox_arguments(
+                bwrap,
+                protected_authority_root=job_dir.resolve().parent,
+                working_directory=Path(os.getcwd()),
+                command=list(command),
+            )
+        except job_store.JobStoreError as exc:
+            raise RuntimeError(str(exc)) from exc
     run_arguments = {
         "check": False,
         "stdout": log,

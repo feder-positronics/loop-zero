@@ -15,6 +15,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "scripts" / "util" / "job.sh"
+sys.path.insert(0, str(REPO_ROOT / "scripts" / "util"))
 TRUSTED_JOB_PYTHON = "/usr/bin/python3"
 REPRO_CONNECT_GUARD_PATH = REPO_ROOT / "scripts" / "util" / "repro_connect_guard.py"
 REPRO_CONNECT_GUARD_SPEC = importlib.util.spec_from_file_location(
@@ -465,6 +466,169 @@ def test_bound_wrapped_command_cannot_substitute_an_authority_ancestor(
     assert result.returncode == 0, result.stdout + result.stderr
     assert not moved.exists()
     assert (job_dir / "exit_code").read_text().strip() == "0"
+
+
+@requires_nested_user_namespace
+def test_bound_sandbox_preserves_authority_ancestor_ownership_walk(
+    tmp_path: Path,
+) -> None:
+    # The authority ledger's descriptor-anchored walk rejects any ancestor
+    # owned by an unmapped uid. Binding the real `/` into the bound child's
+    # single-uid user namespace surfaced `/` and `/home` as the overflow uid
+    # and failed every in-sandbox authority read; the synthesized root must
+    # keep the walk sound for repository paths under the account home.
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    probe = (
+        "import sys; sys.path.insert(0, sys.argv[1]); "
+        "from pathlib import Path; import dispatch_ledger; "
+        "dispatch_ledger._open_anchored_directory(Path(sys.argv[1]))"
+    )
+
+    result = _job(
+        tmp_path,
+        "run",
+        "ancestry-walk",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        TRUSTED_JOB_PYTHON,
+        "-c",
+        probe,
+        str(REPO_ROOT / "scripts" / "util"),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        tmp_path / "jobs" / "ancestry-walk" / "exit_code"
+    ).read_text().strip() == "0"
+
+
+def _fake_filesystem_views(
+    listings: dict[str, list[str]], symlinks: dict[str, str]
+) -> dict[str, object]:
+    def list_directory(path: Path) -> list[str]:
+        return listings[str(path)]
+
+    def read_symlink_target(path: Path) -> str | None:
+        return symlinks.get(str(path))
+
+    return {
+        "list_directory": list_directory,
+        "read_symlink_target": read_symlink_target,
+    }
+
+
+def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
+    import job_store
+
+    # A home nested under a populated system directory (/var/home/user) must
+    # keep every sibling of the synthesized ancestors bound into the view.
+    arguments = job_store.build_bound_sandbox_arguments(
+        "/usr/bin/bwrap",
+        protected_authority_root=Path("/var/home/user/.local/state/intelflo/jobs/abcd"),
+        working_directory=Path("/var/home/user/repo"),
+        command=["true"],
+        account_home=Path("/var/home/user"),
+        **_fake_filesystem_views(
+            {
+                "/": ["bin", "dev", "etc", "proc", "usr", "var"],
+                "/var": ["home", "lib", "log"],
+                "/var/home": ["other", "user"],
+            },
+            {"/bin": "usr/bin"},
+        ),
+    )
+
+    def bind(path: str) -> list[str]:
+        return ["--bind", path, path]
+
+    # Top-level entries keep their host view; /proc and /dev are replaced.
+    assert arguments[:4] == [
+        "/usr/bin/bwrap",
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-pid",
+    ]
+    for preserved in ("/etc", "/usr", "/var/lib", "/var/log", "/var/home/other"):
+        assert bind(preserved) == _window(arguments, bind(preserved))
+    assert _window(arguments, ["--symlink", "usr/bin", "/bin"])
+    assert bind("/proc") != _window(arguments, bind("/proc"))
+    assert bind("/dev") != _window(arguments, bind("/dev"))
+    # Strict home ancestors are synthesized 0555; the home itself is bound.
+    assert _window(arguments, ["--perms", "0555", "--dir", "/var"])
+    assert _window(arguments, ["--perms", "0555", "--dir", "/var/home"])
+    assert _window(arguments, bind("/var/home/user"))
+    # The home is not re-bound by the authority-ancestor mounts, while
+    # authority ancestors below the home stay bind mount points.
+    assert arguments.count("/var/home/user") == 2
+    assert _window(arguments, bind("/var/home/user/.local/state/intelflo"))
+    protected = "/var/home/user/.local/state/intelflo/jobs/abcd"
+    assert _window(arguments, ["--ro-bind", protected, protected])
+    # The read-only remount of the synthesized root is the final mount
+    # operation, after --proc and --dev-bind create their mount points.
+    tail = arguments[arguments.index("--remount-ro") :]
+    assert tail == ["--remount-ro", "/", "--chdir", "/var/home/user/repo", "--", "true"]
+    assert arguments.index("--proc") < arguments.index("--remount-ro")
+    assert arguments.index("--dev-bind") < arguments.index("--remount-ro")
+
+
+def _window(arguments: list[str], expected: list[str]) -> list[str] | None:
+    for start in range(len(arguments) - len(expected) + 1):
+        if arguments[start : start + len(expected)] == expected:
+            return expected
+    return None
+
+
+def test_bound_sandbox_arguments_keep_external_authority_ancestors_bound() -> None:
+    import job_store
+
+    arguments = job_store.build_bound_sandbox_arguments(
+        "/usr/bin/bwrap",
+        protected_authority_root=Path("/tmp/pytest-of-user/case/jobs"),
+        working_directory=Path("/home/user/repo"),
+        command=["true"],
+        account_home=Path("/home/user"),
+        **_fake_filesystem_views(
+            {
+                "/": ["dev", "home", "proc", "tmp", "usr"],
+                "/home": ["user"],
+            },
+            {},
+        ),
+    )
+
+    # An authority root outside the home keeps every ancestor a mount point,
+    # preserving the ancestor-substitution protection.
+    assert _window(arguments, ["--bind", "/tmp", "/tmp"])
+    assert _window(arguments, ["--bind", "/tmp/pytest-of-user", "/tmp/pytest-of-user"])
+    assert _window(
+        arguments,
+        ["--bind", "/tmp/pytest-of-user/case", "/tmp/pytest-of-user/case"],
+    )
+
+
+def test_bound_sandbox_arguments_reject_an_unusable_account_home() -> None:
+    import job_store
+
+    with pytest.raises(job_store.JobStoreError):
+        job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            protected_authority_root=Path("/tmp/jobs"),
+            working_directory=Path("/tmp"),
+            command=["true"],
+            account_home=Path("/"),
+            **_fake_filesystem_views({"/": []}, {}),
+        )
 
 
 @requires_nested_user_namespace
