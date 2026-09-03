@@ -5,13 +5,20 @@ artifact with zero model-side wakes (one blocking call); the killed-worker
 fixture proves the deadman exit routes to the orphan path.
 """
 
+import os
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
 JOB_SH = REPO_ROOT / "scripts" / "util" / "job.sh"
+requires_host_job_authority = pytest.mark.skipif(
+    os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
+    reason="job authority is intentionally outside the nested acceptance sandbox",
+)
 
 
 def run_wait_file(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -25,6 +32,7 @@ def run_wait_file(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
+@requires_host_job_authority
 def test_wait_file_wakes_when_artifact_appears(tmp_path: Path) -> None:
     artifact = tmp_path / "handoff" / "terminal.json"
     artifact.parent.mkdir()
@@ -51,6 +59,7 @@ def test_wait_file_wakes_when_artifact_appears(tmp_path: Path) -> None:
     assert (tmp_path / "jobs").is_dir()
 
 
+@requires_host_job_authority
 def test_wait_file_deadman_routes_to_orphan_path(tmp_path: Path) -> None:
     missing = tmp_path / "never-written.json"
     result = run_wait_file(
@@ -63,6 +72,7 @@ def test_wait_file_deadman_routes_to_orphan_path(tmp_path: Path) -> None:
     assert "do NOT re-wait" in result.stderr
 
 
+@requires_host_job_authority
 def test_wait_file_preexisting_artifact_returns_immediately(tmp_path: Path) -> None:
     artifact = tmp_path / "already-there.json"
     artifact.write_text("{}\n")
@@ -75,6 +85,7 @@ def test_wait_file_preexisting_artifact_returns_immediately(tmp_path: Path) -> N
     assert time.monotonic() - started < 10
 
 
+@requires_host_job_authority
 def test_wait_file_short_timeout_warns_without_fast_cadence(tmp_path: Path) -> None:
     artifact = tmp_path / "quick.json"
     artifact.write_text("{}\n")
@@ -90,6 +101,7 @@ def test_wait_file_short_timeout_warns_without_fast_cadence(tmp_path: Path) -> N
     assert "wait floor" not in quiet.stderr
 
 
+@requires_host_job_authority
 def test_wait_short_timeout_warns_on_job_wait_too(tmp_path: Path) -> None:
     env_dir = tmp_path / "jobs"
     subprocess.run(
