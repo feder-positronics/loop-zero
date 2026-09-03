@@ -474,6 +474,9 @@ def cmd_tool(args: argparse.Namespace) -> int:
         value = getattr(args, key, None)
         if value is not None:
             event[key] = value
+    reason = getattr(args, "reason", None)
+    if reason:
+        event["reason"] = str(reason)[:40]
     if finding_count is not None:
         event["finding_count"] = finding_count
         event["max_severity"] = max_severity
@@ -679,6 +682,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_tool.add_argument("--scope-digest")
     p_tool.add_argument("--prompt-chars", type=int)
     p_tool.add_argument("--timeout-seconds", type=int)
+    p_tool.add_argument(
+        "--reason",
+        help="Why a conditional lane fired (e.g. risk-path, new-module); ≤40 chars",
+    )
     # Residual-miss telemetry: a cross-harness pass runs AFTER local review has
     # converged, so any finding it reports is a local-gate miss over a known
     # denominator. Counting catches without counting misses made gate

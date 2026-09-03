@@ -171,19 +171,6 @@ should_run_blueprint_drift() {
         scripts/hooks/ci-mirror-check.sh
 }
 
-should_run_test_for_oracle() {
-    has_relevant_changes_in \
-        Makefile \
-        fastapi_backend/pyproject.toml \
-        fastapi_backend/uv.lock \
-        scripts/util/backend_test_lane.py \
-        scripts/util/commit-auto-fix.sh \
-        scripts/hooks/ci-mirror-check.sh \
-        fastapi_backend/tests/unit/scripts/test_backend_test_lane.py \
-        fastapi_backend/tests/unit/scripts/test_test_for_contract.py \
-        fastapi_backend/tests/unit/scripts/test_commit_autofix_merge_scope.py
-}
-
 echo "🔍 CI mirror check"
 echo "   Base ref: ${base_ref}"
 
@@ -399,28 +386,13 @@ fi
 if ! has_relevant_changes_in fastapi_backend; then
     echo ""
     echo "== Backend changed-tests =="
-    echo "No backend changes relative to ${base_ref}; skipping pytest --testmon run."
+    echo "No backend changes relative to ${base_ref}; skipping backend changed-tests."
 else
     echo ""
     echo "== Backend changed-tests =="
-    echo "Removed from local mirror for cost. Use make test-for in the edit loop,"
+    echo "Removed from local mirror for cost. Use the focused owning test in the edit loop,"
     echo "targeted integration for DB/API/task paths, and PR/post-merge CI for broad coverage."
     emit_tool_event "backend-changed-tests" "$(now_ms)" "skip"
-fi
-
-echo ""
-echo "== Backend impacted-test oracle =="
-if ! should_run_test_for_oracle; then
-    echo "No selector/toolchain policy changes relative to ${base_ref}; skipping oracle."
-    emit_tool_event "backend-test-for-oracle" "$(now_ms)" "skip"
-else
-    started_ms="$(now_ms)"
-    if make test-for-oracle; then
-        emit_tool_event "backend-test-for-oracle" "$started_ms" "pass"
-    else
-        emit_tool_event "backend-test-for-oracle" "$started_ms" "fail"
-        exit 1
-    fi
 fi
 
 changed_files_output="$(collect_changed_files)" || {
@@ -455,6 +427,25 @@ else
     else
         observe_validation_receipt "agent-config-sync" "fail" "$agent_config_receipt_digest"
         emit_tool_event "agent-config-sync" "$started_ms" "fail"
+        exit 1
+    fi
+fi
+
+echo ""
+echo "== Skill-convergence validator tests =="
+if ! has_relevant_changes_in \
+    scripts/util/skill_convergence.py \
+    scripts/util/test_skill_convergence.py \
+    scripts/util/skill_semantic_paths.py \
+    scripts/util/test_skill_semantic_paths.py; then
+    echo "No validator source changes relative to ${base_ref}; skipping validator unit tests."
+    emit_tool_event "skill-convergence-tests" "$(now_ms)" "skip"
+else
+    started_ms="$(now_ms)"
+    if make check-skill-convergence-tests; then
+        emit_tool_event "skill-convergence-tests" "$started_ms" "pass"
+    else
+        emit_tool_event "skill-convergence-tests" "$started_ms" "fail"
         exit 1
     fi
 fi

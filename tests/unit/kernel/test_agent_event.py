@@ -295,10 +295,12 @@ def test_tool_event_records_cross_harness_cost_fields(monkeypatch) -> None:
         timeout_seconds=120,
         finding_count=2,
         max_severity="important",
+        reason="new-module",
         notes=None,
     )
 
     assert module.cmd_tool(args) == 0
+    assert captured["reason"] == "new-module"
     assert captured["cost_usd"] == 0.37
     assert captured["budget_usd"] == 1.0
     assert captured["provider"] == "claude"
