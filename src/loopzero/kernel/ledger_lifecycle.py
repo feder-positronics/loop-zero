@@ -39,7 +39,7 @@ from dispatch_authority_store import (
     _authority_repository_binding,
     _load_archive_manifest,
     _prospective_retained_view,
-    active_outer_run_id,
+    active_outer_run_ids,
     authority_ledger_lock,
     authority_projection_bundle_v1,
     create_coordinator_authority,
@@ -185,14 +185,17 @@ def _compact_authority_ledger_unlocked(
         )
     snapshot = load_authority_snapshot(repo, full_archive_verify=True)
     records = snapshot.records
-    active_run = active_outer_run_id(repo, authority_repo=repo)
+    active_runs = active_outer_run_ids(repo)
     retained = retained_authority_projection(
         records,
-        active_run_ids=(() if active_run is None else (active_run,)),
+        active_run_ids=active_runs,
     )
-    before_projection = authority_projection_bundle_v1(records)
+    before_projection = authority_projection_bundle_v1(
+        records, active_run_ids=active_runs
+    )
     after_projection = authority_projection_bundle_v1(
-        _prospective_retained_view(retained)
+        _prospective_retained_view(retained, source_records=records),
+        active_run_ids=active_runs,
     )
     if before_projection != after_projection:
         changed = [

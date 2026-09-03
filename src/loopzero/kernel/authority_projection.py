@@ -35,6 +35,7 @@ from dispatch_routing import (
     COMPATIBLE_DISPATCH_POLICY_VERSIONS,
     COORDINATOR_LEDGER_PREFIX_SCHEME,
     COORDINATOR_LEDGER_PREFIX_V3_SCHEME,
+    DISPATCH_OUTCOME_TYPES,
     LEGACY_COORDINATOR_LEDGER_PREFIX_SCHEME,
     LEGACY_COORDINATOR_PREFIX_POLICY_VERSIONS,
     LEGACY_COORDINATOR_PREFIX_RUNTIME_CONTRACT_VERSION,
@@ -45,6 +46,15 @@ from dispatch_routing import (
 )
 from finding_ledger import canonical_record_digest
 from guardian_sandbox import environment as sandbox_environment
+
+RETENTION_STATE_TYPE = "retained-authority-state"
+RETENTION_STATE_VERSION = 1
+
+
+class RetainedRetryOutcome(dict[str, object]):
+    """Retry metadata whose provenance is a verified checkpoint payload."""
+
+    checkpoint_authenticated_retention = True
 
 
 def _terminal_authority_attempt_key(
@@ -214,6 +224,11 @@ def _authenticated_open_before_record_projections(
                 continue
         worktree_open.pop(key, None)
         authenticated_open.discard((worktree, key))
+    anchored_digests = retained_open_before_record_digests(authority_history)
+    if anchored_digests:
+        for record in governed_records:
+            if canonical_record_digest(record) in anchored_digests:
+                repository_open_before.add(id(record))
     return frozenset(repository_open_before), frozenset(worktree_open_before)
 
 
@@ -488,9 +503,7 @@ def _authority_record_list(
 # self-invalidates. In-place mutation of an already-authenticated record is
 # outside the append-only authority contract.
 _AUTHENTICATION_CACHE_LIMIT = 8
-_authentication_cache: dict[
-    tuple[object, ...], tuple[object, frozenset[int]]
-] = {}
+_authentication_cache: dict[tuple[object, ...], tuple[object, frozenset[int]]] = {}
 
 
 def _authentication_cache_key(
@@ -540,9 +553,7 @@ def _authenticated_coordinator_record_ids(
     cached = _authentication_cache.get(key)
     if cached is not None:
         return cached[1]
-    result, operational_failure = _authenticate_coordinator_record_ids_uncached(
-        records
-    )
+    result, operational_failure = _authenticate_coordinator_record_ids_uncached(records)
     if operational_failure:
         # A transient provider failure (for example an Ed25519 timeout) means
         # some proofs were skipped without being judged; never cache that
@@ -567,9 +578,6 @@ def _authenticate_coordinator_record_ids_uncached(
     host_authority_active = False
     trusted_view = records if isinstance(records, AuthorityRecordView) else None
     for index, record in enumerate(records):
-        if trusted_view is not None and id(record) in trusted_view.trusted_retained_ids:
-            accepted.add(id(record))
-            continue
         proof = record.get("terminal_authority_proof")
         if not isinstance(proof, dict) or proof.get("authority_kind") != "coordinator":
             continue
@@ -712,16 +720,165 @@ def _legacy_compatibility_record_ids(
     records: Sequence[dict[str, object]],
 ) -> frozenset[int]:
     """Bound proofless compatibility to the prefix before cutover is attempted."""
-    accepted: set[int] = (
-        set(records.trusted_retained_ids)
-        if isinstance(records, AuthorityRecordView)
-        else set()
-    )
+    accepted: set[int] = set()
+    if isinstance(records, AuthorityRecordView):
+        accepted.update(
+            id(record)
+            for record in records
+            if id(record) in records.trusted_retained_ids
+            and record.get("type") != RETENTION_STATE_TYPE
+            and not isinstance(record.get("terminal_authority_proof"), dict)
+        )
     for record in records:
         if _is_coordinator_cutover_attempt(record):
             break
         accepted.add(id(record))
     return frozenset(accepted)
+
+
+def authenticated_retention_state_records(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return only checkpoint-authenticated compact authority state records."""
+    if not isinstance(records, AuthorityRecordView):
+        if any(record.get("type") == RETENTION_STATE_TYPE for record in records):
+            raise DispatchError(
+                "authority retention state is not checkpoint-authenticated"
+            )
+        return []
+    states: list[dict[str, object]] = []
+    for record in current_telemetry(records):
+        if record.get("type") != RETENTION_STATE_TYPE:
+            continue
+        if id(record) not in records.trusted_retained_ids:
+            continue
+        if record.get("retention_state_version") != RETENTION_STATE_VERSION:
+            raise DispatchError("authority retention state version is invalid")
+        for field in (
+            "task_ids",
+            "work_unit_contracts",
+            "attempt_settlements",
+            "retry_outcomes",
+            "open_before_record_digests",
+        ):
+            if not isinstance(record.get(field), list):
+                raise DispatchError(f"authority retention state {field} is invalid")
+        states.append(record)
+    return states
+
+
+def retained_task_ids(records: Sequence[dict[str, object]]) -> frozenset[str]:
+    """Project historical task identities sealed into retention state."""
+    task_ids: set[str] = set()
+    for state in authenticated_retention_state_records(records):
+        raw = state["task_ids"]
+        assert isinstance(raw, list)
+        if not all(isinstance(item, str) and item for item in raw):
+            raise DispatchError("authority retention state task_ids are invalid")
+        task_ids.update(cast(list[str], raw))
+    return frozenset(task_ids)
+
+
+def retained_work_unit_contracts(
+    records: Sequence[dict[str, object]],
+) -> tuple[tuple[str, str], ...]:
+    """Project immutable unit contracts sealed into retention state."""
+    contracts: set[tuple[str, str]] = set()
+    for state in authenticated_retention_state_records(records):
+        raw = state["work_unit_contracts"]
+        assert isinstance(raw, list)
+        for item in raw:
+            if not isinstance(item, dict):
+                raise DispatchError(
+                    "authority retention state work_unit_contracts are invalid"
+                )
+            work_unit_id = item.get("work_unit_id")
+            contract_hash = item.get("task_contract_hash")
+            if (
+                not isinstance(work_unit_id, str)
+                or not work_unit_id
+                or not isinstance(contract_hash, str)
+            ):
+                raise DispatchError(
+                    "authority retention state work_unit_contracts are invalid"
+                )
+            contracts.add((work_unit_id, contract_hash))
+    return tuple(sorted(contracts))
+
+
+def retained_attempt_settlements(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project compact settlement watermarks sealed into retention state."""
+    settlements: list[dict[str, object]] = []
+    for state in authenticated_retention_state_records(records):
+        raw = state["attempt_settlements"]
+        assert isinstance(raw, list)
+        for item in raw:
+            if not isinstance(item, dict):
+                raise DispatchError(
+                    "authority retention state attempt_settlements are invalid"
+                )
+            task_id = item.get("task_id")
+            attempt_index = item.get("attempt_index")
+            source_digest = item.get("source_record_digest")
+            if (
+                not isinstance(task_id, str)
+                or not task_id
+                or type(attempt_index) is not int
+                or attempt_index < -1
+                or not isinstance(source_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+            ):
+                raise DispatchError(
+                    "authority retention state attempt_settlements are invalid"
+                )
+            settlements.append(dict(item))
+    return settlements
+
+
+def retained_retry_outcomes(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project compact authenticated retry outcomes from retention state."""
+    outcomes: list[dict[str, object]] = []
+    for state in authenticated_retention_state_records(records):
+        raw = state["retry_outcomes"]
+        assert isinstance(raw, list)
+        for item in raw:
+            if (
+                not isinstance(item, dict)
+                or item.get("type") not in DISPATCH_OUTCOME_TYPES
+                or not isinstance(item.get("task_id"), str)
+                or (
+                    item.get("unit_attempt_number") is not None
+                    and type(item.get("unit_attempt_number")) is not int
+                )
+            ):
+                raise DispatchError(
+                    "authority retention state retry_outcomes are invalid"
+                )
+            outcomes.append(RetainedRetryOutcome(item))
+    return outcomes
+
+
+def retained_open_before_record_digests(
+    records: Sequence[dict[str, object]],
+) -> frozenset[str]:
+    """Project quarantined retained rows sealed into compact state."""
+    digests: set[str] = set()
+    for state in authenticated_retention_state_records(records):
+        raw = state["open_before_record_digests"]
+        assert isinstance(raw, list)
+        if not all(
+            isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
+            for item in raw
+        ):
+            raise DispatchError(
+                "authority retention state open_before_record_digests are invalid"
+            )
+        digests.update(cast(list[str], raw))
+    return frozenset(digests)
 
 
 def _authenticated_attempt_terminal_ids(

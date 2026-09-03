@@ -32,6 +32,8 @@ from dispatch_authority import (
     verify_terminal_authority,
 )
 from dispatch_authority_projection import (
+    RETENTION_STATE_TYPE,
+    RETENTION_STATE_VERSION,
     AuthorityLedgerSnapshot,
     AuthorityRecordView,
     _apply_open_write_record,
@@ -43,6 +45,9 @@ from dispatch_authority_projection import (
     _terminal_authority_attempt_key,
     _terminal_authority_work_unit,
     current_telemetry,
+    retained_attempt_settlements,
+    retained_task_ids,
+    retained_work_unit_contracts,
 )
 from dispatch_common import (
     DispatchError,
@@ -67,7 +72,10 @@ from dispatch_routing import (
     AUTHORITY_LEDGER_DIRECTORY,
     COORDINATOR_LEDGER_PREFIX_SCHEME,
     DISPATCH_DIR,
+    DISPATCH_POLICY_VERSION,
     LEGACY_COORDINATOR_LEDGER_PREFIX_SCHEME,
+    RUNTIME_CONTRACT_VERSION,
+    TELEMETRY_SCHEMA_VERSION,
 )
 from finding_ledger import canonical_record_digest
 from guardian_sandbox import environment as sandbox_environment
@@ -115,6 +123,21 @@ def active_outer_run_id(
             f"multiple active outer runs own branch {branch!r}; close the stale run"
         ) from exc
     return resolved[0] if resolved is not None else None
+
+
+def active_outer_run_ids(repo: Path) -> frozenset[str]:
+    """Resolve every active delivery run whose authority must survive compaction."""
+    audit_dir = repo.resolve() / ".audit" / "skill-runs"
+    latest_by_run: dict[str, dict[str, object]] = {}
+    for entry in load_skill_run_entries(audit_dir):
+        run_id = entry.get("run_id")
+        if isinstance(run_id, str) and re.fullmatch(r"sr_[0-9a-f]{32}", run_id):
+            latest_by_run[run_id] = entry
+    return frozenset(
+        run_id
+        for run_id, entry in latest_by_run.items()
+        if entry.get("outcome") == "in_progress"
+    )
 
 
 def _attempt_lock_key(task_id: object) -> str:
@@ -648,6 +671,8 @@ def _work_unit_contract_projection(
     records: Sequence[dict[str, object]],
 ) -> tuple[tuple[str, tuple[str, ...]], ...]:
     contracts: dict[str, set[str]] = {}
+    for work_unit_id, contract_hash in retained_work_unit_contracts(records):
+        contracts.setdefault(work_unit_id, set()).add(contract_hash)
     for record in records:
         record_type = record.get("type")
         if record_type not in {*ATTEMPT_HISTORY_TYPES, "route"}:
@@ -669,12 +694,97 @@ def _work_unit_contract_projection(
     )
 
 
+def _retention_live_record_ids(
+    records: Sequence[dict[str, object]],
+    *,
+    active_run_ids: Collection[str] = (),
+) -> frozenset[int]:
+    """Select raw rows whose live authority remains material after compaction."""
+    open_contexts = _retention_open_attempt_contexts(records)
+    active_runs = frozenset(active_run_ids)
+    open_units_by_worktree: dict[str, dict[str, list[str]]] = {}
+    latest_standing: dict[tuple[object, ...], int] = {}
+    latest_progress: dict[tuple[object, ...], int] = {}
+    for index, record in enumerate(records):
+        if record.get("type") == "attempt-progress":
+            latest_progress[_progress_identity(record)] = index
+        worktree = resolved_record_worktree(record.get("worktree"))
+        unit_id = str(record.get("work_unit_id") or record.get("task_id") or "")
+        if worktree is not None and unit_id:
+            _apply_open_write_record(
+                open_units_by_worktree.setdefault(str(worktree), {}), record
+            )
+        if (
+            not isinstance(record.get("run_id"), str)
+            and record.get("type") != RETENTION_STATE_TYPE
+        ):
+            latest_standing[
+                (
+                    record.get("type"),
+                    record.get("task_id"),
+                    record.get("work_unit_id"),
+                    record.get("alias"),
+                )
+            ] = index
+    open_unit_keys = {
+        (worktree, unit_id)
+        for worktree, units in open_units_by_worktree.items()
+        for unit_id in units
+    }
+    selected: set[int] = set()
+    for index, record in enumerate(records):
+        record_type = record.get("type")
+        if record_type in {"coordinator-authority-cutover", RETENTION_STATE_TYPE}:
+            continue
+        if (
+            record_type == "attempt-progress"
+            and latest_progress.get(_progress_identity(record)) != index
+        ):
+            continue
+        context = (
+            record.get("task_id"),
+            record.get("attempt_index"),
+            record.get("run_id"),
+            _terminal_authority_work_unit(record),
+        )
+        worktree = resolved_record_worktree(record.get("worktree"))
+        unit_id = str(record.get("work_unit_id") or record.get("task_id") or "")
+        standing_key = (
+            record_type,
+            record.get("task_id"),
+            record.get("work_unit_id"),
+            record.get("alias"),
+        )
+        if (
+            record.get("run_id") in active_runs
+            or context in open_contexts
+            or (worktree is not None and (str(worktree), unit_id) in open_unit_keys)
+            or (
+                not isinstance(record.get("run_id"), str)
+                and latest_standing.get(standing_key) == index
+            )
+        ):
+            selected.add(id(record))
+    return frozenset(selected)
+
+
 def authority_projection_bundle_v1(
     records: Sequence[dict[str, object]],
+    *,
+    active_run_ids: Collection[str] = (),
 ) -> AuthorityProjectionBundleV1:
-    """Evaluate every dispatcher authority projection with stable record IDs."""
+    """Evaluate live raw authority plus compact historical admission state.
+
+    ``_retention_live_record_ids`` is the canonical liveness policy for raw
+    records. Historical task, contract, settlement, retry, and quarantine
+    authority is represented separately by the checkpoint-authenticated
+    retention-state fields in this bundle.
+    """
     authority_history = _authority_record_list(records)
     governed = current_telemetry(authority_history)
+    retained_raw_ids = _retention_live_record_ids(
+        governed, active_run_ids=active_run_ids
+    )
     aliases = sorted(
         {
             str(record.get("effective_alias") or record.get("alias"))
@@ -685,7 +795,11 @@ def authority_projection_bundle_v1(
 
     def digests_for_ids(record_ids: Collection[int]) -> tuple[str, ...]:
         return _stable_record_digests(
-            [record for record in governed if id(record) in record_ids]
+            [
+                record
+                for record in governed
+                if id(record) in record_ids and id(record) in retained_raw_ids
+            ]
         )
 
     coordinator_ids = _authenticated_coordinator_record_ids(authority_history)
@@ -716,13 +830,14 @@ def authority_projection_bundle_v1(
             continue
         units = open_units_by_worktree.setdefault(str(worktree), {})
         _apply_open_write_record(units, record)
-    latest_settlement_indices = _latest_attempt_settlement_indices(governed)
+    retry_outcomes = _retry_outcome_projection(authority_history)
     return AuthorityProjectionBundleV1(
         coordinator=_stable_record_digests(
             [
                 record
                 for record in governed
                 if id(record) in coordinator_ids
+                and id(record) in retained_raw_ids
                 and record.get("type") != "coordinator-authority-cutover"
                 and isinstance(record.get("terminal_authority_proof"), dict)
             ]
@@ -731,37 +846,54 @@ def authority_projection_bundle_v1(
         open_before=digests_for_ids(open_before_ids),
         open_attempts=_stable_record_digests(open_attempt_records),
         supersessions=_stable_record_digests(
-            authenticated_supersessions(authority_history)
+            [
+                record
+                for record in authenticated_supersessions(authority_history)
+                if id(record) in retained_raw_ids
+            ]
         ),
         review_terminals=tuple(
             sorted(
                 (task_id, canonical_record_digest(record))
                 for task_id, record in review_terminals.items()
+                if id(record) in retained_raw_ids
             )
         ),
         accepted_review_terminals=tuple(
             sorted(
                 (task_id, canonical_record_digest(record))
                 for task_id, record in accepted.items()
+                if id(record) in retained_raw_ids
             )
         ),
         advisory_review_terminals=tuple(
             sorted(
                 (task_id, canonical_record_digest(record))
                 for task_id, record in advisory.items()
+                if id(record) in retained_raw_ids
             )
         ),
         verdicts=tuple(
             sorted(
                 (task_id, canonical_record_digest(record))
                 for task_id, record in verdicts.items()
+                if id(record) in retained_raw_ids
             )
         ),
         delivery_controller=_stable_record_digests(
-            delivery_controller_records(authority_history)
+            [
+                record
+                for record in delivery_controller_records(authority_history)
+                if id(record) in retained_raw_ids
+            ]
         ),
-        retry_outcomes=_stable_record_digests(
-            authenticated_retry_outcomes(authority_history)
+        retry_outcomes=_stable_record_digests(retry_outcomes),
+        review_gate_terminals=_stable_record_digests(
+            [
+                record
+                for record in retry_outcomes
+                if record.get("review_gate_terminal") is True
+            ]
         ),
         work_unit_contracts=_work_unit_contract_projection(governed),
         open_write_units=tuple(
@@ -784,19 +916,16 @@ def authority_projection_bundle_v1(
             )
             is not None
         ),
-        attempt_settlements=tuple(
+        attempt_settlements=_attempt_settlement_projection(governed),
+        task_ids=tuple(
             sorted(
-                (
-                    str(record["task_id"]),
-                    int(
-                        record.get("attempt_index")
-                        if record.get("attempt_index") is not None
-                        else (0 if record.get("type") == "inline" else -1)
-                    ),
-                    canonical_record_digest(record),
-                )
-                for index, record in enumerate(governed)
-                if index in latest_settlement_indices
+                retained_task_ids(authority_history)
+                | {
+                    str(record["task_id"])
+                    for record in governed
+                    if record.get("type") in ATTEMPT_HISTORY_TYPES
+                    and isinstance(record.get("task_id"), str)
+                }
             )
         ),
     )
@@ -804,13 +933,221 @@ def authority_projection_bundle_v1(
 
 def _prospective_retained_view(
     retained: Sequence[dict[str, object]],
+    *,
+    source_records: Sequence[dict[str, object]] = (),
 ) -> AuthorityRecordView:
-    """Model the retained seed after its checkpoint authenticates every row."""
+    """Model the retained seed behind an authenticated checkpoint boundary."""
     copied = list(retained)
-    return AuthorityRecordView(
-        copied,
-        trusted_retained_ids={id(record) for record in copied},
+    authenticated = _authenticated_coordinator_record_ids(source_records)
+    checkpoint = next(
+        (
+            record
+            for record in reversed(source_records)
+            if id(record) in authenticated and _is_coordinator_cutover_attempt(record)
+        ),
+        None,
     )
+    projected = ([checkpoint] if checkpoint is not None else []) + copied
+    return AuthorityRecordView(
+        projected,
+        trusted_checkpoint_id=id(checkpoint) if checkpoint is not None else None,
+        trusted_retained_ids={id(record) for record in copied},
+        checkpoint_prefix=(
+            cast(dict[str, object], checkpoint["ledger_prefix"])
+            if checkpoint is not None
+            and isinstance(checkpoint.get("ledger_prefix"), dict)
+            else None
+        ),
+    )
+
+
+_RETRY_OUTCOME_ANCHOR_FIELDS = (
+    "type",
+    "task_id",
+    "attempt_index",
+    "run_id",
+    "work_unit_id",
+    "unit_attempt_number",
+    "alias",
+    "effective_alias",
+    "engine",
+    "model",
+    "effort",
+    "failure_class",
+    "deposit_state",
+    "output_identity",
+    "result_sha256",
+    "status",
+    "read_only",
+    "work_kind",
+    "category",
+    "task_contract_hash",
+)
+
+_REVIEW_GATE_ANCHOR_FIELDS = (
+    "delivery_family_id",
+    "slice_id",
+    "review_chain_id",
+    "root_work_unit_id",
+    "review_intent",
+    "review_lens",
+    "source_identity",
+    "snapshot_sha",
+    "snapshot_tree_sha",
+    "patch_identity",
+    "evidence_manifest",
+    "worker_identity",
+)
+
+
+def _add_review_gate_anchor(
+    compact: dict[str, object], record: Mapping[str, object]
+) -> None:
+    """Preserve the bounded identity used by review Gate Closure."""
+    contract = record.get("task_contract")
+    task = contract if isinstance(contract, Mapping) else {}
+    compact["review_gate_terminal"] = True
+    for field in _REVIEW_GATE_ANCHOR_FIELDS:
+        value = record.get(field)
+        if value is None:
+            value = task.get(field)
+        if value is not None:
+            compact[field] = value
+
+
+def _compact_retry_outcome(record: Mapping[str, object]) -> dict[str, object]:
+    """Reduce a settlement to the fields consumed by retry admission."""
+    compact = {
+        field: record[field]
+        for field in _RETRY_OUTCOME_ANCHOR_FIELDS
+        if field in record
+    }
+    if getattr(record, "checkpoint_authenticated_retention", False) is True:
+        for field in ("accepted_verdict", "superseded_with_result"):
+            if field in record:
+                compact[field] = record[field]
+        if record.get("review_gate_terminal") is True:
+            _add_review_gate_anchor(compact, record)
+    return compact
+
+
+def _retry_outcome_projection(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project the compact retry state consumed after a checkpoint."""
+    verdicts = authenticated_verdicts(records)
+    review_terminals = authenticated_review_terminals(records)
+    superseded_with_result = {
+        str(record.get("task_id"))
+        for record in authenticated_supersessions(records)
+        if record.get("failure_class") == "stale-source" and record.get("result_sha256")
+    }
+    outcomes: list[dict[str, object]] = []
+    for record in authenticated_retry_outcomes(records):
+        compact = _compact_retry_outcome(record)
+        task_id = str(record.get("task_id"))
+        verdict = verdicts.get(task_id)
+        if "accepted_verdict" not in compact and verdict is not None:
+            compact["accepted_verdict"] = verdict.get("verdict")
+        if task_id in superseded_with_result:
+            compact["superseded_with_result"] = True
+        terminal = review_terminals.get(task_id)
+        if (
+            terminal is not None
+            and terminal.get("status") == "completed"
+            and terminal.get("work_kind") == "review"
+            and (verdict is None or verdict.get("verdict") != "fail")
+        ):
+            _add_review_gate_anchor(compact, terminal)
+        outcomes.append(compact)
+    outcomes.sort(
+        key=lambda record: (
+            str(record.get("work_unit_id") or record.get("task_id")),
+            int(record.get("unit_attempt_number") or 0),
+            str(record.get("task_id")),
+        )
+    )
+    return outcomes
+
+
+def _attempt_settlement_projection(
+    records: Sequence[dict[str, object]],
+) -> tuple[tuple[str, int, str], ...]:
+    """Merge checkpoint anchors with newer raw settlement watermarks."""
+    latest: dict[str, tuple[int, str]] = {}
+    for settlement in retained_attempt_settlements(records):
+        latest[str(settlement["task_id"])] = (
+            cast(int, settlement["attempt_index"]),
+            cast(str, settlement["source_record_digest"]),
+        )
+    raw_indices = _latest_attempt_settlement_indices(records)
+    for index, record in enumerate(records):
+        if index not in raw_indices:
+            continue
+        attempt_index = record.get("attempt_index")
+        if attempt_index is None:
+            attempt_index = 0 if record.get("type") == "inline" else -1
+        latest[str(record["task_id"])] = (
+            cast(int, attempt_index),
+            canonical_record_digest(record),
+        )
+    return tuple(
+        sorted(
+            (task_id, attempt_index, digest)
+            for task_id, (attempt_index, digest) in latest.items()
+        )
+    )
+
+
+def _retention_state_record(
+    records: Sequence[dict[str, object]],
+    *,
+    live_record_ids: Collection[int],
+) -> dict[str, object]:
+    """Build the deterministic compact state authenticated by the checkpoint."""
+    authority_history = _authority_record_list(records)
+    governed = current_telemetry(authority_history)
+    live_ids = frozenset(live_record_ids)
+    open_before_ids = _authenticated_open_before_record_ids(authority_history)
+    outcomes = _retry_outcome_projection(authority_history)
+    settlements = [
+        {
+            "task_id": task_id,
+            "attempt_index": attempt_index,
+            "source_record_digest": digest,
+        }
+        for task_id, attempt_index, digest in _attempt_settlement_projection(governed)
+    ]
+    task_ids = sorted(
+        retained_task_ids(authority_history)
+        | {
+            str(record["task_id"])
+            for record in governed
+            if record.get("type") in ATTEMPT_HISTORY_TYPES
+            and isinstance(record.get("task_id"), str)
+        }
+    )
+    contracts = [
+        {"work_unit_id": work_unit_id, "task_contract_hash": contract_hash}
+        for work_unit_id, hashes in _work_unit_contract_projection(governed)
+        for contract_hash in hashes
+    ]
+    return {
+        "type": RETENTION_STATE_TYPE,
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "policy_version": DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+        "retention_state_version": RETENTION_STATE_VERSION,
+        "task_ids": task_ids,
+        "work_unit_contracts": contracts,
+        "attempt_settlements": settlements,
+        "retry_outcomes": outcomes,
+        "open_before_record_digests": sorted(
+            canonical_record_digest(record)
+            for record in governed
+            if id(record) in live_ids and id(record) in open_before_ids
+        ),
+    }
 
 
 def _progress_identity(record: Mapping[str, object]) -> tuple[object, ...]:
@@ -841,76 +1178,12 @@ def retained_authority_projection(
             "authority compaction does not know current-policy record families: "
             + ", ".join(unknown)
         )
-    open_contexts = _retention_open_attempt_contexts(governed)
     active_runs = frozenset(active_run_ids)
-    latest_progress: dict[tuple[object, ...], int] = {}
-    latest_standing: dict[tuple[object, ...], int] = {}
-    latest_contract_anchor: dict[tuple[str, str], int] = {}
-    for index, record in enumerate(governed):
-        if record.get("type") == "attempt-progress":
-            latest_progress[_progress_identity(record)] = index
-        if not isinstance(record.get("run_id"), str):
-            latest_standing[
-                (
-                    record.get("type"),
-                    record.get("task_id"),
-                    record.get("work_unit_id"),
-                    record.get("alias"),
-                )
-            ] = index
-        record_type = record.get("type")
-        if record_type in {*ATTEMPT_HISTORY_TYPES, "route"} and (
-            record_type != "route" or record.get("kept")
-        ):
-            work_unit_id = str(record.get("work_unit_id") or record.get("task_id"))
-            contract_hash = record.get("task_contract_hash")
-            normalized = (
-                contract_hash
-                if isinstance(contract_hash, str)
-                and re.fullmatch(r"[0-9a-f]{64}", contract_hash)
-                else "<invalid>"
-            )
-            latest_contract_anchor[(work_unit_id, normalized)] = index
-    contract_anchor_indices = frozenset(latest_contract_anchor.values())
-    settlement_indices = _latest_attempt_settlement_indices(governed)
-    retained: list[dict[str, object]] = []
-    for index, record in enumerate(governed):
-        record_type = record.get("type")
-        if record_type == "coordinator-authority-cutover":
-            continue
-        context = (
-            record.get("task_id"),
-            record.get("attempt_index"),
-            record.get("run_id"),
-            _terminal_authority_work_unit(record),
-        )
-        belongs_to_live_chain = (
-            record.get("run_id") in active_runs or context in open_contexts
-        )
-        preserves_work_unit_contract = index in contract_anchor_indices
-        preserves_attempt_settlement = index in settlement_indices
-        standing_key = (
-            record_type,
-            record.get("task_id"),
-            record.get("work_unit_id"),
-            record.get("alias"),
-        )
-        if (
-            not belongs_to_live_chain
-            and not preserves_work_unit_contract
-            and not preserves_attempt_settlement
-            and (
-                isinstance(record.get("run_id"), str)
-                or latest_standing.get(standing_key) != index
-            )
-        ):
-            continue
-        if (
-            record_type == "attempt-progress"
-            and latest_progress.get(_progress_identity(record)) != index
-        ):
-            continue
-        retained.append(record)
+    live_ids = _retention_live_record_ids(governed, active_run_ids=active_runs)
+    retained: list[dict[str, object]] = [
+        _retention_state_record(records, live_record_ids=live_ids)
+    ]
+    retained.extend(record for record in governed if id(record) in live_ids)
     if retained_authority_projection_once(retained) != retained:
         raise DispatchError("authority retained projection is not idempotent")
     return retained
@@ -1009,6 +1282,7 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "inline",
         "review-chain-advisory",
         "review-recovery-verification",
+        RETENTION_STATE_TYPE,
         "route",
         "scratch-cleanup",
         "verdict",
@@ -1031,10 +1305,12 @@ class AuthorityProjectionBundleV1:
     verdicts: tuple[tuple[str, str], ...]
     delivery_controller: tuple[str, ...]
     retry_outcomes: tuple[str, ...]
+    review_gate_terminals: tuple[str, ...]
     work_unit_contracts: tuple[tuple[str, tuple[str, ...]], ...]
     open_write_units: tuple[tuple[str, tuple[tuple[str, tuple[str, ...]], ...]], ...]
     alias_availability: tuple[tuple[str, str], ...]
     attempt_settlements: tuple[tuple[str, int, str], ...]
+    task_ids: tuple[str, ...]
 
 
 AUTHORITY_PROJECTION_REGISTRY_V1 = (
@@ -1049,10 +1325,12 @@ AUTHORITY_PROJECTION_REGISTRY_V1 = (
     ("verdicts", "authenticated_verdicts"),
     ("delivery_controller", "delivery_controller_records"),
     ("retry_outcomes", "authenticated_retry_outcomes"),
+    ("review_gate_terminals", "validate_review_terminality"),
     ("work_unit_contracts", "validate_work_unit_contract"),
     ("open_write_units", "open_write_units"),
     ("alias_availability", "latest_explicit_alias_availability"),
     ("attempt_settlements", "winning_attempt_settlements"),
+    ("task_ids", "validate_retry_policy"),
 )
 AUTHORITY_PROJECTION_CONSUMERS_V1 = tuple(
     consumer for _field, consumer in AUTHORITY_PROJECTION_REGISTRY_V1
