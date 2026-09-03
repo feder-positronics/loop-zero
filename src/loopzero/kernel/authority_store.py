@@ -981,6 +981,7 @@ _RETRY_OUTCOME_ANCHOR_FIELDS = (
     "read_only",
     "work_kind",
     "category",
+    "verification_verdict",
     "task_contract_hash",
 )
 
@@ -996,8 +997,11 @@ _REVIEW_GATE_ANCHOR_FIELDS = (
     "snapshot_tree_sha",
     "patch_identity",
     "evidence_manifest",
+    "verification_verdict",
     "worker_identity",
 )
+
+_REVIEW_GATE_TERMINAL_ONLY_FIELDS = frozenset({"verification_verdict"})
 
 
 def _add_review_gate_anchor(
@@ -1009,7 +1013,7 @@ def _add_review_gate_anchor(
     compact["review_gate_terminal"] = True
     for field in _REVIEW_GATE_ANCHOR_FIELDS:
         value = record.get(field)
-        if value is None:
+        if value is None and field not in _REVIEW_GATE_TERMINAL_ONLY_FIELDS:
             value = task.get(field)
         if value is not None:
             compact[field] = value
