@@ -694,6 +694,59 @@ def test_stale_abandoned_run_can_recover_only_from_matching_frozen_closeout() ->
         is True
     )
 
+    takeover_id = "sr_fedcba9876543210fedcba9876543210"
+    takeover_prior = [
+        prior[0],
+        {
+            **prior[1],
+            "notes": "rebased review repairs require fresh exact-head chain",
+            "session_id": "recovery-session",
+        },
+        _entry(
+            takeover_id,
+            "in_progress",
+            ts="2026-07-13T10:05:00Z",
+            pr=None,
+            issue=None,
+            git_branch="feat/test",
+            session_id="new-recovery-session",
+        ),
+        _entry(
+            takeover_id,
+            "merged",
+            ts="2026-07-13T11:00:00Z",
+            pr=4043,
+            issue=None,
+            git_branch="feat/test",
+            session_id="recovery-session",
+        ),
+    ]
+    assert (
+        module.validate_stale_abandoned_merge_recovery(takeover_prior, merged, capsule)
+        is True
+    )
+    with pytest.raises(ValueError, match="abandonment evidence"):
+        module.validate_stale_abandoned_merge_recovery(
+            takeover_prior[:-1], merged, capsule
+        )
+
+    candidate = takeover_prior[2]
+    terminal = takeover_prior[3]
+    rejected_histories = [
+        [candidate, *takeover_prior[:2], terminal],
+        [*takeover_prior[:2], {**candidate, "run_id": "legacy-run"}, terminal],
+        [*takeover_prior[:2], {**candidate, "git_branch": "feat/other"}, terminal],
+        [*takeover_prior[:2], {**candidate, "skill": "commit-autofix"}, terminal],
+        [*takeover_prior[:3], {**terminal, "git_branch": "feat/other"}],
+        [*takeover_prior[:3], {**terminal, "skill": "commit-autofix"}],
+        [*takeover_prior[:3], {**terminal, "pr": None}],
+    ]
+    for rejected_history in rejected_histories:
+        with pytest.raises(ValueError, match="abandonment evidence"):
+            module.validate_stale_abandoned_merge_recovery(
+                rejected_history, merged, capsule
+            )
+
     mismatched_history = [{**prior[0], "pr": 3600}, prior[1]]
     with pytest.raises(ValueError, match="conflicts with run history"):
         module.validate_stale_abandoned_merge_recovery(

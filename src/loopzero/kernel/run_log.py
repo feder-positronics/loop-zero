@@ -231,22 +231,67 @@ def _canonical_digest(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _has_completed_concurrent_takeover(
+    entries: list[dict[str, object]],
+    *,
+    abandoned: dict[str, object],
+    abandoned_run_id: object,
+) -> bool:
+    """Prove that another run replaced and completed the abandoned owner."""
+    try:
+        abandonment_index = next(
+            index for index, entry in enumerate(entries) if entry is abandoned
+        )
+    except StopIteration:
+        return False
+    later_entries = entries[abandonment_index + 1 :]
+    for index, entry in enumerate(later_entries, abandonment_index + 1):
+        takeover_run_id = entry.get("run_id")
+        if (
+            entry.get("outcome") != "in_progress"
+            or takeover_run_id == abandoned_run_id
+            or not isinstance(takeover_run_id, str)
+            or RUN_ID_RE.fullmatch(takeover_run_id) is None
+            or entry.get("git_branch") != abandoned.get("git_branch")
+            or entry.get("skill") != abandoned.get("skill")
+        ):
+            continue
+        if any(
+            later.get("run_id") == takeover_run_id
+            and later.get("outcome") == "merged"
+            and later.get("git_branch") == entry.get("git_branch")
+            and later.get("skill") == entry.get("skill")
+            and isinstance(later.get("pr"), int)
+            and later.get("pr", 0) > 0
+            for later in entries[index + 1 :]
+        ):
+            return True
+    return False
+
+
 def validate_stale_abandoned_merge_recovery(
     entries: list[dict[str, object]],
     new_entry: dict[str, object],
     capsule: dict[str, object],
 ) -> bool:
-    """Authorize one hygiene-abandoned run from its exact frozen closeout."""
+    """Authorize one abandoned run from its exact frozen closeout."""
     run_id = new_entry.get("run_id")
     prior = [entry for entry in entries if entry.get("run_id") == run_id]
     if not prior or prior[-1].get("outcome") != "abandoned":
         raise ValueError("stale recovery requires an abandoned logical run")
-    notes = prior[-1].get("notes")
-    if not isinstance(notes, str) or not (
+    abandoned = prior[-1]
+    notes = abandoned.get("notes")
+    canonical_abandonment = isinstance(notes, str) and (
         (notes.startswith("hygiene sweep ") and "session dead" in notes)
         or notes.startswith("stale-reconcile:")
+    )
+    if not canonical_abandonment and not _has_completed_concurrent_takeover(
+        entries, abandoned=abandoned, abandoned_run_id=run_id
     ):
-        raise ValueError("stale recovery requires canonical abandonment evidence")
+        raise ValueError(
+            "stale recovery requires canonical abandonment evidence or a completed "
+            "concurrent takeover"
+        )
     if new_entry.get("outcome") != "merged":
         raise ValueError("stale recovery requires a merged terminal outcome")
 
