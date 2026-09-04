@@ -6,6 +6,7 @@ Move-only extraction: this sibling must not import ``agent_dispatch``.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -48,7 +49,10 @@ from finding_ledger import canonical_record_digest
 from guardian_sandbox import environment as sandbox_environment
 
 RETENTION_STATE_TYPE = "retained-authority-state"
-RETENTION_STATE_VERSION = 1
+RETENTION_STATE_VERSION = 2
+RETENTION_STATE_LEGACY_VERSION = 1
+RETENTION_ANCHOR_ENCODING = authority_ledger.RETENTION_ANCHOR_ENCODING
+RETENTION_ANCHOR_FIELDS = authority_ledger.RETENTION_ANCHOR_FIELDS
 
 
 class RetainedRetryOutcome(dict[str, object]):
@@ -752,30 +756,81 @@ def authenticated_retention_state_records(
             continue
         if id(record) not in records.trusted_retained_ids:
             continue
-        if record.get("retention_state_version") != RETENTION_STATE_VERSION:
+        version = record.get("retention_state_version")
+        if version not in {RETENTION_STATE_LEGACY_VERSION, RETENTION_STATE_VERSION}:
             raise DispatchError("authority retention state version is invalid")
-        for field in (
-            "task_ids",
-            "work_unit_contracts",
-            "attempt_settlements",
-            "retry_outcomes",
-            "open_before_record_digests",
-        ):
-            if not isinstance(record.get(field), list):
-                raise DispatchError(f"authority retention state {field} is invalid")
+        if version == RETENTION_STATE_LEGACY_VERSION:
+            for field in RETENTION_ANCHOR_FIELDS:
+                if not isinstance(record.get(field), list):
+                    raise DispatchError(
+                        f"authority retention state {field} is invalid"
+                    )
+        else:
+            if any(field in record for field in RETENTION_ANCHOR_FIELDS):
+                raise DispatchError(
+                    "authority retention state mixes compact and legacy anchors"
+                )
+            _retention_anchor_fields_for_state(record)
         states.append(record)
     return states
+
+
+def encode_retention_anchor_fields(
+    anchors: Mapping[str, object],
+) -> dict[str, object]:
+    """Encode exact historical anchors into one checkpoint-authenticated blob."""
+    try:
+        return authority_ledger.encode_retention_anchor_fields(anchors)
+    except authority_ledger.DispatchLedgerError as exc:
+        raise DispatchError(str(exc)) from exc
+
+
+def _retention_anchor_fields_for_state(
+    state: Mapping[str, object],
+) -> dict[str, list[object]]:
+    if state.get("retention_state_version") == RETENTION_STATE_LEGACY_VERSION:
+        return cast(
+            dict[str, list[object]],
+            copy.deepcopy({field: state[field] for field in RETENTION_ANCHOR_FIELDS}),
+        )
+    encoding = state.get("anchor_encoding")
+    payload = state.get("anchor_payload")
+    digest = state.get("anchor_payload_sha256")
+    size = state.get("anchor_uncompressed_bytes")
+    if (
+        encoding != RETENTION_ANCHOR_ENCODING
+        or not isinstance(payload, str)
+        or not isinstance(digest, str)
+        or type(size) is not int
+    ):
+        raise DispatchError("authority retention anchor metadata is invalid")
+    try:
+        return authority_ledger.decode_retention_anchor_fields(payload, digest, size)
+    except authority_ledger.DispatchLedgerError as exc:
+        raise DispatchError(str(exc)) from exc
+
+
+def retention_anchor_fields(
+    records: Sequence[dict[str, object]],
+) -> dict[str, list[object]]:
+    """Project exact anchors from legacy or compact authenticated state."""
+    anchors: dict[str, list[object]] = {
+        field: [] for field in RETENTION_ANCHOR_FIELDS
+    }
+    for state in authenticated_retention_state_records(records):
+        decoded = _retention_anchor_fields_for_state(state)
+        for field in RETENTION_ANCHOR_FIELDS:
+            anchors[field].extend(decoded[field])
+    return anchors
 
 
 def retained_task_ids(records: Sequence[dict[str, object]]) -> frozenset[str]:
     """Project historical task identities sealed into retention state."""
     task_ids: set[str] = set()
-    for state in authenticated_retention_state_records(records):
-        raw = state["task_ids"]
-        assert isinstance(raw, list)
-        if not all(isinstance(item, str) and item for item in raw):
-            raise DispatchError("authority retention state task_ids are invalid")
-        task_ids.update(cast(list[str], raw))
+    raw = retention_anchor_fields(records)["task_ids"]
+    if not all(isinstance(item, str) and item for item in raw):
+        raise DispatchError("authority retention state task_ids are invalid")
+    task_ids.update(cast(list[str], raw))
     return frozenset(task_ids)
 
 
@@ -784,25 +839,23 @@ def retained_work_unit_contracts(
 ) -> tuple[tuple[str, str], ...]:
     """Project immutable unit contracts sealed into retention state."""
     contracts: set[tuple[str, str]] = set()
-    for state in authenticated_retention_state_records(records):
-        raw = state["work_unit_contracts"]
-        assert isinstance(raw, list)
-        for item in raw:
-            if not isinstance(item, dict):
-                raise DispatchError(
-                    "authority retention state work_unit_contracts are invalid"
-                )
-            work_unit_id = item.get("work_unit_id")
-            contract_hash = item.get("task_contract_hash")
-            if (
-                not isinstance(work_unit_id, str)
-                or not work_unit_id
-                or not isinstance(contract_hash, str)
-            ):
-                raise DispatchError(
-                    "authority retention state work_unit_contracts are invalid"
-                )
-            contracts.add((work_unit_id, contract_hash))
+    raw = retention_anchor_fields(records)["work_unit_contracts"]
+    for item in raw:
+        if not isinstance(item, dict):
+            raise DispatchError(
+                "authority retention state work_unit_contracts are invalid"
+            )
+        work_unit_id = item.get("work_unit_id")
+        contract_hash = item.get("task_contract_hash")
+        if (
+            not isinstance(work_unit_id, str)
+            or not work_unit_id
+            or not isinstance(contract_hash, str)
+        ):
+            raise DispatchError(
+                "authority retention state work_unit_contracts are invalid"
+            )
+        contracts.add((work_unit_id, contract_hash))
     return tuple(sorted(contracts))
 
 
@@ -811,29 +864,27 @@ def retained_attempt_settlements(
 ) -> list[dict[str, object]]:
     """Project compact settlement watermarks sealed into retention state."""
     settlements: list[dict[str, object]] = []
-    for state in authenticated_retention_state_records(records):
-        raw = state["attempt_settlements"]
-        assert isinstance(raw, list)
-        for item in raw:
-            if not isinstance(item, dict):
-                raise DispatchError(
-                    "authority retention state attempt_settlements are invalid"
-                )
-            task_id = item.get("task_id")
-            attempt_index = item.get("attempt_index")
-            source_digest = item.get("source_record_digest")
-            if (
-                not isinstance(task_id, str)
-                or not task_id
-                or type(attempt_index) is not int
-                or attempt_index < -1
-                or not isinstance(source_digest, str)
-                or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
-            ):
-                raise DispatchError(
-                    "authority retention state attempt_settlements are invalid"
-                )
-            settlements.append(dict(item))
+    raw = retention_anchor_fields(records)["attempt_settlements"]
+    for item in raw:
+        if not isinstance(item, dict):
+            raise DispatchError(
+                "authority retention state attempt_settlements are invalid"
+            )
+        task_id = item.get("task_id")
+        attempt_index = item.get("attempt_index")
+        source_digest = item.get("source_record_digest")
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or type(attempt_index) is not int
+            or attempt_index < -1
+            or not isinstance(source_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", source_digest) is None
+        ):
+            raise DispatchError(
+                "authority retention state attempt_settlements are invalid"
+            )
+        settlements.append(dict(item))
     return settlements
 
 
@@ -842,23 +893,21 @@ def retained_retry_outcomes(
 ) -> list[dict[str, object]]:
     """Project compact authenticated retry outcomes from retention state."""
     outcomes: list[dict[str, object]] = []
-    for state in authenticated_retention_state_records(records):
-        raw = state["retry_outcomes"]
-        assert isinstance(raw, list)
-        for item in raw:
-            if (
-                not isinstance(item, dict)
-                or item.get("type") not in DISPATCH_OUTCOME_TYPES
-                or not isinstance(item.get("task_id"), str)
-                or (
-                    item.get("unit_attempt_number") is not None
-                    and type(item.get("unit_attempt_number")) is not int
-                )
-            ):
-                raise DispatchError(
-                    "authority retention state retry_outcomes are invalid"
-                )
-            outcomes.append(RetainedRetryOutcome(item))
+    raw = retention_anchor_fields(records)["retry_outcomes"]
+    for item in raw:
+        if (
+            not isinstance(item, dict)
+            or item.get("type") not in DISPATCH_OUTCOME_TYPES
+            or not isinstance(item.get("task_id"), str)
+            or (
+                item.get("unit_attempt_number") is not None
+                and type(item.get("unit_attempt_number")) is not int
+            )
+        ):
+            raise DispatchError(
+                "authority retention state retry_outcomes are invalid"
+            )
+        outcomes.append(RetainedRetryOutcome(item))
     return outcomes
 
 
@@ -867,17 +916,15 @@ def retained_open_before_record_digests(
 ) -> frozenset[str]:
     """Project quarantined retained rows sealed into compact state."""
     digests: set[str] = set()
-    for state in authenticated_retention_state_records(records):
-        raw = state["open_before_record_digests"]
-        assert isinstance(raw, list)
-        if not all(
-            isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
-            for item in raw
-        ):
-            raise DispatchError(
-                "authority retention state open_before_record_digests are invalid"
-            )
-        digests.update(cast(list[str], raw))
+    raw = retention_anchor_fields(records)["open_before_record_digests"]
+    if not all(
+        isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
+        for item in raw
+    ):
+        raise DispatchError(
+            "authority retention state open_before_record_digests are invalid"
+        )
+    digests.update(cast(list[str], raw))
     return frozenset(digests)
 
 

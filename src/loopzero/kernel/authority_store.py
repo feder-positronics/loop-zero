@@ -45,6 +45,7 @@ from dispatch_authority_projection import (
     _terminal_authority_attempt_key,
     _terminal_authority_work_unit,
     current_telemetry,
+    encode_retention_anchor_fields,
     retained_attempt_settlements,
     retained_task_ids,
     retained_work_unit_contracts,
@@ -1136,12 +1137,7 @@ def _retention_state_record(
         for work_unit_id, hashes in _work_unit_contract_projection(governed)
         for contract_hash in hashes
     ]
-    return {
-        "type": RETENTION_STATE_TYPE,
-        "schema_version": TELEMETRY_SCHEMA_VERSION,
-        "policy_version": DISPATCH_POLICY_VERSION,
-        "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
-        "retention_state_version": RETENTION_STATE_VERSION,
+    anchors = {
         "task_ids": task_ids,
         "work_unit_contracts": contracts,
         "attempt_settlements": settlements,
@@ -1151,6 +1147,14 @@ def _retention_state_record(
             for record in governed
             if id(record) in live_ids and id(record) in open_before_ids
         ),
+    }
+    return {
+        "type": RETENTION_STATE_TYPE,
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "policy_version": DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+        "retention_state_version": RETENTION_STATE_VERSION,
+        **encode_retention_anchor_fields(anchors),
     }
 
 

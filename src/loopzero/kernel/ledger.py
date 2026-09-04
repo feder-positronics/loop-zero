@@ -3,17 +3,21 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import fcntl
 import hashlib
 import json
 import os
 import re
 import stat
+import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
-from typing import Self
+from typing import Self, cast
 
 LEDGER_ACCUMULATOR_SCHEME = "dispatch-coordinator-ledger-prefix-v3"
 ARCHIVE_MANIFEST_SCHEME = "dispatch-authority-archive-manifest-v1"
@@ -25,6 +29,15 @@ _RECORD_DOMAIN = b"record\0"
 _HEX_128_RE = re.compile(r"[0-9a-f]{32}")
 _HEX_256_RE = re.compile(r"[0-9a-f]{64}")
 _SEGMENT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,254}")
+RETENTION_ANCHOR_ENCODING = "canonical-json-zlib-base64-v1"
+RETENTION_ANCHOR_MAX_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+RETENTION_ANCHOR_FIELDS = (
+    "task_ids",
+    "work_unit_contracts",
+    "attempt_settlements",
+    "retry_outcomes",
+    "open_before_record_digests",
+)
 
 
 class DispatchLedgerError(RuntimeError):
@@ -54,6 +67,78 @@ def _canonical_json(value: object) -> bytes:
         ).encode("utf-8")
     except (TypeError, UnicodeEncodeError) as exc:
         raise DispatchLedgerError("ledger payload is invalid") from exc
+
+
+def encode_retention_anchor_fields(
+    anchors: Mapping[str, object],
+) -> dict[str, object]:
+    """Encode exact historical anchors for checkpoint retention."""
+    if set(anchors) != set(RETENTION_ANCHOR_FIELDS) or any(
+        not isinstance(anchors[field], list) for field in RETENTION_ANCHOR_FIELDS
+    ):
+        raise DispatchLedgerError("authority retention anchor fields are invalid")
+    raw = _canonical_json(anchors)
+    if len(raw) > RETENTION_ANCHOR_MAX_UNCOMPRESSED_BYTES:
+        raise DispatchLedgerError("authority retention anchor payload exceeds limit")
+    return {
+        "anchor_encoding": RETENTION_ANCHOR_ENCODING,
+        "anchor_payload": base64.b64encode(zlib.compress(raw, level=9)).decode(),
+        "anchor_payload_sha256": hashlib.sha256(raw).hexdigest(),
+        "anchor_uncompressed_bytes": len(raw),
+    }
+
+
+@lru_cache(maxsize=1)
+def _validated_retention_anchor_payload(
+    payload: str, expected_digest: str, expected_size: int
+) -> bytes:
+    """Authenticate one retained-anchor payload under a fixed memory ceiling."""
+    if (
+        _HEX_256_RE.fullmatch(expected_digest) is None
+        or isinstance(expected_size, bool)
+        or not isinstance(expected_size, int)
+        or not 0 < expected_size <= RETENTION_ANCHOR_MAX_UNCOMPRESSED_BYTES
+    ):
+        raise DispatchLedgerError("authority retention anchor metadata is invalid")
+    try:
+        compressed = base64.b64decode(payload, validate=True)
+        inflater = zlib.decompressobj()
+        raw = inflater.decompress(compressed, expected_size + 1)
+    except (binascii.Error, zlib.error, ValueError) as exc:
+        raise DispatchLedgerError("authority retention anchor payload is invalid") from exc
+    if (
+        len(raw) != expected_size
+        or not inflater.eof
+        or inflater.unconsumed_tail
+        or inflater.unused_data
+    ):
+        raise DispatchLedgerError(
+            "authority retention anchor payload size does not match"
+        )
+    if hashlib.sha256(raw).hexdigest() != expected_digest:
+        raise DispatchLedgerError(
+            "authority retention anchor payload digest does not match"
+        )
+    try:
+        decoded = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DispatchLedgerError("authority retention anchor payload is invalid") from exc
+    if (
+        not isinstance(decoded, dict)
+        or set(decoded) != set(RETENTION_ANCHOR_FIELDS)
+        or any(not isinstance(decoded[field], list) for field in RETENTION_ANCHOR_FIELDS)
+        or _canonical_json(decoded) != raw
+    ):
+        raise DispatchLedgerError("authority retention anchor payload is invalid")
+    return raw
+
+
+def decode_retention_anchor_fields(
+    payload: str, expected_digest: str, expected_size: int
+) -> dict[str, list[object]]:
+    """Decode exact retained anchors into a fresh caller-owned projection."""
+    raw = _validated_retention_anchor_payload(payload, expected_digest, expected_size)
+    return cast(dict[str, list[object]], json.loads(raw))
 
 
 def canonical_record_digest(record: Mapping[str, object]) -> str:
