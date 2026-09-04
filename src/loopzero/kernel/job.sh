@@ -333,10 +333,12 @@ import hashlib
 import hmac
 import json
 import os
+import pwd
 import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -357,6 +359,9 @@ FINAL_CI_REPRO_TASK_PREFIX = "final-ci-repro:"
 FINAL_CI_REPRO_AUTH_FD_ENV = "INTELFLO_FINAL_CI_REPRO_AUTH_FD"
 FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = "INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT"
 CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
+WORKTREE_LEASE_FD_ENV = "INTELFLO_WORKTREE_LEASE_FD"
+PROVIDER_SLOT_FD_ENV = "INTELFLO_PROVIDER_CONTINUATION_SLOT_FD"
+TRUSTED_CONTINUATION_ENV = "INTELFLO_TRUSTED_CONTINUATION"
 
 try:
     fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -466,6 +471,14 @@ pid_fd = binding_fd = None
 exit_fd = envelope_fd = digest_fd = None
 final_code = 125
 owns_launch = False
+trusted_continuation = False
+continuation_worktree_fd = None
+continuation_provider_fd = None
+continuation_digest = None
+continuation_owner_path = None
+terminal_artifact_sha256 = None
+terminal_envelope_sha256 = None
+terminal_status = None
 try:
     pid_fd, pid_bytes = read_held("pid", wait=True)
     if int(pid_bytes.decode().strip()) != os.getpid():
@@ -523,6 +536,7 @@ try:
     dispatcher = repo_root / "scripts" / "util" / "agent_dispatch.py"
     host_dispatcher = repo_root / "scripts" / "util" / "agent_dispatch_host.py"
     final_ci_gate = repo_root / "scripts" / "util" / "final_ci_gate.py"
+    continuation_runner = repo_root / "scripts" / "util" / "delivery_pipeline.py"
     repro_connect_guard = repo_root / "scripts" / "util" / "repro_connect_guard.py"
     executable = shutil.which(command[0]) if command else None
     command_script = Path(command[1]) if len(command) > 1 else None
@@ -566,6 +580,183 @@ try:
                     and host_arguments[1] == "run"
                 )
 
+    if (
+        binding is not None
+        and len(command) == 9
+        and executable is not None
+        and Path(executable).resolve() == Path(sys.executable).resolve()
+        and command_script is not None
+        and not continuation_runner.is_symlink()
+        and continuation_runner.is_file()
+        and not command_script.is_symlink()
+        and command_script.resolve() == continuation_runner.resolve()
+        and command[2] == "continue"
+        and command[3] == "--candidate-file"
+        and command[5] == "--candidate-sha256"
+        and re.fullmatch(r"[0-9a-f]{64}", command[6]) is not None
+        and command[7] == "--terminal-artifact"
+    ):
+        continuation_digest = command[6]
+        candidate_path = Path(command[4])
+        expected_candidate = (
+            repo_root / ".audit" / "delivery-continuations" / "candidates"
+            / f"{continuation_digest}.json"
+        )
+        expected_result = (
+            repo_root / ".audit" / "delivery-continuations" / "results"
+            / f"{continuation_digest}.json"
+        )
+        continuation_roots = (
+            repo_root / ".audit",
+            repo_root / ".audit" / "delivery-continuations",
+            expected_candidate.parent,
+            expected_result.parent,
+        )
+        if (
+            candidate_path.is_absolute()
+            and candidate_path == expected_candidate
+            and source_path == expected_result
+            and Path(command[8]) == expected_result
+            and candidate_path.is_file()
+            and not candidate_path.is_symlink()
+            and all(
+                path.is_dir()
+                and not path.is_symlink()
+                and path.stat(follow_symlinks=False).st_uid == os.getuid()
+                and not path.stat(follow_symlinks=False).st_mode & stat.S_IWOTH
+                for path in continuation_roots
+            )
+            and binding["name"]
+            == f"delivery-continuation-{continuation_digest[:20]}"
+            and binding["task_id"] == f"continuation-{continuation_digest[:24]}"
+        ):
+            candidate_bytes = candidate_path.read_bytes()
+            candidate = json.loads(candidate_bytes)
+            raw_worktree_fd = os.environ.get(WORKTREE_LEASE_FD_ENV)
+            raw_provider_fd = os.environ.get(PROVIDER_SLOT_FD_ENV)
+            try:
+                continuation_worktree_fd = int(raw_worktree_fd or "")
+                held_worktree = os.fstat(continuation_worktree_fd)
+                fcntl.flock(
+                    continuation_worktree_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
+                )
+                git_dir = Path(
+                    subprocess.run(
+                        [
+                            "git", "-C", os.getcwd(), "rev-parse",
+                            "--path-format=absolute", "--git-dir",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    ).stdout.strip()
+                ).resolve()
+                worktree_lock = git_dir / "worktree-boundary.lock"
+                continuation_owner_path = git_dir / "worktree-boundary.owner.json"
+                current_worktree = worktree_lock.stat(follow_symlinks=False)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                continuation_worktree_fd = None
+            worktree_fd_valid = (
+                continuation_worktree_fd is not None
+                and (held_worktree.st_dev, held_worktree.st_ino)
+                == (current_worktree.st_dev, current_worktree.st_ino)
+            )
+            provider_required = candidate.get("provider_slot_required") is True
+            provider_fd_valid = not provider_required and raw_provider_fd is None
+            if provider_required and raw_provider_fd is not None:
+                try:
+                    continuation_provider_fd = int(raw_provider_fd)
+                    held_provider = os.fstat(continuation_provider_fd)
+                    fcntl.flock(
+                        continuation_provider_fd, fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+                    common_dir = Path(
+                        subprocess.run(
+                            [
+                                "git", "-C", os.getcwd(), "rev-parse",
+                                "--path-format=absolute", "--git-common-dir",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            check=True,
+                        ).stdout.strip()
+                    ).resolve()
+                    provider_paths = [
+                        common_dir / "delivery-provider-continuation-slots"
+                        / f"slot-{index}.lock"
+                        for index in range(6)
+                    ]
+                    provider_fd_valid = any(
+                        path.is_file()
+                        and not path.is_symlink()
+                        and (held_provider.st_dev, held_provider.st_ino)
+                        == (
+                            path.stat(follow_symlinks=False).st_dev,
+                            path.stat(follow_symlinks=False).st_ino,
+                        )
+                        for path in provider_paths
+                    )
+                except (BlockingIOError, OSError, ValueError, subprocess.SubprocessError):
+                    continuation_provider_fd = None
+                    provider_fd_valid = False
+            trusted_continuation = bool(
+                isinstance(candidate, dict)
+                and set(candidate)
+                == {
+                    "schema_version", "run_id", "branch", "pr", "worktree",
+                    "issue", "skill", "head_sha", "head_tree_sha",
+                    "risk_digest", "risk_json", "risk_file_path", "risk_tier",
+                    "pr_body", "pr_body_path", "pr_body_digest", "pr_title",
+                    "pr_labels", "origin_url", "git_config_sha256",
+                    "authority_repo", "review_task_id", "review_task_path",
+                    "review_task_digest", "review_preflight_path",
+                    "review_preflight_digest", "predecessor_findings_digest",
+                    "previous_repair_terminal_digest", "required_evidence",
+                    "required_evidence_digest", "provider_slot_required",
+                }
+                and hashlib.sha256(
+                    json.dumps(
+                        candidate,
+                        sort_keys=True,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                == continuation_digest
+                and candidate.get("schema_version")
+                == "delivery-continuation-candidate-v1"
+                and candidate.get("authority_repo") == str(repo_root)
+                and candidate.get("worktree") == str(Path.cwd().resolve())
+                and candidate.get("run_id") == binding["run_id"]
+                and isinstance(candidate.get("pr"), int)
+                and not isinstance(candidate.get("pr"), bool)
+                and candidate["pr"] > 0
+                and isinstance(candidate.get("issue"), int)
+                and not isinstance(candidate.get("issue"), bool)
+                and candidate["issue"] > 0
+                and candidate.get("skill") in {"execute-blueprint", "work-issue"}
+                and isinstance(candidate.get("branch"), str)
+                and bool(candidate["branch"])
+                and re.fullmatch(r"[0-9a-f]{40}", str(candidate.get("head_sha") or ""))
+                is not None
+                and re.fullmatch(
+                    r"[0-9a-f]{40}", str(candidate.get("head_tree_sha") or "")
+                )
+                is not None
+                and candidate.get("risk_tier") in {"T0", "T1", "T2"}
+                and (
+                    (not provider_required and candidate.get("risk_tier") == "T0")
+                    or (
+                        provider_required
+                        and candidate.get("risk_tier") in {"T1", "T2"}
+                        and isinstance(candidate.get("review_task_id"), str)
+                        and bool(candidate["review_task_id"])
+                    )
+                )
+                and worktree_fd_valid
+                and provider_fd_valid
+            )
+
     repro_signature = None
     if (
         binding is not None
@@ -597,7 +788,12 @@ try:
             "bound final-CI reproduction requires the canonical executor command"
         )
     bwrap = None
-    if binding is not None and not trusted_dispatcher and repro_signature is None:
+    if (
+        binding is not None
+        and not trusted_dispatcher
+        and not trusted_continuation
+        and repro_signature is None
+    ):
         try:
             bwrap = str(system_executable("bwrap"))
         except TrustedExecutableError as exc:
@@ -645,6 +841,8 @@ try:
     child_env.pop("PYTHONSAFEPATH", None)
     child_env["INTELFLO_JOB_NAME"] = job_name
     child_env["INTELFLO_JOB_EXECUTOR_PID"] = str(os.getpid())
+    if trusted_continuation:
+        child_env[TRUSTED_CONTINUATION_ENV] = "1"
     wrapped_command = command
     repro_authorization_key = None
     repro_lifetime_token = None
@@ -734,7 +932,12 @@ try:
             "--",
             *command,
         ]
-    if binding is not None and not trusted_dispatcher and repro_signature is None:
+    if (
+        binding is not None
+        and not trusted_dispatcher
+        and not trusted_continuation
+        and repro_signature is None
+    ):
         assert bwrap is not None
         # The synthesized-root rationale and invariants live on
         # job_store.build_bound_sandbox_arguments. The parent keeps the only
@@ -762,6 +965,11 @@ try:
         run_arguments["stdin"] = subprocess.DEVNULL
     else:
         run_arguments["input"] = repro_authorization_key + repro_lifetime_token
+    if trusted_continuation:
+        inherited = [continuation_worktree_fd]
+        if continuation_provider_fd is not None:
+            inherited.append(continuation_provider_fd)
+        run_arguments["pass_fds"] = tuple(inherited)
     # A same-account child must not be able to reopen the supervisor's held
     # authority or sealing descriptors through /proc.
     libc = ctypes.CDLL(None, use_errno=True)
@@ -850,17 +1058,24 @@ try:
         if status == "blocked":
             if final_code != 0:
                 raise RuntimeError("blocked terminal status conflicts with the wrapper exit code")
+        elif status == "repair-required":
+            if not trusted_continuation or final_code != 3:
+                raise RuntimeError(
+                    "repair-required terminal status conflicts with the wrapper exit code"
+                )
         elif status not in terminal_statuses:
             raise RuntimeError("terminal artifact status is not authoritative")
         elif (status == "completed") != (final_code == 0):
             raise RuntimeError("terminal artifact status conflicts with the wrapper exit code")
+        terminal_artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
+        terminal_status = status
         envelope = {
             "schema_version": "job-terminal-envelope-v2",
             "name": binding["name"],
             "run_id": binding["run_id"],
             "task_id": binding["task_id"],
             "source_terminal_artifact": str(source_path.resolve()),
-            "terminal_artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+            "terminal_artifact_sha256": terminal_artifact_sha256,
             "command_exit_code": final_code,
             "terminal": terminal,
         }
@@ -870,6 +1085,7 @@ try:
         digest_bytes = (
             hashlib.sha256(envelope_bytes).hexdigest() + "\n"
         ).encode("ascii")
+        terminal_envelope_sha256 = digest_bytes.decode("ascii").strip()
         commit_reserved(
             "terminal-envelope.json.tmp",
             "terminal-envelope.json",
@@ -899,6 +1115,101 @@ finally:
         except BaseException as exc:
             report(f"terminal exit code could not be sealed: {exc}")
             final_code = 125
+    continuation_reaped = False
+    if (
+        owns_launch
+        and trusted_continuation
+        and terminal_artifact_sha256 is not None
+        and terminal_envelope_sha256 is not None
+        and terminal_status is not None
+        and binding is not None
+    ):
+        reconciliation_fd = waited_fd = None
+        try:
+            reconciliation = {
+                "schema_version": "job-reconciliation-v2",
+                "name": binding["name"],
+                "run_id": binding["run_id"],
+                "task_id": binding["task_id"],
+                "exit_code": final_code,
+                "terminal_status": terminal_status,
+                "terminal_artifact_sha256": terminal_artifact_sha256,
+                "terminal_envelope": str(
+                    (job_dir / "terminal-envelope.json").resolve()
+                ),
+                "terminal_envelope_sha256": terminal_envelope_sha256,
+                "source_terminal_artifact": str(source_path.resolve()),
+            }
+            reconciliation_fd = reserve("reconciliation.json.tmp")
+            commit_reserved(
+                "reconciliation.json.tmp",
+                "reconciliation.json",
+                reconciliation_fd,
+                (json.dumps(reconciliation, indent=2, sort_keys=True) + "\n").encode(
+                    "utf-8"
+                ),
+            )
+            waited_fd = reserve("waited.tmp")
+            commit_reserved("waited.tmp", "waited", waited_fd, b"")
+            continuation_reaped = True
+        except BaseException as exc:
+            report(f"trusted continuation could not self-reconcile: {exc}")
+        finally:
+            for descriptor in (reconciliation_fd, waited_fd):
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+    if trusted_continuation and continuation_owner_path is not None:
+        nonce = os.environ.get("INTELFLO_WORKTREE_LEASE_NONCE")
+        if nonce:
+            try:
+                owner = json.loads(continuation_owner_path.read_text(encoding="utf-8"))
+                if owner.get("nonce_sha256") == hashlib.sha256(nonce.encode()).hexdigest():
+                    continuation_owner_path.unlink()
+            except (OSError, json.JSONDecodeError):
+                pass
+    for descriptor in (continuation_provider_fd, continuation_worktree_fd):
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    if continuation_reaped:
+        try:
+            refill_home = pwd.getpwuid(os.getuid()).pw_dir
+        except KeyError:
+            refill_home = ""
+        refill_env = {
+            "HOME": refill_home,
+            "LANG": child_env.get("LANG", "C.UTF-8"),
+            "LC_ALL": child_env.get("LC_ALL", "C.UTF-8"),
+            "PATH": "/usr/bin:/bin",
+            "PYTHONNOUSERSITE": "1",
+        }
+        if not Path(refill_home).is_absolute() or not Path(refill_home).is_dir():
+            report("bounded continuation refill has no valid account home")
+            refill = None
+        else:
+            refill = subprocess.run(
+                [
+                    str(sys.executable),
+                    str(continuation_runner),
+                    "fill",
+                    "--authority-repo",
+                    str(repo_root),
+                    "--limit",
+                    "1",
+                ],
+                cwd=repo_root,
+                env=refill_env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        if refill is not None and refill.returncode != 0:
+            report(f"bounded continuation refill failed with exit {refill.returncode}")
     for descriptor in (pid_fd, binding_fd, exit_fd, envelope_fd, digest_fd, lease_fd):
         if descriptor is not None:
             try:
@@ -914,6 +1225,111 @@ finally:
     log.close()
 
 raise SystemExit(final_code)
+PY
+}
+
+record_retryable_continuation_interruption() {
+	local dir="$1" name="$2" run_id="$3" task_id="$4" terminal_artifact="$5"
+	shift 5
+	"$PYTHON_BIN" - "$REPO_ROOT" "$dir" "$name" "$run_id" "$task_id" "$terminal_artifact" "$@" <<'PY'
+import hashlib
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1]).resolve()
+job_dir = Path(sys.argv[2]).resolve()
+name, run_id, task_id = sys.argv[3:6]
+terminal = Path(sys.argv[6])
+command = sys.argv[7:]
+runner = repo / "scripts" / "util" / "delivery_pipeline.py"
+if len(command) != 9:
+    raise SystemExit(1)
+executable = Path(command[0]).resolve()
+digest = command[6]
+candidate = Path(command[4])
+expected_candidate = (
+    repo / ".audit" / "delivery-continuations" / "candidates" / f"{digest}.json"
+)
+expected_terminal = (
+    repo / ".audit" / "delivery-continuations" / "results" / f"{digest}.json"
+)
+if not (
+    executable == Path("/usr/bin/python3").resolve()
+    and Path(command[1]).resolve() == runner.resolve()
+    and not Path(command[1]).is_symlink()
+    and command[2:4] == ["continue", "--candidate-file"]
+    and command[5] == "--candidate-sha256"
+    and re.fullmatch(r"[0-9a-f]{64}", digest)
+    and command[7] == "--terminal-artifact"
+    and Path(command[8]).resolve() == terminal == expected_terminal
+    and candidate == expected_candidate
+    and candidate.is_absolute()
+    and name == f"delivery-continuation-{digest[:20]}"
+    and task_id == f"continuation-{digest[:24]}"
+    and candidate.is_file()
+    and not candidate.is_symlink()
+    and not os.path.lexists(expected_terminal)
+    and not (job_dir / "terminal-envelope.json").exists()
+    and not (job_dir / "reconciliation.json").exists()
+):
+    raise SystemExit(1)
+try:
+    binding_bytes = (job_dir / "binding.json").read_bytes()
+    binding = json.loads(binding_bytes)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(1)
+if binding.get("name") != name or binding.get("run_id") != run_id or binding.get("task_id") != task_id:
+    raise SystemExit(1)
+log_path = job_dir / "log"
+log_bytes = log_path.read_bytes() if log_path.is_file() and not log_path.is_symlink() else b""
+receipt = {
+    "schema_version": "delivery-continuation-interruption-v1",
+    "candidate_digest": digest,
+    "name": name,
+    "run_id": run_id,
+    "task_id": task_id,
+    "binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+    "log_sha256": hashlib.sha256(log_bytes).hexdigest(),
+}
+exit_path = job_dir / "exit_code"
+if exit_path.is_file() and not exit_path.is_symlink():
+    raw_exit = exit_path.read_text(encoding="ascii").strip()
+    if re.fullmatch(r"[0-9]+", raw_exit):
+        receipt["previous_exit_code"] = int(raw_exit)
+encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+receipt_sha256 = hashlib.sha256(encoded).hexdigest()
+interruption_dir = repo / ".audit" / "delivery-continuations" / "interruptions"
+interruption_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
+for directory in (repo / ".audit", interruption_dir.parent, interruption_dir):
+    metadata = os.lstat(directory)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & stat.S_IWOTH
+    ):
+        raise SystemExit(1)
+out = interruption_dir / f"{digest}-{receipt['binding_sha256']}-{receipt_sha256}.json"
+prior_receipts = [
+    path
+    for path in interruption_dir.glob(f"{digest}-*.json")
+    if path.is_file() and not path.is_symlink()
+]
+if os.path.lexists(out) or len(prior_receipts) >= 3:
+    raise SystemExit(1)
+try:
+    fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o400)
+except FileExistsError:
+    raise SystemExit(1)
+else:
+    try:
+        os.write(fd, encoded)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 PY
 }
 
@@ -957,7 +1373,10 @@ cmd_start() {
 	fi
 	if [ -d "$dir" ] && ! job_reaped "$dir" &&
 		{ [ -f "$dir/binding.json" ] || [ -f "$dir/pid" ] || [ -f "$dir/exit_code" ]; }; then
-		die "job '$name' has an unreaped result; use 'wait' or 'reconcile' before reusing its name"
+		if ! record_retryable_continuation_interruption \
+			"$dir" "$name" "$run_id" "$task_id" "$terminal_artifact" "$@"; then
+			die "job '$name' has an unreaped result; use 'wait' or 'reconcile' before reusing its name"
+		fi
 	fi
 	rm -rf "$dir"
 	local created_dir
@@ -1441,13 +1860,24 @@ cmd_binding_files() {
 	[ "${1:-}" = "--run-id" ] || die "binding-files requires --run-id <id>"
 	local run_id="${2:-}"
 	[[ "$run_id" =~ ^sr_[0-9a-f]{32}$ ]] || die "binding-files --run-id must match sr_<32 lowercase hex>"
-	"$PYTHON_BIN" - "$run_id" "${JOB_ROOTS[@]}" <<'PY'
+	local skip_name=""
+	if [ "${INTELFLO_TRUSTED_CONTINUATION:-}" = "1" ] &&
+		[ -n "${INTELFLO_JOB_NAME:-}" ] &&
+		[ -n "${INTELFLO_JOB_EXECUTOR_PID:-}" ]; then
+		local current_dir
+		current_dir="$(job_path "$INTELFLO_JOB_NAME")" || return $?
+		if executor_matches "$current_dir" "$INTELFLO_JOB_NAME" "$INTELFLO_JOB_EXECUTOR_PID"; then
+			skip_name="$INTELFLO_JOB_NAME"
+		fi
+	fi
+	"$PYTHON_BIN" - "$run_id" "$skip_name" "${JOB_ROOTS[@]}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 run_id = sys.argv[1]
-roots = [Path(raw) for raw in sys.argv[2:]]
+skip_name = sys.argv[2]
+roots = [Path(raw) for raw in sys.argv[3:]]
 paths = sorted(
     path
     for root in roots
@@ -1455,6 +1885,8 @@ paths = sorted(
     for path in root.glob("*/binding.json")
 )
 for path in paths:
+    if skip_name and path.parent.name == skip_name:
+        continue
     if path.is_symlink():
         raise SystemExit(f"job.sh: invalid symlinked job binding {path}")
     try:
@@ -1900,6 +2332,11 @@ if status == "blocked":
             "job.sh: blocked result has no unique matching dispatcher terminal telemetry"
         )
     terminal_record_sha256 = next(iter(matching_records_by_digest))
+elif status == "repair-required":
+    if exit_code != 3:
+        raise SystemExit(
+            "job.sh: repair-required terminal status conflicts with the wrapper exit code"
+        )
 elif status not in terminal_statuses:
     raise SystemExit("job.sh: terminal artifact status is not authoritative")
 elif (status == "completed") != (exit_code == 0):

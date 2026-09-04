@@ -79,6 +79,34 @@ def test_same_worktree_lease_contends_and_releases(git_repo: Path) -> None:
         pass
 
 
+def test_successful_handoff_transfers_live_lease_to_inherited_child(
+    git_repo: Path,
+) -> None:
+    child = None
+    with module.worktree_lease(
+        git_repo,
+        boundary="handoff",
+        timeout_s=0.1,
+        transfer_on_success=True,
+    ) as lease:
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(2)"],
+            pass_fds=lease.pass_fds,
+        )
+
+    try:
+        with pytest.raises(module.LeaseTimeoutError):
+            with module.worktree_lease(git_repo, boundary="contender", timeout_s=0.05):
+                raise AssertionError("transferred lease must remain live")
+    finally:
+        assert child is not None
+        child.terminate()
+        child.wait(timeout=5)
+
+    with module.worktree_lease(git_repo, boundary="after-child", timeout_s=0.1):
+        pass
+
+
 def test_inherited_descriptor_is_reentrant_for_owned_child(git_repo: Path) -> None:
     script = Path(module.__file__).resolve()
     with module.worktree_lease(git_repo, boundary="parent", timeout_s=0.1) as lease:
@@ -107,6 +135,22 @@ def test_inherited_descriptor_is_reentrant_for_owned_child(git_repo: Path) -> No
 
     assert completed.returncode == 0
     assert completed.stdout.strip() == "child-ok"
+
+
+def test_nested_caller_cannot_transfer_ancestor_lease(
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with module.worktree_lease(git_repo, boundary="parent", timeout_s=0.1) as lease:
+        for name, value in lease.child_env().items():
+            monkeypatch.setenv(name, value)
+        with pytest.raises(module.WorktreeGuardError, match="cannot transfer"):
+            with module.worktree_lease(
+                git_repo,
+                boundary="nested-handoff",
+                timeout_s=0.1,
+                transfer_on_success=True,
+            ):
+                raise AssertionError("nested transfer must not enter")
 
 
 def test_wrong_worktree_inherited_descriptor_does_not_bypass_lock(

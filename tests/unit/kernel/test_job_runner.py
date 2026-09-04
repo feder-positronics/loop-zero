@@ -1,9 +1,11 @@
 """Coverage for the detached long-running-command runner used by agents."""
 
+import fcntl
 import hashlib
 import importlib.util
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -66,6 +68,7 @@ def _job(
     timeout: float = 60,
     script: Path = SCRIPT,
     env_overrides: dict[str, str] | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     environment = {
         "PATH": "/usr/bin:/bin",
@@ -79,6 +82,7 @@ def _job(
         capture_output=True,
         text=True,
         timeout=timeout,
+        pass_fds=pass_fds,
     )
 
 
@@ -736,6 +740,392 @@ raise SystemExit(
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def _trusted_continuation_fixture(
+    tmp_path: Path, *, status: str = "completed"
+) -> tuple[Path, Path, str, Path, int]:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    run_id = "sr_" + "a" * 32
+    candidate = {
+        "schema_version": "delivery-continuation-candidate-v1",
+        "authority_repo": str(repo),
+        "worktree": str(repo),
+        "run_id": run_id,
+        "branch": "phase-2",
+        "pr": 42,
+        "issue": 4046,
+        "skill": "execute-blueprint",
+        "head_sha": "a" * 40,
+        "head_tree_sha": "b" * 40,
+        "risk_digest": "c" * 64,
+        "risk_json": "{}",
+        "risk_file_path": str(repo / "risk.json"),
+        "risk_tier": "T0",
+        "pr_body": "body\n",
+        "pr_body_path": str(repo / "body.md"),
+        "pr_body_digest": hashlib.sha256(b"body\n").hexdigest(),
+        "pr_title": "Phase 2",
+        "pr_labels": [],
+        "origin_url": "git@github.com:example/project.git",
+        "git_config_sha256": "d" * 64,
+        "review_task_id": None,
+        "review_task_path": None,
+        "review_task_digest": None,
+        "review_preflight_path": None,
+        "review_preflight_digest": None,
+        "predecessor_findings_digest": None,
+        "previous_repair_terminal_digest": None,
+        "required_evidence": [],
+        "required_evidence_digest": hashlib.sha256(b"[]").hexdigest(),
+        "provider_slot_required": False,
+    }
+    digest = hashlib.sha256(
+        json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    candidate_path = (
+        repo / ".audit" / "delivery-continuations" / "candidates" / f"{digest}.json"
+    )
+    terminal_path = (
+        repo / ".audit" / "delivery-continuations" / "results" / f"{digest}.json"
+    )
+    candidate_path.parent.mkdir(parents=True)
+    terminal_path.parent.mkdir(parents=True)
+    candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+    runner = script.with_name("delivery_pipeline.py")
+    runner.write_text(
+        f"""import json
+import os
+import sys
+from pathlib import Path
+
+if sys.argv[1] == "fill":
+    Path("refill-home").write_text(os.environ["HOME"], encoding="utf-8")
+    raise SystemExit(0)
+assert sys.argv[1:3] == ["continue", "--candidate-file"]
+terminal = Path(sys.argv[sys.argv.index("--terminal-artifact") + 1])
+digest = sys.argv[sys.argv.index("--candidate-sha256") + 1]
+terminal.write_text(json.dumps({{
+    "task_id": f"continuation-{{digest[:24]}}",
+    "status": {status!r},
+}}), encoding="utf-8")
+Path("trusted-continuation-write").write_text("owned", encoding="utf-8")
+raise SystemExit(0 if {status!r} == "completed" else 3)
+""",
+        encoding="utf-8",
+    )
+    lock = repo / ".git" / "worktree-boundary.lock"
+    lock.touch()
+    descriptor = os.open(lock, os.O_RDWR)
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.set_inheritable(descriptor, True)
+    return script, candidate_path, digest, terminal_path, descriptor
+
+
+@pytest.mark.parametrize("status", ("completed", "repair-required"))
+def test_fixed_continuation_is_writable_bound_and_self_reconciled(
+    tmp_path: Path, status: str
+) -> None:
+    script, candidate, digest, terminal, descriptor = _trusted_continuation_fixture(
+        tmp_path, status=status
+    )
+    repo = script.resolve().parents[2]
+    name = f"delivery-continuation-{digest[:20]}"
+    task_id = f"continuation-{digest[:24]}"
+    try:
+        started = _job(
+            tmp_path,
+            "start",
+            name,
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            task_id,
+            "--terminal-artifact",
+            str(terminal),
+            "--",
+            TRUSTED_JOB_PYTHON,
+            str(script.with_name("delivery_pipeline.py")),
+            "continue",
+            "--candidate-file",
+            str(candidate),
+            "--candidate-sha256",
+            digest,
+            "--terminal-artifact",
+            str(terminal),
+            script=script,
+            env_overrides={
+                "INTELFLO_DELIVERY_ROOT": str(repo),
+                "INTELFLO_WORKTREE_LEASE_FD": str(descriptor),
+            },
+            pass_fds=(descriptor,),
+        )
+        assert started.returncode == 0, started.stdout + started.stderr
+        _wait_until_done(tmp_path, name, script=script)
+        for _ in range(250):
+            if (repo / "refill-home").is_file():
+                break
+            time.sleep(0.02)
+        else:
+            pytest.fail("trusted continuation did not run its bounded refill")
+    finally:
+        os.close(descriptor)
+
+    job_dir = tmp_path / "jobs" / name
+    assert (repo / "trusted-continuation-write").read_text() == "owned"
+    assert (job_dir / "reconciliation.json").is_file()
+    assert (job_dir / "waited").is_file()
+    receipt = json.loads((job_dir / "reconciliation.json").read_text())
+    assert receipt["terminal_status"] == status
+    assert receipt["exit_code"] == (0 if status == "completed" else 3)
+    assert (repo / "refill-home").read_text() == pwd.getpwuid(os.getuid()).pw_dir
+    assert _job(tmp_path, "check", script=script).returncode == 0
+
+
+@pytest.mark.parametrize(
+    "variant", ("script", "script-symlink", "candidate", "terminal", "task")
+)
+def test_fixed_continuation_rejects_every_alternate_identity(
+    tmp_path: Path, variant: str
+) -> None:
+    script, candidate, digest, terminal, descriptor = _trusted_continuation_fixture(
+        tmp_path
+    )
+    repo = script.resolve().parents[2]
+    runner = script.with_name("delivery_pipeline.py")
+    task_id = f"continuation-{digest[:24]}"
+    if variant == "script":
+        runner = script.with_name("alternate.py")
+        runner.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    elif variant == "script-symlink":
+        runner = script.with_name("delivery-pipeline-alias.py")
+        runner.symlink_to(script.with_name("delivery_pipeline.py"))
+    elif variant == "candidate":
+        candidate = candidate.with_name("alternate.json")
+        candidate.write_text("{}\n", encoding="utf-8")
+    elif variant == "terminal":
+        terminal = terminal.with_name("alternate.json")
+    elif variant == "task":
+        task_id = "continuation-" + "b" * 24
+    _deny_outer_bubblewrap(script)
+    try:
+        result = _job(
+            tmp_path,
+            "run",
+            f"delivery-continuation-{digest[:20]}",
+            "--timeout",
+            "30",
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            task_id,
+            "--terminal-artifact",
+            str(terminal),
+            "--",
+            TRUSTED_JOB_PYTHON,
+            str(runner),
+            "continue",
+            "--candidate-file",
+            str(candidate),
+            "--candidate-sha256",
+            digest,
+            "--terminal-artifact",
+            str(terminal),
+            script=script,
+            env_overrides={
+                "INTELFLO_DELIVERY_ROOT": str(repo),
+                "INTELFLO_WORKTREE_LEASE_FD": str(descriptor),
+            },
+            pass_fds=(descriptor,),
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.returncode != 0
+    assert "bound job supervision requires protected bubblewrap" in result.stdout
+
+
+def test_fixed_continuation_pickup_replaces_only_its_authenticated_interruption(
+    tmp_path: Path,
+) -> None:
+    script, candidate, digest, terminal, descriptor = _trusted_continuation_fixture(
+        tmp_path
+    )
+    repo = script.resolve().parents[2]
+    name = f"delivery-continuation-{digest[:20]}"
+    task_id = f"continuation-{digest[:24]}"
+    job_dir = tmp_path / "jobs" / name
+    job_dir.mkdir(parents=True)
+    binding = {
+        "schema_version": "job-binding-v2",
+        "name": name,
+        "run_id": "sr_" + "a" * 32,
+        "task_id": task_id,
+        "terminal_envelope": str((job_dir / "terminal-envelope.json").resolve()),
+    }
+    (job_dir / "binding.json").write_text(json.dumps(binding), encoding="utf-8")
+    (job_dir / "pid").write_text("999999\n", encoding="ascii")
+    (job_dir / "log").write_text("interrupted\n", encoding="utf-8")
+    interruption_dir = repo / ".audit" / "delivery-continuations" / "interruptions"
+    interruption_dir.mkdir(parents=True)
+    binding_digest = hashlib.sha256((job_dir / "binding.json").read_bytes()).hexdigest()
+    # A prior interruption for the same immutable binding must not prevent a
+    # later killed retry from recording its distinct content-addressed receipt.
+    (interruption_dir / f"{digest}-{binding_digest}.json").write_text(
+        "{}\n", encoding="utf-8"
+    )
+    command = [
+        TRUSTED_JOB_PYTHON,
+        str(script.with_name("delivery_pipeline.py")),
+        "continue",
+        "--candidate-file",
+        str(candidate),
+        "--candidate-sha256",
+        digest,
+        "--terminal-artifact",
+        str(terminal),
+    ]
+    try:
+        started = _job(
+            tmp_path,
+            "start",
+            name,
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            task_id,
+            "--terminal-artifact",
+            str(terminal),
+            "--",
+            *command,
+            script=script,
+            env_overrides={
+                "INTELFLO_DELIVERY_ROOT": str(repo),
+                "INTELFLO_WORKTREE_LEASE_FD": str(descriptor),
+            },
+            pass_fds=(descriptor,),
+        )
+        assert started.returncode == 0, started.stdout + started.stderr
+        _wait_until_done(tmp_path, name, script=script)
+    finally:
+        os.close(descriptor)
+
+    interruptions = list(interruption_dir.glob(f"{digest}-*.json"))
+    assert len(interruptions) == 2
+    receipts = [json.loads(path.read_text()) for path in interruptions]
+    interruption = next(
+        receipt for receipt in receipts if receipt.get("candidate_digest") == digest
+    )
+    assert interruption["candidate_digest"] == digest
+    assert (tmp_path / "jobs" / name / "reconciliation.json").is_file()
+
+
+@pytest.mark.parametrize(
+    "blocked_by",
+    (
+        "sealed-terminal",
+        "duplicate-receipt",
+        "retry-cap",
+        "unsafe-interruption-dir",
+    ),
+)
+def test_fixed_continuation_pickup_rejects_unsafe_or_exhausted_retry(
+    tmp_path: Path, blocked_by: str
+) -> None:
+    script, candidate, digest, terminal, descriptor = _trusted_continuation_fixture(
+        tmp_path
+    )
+    repo = script.resolve().parents[2]
+    name = f"delivery-continuation-{digest[:20]}"
+    task_id = f"continuation-{digest[:24]}"
+    job_dir = tmp_path / "jobs" / name
+    job_dir.mkdir(parents=True)
+    binding = {
+        "schema_version": "job-binding-v2",
+        "name": name,
+        "run_id": "sr_" + "a" * 32,
+        "task_id": task_id,
+        "terminal_envelope": str((job_dir / "terminal-envelope.json").resolve()),
+    }
+    (job_dir / "binding.json").write_text(json.dumps(binding), encoding="utf-8")
+    (job_dir / "pid").write_text("999999\n", encoding="ascii")
+    (job_dir / "log").write_text("interrupted\n", encoding="utf-8")
+    interruption_dir = repo / ".audit" / "delivery-continuations" / "interruptions"
+    if blocked_by == "sealed-terminal":
+        terminal.write_text('{"status":"completed"}\n', encoding="utf-8")
+    elif blocked_by == "duplicate-receipt":
+        interruption_dir.mkdir(parents=True)
+        binding_bytes = (job_dir / "binding.json").read_bytes()
+        log_bytes = (job_dir / "log").read_bytes()
+        receipt = {
+            "schema_version": "delivery-continuation-interruption-v1",
+            "candidate_digest": digest,
+            "name": name,
+            "run_id": "sr_" + "a" * 32,
+            "task_id": task_id,
+            "binding_sha256": hashlib.sha256(binding_bytes).hexdigest(),
+            "log_sha256": hashlib.sha256(log_bytes).hexdigest(),
+        }
+        encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
+        receipt_digest = hashlib.sha256(encoded).hexdigest()
+        duplicate = interruption_dir / (
+            f"{digest}-{receipt['binding_sha256']}-{receipt_digest}.json"
+        )
+        duplicate.write_bytes(encoded)
+    elif blocked_by == "retry-cap":
+        interruption_dir.mkdir(parents=True)
+        for index in range(3):
+            (interruption_dir / f"{digest}-{index:064x}.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+    else:
+        external = tmp_path / "untrusted-interruptions"
+        external.mkdir()
+        interruption_dir.symlink_to(external, target_is_directory=True)
+    try:
+        result = _job(
+            tmp_path,
+            "start",
+            name,
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            task_id,
+            "--terminal-artifact",
+            str(terminal),
+            "--",
+            TRUSTED_JOB_PYTHON,
+            str(script.with_name("delivery_pipeline.py")),
+            "continue",
+            "--candidate-file",
+            str(candidate),
+            "--candidate-sha256",
+            digest,
+            "--terminal-artifact",
+            str(terminal),
+            script=script,
+            env_overrides={
+                "INTELFLO_DELIVERY_ROOT": str(repo),
+                "INTELFLO_WORKTREE_LEASE_FD": str(descriptor),
+            },
+            pass_fds=(descriptor,),
+        )
+    finally:
+        os.close(descriptor)
+
+    assert result.returncode != 0
+    assert "has an unreaped result" in result.stderr
+    assert (job_dir / "binding.json").is_file()
+    if blocked_by == "sealed-terminal":
+        assert terminal.is_file()
+        assert not interruption_dir.exists()
+    elif blocked_by == "duplicate-receipt":
+        assert list(interruption_dir.glob(f"{digest}-*.json")) == [duplicate]
+    elif blocked_by == "retry-cap":
+        assert len(list(interruption_dir.glob(f"{digest}-*.json"))) == 3
+    else:
+        assert not any(external.iterdir())
 
 
 @pytest.mark.parametrize(

@@ -225,12 +225,24 @@ def worktree_lease(
     boundary: str,
     timeout_s: float = 300.0,
     git_directory: Path | None = None,
+    transfer_on_success: bool = False,
 ) -> Iterator[LeaseHandle]:
-    """Hold the per-worktree writer lease for one repository boundary."""
+    """Hold the per-worktree writer lease for one repository boundary.
+
+    ``transfer_on_success`` is the narrow detached-runner handoff. A normally
+    completed scope closes the parent's descriptor without explicitly
+    unlocking the shared open-file description.  At least one launched child
+    must have inherited the descriptor before the scope exits.  Exceptional
+    exits retain the ordinary unlock-and-close behavior.
+    """
     resolved = worktree.resolve()
     lock_path, owner_path = _lock_paths(resolved, git_directory=git_directory)
     lock_path.touch(mode=0o600, exist_ok=True)
     if inherited := _inherited_lease(lock_path):
+        if transfer_on_success:
+            raise WorktreeGuardError(
+                "a nested caller cannot transfer its ancestor's worktree lease"
+            )
         yield inherited
         return
 
@@ -253,6 +265,7 @@ def worktree_lease(
     nonce = secrets.token_hex(8)
     os.set_inheritable(fd, True)
     _write_owner(owner_path, boundary=boundary, nonce=nonce)
+    succeeded = False
     try:
         yield LeaseHandle(
             fd=fd,
@@ -260,9 +273,11 @@ def worktree_lease(
             owner_pid=os.getpid(),
             nonce=nonce,
         )
+        succeeded = True
     finally:
-        _clear_owner(owner_path, nonce=nonce)
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        if not (transfer_on_success and succeeded):
+            _clear_owner(owner_path, nonce=nonce)
+            fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
 
 
