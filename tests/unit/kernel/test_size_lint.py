@@ -122,6 +122,117 @@ def test_evaluate_warn_and_fail_tiers() -> None:
     assert by_path["nextjs-frontend/components/Fail.tsx"].limit == 800
 
 
+def test_evaluate_near_hard_boundary_is_distinct_and_non_blocking() -> None:
+    findings = module.evaluate(
+        {
+            "fastapi_backend/app/services/near.py": 1440,
+            "scripts/util/near.py": 1440,
+            "fastapi_backend/tests/unit/test_near.py": 3600,
+            "nextjs-frontend/components/Near.tsx": 720,
+            "scripts/util/at_hard.py": 1600,
+            "fastapi_backend/tests/unit/test_at_hard.py": 4000,
+            "nextjs-frontend/components/AtHard.tsx": 800,
+            "fastapi_backend/app/services/below.py": 1439,
+        }
+    )
+
+    by_path = {finding.path: finding for finding in findings}
+    assert set(by_path) == {
+        "fastapi_backend/app/services/near.py",
+        "scripts/util/near.py",
+        "fastapi_backend/tests/unit/test_near.py",
+        "nextjs-frontend/components/Near.tsx",
+        "scripts/util/at_hard.py",
+        "fastapi_backend/tests/unit/test_at_hard.py",
+        "nextjs-frontend/components/AtHard.tsx",
+        "fastapi_backend/app/services/below.py",
+    }
+    assert {path: finding.level for path, finding in by_path.items()} == {
+        "fastapi_backend/app/services/near.py": "near-hard-limit",
+        "scripts/util/near.py": "near-hard-limit",
+        "fastapi_backend/tests/unit/test_near.py": "near-hard-limit",
+        "nextjs-frontend/components/Near.tsx": "near-hard-limit",
+        "scripts/util/at_hard.py": "near-hard-limit",
+        "fastapi_backend/tests/unit/test_at_hard.py": "near-hard-limit",
+        "nextjs-frontend/components/AtHard.tsx": "near-hard-limit",
+        "fastapi_backend/app/services/below.py": "warn",
+    }
+    assert {path: finding.limit for path, finding in by_path.items()} == {
+        "fastapi_backend/app/services/near.py": 1440,
+        "scripts/util/near.py": 1440,
+        "fastapi_backend/tests/unit/test_near.py": 3600,
+        "nextjs-frontend/components/Near.tsx": 720,
+        "scripts/util/at_hard.py": 1440,
+        "fastapi_backend/tests/unit/test_at_hard.py": 3600,
+        "nextjs-frontend/components/AtHard.tsx": 720,
+        "fastapi_backend/app/services/below.py": 800,
+    }
+
+
+def test_health_inventory_lists_every_guarded_file_at_boundary(
+    monkeypatch, capsys
+) -> None:
+    counts = {
+        "scripts/util/near.py": 1440,
+        "fastapi_backend/tests/unit/test_over.py": 4001,
+        "nextjs-frontend/components/Below.tsx": 719,
+        "scripts/util/agent_dispatch.py": 30_000,
+        "docs/large.md": 50_000,
+    }
+    monkeypatch.setattr(module, "tracked_paths", lambda: list(counts))
+    counted: list[str] = []
+
+    def count_lines(path: Path) -> int:
+        relative_path = str(path.relative_to(module.REPO_ROOT))
+        counted.append(relative_path)
+        return counts[relative_path]
+
+    monkeypatch.setattr(module, "count_lines", count_lines)
+
+    assert module.health_inventory() == 0
+
+    output = capsys.readouterr().out
+    assert "near-hard-limit\tscripts/util/near.py\t1440\t1440\t1600" in output
+    assert "fail\tfastapi_backend/tests/unit/test_over.py\t4001\t3600\t4000" in output
+    assert "Below.tsx" not in output
+    assert "agent_dispatch.py" not in output
+    assert counted == [
+        "scripts/util/near.py",
+        "fastapi_backend/tests/unit/test_over.py",
+        "nextjs-frontend/components/Below.tsx",
+    ]
+
+
+def test_health_inventory_fails_when_a_guarded_file_cannot_be_read(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(module, "tracked_paths", lambda: ["scripts/util/near.py"])
+
+    def unreadable(_path: Path) -> int:
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(module, "count_lines", unreadable)
+
+    assert module.health_inventory() == 1
+    assert "cannot read guarded file scripts/util/near.py" in capsys.readouterr().err
+
+
+def test_health_inventory_skips_a_tracked_file_missing_from_the_worktree(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(module, "tracked_paths", lambda: ["scripts/util/missing.py"])
+
+    def missing(_path: Path) -> int:
+        raise FileNotFoundError
+
+    monkeypatch.setattr(module, "count_lines", missing)
+
+    assert module.health_inventory() == 0
+    captured = capsys.readouterr()
+    assert "missing.py" not in captured.out
+    assert captured.err == ""
+
+
 def test_function_findings_flags_long_functions() -> None:
     body = "\n".join(f"    x{i} = {i}" for i in range(200))
     source = f"def long_fn():\n{body}\n\n\ndef short_fn():\n    return 1\n"

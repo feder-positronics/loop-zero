@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """Touched-file module-size guard (audit finding F10, issue #765; scope #3944).
 
-Warn when a *touched* source file exceeds its soft threshold; hard-fail at 2x.
-Only the files passed in (pre-commit's staged set) are checked — pre-existing
-large files elsewhere are never scanned, so this stops new growth without a
-repo-wide sweep.
+Warn when a *touched* source file exceeds its soft threshold; emit a distinct
+non-blocking near-hard warning at 90% of the hard threshold; hard-fail above 2x.
+Only the files passed in (pre-commit's staged set) are checked by the normal
+hook mode. Health inventory mode scans every tracked guarded file.
 
-Thresholds (soft / hard = 2x soft):
-    fastapi_backend/app/**.py           800 / 1600
-    scripts/**.py                       800 / 1600
+Thresholds (soft / near-hard / hard):
+    fastapi_backend/app/**.py           800 / 1440 / 1600
+    scripts/**.py                       800 / 1440 / 1600
     Python test files (test_*.py or
-    under fastapi_backend/tests/)      2000 / 4000
-    nextjs-frontend/**.{ts,tsx}         400 /  800
+    under fastapi_backend/tests/)      2000 / 3600 / 4000
+    nextjs-frontend/**.{ts,tsx}         400 /  720 /  800
 
 Frontend test files (`.test.`, `.spec.`, `__tests__/`) stay out of scope.
 
@@ -28,10 +28,12 @@ until its entry is removed, locking in the win.
 
 Usage (pre-commit passes staged paths as args; falls back to the staged set):
     python3 scripts/hooks/size_lint.py [path ...]
+    python3 scripts/hooks/size_lint.py --health-inventory
 
 Exit codes:
     0  no file over the hard limit (warnings are non-blocking)
-    1  at least one touched file over the hard limit
+    1  a touched file is over the hard limit, or health inventory cannot read
+       an existing guarded file
 """
 
 import ast
@@ -40,11 +42,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 BACKEND_WARN = 800
 SCRIPTS_WARN = 800
 PY_TEST_WARN = 2000
 FRONTEND_WARN = 400
 HARD_MULTIPLIER = 2  # hard-fail threshold = warn x 2
+NEAR_HARD_RATIO = 0.9  # non-blocking warning boundary as a fraction of hard
 FUNCTION_WARN = 150  # warn-only: Python function length signal
 
 # Exempt from both warn and fail.
@@ -113,7 +118,7 @@ class Finding:
     path: str
     lines: int
     limit: int
-    level: str  # "warn" | "fail"
+    level: str  # "warn" | "near-hard-limit" | "fail"
 
 
 def is_python_test(path: str) -> bool:
@@ -142,6 +147,18 @@ def warn_threshold(path: str) -> int | None:
     return None
 
 
+def hard_threshold(path: str) -> int | None:
+    """Hard threshold for a guarded source path, or None if out of scope."""
+    warn = warn_threshold(path)
+    return warn * HARD_MULTIPLIER if warn is not None else None
+
+
+def near_hard_threshold(path: str) -> int | None:
+    """Exact 90% boundary of the hard threshold for a guarded source path."""
+    hard = hard_threshold(path)
+    return int(hard * NEAR_HARD_RATIO) if hard is not None else None
+
+
 def is_exempt(path: str) -> bool:
     if any(token in path for token in SKIP_SUBSTRINGS):
         return True
@@ -158,12 +175,22 @@ def evaluate(files: dict[str, int]) -> list[Finding]:
         if warn is None or is_exempt(path):
             continue
         lines = files[path]
-        hard = warn * HARD_MULTIPLIER
+        hard = hard_threshold(path)
+        near_hard = near_hard_threshold(path)
+        assert hard is not None
+        assert near_hard is not None
         if lines > hard:
             findings.append(Finding(path, lines, hard, "fail"))
+        elif lines >= near_hard:
+            findings.append(Finding(path, lines, near_hard, "near-hard-limit"))
         elif lines > warn:
             findings.append(Finding(path, lines, warn, "warn"))
     return findings
+
+
+def health_findings(files: dict[str, int]) -> list[Finding]:
+    """Return guarded files at or above the non-blocking near-hard boundary."""
+    return [finding for finding in evaluate(files) if finding.level != "warn"]
 
 
 def function_findings(path: str, source: str) -> list[Finding]:
@@ -201,7 +228,7 @@ def evaluate_functions(paths: list[str]) -> list[Finding]:
     return findings
 
 
-def count_lines(path: str) -> int:
+def count_lines(path: str | Path) -> int:
     """Count newlines, matching `wc -l` semantics."""
     return Path(path).read_bytes().count(b"\n")
 
@@ -216,7 +243,46 @@ def staged_paths() -> list[str]:
     return [line for line in result.stdout.splitlines() if line]
 
 
+def tracked_paths(repo_root: Path = REPO_ROOT) -> list[str]:
+    """Return all tracked paths, preserving unusual names via NUL framing."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), "ls-files", "-z"],
+        capture_output=True,
+        check=True,
+    )
+    return [path for path in result.stdout.decode().split("\0") if path]
+
+
+def health_inventory() -> int:
+    """Print the repository-wide near-hard size inventory for health audits."""
+    files: dict[str, int] = {}
+    for path in tracked_paths():
+        if warn_threshold(path) is None or is_exempt(path):
+            continue
+        try:
+            files[path] = count_lines(REPO_ROOT / path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            print(f"size-lint: cannot read guarded file {path}: {exc}", file=sys.stderr)
+            return 1
+
+    print("# Tracked guarded files at or above 90% of the hard size limit")
+    print("# level\tpath\tlines\tnear-hard-boundary\thard-limit")
+    for finding in health_findings(files):
+        hard = hard_threshold(finding.path)
+        assert hard is not None
+        print(
+            f"{finding.level}\t{finding.path}\t{finding.lines}\t"
+            f"{near_hard_threshold(finding.path)}\t{hard}"
+        )
+    return 0
+
+
 def main(argv: list[str]) -> int:
+    if argv == ["--health-inventory"]:
+        return health_inventory()
+
     paths = argv or staged_paths()
     files: dict[str, int] = {}
     for path in paths:
@@ -226,11 +292,19 @@ def main(argv: list[str]) -> int:
             continue  # deleted in this commit, or unreadable
 
     findings = evaluate(files)
-    warnings = [f for f in findings if f.level == "warn"]
+    warnings = [f for f in findings if f.level in {"warn", "near-hard-limit"}]
+    near_hard_warnings = [f for f in warnings if f.level == "near-hard-limit"]
     failures = [f for f in findings if f.level == "fail"]
     function_warnings = evaluate_functions(list(files))
 
     for f in warnings:
+        if f.level == "near-hard-limit":
+            print(
+                f"  ⚠ {f.path}: {f.lines} lines >= {f.limit} "
+                "(near-hard-limit, 90% of hard; non-blocking).",
+                file=sys.stderr,
+            )
+            continue
         print(
             f"  ⚠ {f.path}: {f.lines} lines > {f.limit} (soft). Consider "
             f"decomposing (directory + barrel, or a concern module).",
@@ -254,7 +328,8 @@ def main(argv: list[str]) -> int:
     if failures:
         print(
             f"\nsize-lint: {len(failures)} file(s) over the hard limit "
-            f"({len(warnings) + len(function_warnings)} warning(s)).",
+            f"({len(warnings) + len(function_warnings)} warning(s), "
+            f"including {len(near_hard_warnings)} near-hard).",
             file=sys.stderr,
         )
         return 1
