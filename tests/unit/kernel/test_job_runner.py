@@ -1230,6 +1230,9 @@ def test_fixed_continuation_pickup_rejects_unsafe_or_exhausted_retry(
         "symlink-path",
         "internal-authority",
         "internal-artifact",
+        "wrong-task-result",
+        "symlink-result",
+        "symlink-result-directory",
     ),
 )
 def test_bound_host_dispatcher_trust_predicate_fails_closed(
@@ -1250,10 +1253,27 @@ def test_bound_host_dispatcher_trust_predicate_fails_closed(
     artifact = tmp_path / "terminal.json"
     if variant == "internal-artifact":
         artifact = repo / "terminal.json"
-    artifact.write_text(
-        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
-        encoding="utf-8",
+    elif variant == "wrong-task-result":
+        artifact = repo / ".audit" / "dispatch" / "results" / "other-task.json"
+    elif variant == "symlink-result":
+        artifact = repo / ".audit" / "dispatch" / "results" / "dispatch-closeout.json"
+    elif variant == "symlink-result-directory":
+        external_results = tmp_path / "external-results"
+        external_results.mkdir()
+        results = repo / ".audit" / "dispatch" / "results"
+        results.parent.mkdir(parents=True)
+        results.symlink_to(external_results, target_is_directory=True)
+        artifact = results / "dispatch-closeout.json"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact_payload = json.dumps(
+        {"task_id": "dispatch-closeout", "status": "completed"}
     )
+    if variant == "symlink-result":
+        target = tmp_path / "symlink-result-target.json"
+        target.write_text(artifact_payload, encoding="utf-8")
+        artifact.symlink_to(target)
+    else:
+        artifact.write_text(artifact_payload, encoding="utf-8")
     command = [TRUSTED_JOB_PYTHON, str(host_dispatcher), "run"]
     if variant == "untrusted-executable":
         command[0] = "/bin/sh"
@@ -1299,7 +1319,13 @@ def test_bound_host_dispatcher_trust_predicate_fails_closed(
     )
 
     assert result.returncode != 0
-    assert "bound job supervision requires protected bubblewrap" in result.stdout
+    if variant in {"symlink-result", "symlink-result-directory"}:
+        log = tmp_path / "jobs" / f"bound-host-{variant}" / "log"
+        assert "bound job supervision requires protected bubblewrap" in log.read_text(
+            encoding="utf-8"
+        )
+    else:
+        assert "bound job supervision requires protected bubblewrap" in result.stdout
 
 
 def test_inherited_codex_descriptor_is_invalidated_without_host_reacquisition(

@@ -170,3 +170,120 @@ def test_candidate_store_protection_pins_linked_worktree_metadata(
         primary / ".git",
         primary / ".audit" / "delivery-continuations" / "candidates",
     )
+
+
+@pytest.mark.parametrize(
+    "entrypoint", ("direct", "host", "host-repo", "host-repo-equals")
+)
+def test_bound_host_dispatcher_accepts_its_canonical_task_result(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    host_dispatcher = script.with_name("agent_dispatch_host.py")
+    if entrypoint == "direct":
+        host_dispatcher = script.with_name("agent_dispatch.py")
+    task_id = "dispatch-canonical-result"
+    admin = repo / ".git" / "worktrees" / "delivery"
+    admin.mkdir(parents=True)
+    artifact = repo / ".audit" / "dispatch" / "results" / f"{task_id}.json"
+    artifact.parent.mkdir(parents=True)
+    host_dispatcher.write_text(
+        "from pathlib import Path\n"
+        "from worktree_guard import worktree_lease\n"
+        f"with worktree_lease(Path({str(repo)!r}), boundary='dispatch-test', git_directory=Path({str(admin)!r})):\n"
+        f"    Path({str(artifact)!r}).write_text("
+        f"{json.dumps(json.dumps({'task_id': task_id, 'status': 'completed'}))}, "
+        "encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    arguments = ["run"]
+    if entrypoint == "host-repo":
+        arguments = ["--repo", str(repo), "run"]
+    elif entrypoint == "host-repo-equals":
+        arguments = [f"--repo={repo}", "run"]
+
+    result = subprocess.run(
+        [
+            str(script),
+            "run",
+            "bound-host-canonical-result",
+            "--timeout",
+            "30",
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            task_id,
+            "--terminal-artifact",
+            str(artifact),
+            "--",
+            "/usr/bin/python3",
+            str(host_dispatcher),
+            *arguments,
+        ],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (admin / "worktree-boundary.lock").exists()
+    assert not (admin / "worktree-boundary.owner.json").exists()
+    assert json.loads(artifact.read_text(encoding="utf-8")) == {
+        "task_id": task_id,
+        "status": "completed",
+    }
+
+
+@pytest.mark.parametrize("linked_component", ("file", "directory"))
+def test_bound_dispatcher_preserves_external_symlink_artifact(
+    tmp_path: Path, linked_component: str
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    dispatcher = script.with_name("agent_dispatch_host.py")
+    target_dir = tmp_path / "external"
+    target_dir.mkdir()
+    target = target_dir / "result.json"
+    alias = tmp_path / "alias"
+    if linked_component == "file":
+        alias.symlink_to(target)
+        artifact = alias
+    else:
+        alias.symlink_to(target_dir, target_is_directory=True)
+        artifact = alias / "result.json"
+    payload = json.dumps({"task_id": "dispatch-external", "status": "completed"})
+    dispatcher.write_text(
+        "from pathlib import Path\n"
+        + f"Path({str(target)!r}).write_text({payload!r})\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            str(script),
+            "run",
+            "external-link",
+            "--timeout",
+            "30",
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            "dispatch-external",
+            "--terminal-artifact",
+            str(artifact),
+            "--",
+            "/usr/bin/python3",
+            str(dispatcher),
+            "run",
+        ],
+        cwd=repo,
+        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(target.read_text()) == json.loads(payload)

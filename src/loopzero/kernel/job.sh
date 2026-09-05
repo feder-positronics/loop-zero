@@ -540,6 +540,34 @@ try:
     repro_connect_guard = repo_root / "scripts" / "util" / "repro_connect_guard.py"
     executable = shutil.which(command[0]) if command else None
     command_script = Path(command[1]) if len(command) > 1 else None
+
+    def is_canonical_dispatch_result() -> bool:
+        if binding is None or re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]*", binding["task_id"]
+        ) is None:
+            return False
+        expected = (
+            repo_root / ".audit" / "dispatch" / "results"
+            / f"{binding['task_id']}.json"
+        )
+        if not source_path.is_absolute() or source_path != expected:
+            return False
+        roots = (repo_root / ".audit", expected.parent.parent, expected.parent)
+        try:
+            if not all(
+                path.is_dir()
+                and not path.is_symlink()
+                and path.stat(follow_symlinks=False).st_uid == os.getuid()
+                and not path.stat(follow_symlinks=False).st_mode & stat.S_IWOTH
+                for path in roots
+            ):
+                return False
+            if expected.is_symlink():
+                return False
+            return not expected.exists() or expected.is_file()
+        except OSError:
+            return False
+
     trusted_dispatch_context = (
         binding is not None
         and len(command) >= 3
@@ -548,7 +576,16 @@ try:
         and command_script is not None
         and not command_script.is_symlink()
         and not job_dir.resolve().is_relative_to(repo_root)
-        and not source_path.resolve().is_relative_to(repo_root)
+        and (
+            (
+                source_path.is_relative_to(repo_root)
+                and is_canonical_dispatch_result()
+            )
+            or (
+                not source_path.is_relative_to(repo_root)
+                and not source_path.resolve().is_relative_to(repo_root)
+            )
+        )
     )
     trusted_dispatcher = False
     if trusted_dispatch_context:
@@ -1359,7 +1396,16 @@ cmd_start() {
 	if [ -n "$run_id$task_id$terminal_artifact" ]; then
 		[[ "$run_id" =~ ^sr_[0-9a-f]{32}$ ]] || die "bound job --run-id must match sr_<32 lowercase hex>"
 		[ -n "$task_id" ] && [ -n "$terminal_artifact" ] || die "bound jobs require --run-id, --task-id, and --terminal-artifact together"
-		terminal_artifact="$(realpath -m -- "$terminal_artifact")"
+		# Preserve the lexical path so the executor can reject symlink traversal
+		# for the one writable in-repo dispatcher result exception.
+		terminal_artifact="$(realpath -ms -- "$terminal_artifact")"
+		local resolved_terminal_artifact
+		resolved_terminal_artifact="$(realpath -m -- "$terminal_artifact")"
+		if [[ "$terminal_artifact" != "$REPO_ROOT/"* && "$resolved_terminal_artifact" != "$REPO_ROOT/"* ]]; then
+			# Preserve existing external symlink compatibility without laundering
+			# an internal result through an external target (or vice versa).
+			terminal_artifact="$resolved_terminal_artifact"
+		fi
 	fi
 
 	local dir lease_fd="" lease_path
