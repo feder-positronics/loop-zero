@@ -366,12 +366,14 @@ def _preflight_environment(
     make_body: str,
     gh_body: str = "exit 0",
     bash_body: str = "exit 0",
+    python_body: str = "exit 0",
 ) -> dict[str, str]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_executable(fake_bin / "gh", gh_body)
     _write_executable(fake_bin / "make", make_body)
     _write_executable(fake_bin / "bash", bash_body)
+    _write_executable(fake_bin / "python3", python_body)
     return {
         **os.environ,
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
@@ -398,8 +400,128 @@ def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0
+    assert "== review provider authentication ==" in result.stdout
     assert "== local worktree ownership ==" in result.stdout
     assert "preflight: OK (#3202)" in result.stdout
+
+
+def test_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    call_log = tmp_path / "python-calls"
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=_preflight_environment(
+            tmp_path,
+            make_body="exit 0",
+            python_body=f'printf "%s\\n" "$*" >> "{call_log}"; exit 0',
+        ),
+    )
+
+    assert result.returncode == 0
+    assert call_log.read_text(encoding="utf-8").splitlines() == [
+        f"{repo_root}/scripts/util/agent_dispatch_host.py doctor --alias opus "
+        "--timeout-s 900"
+    ]
+
+
+def test_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    timeout_log = tmp_path / "timeout-calls"
+    environment = _preflight_environment(tmp_path, make_body="exit 0")
+    fake_bin = tmp_path / "bin"
+    _write_executable(
+        fake_bin / "timeout",
+        f'printf "%s\\n" "$3" >> "{timeout_log}"; shift 3; exec "$@"',
+    )
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 0
+    assert timeout_log.read_text(encoding="utf-8").splitlines()[:2] == [
+        "30s",
+        "120s",
+    ]
+
+
+def test_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=_preflight_environment(
+            tmp_path,
+            make_body="exit 0",
+            python_body=(
+                "echo 'cursor: authentication check failed; "
+                "run cursor-agent login'; exit 1"
+            ),
+        ),
+    )
+
+    assert result.returncode == 1
+    assert result.stdout.count("cursor-agent login") == 1
+    assert "claude auth login" not in result.stderr
+    assert "follow any provider login guidance above" in result.stderr
+    assert "== lanes (remote coordination gate) ==" not in result.stdout
+
+
+def test_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    environment = _preflight_environment(
+        tmp_path, make_body="exit 0", python_body="sleep 2"
+    )
+    environment["PREFLIGHT_REVIEW_AUTH_TIMEOUT_SECONDS"] = "0.1"
+
+    result = subprocess.run(
+        [
+            "/bin/bash",
+            str(repo_root / "scripts/util/preflight.sh"),
+            "3202",
+            "--no-label",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+        env=environment,
+    )
+
+    assert result.returncode == 1
+    assert "review provider authentication timed out after 0.1s" in result.stderr
+    assert "provider login reported above" not in result.stderr
 
 
 def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
