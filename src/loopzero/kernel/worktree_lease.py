@@ -476,8 +476,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="exit 1 when a foreign live writer holds this worktree's lease",
     )
     guard_parser.add_argument("--worktree", type=Path, default=Path.cwd())
+    inherited_parser = subparsers.add_parser(
+        "check-inherited",
+        help="exit 1 unless an inherited descriptor holds this worktree's lease",
+    )
+    inherited_parser.add_argument("--worktree", type=Path, default=Path.cwd())
     args = parser.parse_args(argv)
     try:
+        if args.command_name == "check-inherited":
+            lock_path, _ = _lock_paths(args.worktree.resolve())
+            return 0 if _inherited_lease(lock_path) is not None else 1
         if args.command_name == "guard-commit":
             return _guard_commit(args)
         return _exec_command(args)

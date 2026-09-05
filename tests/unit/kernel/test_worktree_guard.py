@@ -433,3 +433,34 @@ def test_guard_commit_blocks_foreign_live_writer_then_releases(
     # Kernel releases the flock with the dead writer: commits flow again —
     # a crashed writer never wedges the worktree.
     assert _guard_commit(repo).returncode == 0
+
+
+@pytest.mark.parametrize("inherit_fd", [False, True])
+def test_check_inherited_requires_live_descriptor(
+    git_repo: Path, inherit_fd: bool
+) -> None:
+    with module.worktree_lease(git_repo, boundary="parent", timeout_s=0.1) as lease:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(Path(module.__file__).resolve()),
+                "check-inherited",
+                "--worktree",
+                str(git_repo),
+            ],
+            env={
+                **os.environ,
+                **lease.child_env(),
+                module.LEASE_BOUNDARY_ENV: "commit-autofix",
+            },
+            pass_fds=lease.pass_fds if inherit_fd else (),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == (0 if inherit_fd else 1)
+        with pytest.raises(module.LeaseTimeoutError):
+            with module.worktree_lease(git_repo, boundary="contender", timeout_s=0.01):
+                raise AssertionError(
+                    "inherited check must not release the parent's lock"
+                )
