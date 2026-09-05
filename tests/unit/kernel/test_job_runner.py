@@ -174,7 +174,7 @@ def test_job_runner_disables_hostile_python_startup_paths(tmp_path: Path) -> Non
 
 def test_snapshot_runner_keys_authority_to_declared_delivery(tmp_path: Path) -> None:
     delivery = tmp_path / "delivery"
-    delivery.mkdir()
+    delivery.mkdir(mode=0o700)
 
     result = subprocess.run(
         [str(SCRIPT), "list"],
@@ -540,6 +540,9 @@ def _fake_filesystem_views(
 def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     import job_store
 
+    candidate_store = Path(
+        "/var/home/user/project/.audit/delivery-continuations/candidates"
+    )
     # A home nested under a populated system directory (/var/home/user) must
     # keep every sibling of the synthesized ancestors bound into the view.
     arguments = job_store.build_bound_sandbox_arguments(
@@ -548,6 +551,7 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
         working_directory=Path("/var/home/user/repo"),
         command=["true"],
         account_home=Path("/var/home/user"),
+        protected_read_only_paths=(candidate_store,),
         **_fake_filesystem_views(
             {
                 "/": ["bin", "dev", "etc", "proc", "usr", "var"],
@@ -583,12 +587,94 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert _window(arguments, bind("/var/home/user/.local/state/intelflo"))
     protected = "/var/home/user/.local/state/intelflo/jobs/abcd"
     assert _window(arguments, ["--ro-bind", protected, protected])
+    for pinned in (
+        "/var/home/user/project",
+        "/var/home/user/project/.audit",
+        "/var/home/user/project/.audit/delivery-continuations",
+    ):
+        assert _window(arguments, bind(pinned))
+    assert _window(
+        arguments,
+        ["--ro-bind", str(candidate_store), str(candidate_store)],
+    )
     # The read-only remount of the synthesized root is the final mount
     # operation, after --proc and --dev-bind create their mount points.
     tail = arguments[arguments.index("--remount-ro") :]
     assert tail == ["--remount-ro", "/", "--chdir", "/var/home/user/repo", "--", "true"]
     assert arguments.index("--proc") < arguments.index("--remount-ro")
     assert arguments.index("--dev-bind") < arguments.index("--remount-ro")
+
+
+def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
+    import job_store
+
+    def list_directory(path: Path) -> list[str]:
+        if path == Path("/"):
+            return ["dev", "home", "proc", "usr"]
+        if path == Path("/home"):
+            raise PermissionError("execute-only")
+        raise AssertionError(f"unexpected listing: {path}")
+
+    arguments = job_store.build_bound_sandbox_arguments(
+        "/usr/bin/bwrap",
+        protected_authority_root=Path("/home/user/.local/state/intelflo/jobs/current"),
+        working_directory=Path("/home/user/repo"),
+        command=["true"],
+        account_home=Path("/home/user"),
+        protected_read_only_paths=(),
+        list_directory=list_directory,
+        read_symlink_target=lambda _path: None,
+    )
+
+    assert _window(arguments, ["--perms", "0555", "--dir", "/home"])
+    assert _window(arguments, ["--perms", "0555", "--dir", "/home/user"])
+    assert _window(arguments, ["--bind", "/home/user", "/home/user"])
+
+
+@requires_nested_user_namespace
+@requires_host_job_authority
+def test_bound_sandbox_arguments_deny_sibling_collection_writes(
+    tmp_path: Path,
+) -> None:
+    import job_store
+
+    current = job_store.canonical_job_root(REPO_ROOT)
+    sibling = current.parent / f"test-sibling-{os.getpid()}-{tmp_path.name}"
+    sibling.mkdir(parents=True)
+    forged = sibling / "terminal-envelope.json"
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+
+    job_name = f"bound-sibling-{os.getpid()}-{tmp_path.name}"
+    try:
+        result = _default_job(
+            SCRIPT,
+            "run",
+            job_name,
+            "--timeout",
+            "30",
+            "--run-id",
+            "sr_" + "a" * 32,
+            "--task-id",
+            "dispatch-closeout",
+            "--terminal-artifact",
+            str(artifact),
+            "--",
+            "sh",
+            "-c",
+            'if touch "$1"; then exit 9; fi',
+            "sh",
+            str(forged),
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not forged.exists()
+    finally:
+        shutil.rmtree(sibling, ignore_errors=True)
+        _default_job(SCRIPT, "clean", job_name)
 
 
 def _window(arguments: list[str], expected: list[str]) -> list[str] | None:
@@ -607,6 +693,7 @@ def test_bound_sandbox_arguments_keep_external_authority_ancestors_bound() -> No
         working_directory=Path("/home/user/repo"),
         command=["true"],
         account_home=Path("/home/user"),
+        protected_read_only_paths=(),
         **_fake_filesystem_views(
             {
                 "/": ["dev", "home", "proc", "tmp", "usr"],
@@ -1788,6 +1875,7 @@ def _isolated_job_script(tmp_path: Path) -> Path:
         script.parent,
         dirs_exist_ok=True,
     )
+    repo.chmod(0o700)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     return script
 

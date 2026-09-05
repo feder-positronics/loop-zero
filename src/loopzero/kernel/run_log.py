@@ -54,6 +54,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_event import cmd_phase, common_fields, repo_root
+from job_store import JobStoreError, canonical_job_root
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
 VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
@@ -390,6 +391,16 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
         or path.parent != expected_parent
     ):
         raise ValueError("closeout capsule must be the canonical primary artifact")
+    try:
+        lock_path = (
+            canonical_job_root(root, configured="")
+            / ".leases"
+            / "delivery-closeout.lock"
+        )
+    except JobStoreError as exc:
+        raise ValueError(
+            "closeout capsule directory identity is unavailable"
+        ) from exc
     directory_flags = os.O_RDONLY | os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
@@ -406,21 +417,24 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
         raise ValueError("closeout capsule is unreadable") from exc
     lock_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        lock_descriptor = os.open(
-            common_dir / "intelflo-delivery-closeout.lock", lock_flags
-        )
+        lock_descriptor = os.open(lock_path, lock_flags)
     except OSError as exc:
         os.close(parent_descriptor)
         os.close(audit_descriptor)
         raise ValueError("closeout capsule directory identity is unavailable") from exc
     try:
         lock_before = os.fstat(lock_descriptor)
-        if not stat.S_ISREG(lock_before.st_mode) or lock_before.st_nlink != 1:
+        if (
+            not stat.S_ISREG(lock_before.st_mode)
+            or lock_before.st_nlink != 1
+            or lock_before.st_uid != os.getuid()
+            or stat.S_IMODE(lock_before.st_mode) != 0o600
+        ):
             raise ValueError("closeout capsule directory identity is invalid")
         identity_payload = os.read(lock_descriptor, 129)
         lock_after = os.fstat(lock_descriptor)
         lock_current = os.stat(  # noqa: PTH116 - compare opened lock to its name.
-            common_dir / "intelflo-delivery-closeout.lock", follow_symlinks=False
+            lock_path, follow_symlinks=False
         )
         if (
             len(identity_payload) > 128

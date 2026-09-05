@@ -9,6 +9,7 @@ import os
 import pwd
 import re
 import stat
+import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -93,6 +94,115 @@ def _ensure_directory(path: Path, *, private: bool) -> None:
             )
 
 
+def _ensure_private_directory_chain(
+    path: Path, *, allow_group_writable_owned_ancestors: bool = False
+) -> None:
+    """Create an absolute directory chain through pinned, safe descriptors."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path.anchor, flags)
+    except OSError as exc:
+        raise JobStoreError("job authority root anchor is unavailable") from exc
+    account_boundary_seen = False
+    current = Path(path.anchor)
+    try:
+        components = path.parts[1:]
+        for index, part in enumerate(components):
+            current /= part
+            is_final = index == len(components) - 1
+            created = False
+            try:
+                child = os.open(part, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(part, mode=_PRIVATE_MODE, dir_fd=descriptor)
+                    created = True
+                    path_flags = (
+                        getattr(os, "O_PATH", 0)
+                        | os.O_DIRECTORY
+                        | getattr(os, "O_NOFOLLOW", 0)
+                    )
+                    if not getattr(os, "O_PATH", 0):
+                        raise JobStoreError(
+                            "private job authority creation requires O_PATH"
+                        )
+                    pinned = os.open(part, path_flags, dir_fd=descriptor)
+                    try:
+                        os.chmod(f"/proc/self/fd/{pinned}", _PRIVATE_MODE)
+                    finally:
+                        os.close(pinned)
+                    child = os.open(part, flags, dir_fd=descriptor)
+                except OSError as exc:
+                    raise JobStoreError(
+                        f"cannot create job authority directory: {current}"
+                    ) from exc
+            except OSError as exc:
+                raise JobStoreError(
+                    f"job authority component is not a directory: {current}"
+                ) from exc
+
+            try:
+                state = os.fstat(child)
+                if not stat.S_ISDIR(state.st_mode):
+                    raise JobStoreError(
+                        f"job authority component is not a directory: {current}"
+                    )
+                mode = stat.S_IMODE(state.st_mode)
+                if state.st_uid == os.getuid():
+                    account_boundary_seen = True
+                    writable_mask = (
+                        0o002 if allow_group_writable_owned_ancestors else 0o022
+                    )
+                    if mode & writable_mask and not is_final:
+                        raise JobStoreError(
+                            "job authority component is writable by another account: "
+                            f"{current}"
+                        )
+                    if is_final and mode != _PRIVATE_MODE:
+                        os.fchmod(child, _PRIVATE_MODE)
+                elif account_boundary_seen or (
+                    mode & 0o022 and not mode & stat.S_ISVTX
+                ):
+                    raise JobStoreError(
+                        f"job authority component is not owned by this account: {current}"
+                    )
+                if created and state.st_uid != os.getuid():
+                    raise JobStoreError(
+                        f"job authority directory is not owned by this account: {current}"
+                    )
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+
+        state = os.fstat(descriptor)
+        if state.st_uid != os.getuid():
+            raise JobStoreError(
+                f"job authority directory is not owned by this account: {path}"
+            )
+        if stat.S_IMODE(state.st_mode) != _PRIVATE_MODE:
+            os.fchmod(descriptor, _PRIVATE_MODE)
+        lexical = path.lstat()
+        final = os.fstat(descriptor)
+        if final.st_uid != os.getuid() or stat.S_IMODE(final.st_mode) != _PRIVATE_MODE:
+            raise JobStoreError(
+                f"job authority directory permissions are invalid: {path}"
+            )
+        if (lexical.st_dev, lexical.st_ino) != (final.st_dev, final.st_ino):
+            raise JobStoreError(
+                "job authority directory identity changed during creation"
+            )
+    except OSError as exc:
+        raise JobStoreError(f"job authority directory is unavailable: {path}") from exc
+    finally:
+        os.close(descriptor)
+
+
 def canonical_job_root(worktree: Path, *, configured: str | None = None) -> Path:
     """Return one canonical root; legacy recovery requires an explicit override."""
     root = worktree.resolve()
@@ -114,10 +224,10 @@ def ensure_job_root(worktree: Path, *, configured: str | None = None) -> Path:
     root = canonical_job_root(worktree, configured=configured)
     raw = os.environ.get("INTELFLO_JOB_DIR") if configured is None else configured
     if raw:
-        # An explicit recovery root is operator-selected. Keep that escape hatch,
-        # but still make its actual authority directory account-private.
-        root.parent.mkdir(parents=True, exist_ok=True)
-        _ensure_directory(root, private=True)
+        # Pin every component while creating the operator-selected recovery root.
+        # This preserves the escape hatch without trusting umask or a path that
+        # another account can rename between validation and creation.
+        _ensure_private_directory_chain(root)
         return root
 
     home = _account_home()
@@ -196,6 +306,89 @@ def ensure_job_lease(
     return lease
 
 
+def _canonical_candidate_protection_paths() -> tuple[Path, ...]:
+    tool_repository = Path(__file__).resolve().parents[2]
+    completed = subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(tool_repository),
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": "/tmp",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": "/usr/bin:/bin",
+        },
+    )
+    if completed.returncode != 0:
+        raise JobStoreError("canonical continuation candidate root is unavailable")
+    metadata = completed.stdout.splitlines()
+    if len(metadata) != 3:
+        raise JobStoreError("canonical continuation candidate root is unavailable")
+    repository = Path(metadata[0]).resolve()
+    git_dir = Path(metadata[1]).resolve()
+    common_dir = Path(metadata[2]).resolve()
+    primary = common_dir.parent
+    candidate_store = (
+        primary / ".audit" / "delivery-continuations" / "candidates"
+    )
+    _ensure_private_directory_chain(
+        candidate_store, allow_group_writable_owned_ancestors=True
+    )
+    protected = [repository / ".git"]
+    if git_dir not in protected:
+        protected.append(git_dir)
+    if common_dir not in protected:
+        protected.append(common_dir)
+    protected.append(candidate_store)
+    for path in protected[:-1]:
+        try:
+            state = path.lstat()
+        except OSError as exc:
+            raise JobStoreError("canonical Git metadata is unavailable") from exc
+        if stat.S_ISLNK(state.st_mode) or not (
+            stat.S_ISREG(state.st_mode) or stat.S_ISDIR(state.st_mode)
+        ):
+            raise JobStoreError(f"canonical Git metadata is unsafe: {path}")
+    return tuple(protected)
+
+
+def _protected_read_only_mounts(
+    paths: Sequence[Path], *, account_home: Path
+) -> list[str]:
+    mounts: list[str] = []
+    bound: set[Path] = set()
+    for protected in paths:
+        if not protected.is_absolute() or protected == Path("/"):
+            raise JobStoreError("protected read-only path is invalid")
+        for ancestor in reversed(protected.parents):
+            if (
+                ancestor == Path("/")
+                or ancestor == account_home
+                or ancestor in account_home.parents
+                or ancestor in bound
+            ):
+                continue
+            mounts.extend(("--bind", str(ancestor), str(ancestor)))
+            bound.add(ancestor)
+        mounts.extend(("--ro-bind", str(protected), str(protected)))
+    return mounts
+
+
 def build_bound_sandbox_arguments(
     bubblewrap: str,
     *,
@@ -203,6 +396,7 @@ def build_bound_sandbox_arguments(
     working_directory: Path,
     command: Sequence[str],
     account_home: Path | None = None,
+    protected_read_only_paths: Sequence[Path] | None = None,
     list_directory: Callable[[Path], list[str]] | None = None,
     read_symlink_target: Callable[[Path], str | None] | None = None,
 ) -> list[str]:
@@ -220,7 +414,10 @@ def build_bound_sandbox_arguments(
     Anti-forgery is preserved: every ancestor of the job collection is either
     a bind mount point or a directory inside the read-only tmpfs root, so a
     child cannot rename an ancestor, recreate the lexical job path, and feed
-    reconciliation forged files.
+    reconciliation forged files. The shared default jobs root is also bound
+    read-only, closing writes into another worktree's authority collection.
+    Additional trusted-input stores, including continuation candidates, are
+    overlaid read-only after the account-home bind.
     """
     if account_home is None:
         try:
@@ -263,11 +460,22 @@ def build_bound_sandbox_arguments(
         if entry_path == home_top:
             continue  # synthesized with its real entries below
         root_view.extend(bind_entry(entry_path))
+    synthesized_directories: set[Path] = set()
+
+    def synthesize_directory(path: Path) -> None:
+        if path not in synthesized_directories:
+            root_view.extend(("--perms", "0555", "--dir", str(path)))
+            synthesized_directories.add(path)
+
     for index, ancestor in enumerate(home_chain[:-1]):
-        root_view.extend(("--perms", "0555", "--dir", str(ancestor)))
+        synthesize_directory(ancestor)
         next_component = home_chain[index + 1]
         try:
             entry_names = list_directory(ancestor)
+        except PermissionError:
+            # Execute permission is enough to reach the known account home.
+            synthesize_directory(next_component)
+            continue
         except OSError as exc:
             raise JobStoreError(
                 f"cannot enumerate a home ancestor for the bound sandbox: {ancestor}"
@@ -290,6 +498,18 @@ def build_bound_sandbox_arguments(
             # its strict ancestors live in the read-only tmpfs root.
             continue
         authority_mounts.extend(("--bind", str(ancestor), str(ancestor)))
+    shared_jobs_root = account_home / ".local" / "state" / "intelflo" / "jobs"
+    shared_root_mount: list[str] = []
+    if protected_authority_root.parent == shared_jobs_root:
+        shared_root_mount.extend(
+            ("--ro-bind", str(shared_jobs_root), str(shared_jobs_root))
+        )
+    if protected_read_only_paths is None:
+        protected_read_only_paths = _canonical_candidate_protection_paths()
+    protected_mounts = _protected_read_only_mounts(
+        protected_read_only_paths,
+        account_home=account_home,
+    )
     return [
         bubblewrap,
         "--die-with-parent",
@@ -304,6 +524,8 @@ def build_bound_sandbox_arguments(
         "/",
         *root_view,
         *authority_mounts,
+        *shared_root_mount,
+        *protected_mounts,
         "--ro-bind",
         str(protected_authority_root),
         str(protected_authority_root),

@@ -38,6 +38,57 @@ def load_module() -> ModuleType:
 module = load_module()
 
 
+def _install_closeout_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsule_dir: Path
+) -> Path:
+    job_root = tmp_path / "account-private-jobs"
+    lease_root = job_root / ".leases"
+    lease_root.mkdir(parents=True)
+    lock = lease_root / "delivery-closeout.lock"
+    capsule_stat = capsule_dir.stat()
+    lock.write_text(f"{capsule_stat.st_dev}:{capsule_stat.st_ino}\n", encoding="ascii")
+    lock.chmod(0o600)
+    monkeypatch.setattr(
+        module,
+        "canonical_job_root",
+        lambda _root, *, configured=None: job_root,
+    )
+    return lock
+
+
+def test_canonical_closeout_capsule_translates_job_store_failure_before_open(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    common_dir = tmp_path / ".git"
+    common_dir.mkdir()
+    capsule_dir = tmp_path / ".audit" / "delivery-closeout"
+    capsule_dir.mkdir(parents=True)
+    capsule = capsule_dir / "capsule.json"
+    capsule.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: module.subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=str(common_dir), stderr=""
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "canonical_job_root",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            module.JobStoreError("unavailable")
+        ),
+    )
+    monkeypatch.setattr(
+        module.os,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("opened before validating job root"),
+    )
+
+    with pytest.raises(ValueError, match="directory identity is unavailable"):
+        module.load_canonical_closeout_capsule(tmp_path, capsule)
+
+
 def test_derive_duration_s_uses_earliest_event_for_exact_run(tmp_path: Path) -> None:
     audit_dir = tmp_path / ".audit" / "agent-events"
     audit_dir.mkdir(parents=True)
@@ -789,10 +840,7 @@ def test_canonical_closeout_capsule_rejects_hard_link_alias(
     capsule_dir.mkdir(parents=True)
     capsule = capsule_dir / "pr-3702-sr_0123456789abcdef0123456789abcdef.json"
     capsule.write_text("{}\n", encoding="utf-8")
-    capsule_stat = capsule_dir.stat()
-    (common_dir / "intelflo-delivery-closeout.lock").write_text(
-        f"{capsule_stat.st_dev}:{capsule_stat.st_ino}\n", encoding="ascii"
-    )
+    _install_closeout_lock(monkeypatch, tmp_path, capsule_dir)
     (tmp_path / "capsule-alias.json").hardlink_to(capsule)
     monkeypatch.setattr(
         module.subprocess,
@@ -836,10 +884,7 @@ def test_canonical_closeout_capsule_rejects_replaced_locked_directory(
     common_dir.mkdir()
     capsule_dir = tmp_path / ".audit" / "delivery-closeout"
     capsule_dir.mkdir(parents=True)
-    original_stat = capsule_dir.stat()
-    (common_dir / "intelflo-delivery-closeout.lock").write_text(
-        f"{original_stat.st_dev}:{original_stat.st_ino}\n", encoding="ascii"
-    )
+    _install_closeout_lock(monkeypatch, tmp_path, capsule_dir)
     moved = tmp_path / ".audit" / "delivery-closeout-moved"
     capsule_dir.rename(moved)
     capsule_dir.mkdir()
