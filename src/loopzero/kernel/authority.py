@@ -18,11 +18,12 @@ import tempfile
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Literal, Mapping, Sequence
 
 # Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from finding_ledger import canonical_record_digest
 from trusted_executable import TrustedExecutableError, system_executable
 
 LEGACY_AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v1"
@@ -1074,3 +1075,109 @@ def verify_terminal_authority(
 
     if not _signature_is_valid(public_key, signature, payload):
         raise TerminalAuthorityError("terminal authority signature is invalid")
+
+
+def _attempt_owner_record_digests(
+    records: Sequence[Mapping[str, object]],
+    *,
+    task_id: object,
+    attempt_index: object,
+    before: Mapping[str, object],
+) -> frozenset[str]:
+    """Digest the ledger's `attempt-owner` rows for one attempt.
+
+    Only rows recorded before the attempt's first settlement count: the ledger
+    is append-only and settlements are first-writer-wins per attempt, so a row
+    appended after `before` (or after any settlement of the same attempt) can
+    never have been observed by it. Consumers may hold re-projected copies, so
+    the cutoff is matched by content, not object identity.
+    """
+    digests: set[str] = set()
+    for record in records:
+        same_attempt = (
+            record.get("task_id") == task_id
+            and not isinstance(record.get("attempt_index"), bool)
+            and record.get("attempt_index") == attempt_index
+        )
+        if record is before or (
+            same_attempt
+            and record.get("type") in {"attempt-abort", "attempt-terminal"}
+        ):
+            break
+        if same_attempt and record.get("type") == "attempt-owner":
+            digests.add(canonical_record_digest(record))
+    return frozenset(digests)
+
+
+def authenticated_gone_owner_abort(
+    record: Mapping[str, object],
+    start: Mapping[str, object],
+    authenticated_coordinator_ids: frozenset[int],
+    records: Sequence[Mapping[str, object]],
+) -> bool:
+    """Accept only a host-signed, exact-start failure settlement after owner loss.
+
+    The proof's process half is checked against the ledger, not trusted: it
+    must carry the start's controller identity and a non-empty digest list
+    that names every `attempt-owner` row for this attempt recorded before the
+    settlement. Rows appended later are never consulted and rows pruned by
+    retention cannot revoke an accepted settlement, so no ledger writer can
+    reopen a host-signed failure by adding or removing owner rows.
+    """
+    proof = record.get("gone_owner_proof")
+    if (
+        id(record) not in authenticated_coordinator_ids
+        or record.get("type") != "attempt-abort"
+        or record.get("status") != "infrastructure-failure"
+        or record.get("failure_class") != "operator-terminated"
+        or record.get("settlement_evidence") != "gone-owner-v1"
+        or not isinstance(proof, dict)
+        or proof.get("version") != 1
+        or proof.get("start_digest") != canonical_record_digest(start)
+        or not all(
+            record.get(field) == start.get(field)
+            for field in (
+                "task_id",
+                "attempt_index",
+                "run_id",
+                "work_unit_id",
+                "root_work_unit_id",
+                "worktree",
+                "task_contract_hash",
+            )
+        )
+    ):
+        return False
+    process, lease, worktree = (
+        proof.get(key) for key in ("process", "lease", "worktree")
+    )
+    controller_identity = start.get("controller_identity")
+    if not isinstance(process, dict) or not isinstance(controller_identity, dict):
+        return False
+    recorded_digests = process.get("owner_record_digests")
+    if (
+        process.get("state") != "gone"
+        or process.get("controller_identity") != controller_identity
+        or not isinstance(recorded_digests, list)
+        or not recorded_digests
+        or not all(
+            isinstance(item, str) and re.fullmatch(r"[0-9a-f]{64}", item)
+            for item in recorded_digests
+        )
+        or not _attempt_owner_record_digests(
+            records,
+            task_id=start.get("task_id"),
+            attempt_index=start.get("attempt_index"),
+            before=record,
+        )
+        <= set(recorded_digests)
+    ):
+        return False
+    return (
+        isinstance(lease, dict)
+        and lease.get("state") in {"acquired", "absent"}
+        and isinstance(worktree, dict)
+        and worktree.get("state") in {"present", "absent"}
+        and worktree.get("path") == start.get("worktree")
+        and (lease.get("state") != "absent" or worktree.get("state") == "absent")
+    )

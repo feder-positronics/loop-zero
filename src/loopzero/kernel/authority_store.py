@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dispatch_ledger as authority_ledger
 from dispatch_authority import (
+    authenticated_gone_owner_abort,
     CoordinatorAuthority,
     TerminalAuthority,
     TerminalAuthorityError,
@@ -1221,7 +1222,9 @@ def _retention_open_attempt_contexts(
         if start is None:
             continue
         registration = start.get("terminal_authority")
-        if isinstance(registration, dict):
+        if isinstance(registration, dict) and not authenticated_gone_owner_abort(
+            record, start, authenticated_coordinator_ids, records
+        ):
             try:
                 verify_terminal_authority(
                     record,

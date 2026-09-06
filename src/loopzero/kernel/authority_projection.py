@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_ledger as authority_ledger
 from dispatch_authority import (
     COORDINATOR_AUTHORITY_SCHEME,
+    authenticated_gone_owner_abort,
     LEGACY_COORDINATOR_AUTHORITY_SCHEME,
     TerminalAuthorityError,
     TerminalAuthorityOperationalError,
@@ -131,7 +132,9 @@ def _authenticated_open_dispatch_attempts(
         if start is None:
             continue
         registration = start.get("terminal_authority")
-        if isinstance(registration, dict):
+        if isinstance(registration, dict) and not authenticated_gone_owner_abort(
+            record, start, authenticated_coordinator_ids, governed_records
+        ):
             try:
                 verify_terminal_authority(
                     record,
@@ -209,7 +212,9 @@ def _authenticated_open_before_record_projections(
         if start is None:
             continue
         registration = start.get("terminal_authority")
-        if isinstance(registration, dict):
+        if isinstance(registration, dict) and not authenticated_gone_owner_abort(
+            record, start, authenticated_coordinator_ids, governed_records
+        ):
             try:
                 verify_terminal_authority(
                     record,
@@ -1011,13 +1016,16 @@ def _authenticated_attempt_terminal_ids(
         if len(candidates) != 1:
             continue
         try:
-            verify_terminal_authority(
-                record,
-                registration=cast(
-                    dict[str, object], candidates[0]["terminal_authority"]
-                ),
-                expected_kind="dispatcher",
-            )
+            if not authenticated_gone_owner_abort(
+                record, candidates[0], authenticated_coordinator_ids, governed_records
+            ):
+                verify_terminal_authority(
+                    record,
+                    registration=cast(
+                        dict[str, object], candidates[0]["terminal_authority"]
+                    ),
+                    expected_kind="dispatcher",
+                )
         except TerminalAuthorityError:
             continue
         accepted.add(id(record))
