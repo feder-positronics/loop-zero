@@ -8,11 +8,13 @@ need without importing the dispatcher. Nothing here may import
 `agent_dispatch`.
 """
 
+import fnmatch
 import hashlib
 import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,3 +136,33 @@ def _deterministic_identifier_sha256(value: object) -> str:
         except (TypeError, ValueError):
             payload = type(value).__qualname__.encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _literal_bracket_glob(glob: str) -> str:
+    """Keep framework route segments such as ``[slug]`` literal."""
+    return "".join(
+        "[[]" if char == "[" else "[]]" if char == "]" else char for char in glob
+    )
+
+
+
+def _path_allowed(path: str, glob: str) -> bool:
+    if fnmatch.fnmatchcase(path, _literal_bracket_glob(glob)):
+        return True
+    # A literal directory entry ("app/routers" or "app/routers/") allows
+    # everything under it — callers routinely pass directories, and fnmatch
+    # alone flags every in-scope file as a violation (2026-07-10
+    # usage-capture-rollout false scope-violation).
+    prefix = glob.rstrip("/")
+    if prefix and not any(ch in prefix for ch in "*?"):
+        return path == prefix or path.startswith(prefix + "/")
+    return False
+
+
+
+def scope_violations(changed: set[str], allowed_globs: Sequence[str]) -> list[str]:
+    return sorted(
+        path
+        for path in changed
+        if not any(_path_allowed(path, glob) for glob in allowed_globs)
+    )
