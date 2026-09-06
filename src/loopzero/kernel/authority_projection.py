@@ -731,6 +731,7 @@ def _legacy_compatibility_record_ids(
     """Bound proofless compatibility to the prefix before cutover is attempted."""
     accepted: set[int] = set()
     if isinstance(records, AuthorityRecordView):
+        # Only checkpoint-authenticated retained IDs preserve prefix membership.
         accepted.update(
             id(record)
             for record in records
