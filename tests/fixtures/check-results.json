@@ -1,0 +1,8 @@
+{
+  "lint": {"conclusion": "success"},
+  "types": {"conclusion": "failure"},
+  "tests": {"conclusion": "network_timeout", "attempts": 2},
+  "optional-tests": {"conclusion": "failure"},
+  "external-links": {"conclusion": "failure"},
+  "dependency-audit": {"conclusion": "runner_loss", "attempts": 1}
+}

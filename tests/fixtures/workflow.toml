@@ -1,0 +1,7 @@
+[checks]
+required = ["lint", "types", "tests"]
+advisory = ["optional-tests"]
+scheduled = ["external-links", "dependency-audit"]
+
+[commands]
+check_fast = "touch MUST_NOT_EXECUTE"

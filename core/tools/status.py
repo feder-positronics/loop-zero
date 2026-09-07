@@ -15,7 +15,8 @@ GIT_ENV_KEYS = ('PATH', 'SYSTEMROOT', 'WINDIR', 'TMPDIR', 'TEMP', 'TMP')
 
 
 def check_child_env(environment) -> None:
-    if any('LEASE' in key.upper() or 'NONCE' in key.upper() for key in environment):
+    if any(re.search(r'(^|[^A-Z0-9])(LEASE|NONCE)(?=$|[^A-Z0-9])', key.upper())
+           for key in environment):
         raise ValueError('child environment contains lease/nonce authority')
 
 
