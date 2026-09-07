@@ -101,3 +101,37 @@ Update versions when changing the shared contract, pin the resulting reviewed
 commit and keep the snapshot identical across pilot consumers. If one consumer
 exposes a shared defect, fix it here once and revalidate affected acceptance in
 both consumers on the same revision. Never hide a local fork inside the snapshot.
+
+## Upgrade consumers to 0.2.0
+
+After the 0.2.0 PR is reviewed and merged, select the resulting full merge commit
+SHA containing `core/VERSION` = `0.2.0`. In each consumer, replace the tracked
+snapshot as above and update `[core].revision` and any explicit adapter revision
+pointers in the same consumer PR. Do not use `0.2.0` as the pin or pin the
+pre-merge candidate. Verify bytes and rerun consumer acceptance on that exact
+SHA; use the same pin across pilot consumers. This source release does not
+itself update consumers or establish product portability.
+
+Create one consumer-owned `KNOWN-GAPS.md` outside the snapshot, using the format
+in the contract, and add its deterministic cap check to the consumer's CI:
+
+```sh
+python3 vendor/loop-zero/tools/status.py --known-gaps KNOWN-GAPS.md
+```
+
+Inside an already isolated validation child, check the environment with
+`python3 vendor/loop-zero/tools/status.py --check-child-env`. It rejects any
+variable name containing `lease` or `nonce` (case insensitive), even if empty.
+Repository-specific aliases and other commit credentials must also be excluded
+by the runtime's allowlist. This check cannot prove absence of arbitrary aliases
+or filesystem write authority. Configure ref/index isolation for hooks and all
+validation descendants in the consumer's existing runtime; a linked worktree
+shares refs and is not an isolation boundary. The pin check passes only a small
+OS environment allowlist to its read-only Git children, with global/system Git
+configuration disabled; it never launches consumer commands.
+
+Selected status checks print exactly `pass` or `fail` on stdout, with failure
+diagnostics on stderr and a nonzero failure exit. The 0.1.0 `VERIFIED` success
+message is replaced; update any consumer parsing it. No source checkout is
+required for the environment or known-gaps checks. Publication/review evidence
+belongs only in the current-head PR body, using `core/HANDOFF.md`.

@@ -12,3 +12,8 @@ Stop dependent work when missing authority, conflicting ownership or a material
 unresolved requirement would change the result. State the exact decision needed
 and continue independent authorized preparation. Planning alone does not authorize
 publication or merge beyond the original task and local policy.
+
+Select all applicable deterministic gates before review, the validation child's
+environment and Git-metadata isolation boundary, and one independent review
+route with at most one bounded delta. Name the single PR evidence location and
+consumer-owned `KNOWN-GAPS.md`; do not plan a finding ledger or mandatory phases.

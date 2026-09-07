@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Compare a consumer's vendored files with its declared immutable Git pin."""
+"""Read-only pin, child-environment and known-gaps checks; verdicts are pass/fail."""
 
 import argparse
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -9,9 +10,38 @@ import sys
 import tomllib
 
 
+# No inherited Git configuration, repository routing, or commit authority.
+GIT_ENV_KEYS = ('PATH', 'SYSTEMROOT', 'WINDIR', 'TMPDIR', 'TEMP', 'TMP')
+
+
+def check_child_env(environment) -> None:
+    if any('LEASE' in key.upper() or 'NONCE' in key.upper() for key in environment):
+        raise ValueError('child environment contains lease/nonce authority')
+
+
+def git_environment() -> dict[str, str]:
+    environment = {key: os.environ[key] for key in GIT_ENV_KEYS if key in os.environ}
+    environment.update(GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull,
+                       GIT_TERMINAL_PROMPT='0')
+    check_child_env(environment)
+    return environment
+
+
+def check_known_gaps(path: Path) -> None:
+    lines = path.read_text().splitlines()
+    if not lines or lines[0] != '# Known gaps':
+        raise ValueError('known gaps must start with # Known gaps')
+    entries = [line for line in lines[1:] if line.strip()]
+    if any(not line.startswith('- ') or not line[2:].strip() for line in entries):
+        raise ValueError('known gaps require one nonempty - entry per line')
+    if len(entries) > 30:
+        raise ValueError('known gaps exceed the cap of 30')
+
+
 def git(source: Path, *args: str) -> bytes:
     return subprocess.run(
-        ['git', '--no-replace-objects', '-C', str(source), *args], check=True, capture_output=True
+        ['git', '--no-replace-objects', '-C', str(source), *args],
+        check=True, capture_output=True, env=git_environment()
     ).stdout
 
 
@@ -67,15 +97,26 @@ def verify(consumer: Path, source: Path) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--consumer', type=Path, default=Path.cwd())
-    parser.add_argument('--source', type=Path, required=True,
+    parser.add_argument('--source', type=Path,
                         help='local loop-zero Git checkout containing the pinned commit')
+    parser.add_argument('--known-gaps', type=Path, help='check the repository-owned debt list')
+    parser.add_argument('--check-child-env', action='store_true',
+                        help='reject lease/nonce names in this process environment')
     args = parser.parse_args()
+    if not (args.source or args.known_gaps or args.check_child_env):
+        parser.error('select --source, --known-gaps or --check-child-env')
     try:
-        revision = verify(args.consumer, args.source)
+        if args.check_child_env:
+            check_child_env(os.environ)
+        if args.known_gaps:
+            check_known_gaps(args.known_gaps)
+        if args.source:
+            verify(args.consumer, args.source)
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+        print('fail')
         print(f'UNVERIFIED: {exc}', file=sys.stderr)
         return 1
-    print(f'VERIFIED: vendored core bytes match {revision}')
+    print('pass')
     return 0
 
 

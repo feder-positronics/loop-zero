@@ -8,8 +8,16 @@ selected profiles. Make the smallest complete change under the repository's
 testing contract. Run the owning checks and record actual commands/results;
 broaden validation when the changed behavior or local policy warrants it.
 
-Stop on scope or ownership conflict. A failed check requires diagnosis or an
-explicit blocker; do not weaken acceptance to obtain a pass. Submit the exact
-candidate for the independent review required for a real pilot change. Resolve
-important findings and verify repairs according to local review policy.
-Finish with the [handoff](../../HANDOFF.md), distinguishing READY from merged.
+Stop on scope or ownership conflict. Run all applicable deterministic gates
+before freezing the tree for one independent PR review. Validation children,
+including commit hooks, must meet the contract's environment and Git-metadata
+containment rules; only the parent commits adopted changes.
+
+Resolve critical/important findings or obtain an explicit PR waiver from merge
+authority. Rerun gates after repairs; mechanical lint/format/ratchet repairs with
+unchanged behavior need no re-review. Substantive repairs use at most one bounded
+delta review. Return to editing without a phase lock and preserve an adoptable
+diff on timeout. Update the one PR evidence block for the exact publication head.
+Consciously curate known gaps at closeout without copying suggestions or a
+finding backlog. Finish with the [handoff](../../HANDOFF.md), then stop at READY
+unless separately authorized to merge.
