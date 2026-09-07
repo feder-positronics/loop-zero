@@ -4,14 +4,29 @@ permissions:
   contents: read
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - run: python3 -m unittest discover -s tests -v
-      - run: python3 core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
-      - run: git diff --check
+      - name: Install validation sandbox
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+      - name: Validate without parent Git write authority
+        env:
+          CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          sudo bwrap --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
+            --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
+            --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
+            --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
+            --chdir "$GITHUB_WORKSPACE" -- bash -eu -c '
+              python3 -m unittest discover -s tests -v
+              python3 core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
+              base="$CHECK_BASE"
+              if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
+                base=$(git hash-object -t tree /dev/null)
+              fi
+              git diff --check "$base" "$CHECK_HEAD"
+            '
