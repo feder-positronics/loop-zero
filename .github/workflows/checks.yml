@@ -17,7 +17,7 @@ jobs:
           CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          sudo bwrap --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
+          sudo bwrap --unshare-user --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
             --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
