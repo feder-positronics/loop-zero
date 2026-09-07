@@ -141,10 +141,10 @@ check a child's environment; it is not a sandbox or arbitrary command runner.
 Run every applicable class-1 gate, required and advisory, including lint, type
 checks, complexity ratchets and tests, before freezing the review tree. Record
 unavailable required gates as blockers and genuinely inapplicable gates with a
-reason. Use one
-independent review per PR and at most one bounded delta review for substantive
-repairs. Mechanical post-review lint, formatting or ratchet fixes need no
-re-review when behavior and acceptance are unchanged; rerun deterministic gates.
+reason. Use one independent review per PR and at most one bounded delta review
+for substantive repairs. Mechanical post-review lint, formatting or ratchet
+fixes need no re-review when behavior and acceptance are unchanged; rerun
+deterministic gates.
 A ratchet change that weakens a threshold is not a mechanical fix.
 
 Bind publication and review evidence to the exact head in exactly one place:

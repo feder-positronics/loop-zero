@@ -127,7 +127,7 @@ python3 vendor/loop-zero/tools/status.py --known-gaps KNOWN-GAPS.md
 Inside an already isolated validation child, check the environment with
 `python3 vendor/loop-zero/tools/status.py --check-child-env`. It rejects any
 variable name containing `lease` or `nonce` (case insensitive), even if empty,
-except `lease` inside the word `release`. Ordinary `RELEASE_CHANNEL` and
+except `lease` immediately preceded by `re`. Ordinary `RELEASE_CHANNEL` and
 `RELEASE_VERSION` metadata is allowed; `RELEASE_NONCE` or `RE_LEASE` is not.
 Repository-specific aliases and other commit credentials must also be excluded
 by the runtime's allowlist. This check cannot prove absence of arbitrary aliases
