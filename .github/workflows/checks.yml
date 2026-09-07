@@ -11,13 +11,17 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install validation sandbox
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          # Let the runner user create its sandbox on this disposable Ubuntu VM.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Validate without parent Git write authority
         env:
           CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          sudo bwrap --unshare-user --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
+          bwrap --unshare-user --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
