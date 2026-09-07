@@ -39,6 +39,11 @@ repository = "https://github.com/feder-positronics/loop-zero"
 revision = "REPLACE_WITH_INSPECTED_FULL_COMMIT_SHA"
 path = "vendor/loop-zero"
 
+[checks]
+required = ["lint", "types", "tests", "changed-links"]
+advisory = ["optional-tests"]
+scheduled = ["external-links", "dependency-audit", "cost-usage", "docs-governance"]
+
 [paths]
 source = "src"
 tests = "tests"
@@ -102,12 +107,12 @@ commit and keep the snapshot identical across pilot consumers. If one consumer
 exposes a shared defect, fix it here once and revalidate affected acceptance in
 both consumers on the same revision. Never hide a local fork inside the snapshot.
 
-## Upgrade consumers to 0.2.0
+## Upgrade consumers to 0.2.1
 
-After the 0.2.0 PR is reviewed and merged, select the resulting full merge commit
-SHA containing `core/VERSION` = `0.2.0`. In each consumer, replace the tracked
+After the 0.2.1 PR is reviewed and merged, select the resulting full merge commit
+SHA containing `core/VERSION` = `0.2.1`. In each consumer, replace the tracked
 snapshot as above and update `[core].revision` and any explicit adapter revision
-pointers in the same consumer PR. Do not use `0.2.0` as the pin or pin the
+pointers in the same consumer PR. Do not use `0.2.1` as the pin or pin the
 pre-merge candidate. Verify bytes and rerun consumer acceptance on that exact
 SHA; use the same pin across pilot consumers. This source release does not
 itself update consumers or establish product portability.
@@ -121,7 +126,9 @@ python3 vendor/loop-zero/tools/status.py --known-gaps KNOWN-GAPS.md
 
 Inside an already isolated validation child, check the environment with
 `python3 vendor/loop-zero/tools/status.py --check-child-env`. It rejects any
-variable name containing `lease` or `nonce` (case insensitive), even if empty.
+variable name containing `lease` or `nonce` (case insensitive), even if empty,
+except `lease` immediately preceded by `re`. Ordinary `RELEASE_CHANNEL` and
+`RELEASE_VERSION` metadata is allowed; `RELEASE_NONCE` or `RE_LEASE` is not.
 Repository-specific aliases and other commit credentials must also be excluded
 by the runtime's allowlist. This check cannot prove absence of arbitrary aliases
 or filesystem write authority. Configure ref/index isolation for hooks and all
@@ -135,3 +142,43 @@ diagnostics on stderr and a nonzero failure exit. The 0.1.0 `VERIFIED` success
 message is replaced; update any consumer parsing it. No source checkout is
 required for the environment or known-gaps checks. Publication/review evidence
 belongs only in the current-head PR body, using `core/HANDOFF.md`.
+
+## Check policy and execution evidence
+
+Adopt the `[checks]` table above using exact consumer CI check names. All three
+arrays are required, may be empty, and must be disjoint with no duplicates.
+Required and advisory are diff-scoped deterministic checks; scheduled contains
+repository-health checks. Configure scheduled jobs against `main` to maintain
+one health issue, and remove health contexts from required branch protection.
+Configure the CI's infrastructure retry once and weekly override review per
+`core/CONTRACT.md`; these integrations belong to the consumer, not this package.
+Create consumer-owned `CHECK-OVERRIDES.md` only when an override is actually used.
+
+```sh
+python3 vendor/loop-zero/tools/checks.py checks --workflow workflow.toml
+python3 vendor/loop-zero/tools/checks.py checks --workflow workflow.toml --results check-results.json
+```
+
+The read-only command uses the TOML required-list route; it makes no network
+requests and does not query or change branch protection. Maintain alignment via
+normal consumer review. Optional results are a JSON object keyed by exact check
+name, for example:
+
+```json
+{"tests": {"conclusion": "network_timeout", "attempts": 2}}
+```
+
+Conclusions are `success`, `failure`, `pending`, `runner_loss`,
+`cancelled_concurrency`, or `network_timeout`. Attempts is a positive integer
+(default 1): the cumulative number of executions of that check for the same
+candidate head, including the original attempt, never reset by a manual or
+scheduled rerun (a per-run attempt counter such as GitHub's `run_attempt` is
+not sufficient on its own). Infrastructure reasons require positive
+identification by the consumer; a generic cancellation is insufficient. Absent
+results are pending. Output is JSON with name, group, class, conclusion,
+`blocks`, and action. `blocks` is true for every required check without a
+`success` conclusion, including pending and infrastructure results; consume
+that field rather than matching action text. Exit 0 means the report was
+produced, **not that checks passed**. Invalid/missing input exits 1 with
+`UNVERIFIED` on stderr. Files are read as UTF-8. The command executes no TOML
+commands, applies no overrides, retries nothing, and writes no files.

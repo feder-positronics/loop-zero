@@ -77,3 +77,16 @@ class CheckTests(unittest.TestCase):
                                       ({**clean, 'PROJECT_NONCE': ''}, (1, 'fail\n'))):
             result = subprocess.run(command, env=environment, capture_output=True, text=True)
             self.assertEqual((result.returncode, result.stdout), expected)
+
+    def test_release_metadata_is_not_authority(self):
+        environment = {**status.git_environment(), 'RELEASE_CHANNEL': 'stable',
+                       'RELEASE_VERSION': '0.2.1', 'PRERELEASE': '1', 'IS_RELEASED': 'y'}
+        status.check_child_env(environment)
+        command = [sys.executable, status.__file__, '--check-child-env']
+        result = subprocess.run(command, env=environment, capture_output=True, text=True)
+        self.assertEqual((result.returncode, result.stdout), (0, 'pass\n'))
+        for key in ('LEASE', 'PROJECT_COMMIT_LEASE', 'commit_nonce', 'Commit_NoNcE',
+                    'project-lease-id', 'NONCE', 'LEASEID', 'COMMITLEASE', 'LEASE1',
+                    'GITNONCE', 'NONCE1', 'RE_LEASE', 'RELEASE_NONCE', 'PRERELEASE_LEASE'):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                status.check_child_env({**environment, key: ''})

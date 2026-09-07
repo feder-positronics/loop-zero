@@ -6,7 +6,8 @@ their own commands, architecture, security and release policy.
 
 The portable distribution is [`core/`](core/CONTRACT.md): four skills, one
 handoff, thin Codex and Claude entry points, four conditional framework profiles
-and a read-only pin check. There is no dispatcher, task runner or installer.
+and read-only pin and check-policy tools. There is no dispatcher, task runner or
+installer.
 
 See [setup and revision updates](SETUP.md). Run the source tests with
 `python3 -m unittest discover -s tests -v` (Python 3.11+ and Git).
@@ -15,8 +16,10 @@ A deposit is not evidence of product portability. That requires real changes in
 two consumers on the same final core revision, both runtime entry points used,
 and the repositories' ordinary validation and review evidence.
 
-Version 0.2.0 adds PR-scoped review, validation-child containment requirements,
-exact-head delivery evidence, and deterministic environment/debt checks. The
+Version 0.2.1 fixes release-metadata environment checks and adds check classes,
+evidence-backed overrides, and an offline check-policy report. Consumers must
+bump their snapshot and full commit pin to the reviewed 0.2.1 merge commit as
+described in SETUP.md. The
 single durable debt list is [KNOWN-GAPS.md](KNOWN-GAPS.md), curated at closeout.
 CI runs the tests and `python3 core/tools/status.py --known-gaps KNOWN-GAPS.md
 --check-child-env`; run `git diff --check` before freezing a review candidate.
