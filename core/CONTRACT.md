@@ -37,9 +37,10 @@ verdict; diagnostics explain failures without creating findings or debt.
 Deterministic CI checks replace evidence-closure bookkeeping.
 
 Keep exactly one repository-owned `KNOWN-GAPS.md` as the curated durable debt
-list, outside the vendored core. The health tracking issue and override audit log
-below are narrow operational records, not additional finding backlogs. At closeout, consciously curate at most 30
-concrete gaps; do not automatically copy findings, waivers or suggestions.
+list, outside the vendored core. The health tracking issue and override audit
+log below are narrow operational records, not additional finding backlogs. At
+closeout, consciously curate at most 30 concrete gaps; do not automatically
+copy findings, waivers or suggestions.
 Use `# Known gaps`, blank lines, and one `- ` entry per gap (no continuation
 lines); each entry states the gap and its impact. An empty list is valid.
 Once a month, sample merged PR reviews against observed real defects and noise;
@@ -88,7 +89,8 @@ commit authority must approve it in the PR after independent review. It must:
   check command, scope/inputs, tool versions and environment as the candidate.
   Link both run logs and compare the failure signature; an old failure on a
   different base or merely similar error is insufficient. Refresh evidence and
-  approval whenever head or base changes.
+  approval whenever head or base changes, except for the audit-log append
+  allowed below.
 - Link the issue tracking the pre-existing defect, with an owner and remediation
   plan. Identify why the changed paths cannot cause or worsen the failure.
 - Be capped to a consumer-reviewed allowlist of non-risk prose paths, defaulting
@@ -136,9 +138,10 @@ check a child's environment; it is not a sandbox or arbitrary command runner.
 
 ## Delivery
 
-Run every applicable required class-1 gate, including lint, type checks, complexity
-ratchets and tests, before freezing the review tree. Record unavailable required
-gates as blockers and genuinely inapplicable gates with a reason. Use one
+Run every applicable class-1 gate, required and advisory, including lint, type
+checks, complexity ratchets and tests, before freezing the review tree. Record
+unavailable required gates as blockers and genuinely inapplicable gates with a
+reason. Use one
 independent review per PR and at most one bounded delta review for substantive
 repairs. Mechanical post-review lint, formatting or ratchet fixes need no
 re-review when behavior and acceptance are unchanged; rerun deterministic gates.

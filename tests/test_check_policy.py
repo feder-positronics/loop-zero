@@ -31,11 +31,29 @@ class PolicyTests(unittest.TestCase):
         self.assertIn('report infrastructure; no code verdict', rows['tests']['action'])
         self.assertIn('required evidence unavailable', rows['tests']['action'])
         self.assertEqual(rows['dependency-audit']['action'], 'retry once automatically')
+        self.assertEqual({n for n, r in rows.items() if r['blocks']}, {'types', 'tests'})
+        self.assertTrue(rows['tests']['action'].endswith('; would block PR'))
 
     def test_missing_required_evidence_blocks(self):
         rows = checks.classify(self.config, {})
-        self.assertEqual([r['name'] for r in rows if r['action'] == 'would block PR'],
-                         self.config['required'])
+        self.assertEqual([r['name'] for r in rows if r['blocks']], self.config['required'])
+        for row in rows:
+            self.assertEqual(row['action'], 'would block PR; no result yet'
+                             if row['blocks'] else 'does not block PR')
+
+    def test_required_infrastructure_loss_blocks_at_every_attempt(self):
+        for reason in checks.INFRASTRUCTURE:
+            for attempts in (1, 2):
+                with self.subTest(reason=reason, attempts=attempts):
+                    row = checks.classify(self.config, {'lint': {
+                        'conclusion': reason, 'attempts': attempts}})[0]
+                    self.assertEqual((row['class'], row['blocks']), (3, True))
+                    self.assertTrue(row['action'].endswith(
+                        'required evidence unavailable; would block PR'))
+        row = checks.classify(self.config, {'optional-tests': {'conclusion': 'runner_loss'}})
+        self.assertEqual([(r['class'], r['blocks'], r['action']) for r in row
+                          if r['name'] == 'optional-tests'],
+                         [(3, False, 'retry once automatically')])
 
     def test_each_infrastructure_reason_retries_only_once(self):
         for reason in checks.INFRASTRUCTURE:
@@ -73,7 +91,14 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), checks.classify(self.config, self.results))
             self.assertEqual(before, {p.name: p.read_bytes() for p in root.iterdir()})
-            (root / 'workflow.toml').write_text('[checks]\nrequired = "bad"\n')
+            for bad in ('[checks]\nrequired = "bad"\n', '[commands]\ncheck_fast = "x"\n'):
+                (root / 'workflow.toml').write_text(bad)
+                result = subprocess.run(command, cwd=root, capture_output=True, text=True)
+                self.assertEqual((result.returncode, result.stdout), (1, ''))
+                self.assertIn('UNVERIFIED', result.stderr)
+            self.assertIn('no [checks] table', result.stderr)
+            (root / 'check-results.json').write_text('[' * 100000 + ']' * 100000)
             result = subprocess.run(command, cwd=root, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 1)
+            self.assertEqual((result.returncode, result.stdout), (1, ''))
             self.assertIn('UNVERIFIED', result.stderr)
+            self.assertNotIn('Traceback', result.stderr)

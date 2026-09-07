@@ -126,9 +126,9 @@ python3 vendor/loop-zero/tools/status.py --known-gaps KNOWN-GAPS.md
 
 Inside an already isolated validation child, check the environment with
 `python3 vendor/loop-zero/tools/status.py --check-child-env`. It rejects any
-variable name with a `lease` or `nonce` token (case insensitive, delimited by
-non-alphanumeric characters or name boundaries), even if empty. Ordinary
-`RELEASE_CHANNEL` and `RELEASE_VERSION` metadata is allowed.
+variable name containing `lease` or `nonce` (case insensitive), even if empty,
+except `lease` inside the word `release`. Ordinary `RELEASE_CHANNEL` and
+`RELEASE_VERSION` metadata is allowed; `RELEASE_NONCE` or `RE_LEASE` is not.
 Repository-specific aliases and other commit credentials must also be excluded
 by the runtime's allowlist. This check cannot prove absence of arbitrary aliases
 or filesystem write authority. Configure ref/index isolation for hooks and all
@@ -170,9 +170,15 @@ name, for example:
 
 Conclusions are `success`, `failure`, `pending`, `runner_loss`,
 `cancelled_concurrency`, or `network_timeout`. Attempts is a positive integer
-(default 1), including the original attempt. Infrastructure reasons require
-positive identification by the consumer; a generic cancellation is insufficient.
-Absent results are pending. Output is JSON with name, group, class, conclusion,
-and action; exit 0 means the report was produced, **not that checks passed**.
-Invalid/missing input exits 1 with `UNVERIFIED` on stderr. The command executes
-no TOML commands, applies no overrides, retries nothing, and writes no files.
+(default 1): the cumulative number of executions of that check for the same
+candidate head, including the original attempt, never reset by a manual or
+scheduled rerun (a per-run attempt counter such as GitHub's `run_attempt` is
+not sufficient on its own). Infrastructure reasons require positive
+identification by the consumer; a generic cancellation is insufficient. Absent
+results are pending. Output is JSON with name, group, class, conclusion,
+`blocks`, and action. `blocks` is true for every required check without a
+`success` conclusion, including pending and infrastructure results; consume
+that field rather than matching action text. Exit 0 means the report was
+produced, **not that checks passed**. Invalid/missing input exits 1 with
+`UNVERIFIED` on stderr. Files are read as UTF-8. The command executes no TOML
+commands, applies no overrides, retries nothing, and writes no files.

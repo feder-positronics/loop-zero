@@ -6,7 +6,8 @@ their own commands, architecture, security and release policy.
 
 The portable distribution is [`core/`](core/CONTRACT.md): four skills, one
 handoff, thin Codex and Claude entry points, four conditional framework profiles
-and read-only pin and check-policy tools. There is no dispatcher, task runner or installer.
+and read-only pin and check-policy tools. There is no dispatcher, task runner or
+installer.
 
 See [setup and revision updates](SETUP.md). Run the source tests with
 `python3 -m unittest discover -s tests -v` (Python 3.11+ and Git).
