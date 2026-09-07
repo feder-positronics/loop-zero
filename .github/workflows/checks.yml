@@ -18,16 +18,16 @@ jobs:
           CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           sudo bwrap --unshare-user --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
-            --ro-bind "$GITHUB_WORKSPACE" /workspace \
+            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
             --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
-            --chdir /workspace -- bash -eu -c '
+            --chdir /tmp/workspace -- bash -eu -c '
               python3 -m unittest discover -s tests -v
               python3 core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
               base="$CHECK_BASE"
               if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-                base=$(git -c safe.directory=/workspace hash-object -t tree /dev/null)
+                base=$(git -c safe.directory=/tmp/workspace hash-object -t tree /dev/null)
               fi
-              git -c safe.directory=/workspace diff --check "$base" "$CHECK_HEAD"
+              git -c safe.directory=/tmp/workspace diff --check "$base" "$CHECK_HEAD"
             '
