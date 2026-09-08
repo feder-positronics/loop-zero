@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+import errno
+import grp
 import os
+import pwd
 import stat
 import sys
+from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -119,6 +123,99 @@ def _validated(path: Path, *, directory: bool | None = None) -> Path:
     return resolved
 
 
+def _private_group(group_id: int) -> bool:
+    """Accept owner-private groups, never shared group write authority."""
+    try:
+        current = pwd.getpwuid(os.geteuid())
+        group = grp.getgrgid(group_id)
+        members = {
+            entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == group_id
+        }
+    except (KeyError, OSError):
+        return False
+    return members.union(group.gr_mem) <= {current.pw_name}
+
+
+def _acl_masked(path: Path) -> bool:
+    """Group mode bits are the ACL mask, not owning-group rights, once ACL entries exist."""
+    try:
+        return "system.posix_acl_access" in os.listxattr(path)
+    except OSError as exc:
+        # A filesystem without extended attributes cannot carry ACL entries; any
+        # other failure leaves the group bits unexplained, so fail closed.
+        return exc.errno != errno.ENOTSUP
+
+
+def _tool_path_components(path: Path) -> tuple[Path, set[Path]]:
+    """Retain every symlink hop instead of discarding it with resolve()."""
+    remaining = deque(path.absolute().parts[1:])
+    current = Path("/")
+    components = {current}
+    links = 0
+    while remaining:
+        part = remaining.popleft()
+        current = current.parent if part == ".." else current / part
+        components.add(current)
+        if current.is_symlink():
+            links += 1
+            if links > 40:
+                raise SandboxError("sandbox runtime tool has too many symlink hops")
+            target = Path(os.readlink(current))
+            current = Path("/") if target.is_absolute() else current.parent
+            parts = target.parts[1:] if target.is_absolute() else target.parts
+            remaining.extendleft(reversed(parts))
+    return current, components
+
+
+def _protected_tool_path(path: Path, *, forbidden_roots: Sequence[Path]) -> Path:
+    """Protect provider credentials and acceptance execution from PATH redirection."""
+    lexical = path.absolute()
+    resolved, traversed = _tool_path_components(path)
+    roots = tuple(root.resolve() for root in forbidden_roots)
+    # Checking every ancestor also catches a PATH directory alias into the
+    # worktree whose executable symlink points back out to external scratch.
+    components = {
+        lexical,
+        *lexical.parents,
+        resolved,
+        *resolved.parents,
+        *traversed,
+    }
+    for component in components:
+        target = component.resolve()
+        if any(
+            component.is_relative_to(root) or target.is_relative_to(root)
+            for root in roots
+        ):
+            raise SandboxError(
+                f"sandbox runtime tool is under a writable sandbox source: {path.name}"
+            )
+    # The host supplies the runtime installation. Outer host directories (for
+    # example the hosted runner's 0777 tool cache) are not worker authority
+    # unless exposed by a writable mount, which the ancestry check above rejects.
+    # Check the launcher and its containing directory, not every host ancestor.
+    for component in {lexical, lexical.parent, resolved, resolved.parent}:
+        metadata = component.stat()
+        # A root-owned sticky ancestor (/tmp) protects an owner-private child
+        # from replacement; it is never acceptable as the executable itself.
+        sticky_ancestor = (
+            component != lexical
+            and component != resolved
+            and stat.S_ISDIR(metadata.st_mode)
+            and metadata.st_uid == 0
+            and metadata.st_mode & stat.S_ISVTX
+        )
+        shared_write = bool(metadata.st_mode & stat.S_IWOTH) or (
+            bool(metadata.st_mode & stat.S_IWGRP)
+            and (_acl_masked(component) or not _private_group(metadata.st_gid))
+        )
+        if metadata.st_uid not in {0, os.geteuid()} or (
+            shared_write and not sticky_ancestor
+        ):
+            raise SandboxError(f"sandbox runtime tool is not protected: {path.name}")
+    return resolved
+
+
 def _tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path:
     found = next(
         (
@@ -131,12 +228,7 @@ def _tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path:
     )
     if found is None:
         raise SandboxError(f"sandbox runtime tool is unavailable: {name}")
-    resolved = found.resolve()
-    if any(resolved.is_relative_to(root.resolve()) for root in forbidden_roots):
-        raise SandboxError(
-            f"sandbox runtime tool is under a writable sandbox source: {name}"
-        )
-    return resolved
+    return _protected_tool_path(found, forbidden_roots=forbidden_roots)
 
 
 def _system_tool(name: str) -> Path:
@@ -180,8 +272,10 @@ def _corepack_runtime_root(
             and packaged.resolve() == corepack
         ):
             continue
-        resolved_candidate = candidate.resolve()
-        resolved_node = node.resolve()
+        resolved_candidate = _protected_tool_path(
+            candidate, forbidden_roots=forbidden_roots
+        )
+        resolved_node = _protected_tool_path(node, forbidden_roots=forbidden_roots)
         if not resolved_node.is_relative_to(resolved_candidate):
             continue
         if any(
@@ -228,7 +322,7 @@ def _resolve_corepack_home(
         resolved = home.resolve()
         if any(resolved.is_relative_to(root.resolve()) for root in forbidden_roots):
             continue
-        return resolved
+        return _protected_tool_path(home, forbidden_roots=forbidden_roots)
     if required:
         raise SandboxError("sandbox Corepack home is unavailable")
     return None

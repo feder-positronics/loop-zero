@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import base64
+import errno
 import importlib.util
 import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -184,8 +186,179 @@ def test_external_user_owned_runtime_tool_remains_valid(
     assert str(uv) in argv
 
 
+@pytest.mark.parametrize("name", ["node", "corepack", "uv"])
+@pytest.mark.parametrize("path_alias", [False, True])
+@pytest.mark.parametrize("path_index", [0, 1])
+def test_runtime_tool_rejects_writable_path_symlink_to_external_target(
+    monkeypatch, tmp_path: Path, name: str, path_alias: bool, path_index: int
+) -> None:
+    worktree = tmp_path / "worktree"
+    bin_dir = worktree / "bin"
+    bin_dir.mkdir(parents=True)
+    target = tmp_path / "scratch" / name
+    _write_executable(target)
+    (bin_dir / name).symlink_to(target)
+    search_dir = bin_dir
+    if path_alias:
+        search_dir = tmp_path / "alias"
+        search_dir.symlink_to(bin_dir, target_is_directory=True)
+    entries = [str(tmp_path / "empty-bin")] * path_index + [str(search_dir)]
+    monkeypatch.setenv("PATH", os.pathsep.join(entries))
+
+    with pytest.raises(module.SandboxError, match="writable sandbox source"):
+        module._tool(name, forbidden_roots=(worktree,))
+
+
+@pytest.mark.parametrize("name", ["uv", "node", "corepack"])
+@pytest.mark.parametrize("writable_cache", [False, True])
+def test_hosted_toolcache_outer_permissions_follow_sandbox_mount_authority(
+    monkeypatch, tmp_path: Path, name: str, writable_cache: bool
+) -> None:
+    cache = tmp_path / "opt" / "hostedtoolcache"
+    target = cache / name / "1.0" / "aarch64" / name
+    _write_executable(target)
+    target.parent.chmod(0o755)
+    cache.chmod(0o777)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'empty-bin'}:{target.parent}")
+
+    if writable_cache:
+        with pytest.raises(module.SandboxError, match="writable sandbox source"):
+            module._tool(name, forbidden_roots=(cache,))
+    else:
+        assert module._tool(name) == target.resolve()
+
+
+@pytest.mark.parametrize("name", ["uv", "node", "corepack"])
+@pytest.mark.parametrize("directory_hop", [False, True])
+@pytest.mark.parametrize("relative_hop", [False, True])
+def test_runtime_tool_rejects_intermediate_writable_symlink_hop(
+    monkeypatch, tmp_path: Path, name: str, directory_hop: bool, relative_hop: bool
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = tmp_path / "host-tools" / name
+    _write_executable(target)
+    hop = worktree / "hop"
+    hop_target = target.parent if directory_hop else target
+    hop.symlink_to(
+        os.path.relpath(hop_target, hop.parent) if relative_hop else hop_target
+    )
+    entry = tmp_path / "host-bin" / ("alias" if directory_hop else name)
+    entry.parent.mkdir()
+    entry.symlink_to(os.path.relpath(hop, entry.parent) if relative_hop else hop)
+    monkeypatch.setenv("PATH", str(entry if directory_hop else entry.parent))
+
+    with pytest.raises(module.SandboxError, match="writable sandbox source"):
+        module._tool(name, forbidden_roots=(worktree,))
+
+
+def test_runtime_tool_accepts_host_relative_symlink_chain(monkeypatch, tmp_path: Path):
+    target = tmp_path / "host-tools" / "uv"
+    _write_executable(target)
+    intermediate = tmp_path / "hop"
+    intermediate.symlink_to("host-tools/uv")
+    entry = tmp_path / "bin" / "uv"
+    entry.parent.mkdir()
+    entry.symlink_to("../hop")
+    monkeypatch.setenv("PATH", str(entry.parent))
+
+    assert module._tool("uv", forbidden_roots=(tmp_path / "worktree",)) == target
+
+
+def test_runtime_tool_symlink_traversal_is_bounded(tmp_path: Path):
+    link = tmp_path / "loop"
+    link.symlink_to("loop")
+
+    with pytest.raises(module.SandboxError, match="too many symlink hops"):
+        module._protected_tool_path(link, forbidden_roots=())
+
+
+@pytest.mark.parametrize("unsafe_component", ["executable", "parent"])
+def test_runtime_tool_rejects_unprotected_external_target(
+    monkeypatch, tmp_path: Path, unsafe_component: str
+) -> None:
+    target = tmp_path / "host-tools" / "node"
+    _write_executable(target)
+    component = target if unsafe_component == "executable" else target.parent
+    component.chmod(0o777)
+    monkeypatch.setenv("PATH", str(target.parent))
+
+    with pytest.raises(module.SandboxError, match="not protected"):
+        module._tool("node")
+
+
+@pytest.mark.parametrize(
+    "group_kind", ["private", "supplementary", "primary", "unknown"]
+)
+@pytest.mark.parametrize("writable_component", ["executable", "parent"])
+def test_runtime_tool_group_write_requires_owner_private_membership(
+    monkeypatch, tmp_path: Path, group_kind: str, writable_component: str
+) -> None:
+    target = tmp_path / "host-tools" / "node"
+    _write_executable(target)
+    target.parent.chmod(0o755)
+    component = target if writable_component == "executable" else target.parent
+    component.chmod(0o775)
+    group_id = component.stat().st_gid
+    owner = SimpleNamespace(pw_name="operator", pw_gid=group_id)
+    users = [owner]
+    if group_kind == "primary":
+        users.append(SimpleNamespace(pw_name="other", pw_gid=group_id))
+
+    def lookup_group(_group_id: int):
+        if group_kind == "unknown":
+            raise KeyError(_group_id)
+        members = (
+            ["operator", "other"] if group_kind == "supplementary" else ["operator"]
+        )
+        return SimpleNamespace(gr_mem=members)
+
+    monkeypatch.setattr(module.pwd, "getpwuid", lambda _uid: owner)
+    monkeypatch.setattr(module.pwd, "getpwall", lambda: users)
+    monkeypatch.setattr(module.grp, "getgrgid", lookup_group)
+    monkeypatch.setenv("PATH", str(target.parent))
+
+    if group_kind == "private":
+        assert module._tool("node") == target.resolve()
+    else:
+        with pytest.raises(module.SandboxError, match="not protected"):
+            module._tool("node")
+
+
+@pytest.mark.parametrize("acl_state", ["entries", "unsupported", "unreadable"])
+@pytest.mark.parametrize("writable_component", ["executable", "parent"])
+def test_runtime_tool_private_group_write_fails_closed_on_acl_entries(
+    monkeypatch, tmp_path: Path, acl_state: str, writable_component: str
+) -> None:
+    target = tmp_path / "host-tools" / "node"
+    _write_executable(target)
+    target.parent.chmod(0o755)
+    component = target if writable_component == "executable" else target.parent
+    component.chmod(0o775)
+    monkeypatch.setattr(module, "_private_group", lambda _group_id: True)
+
+    def listxattr(path, *, follow_symlinks: bool = True) -> list[str]:
+        if Path(path) != component:
+            return []
+        if acl_state == "unsupported":
+            raise OSError(errno.ENOTSUP, "xattr unsupported")
+        if acl_state == "unreadable":
+            raise OSError(errno.EACCES, "xattr unreadable")
+        return ["system.posix_acl_access"]
+
+    monkeypatch.setattr(module.os, "listxattr", listxattr)
+    monkeypatch.setenv("PATH", str(target.parent))
+
+    if acl_state == "unsupported":
+        assert module._tool("node") == target.resolve()
+    else:
+        with pytest.raises(module.SandboxError, match="not protected"):
+            module._tool("node")
+
+
+@pytest.mark.parametrize("unsafe_root", [None, "runtime", "cache"])
 def test_trusted_corepack_mounts_its_adjacent_node_runtime(
-    monkeypatch, tmp_path: Path
+    monkeypatch, tmp_path: Path, unsafe_root: str | None
 ) -> None:
     worktree = tmp_path / "worktree"
     runtime = tmp_path / "trusted-node"
@@ -202,6 +375,24 @@ def test_trusted_corepack_mounts_its_adjacent_node_runtime(
     monkeypatch.setenv("PATH", f"{runtime / 'bin'}:{uv.parent}")
     monkeypatch.setenv("COREPACK_HOME", str(corepack_home))
     monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    if unsafe_root is not None:
+        (runtime if unsafe_root == "runtime" else corepack_home).chmod(0o777)
+        with pytest.raises(module.SandboxError, match="not protected"):
+            module.command(
+                ["/usr/bin/true"],
+                worktree=worktree,
+                writable_worktree=True,
+                audit_source=None,
+                audit_destination=None,
+                git_source=None,
+                git_destination=None,
+                writable_git=False,
+                deny_network=True,
+                include_model_runtime=False,
+                include_corepack_runtime=True,
+            )
+        return
 
     argv = module.command(
         ["/usr/bin/bash", "-c", "corepack pnpm test"],
