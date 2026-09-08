@@ -287,10 +287,10 @@ else
     frontend_static_receipt_digest="$(capture_validation_receipt_identity "frontend-static")"
     started_ms="$(now_ms)"
     if (
-        cd nextjs-frontend
-        pnpm run tsc
-        pnpm run lint
-        pnpm exec prettier --check '**/*.{js,jsx,ts,tsx,json,css,html}'
+        cd nextjs-frontend &&
+            pnpm run tsc &&
+            pnpm run lint &&
+            pnpm exec prettier --check '**/*.{js,jsx,ts,tsx,json,css,html}'
     ); then
         observe_validation_receipt "frontend-static" "pass" "$frontend_static_receipt_digest"
         emit_tool_event "frontend-static" "$started_ms" "pass"
