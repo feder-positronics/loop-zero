@@ -74,10 +74,13 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 VALID_STATUS = {"start", "complete", "failed"}
 VALID_RESULT = {"pass", "fail", "skip"}
@@ -110,6 +113,7 @@ FRICTION_EVIDENCE_KINDS = {
 CONTEXT_BOUNDARY_DISPOSITIONS = {"rollover", "kept_inline"}
 OUTER_ORCHESTRATORS = {"work-issue", "execute-blueprint"}
 RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
+APPEND_ORDER_STATE = ".append-order.json"
 
 
 def repo_root() -> Path:
@@ -212,18 +216,126 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _open_event_lock(path: Path) -> TextIO:
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("event lock must be a regular file with one link")
+        return os.fdopen(descriptor, "r+", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _parse_append_order(raw: str) -> tuple[int, int]:
+    state = json.loads(raw)
+    if (
+        not isinstance(state, dict)
+        or type(state.get("generation")) is not int
+        or state["generation"] < 1
+        or type(state.get("last_sequence")) is not int
+        or state["last_sequence"] < 0
+    ):
+        raise ValueError("invalid append-order state")
+    return state["generation"], state["last_sequence"]
+
+
+def _recover_append_order(
+    audit_dir: Path, *known: tuple[int, int] | None
+) -> tuple[int, int]:
+    """Advance generation once on initialization or loss, never on the hot path."""
+    generation = max((item[0] for item in known if item is not None), default=0)
+    for path in audit_dir.glob("*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            value = row.get("append_generation") if isinstance(row, dict) else None
+            if type(value) is int:
+                generation = max(generation, value)
+    return generation + 1, 0
+
+
+def _read_append_order(path: Path) -> tuple[int, int] | None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(descriptor, "r", encoding="utf-8") as state_file:
+        metadata = os.fstat(state_file.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError("append-order state must be regular with one link")
+        return _parse_append_order(state_file.read())
+
+
+def _persist_append_order(state_path: Path, reservation: dict) -> None:
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=state_path.stem + ".", suffix=".tmp", dir=state_path.parent
+    )
+    temporary_path = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as state_file:
+            json.dump(reservation, state_file)
+            state_file.write("\n")
+            state_file.flush()
+            os.fsync(state_file.fileno())
+        temporary_path.replace(state_path)
+        directory_fd = os.open(state_path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+
+
+def _reserve_append_sequence(audit_dir: Path, _lock_file: TextIO) -> tuple[int, int]:
+    """Reserve in both bounded states before payload; keep gaps after interruption.
+
+    An independent atomic mirror retains high water so restoring one stale counter
+    cannot reuse an identity. Loss triggers one retained-history recovery pass.
+    Malformed state fails closed; wholesale rollback of all evidence is excluded.
+    """
+    state_path = audit_dir / APPEND_ORDER_STATE
+    state = _read_append_order(state_path)
+    mirror_path = audit_dir / ".append-order-mirror.json"
+    mirror = _read_append_order(mirror_path)
+    generation, last_sequence = (
+        max(state, mirror)
+        if state is not None and mirror is not None
+        else _recover_append_order(audit_dir, state, mirror)
+    )
+    sequence = last_sequence + 1
+    reservation = {"generation": generation, "last_sequence": sequence}
+    for path in (state_path, mirror_path):
+        _persist_append_order(path, reservation)
+    return generation, sequence
+
+
+def _ordered_event(event: dict, audit_dir: Path, lock_file: TextIO) -> dict:
+    """Attach producer order; only cold recovery reads retained event history."""
+    generation, sequence = _reserve_append_sequence(audit_dir, lock_file)
+    return {
+        **event,
+        "append_generation": generation,
+        "append_sequence": sequence,
+    }
+
+
 def write_event(event: dict) -> bool:
     try:
         root = repo_root()
         audit_dir = root / ".audit" / "agent-events"
         audit_dir.mkdir(parents=True, exist_ok=True)
-        day = datetime.now(UTC).strftime("%Y-%m-%d")
-        log_path = audit_dir / f"{day}.jsonl"
         lock_path = audit_dir / ".write.lock"
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
+        with _open_event_lock(lock_path) as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
+            log_path = audit_dir / f"{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
+            stored = _ordered_event(event, audit_dir, lock_file)
             with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(event) + "\n")
+                f.write(json.dumps(stored) + "\n")
         return True
     except Exception as e:
         print(f"agent_event: warning — could not write event ({e})", file=sys.stderr)
@@ -237,7 +349,7 @@ def write_unique_event(event: dict, *, key_fields: tuple[str, ...]) -> bool:
         audit_dir = root / ".audit" / "agent-events"
         audit_dir.mkdir(parents=True, exist_ok=True)
         lock_path = audit_dir / ".write.lock"
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
+        with _open_event_lock(lock_path) as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             for log_path in sorted(audit_dir.glob("*.jsonl")):
                 for line in log_path.read_text(encoding="utf-8").splitlines():
@@ -255,8 +367,9 @@ def write_unique_event(event: dict, *, key_fields: tuple[str, ...]) -> bool:
                         return False
             day = str(event.get("ts", now_iso()))[:10]
             log_path = audit_dir / f"{day}.jsonl"
+            stored = _ordered_event(event, audit_dir, lock_file)
             with log_path.open("a", encoding="utf-8") as output:
-                output.write(json.dumps(event) + "\n")
+                output.write(json.dumps(stored) + "\n")
         return True
     except Exception as exc:
         print(

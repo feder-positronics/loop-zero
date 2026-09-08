@@ -179,9 +179,7 @@ def resolve_start_run_id(
     return f"sr_{uuid4().hex}"
 
 
-def latest_run_branch(
-    entries: list[dict[str, object]], *, run_id: str
-) -> str | None:
+def latest_run_branch(entries: list[dict[str, object]], *, run_id: str) -> str | None:
     """Return the branch recorded on the latest entry of one run, if any."""
     for entry in reversed(entries):
         if entry.get("run_id") == run_id:
@@ -358,13 +356,19 @@ def validate_stale_abandoned_merge_recovery(
         for entry in prior
         if entry.get("git_branch") is not None
     }
-    if historical_issues not in (
-        set(),
-        {new_entry.get("issue")},
-    ) or historical_prs not in (
-        set(),
-        {new_entry.get("pr")},
-    ) or historical_branches != {new_entry.get("git_branch")}:
+    if (
+        historical_issues
+        not in (
+            set(),
+            {new_entry.get("issue")},
+        )
+        or historical_prs
+        not in (
+            set(),
+            {new_entry.get("pr")},
+        )
+        or historical_branches != {new_entry.get("git_branch")}
+    ):
         raise ValueError("frozen closeout capsule conflicts with run history")
     return True
 
@@ -398,9 +402,7 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
             / "delivery-closeout.lock"
         )
     except JobStoreError as exc:
-        raise ValueError(
-            "closeout capsule directory identity is unavailable"
-        ) from exc
+        raise ValueError("closeout capsule directory identity is unavailable") from exc
     directory_flags = os.O_RDONLY | os.O_DIRECTORY
     if hasattr(os, "O_NOFOLLOW"):
         directory_flags |= os.O_NOFOLLOW
@@ -485,9 +487,18 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
             current = os.stat(  # noqa: PTH116 - dir_fd pins canonical ancestry.
                 path.name, dir_fd=parent_descriptor, follow_symlinks=False
             )
-            stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+            stable_fields = (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
             if (
-                any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+                any(
+                    getattr(before, field) != getattr(after, field)
+                    for field in stable_fields
+                )
                 or after.st_nlink != 1
                 or current.st_nlink != 1
                 or (current.st_dev, current.st_ino) != (after.st_dev, after.st_ino)
@@ -533,10 +544,13 @@ def require_run_owner(
 
 def load_phase_events(root: Path) -> list[dict[str, object]]:
     """Load phase evidence without rewriting malformed or legacy JSONL rows."""
-    events: list[dict[str, object]] = []
+    legacy: list[tuple[int, int, dict[str, object]]] = []
+    ordered: list[tuple[int, int, int, dict[str, object]]] = []
+    legacy_sequence = 0
+    position = 0
     audit_dir = root / ".audit" / "agent-events"
     if not audit_dir.exists():
-        return events
+        return []
     for log_path in sorted(audit_dir.glob("*.jsonl")):
         for line in log_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
@@ -546,8 +560,26 @@ def load_phase_events(root: Path) -> list[dict[str, object]]:
             except json.JSONDecodeError:
                 continue
             if isinstance(event, dict):
-                events.append(event)
-    return events
+                sequence = event.get("append_sequence")
+                generation = event.get("append_generation")
+                if (
+                    type(generation) is int
+                    and generation > 0
+                    and type(sequence) is int
+                    and sequence > 0
+                ):
+                    ordered.append((generation, sequence, position, event))
+                else:
+                    if type(sequence) is not int or sequence < 1:
+                        legacy_sequence += 1
+                        sequence = legacy_sequence
+                    legacy.append((sequence, position, event))
+                position += 1
+    legacy.sort(key=lambda item: item[:2])
+    ordered.sort(key=lambda item: item[:3])
+    return [event for _sequence, _position, event in legacy] + [
+        event for _generation, _sequence, _position, event in ordered
+    ]
 
 
 def _phase_index(phase: object) -> int:
@@ -576,13 +608,26 @@ def _phase_history(
     ]
     active: int | None = None
     completed = -1
+    reentered = False
     for event in relevant:
         index = _phase_index(event.get("phase"))
         expected_name = PHASES[index]
         if event.get("name") not in {None, expected_name}:
             raise ValueError("phase event name does not match the fixed taxonomy")
         status = event.get("status")
-        if status == "start":
+        if status == "review-reentry":
+            if (
+                reentered
+                or active != PHASES.index("ci-wait")
+                or index != PHASES.index("review")
+            ):
+                raise ValueError("invalid or repeated review reentry")
+            if not isinstance(event.get("reason"), str) or not event["reason"].strip():
+                raise ValueError("review reentry requires a stated reason")
+            active = index
+            completed = index - 1
+            reentered = True
+        elif status == "start":
             if active is not None or index != completed + 1:
                 raise ValueError("contradictory phase history")
             active = index
@@ -925,9 +970,7 @@ def codex_turn_evidence(
     interruptions: list[dict[str, object]] = []
     boundary = run_started_at.astimezone(UTC)
     first_turn_floor = (
-        first_turn_after.astimezone(UTC)
-        if first_turn_after is not None
-        else boundary
+        first_turn_after.astimezone(UTC) if first_turn_after is not None else boundary
     )
     for line_number, line in enumerate(_rollout_lines(rollout), start=1):
         if not line.strip():
@@ -1025,9 +1068,7 @@ def codex_rollout_path(session_id: str) -> Path | None:
     if CODEX_SESSION_ID_RE.fullmatch(session_id) is None:
         return None
     codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
-    matches = sorted(
-        codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl")
-    )
+    matches = sorted(codex_home.glob(f"sessions/*/*/*/rollout-*{session_id}.jsonl"))
     if len(matches) > 1:
         raise RolloutEvidenceError("multiple rollout files match one session")
     return matches[0] if matches else None

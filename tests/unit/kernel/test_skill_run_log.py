@@ -1690,3 +1690,37 @@ def test_start_rejects_an_explicit_second_run_on_an_owned_branch(tmp_path):
 
     assert result.returncode == 2, result.stdout + result.stderr
     assert f"already owned by active run {RID_LIVE}" in result.stderr
+
+
+def test_review_reentry_preserves_forward_order_and_is_once_per_run():
+    run_id = "sr_" + "1" * 32
+
+    def row(phase, status):
+        return {
+            "kind": "phase",
+            "skill": "work-issue",
+            "run_id": run_id,
+            "phase": str(phase),
+            "status": status,
+            "reason": "gate demanded rebase",
+        }
+
+    events = [row(p, status) for p in (1, 2, 3) for status in ("start", "complete")]
+    events += [row(4, "start"), row(3, "review-reentry")]
+    assert module.phase_state(events, skill="work-issue", run_id=run_id) == (
+        "review",
+        "local-validation",
+    )
+    resumed = [*events, row(3, "complete"), row(4, "start")]
+    assert module.phase_state(resumed, skill="work-issue", run_id=run_id) == (
+        "ci-wait",
+        "review",
+    )
+    with pytest.raises(ValueError, match="reentry"):
+        module.phase_state(
+            [*resumed, row(3, "review-reentry")], skill="work-issue", run_id=run_id
+        )
+    with pytest.raises(ValueError, match="contradictory"):
+        module.phase_state(
+            [*events, row(5, "start")], skill="work-issue", run_id=run_id
+        )

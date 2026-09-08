@@ -703,6 +703,12 @@ def _retention_live_record_ids(
 ) -> frozenset[int]:
     """Select raw rows whose live authority remains material after compaction."""
     open_contexts = _retention_open_attempt_contexts(records)
+    authenticated_reentry_ids = {
+        id(record)
+        for record in delivery_controller_records(records)
+        if record.get("type") == "delivery-control"
+        and record.get("action") == "review-reentry"
+    }
     active_runs = frozenset(active_run_ids)
     open_units_by_worktree: dict[str, dict[str, list[str]]] = {}
     latest_standing: dict[tuple[object, ...], int] = {}
@@ -758,7 +764,8 @@ def _retention_live_record_ids(
             record.get("alias"),
         )
         if (
-            record.get("run_id") in active_runs
+            id(record) in authenticated_reentry_ids
+            or record.get("run_id") in active_runs
             or context in open_contexts
             or (worktree is not None and (str(worktree), unit_id) in open_unit_keys)
             or (
