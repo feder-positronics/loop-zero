@@ -38,6 +38,7 @@ from dispatch_routing import (
     COORDINATOR_LEDGER_PREFIX_SCHEME,
     COORDINATOR_LEDGER_PREFIX_V3_SCHEME,
     DISPATCH_OUTCOME_TYPES,
+    supersession_reason_matches_terminal,
     LEGACY_COORDINATOR_LEDGER_PREFIX_SCHEME,
     LEGACY_COORDINATOR_PREFIX_POLICY_VERSIONS,
     LEGACY_COORDINATOR_PREFIX_RUNTIME_CONTRACT_VERSION,
@@ -1123,15 +1124,9 @@ def _supersession_matches_deposit(
     raw_deposit_worktree = deposit.get("worktree")
     supersession_worktree = resolved_record_worktree(raw_supersession_worktree)
     deposit_worktree = resolved_record_worktree(raw_deposit_worktree)
-    reason = supersession.get("supersession_reason")
-    supported_reason = reason == "stale-source" or (
-        reason == "failed-review"
-        and supersession.get("failure_class") == "failed-review"
-        and deposit.get("work_kind") == "review"
-        and deposit.get("read_only") is True
-        and supersession.get("superseding_source_identity")
-        == deposit.get("source_identity")
-    )
+    preserved_fields = _SUPERSESSION_PRESERVED_FIELDS
+    if supersession.get("supersession_reason") == "identity-unverifiable":
+        preserved_fields += ("root_work_unit_id", "task_contract", "lineage")
     return (
         supersession_worktree is not None
         and supersession_worktree == deposit_worktree
@@ -1139,11 +1134,11 @@ def _supersession_matches_deposit(
         == _terminal_authority_attempt_key(deposit)
         and all(
             deposit.get(field) == supersession.get(field)
-            for field in _SUPERSESSION_PRESERVED_FIELDS
+            for field in preserved_fields
         )
         and supersession.get("superseded_task_id") == deposit.get("task_id")
         and supersession.get("status") == "superseded"
-        and supported_reason
+        and supersession_reason_matches_terminal(supersession, deposit)
     )
 
 
