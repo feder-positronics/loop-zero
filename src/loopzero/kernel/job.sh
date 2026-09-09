@@ -16,7 +16,7 @@
 #   scripts/util/job.sh log   <name> [--tail LINES] [--follow]
 #   scripts/util/job.sh list
 #   scripts/util/job.sh binding-files --run-id <id>
-#   scripts/util/job.sh reconcile <name> [--terminal-artifact <path>] [--primary <path>]
+#   scripts/util/job.sh reconcile <name> [--terminal-artifact <path>] [--primary <path>] [--expected-binding-sha256 <digest>]
 #   scripts/util/job.sh check                 # non-zero if any job is running or unreaped
 #   scripts/util/job.sh clean [--all]
 #
@@ -187,10 +187,10 @@ PY
 }
 
 job_reaped() {
-	local dir="$1"
+	local dir="$1" expected_schema="${2:-}"
 	if [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; then
 		[ -f "$dir/reconciliation.json" ] && [ ! -L "$dir/reconciliation.json" ] || return 1
-		"$PYTHON_BIN" - "$dir/binding.json" "$dir/reconciliation.json" <<'PY' >/dev/null 2>&1
+		"$PYTHON_BIN" - "$dir/binding.json" "$dir/reconciliation.json" "$expected_schema" <<'PY' >/dev/null 2>&1
 import hashlib
 import json
 import sys
@@ -209,7 +209,53 @@ for key in ("name", "run_id", "task_id"):
     if receipt.get(key) != binding.get(key):
         raise SystemExit(1)
 schema = receipt.get("schema_version")
+if sys.argv[3] and schema != sys.argv[3]:
+    raise SystemExit(1)
 if schema in {"job-reconciliation-v1", "job-reconciliation-v2"}:
+    raise SystemExit(0)
+if schema == "job-supervision-failure-v1":
+    import os
+    import re
+    import stat
+    required = {"schema_version", "name", "run_id", "task_id", "failure_class", "observed_exit_code", "binding_sha256", "archive_sha256"}
+    archive_id = receipt.get("archive_sha256")
+    if (set(receipt) != required or binding.get("schema_version") != "job-binding-v2"
+        or receipt.get("failure_class") != "terminal-supervision-failure"
+        or type(receipt.get("observed_exit_code")) is not int or receipt["observed_exit_code"] != 125
+        or receipt.get("binding_sha256") != hashlib.sha256(binding_bytes).hexdigest()
+        or not isinstance(archive_id, str) or re.fullmatch(r"[0-9a-f]{64}", archive_id) is None):
+        raise SystemExit(1)
+    # Keep /proc/<pid>/fd/<dirfd> pinned: its parent is a filesystem
+    # traversal, not the lexical /proc/<pid>/fd directory.
+    archive_root = binding_path.parent / ".." / ".failure-archives"
+    archive = archive_root / archive_id
+    try:
+        for directory in (archive_root, archive, archive / "original"):
+            mode = directory.lstat()
+            if not stat.S_ISDIR(mode.st_mode) or mode.st_uid != os.getuid() or stat.S_IMODE(mode.st_mode) != 0o700:
+                raise ValueError("unsafe archive directory")
+        def safe_bytes(path):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as stream:
+                mode = os.fstat(stream.fileno())
+                if not stat.S_ISREG(mode.st_mode) or mode.st_uid != os.getuid():
+                    raise ValueError("unsafe archive file")
+                return stream.read()
+        manifest_bytes = safe_bytes(archive / "manifest.json")
+        if hashlib.sha256(manifest_bytes).hexdigest() != archive_id:
+            raise ValueError("archive digest mismatch")
+        manifest = json.loads(manifest_bytes)
+        names = {p.name for p in binding_path.parent.iterdir()} - {"reconciliation.json"}
+        if set(manifest["files"]) != names or {p.name for p in (archive / "original").iterdir()} != names:
+            raise ValueError("archive inventory mismatch")
+        for name in names:
+            original = safe_bytes(binding_path.parent / name)
+            if safe_bytes(archive / "original" / name) != original or manifest["files"][name] != {"sha256": hashlib.sha256(original).hexdigest(), "size": len(original)}:
+                raise ValueError("archive original mismatch")
+        if safe_bytes(binding_path.parent / "exit_code").strip() != b"125":
+            raise ValueError("exit mismatch")
+    except (OSError, ValueError, KeyError, TypeError):
+        raise SystemExit(1)
     raise SystemExit(0)
 required = {
     "schema_version", "name", "run_id", "task_id", "failure_class",
@@ -1667,7 +1713,30 @@ PY
 		code="$(cat "$dir/exit_code" 2>/dev/null || echo 1)"
 		# Only a sealed terminal may be reaped by waiting.  Supervisor loss stays
 		# visible and unreaped until reconcile seals its typed recovery receipt.
-		write_waited_marker "$dir" || die "job '$name' waited marker is unsafe"
+		if [ "$code" = 125 ] &&
+			[ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ] &&
+			[ ! -e "$dir/terminal-envelope.json" ] && [ ! -L "$dir/terminal-envelope.json" ] &&
+			[ ! -e "$dir/terminal-envelope.sha256" ] && [ ! -L "$dir/terminal-envelope.sha256" ] &&
+			"$PYTHON_BIN" - "$dir/binding.json" <<'PY_WAIT_BINDING'
+import json
+import sys
+from pathlib import Path
+try:
+    binding = json.loads(Path(sys.argv[1]).read_bytes())
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(binding, dict) and binding.get("schema_version") == "job-binding-v2" else 1)
+PY_WAIT_BINDING
+		then
+			# A completed failure archive includes the original marker state.
+			# Validate it under this lease; neither acceptance nor refusal may
+			# add or truncate an original file. The observed exit remains 125.
+			if ! job_reaped "$dir" job-supervision-failure-v1; then
+				echo "job '$name' supervision failure receipt is invalid; reconcile before reaping" >&2
+			fi
+		else
+			write_waited_marker "$dir" || die "job '$name' waited marker is unsafe"
+		fi
 	else
 		if [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; then
 			echo "job '$name' has no sealed exit code; run 'reconcile $name' to classify supervisor loss" >&2
@@ -1976,6 +2045,31 @@ cmd_reconcile() {
 	[ ! -L "$dir" ] || die "job '$name' directory cannot be a symlink"
 	[ -f "$dir/binding.json" ] || die "job '$name' has no delivery-run binding"
 	[ ! -L "$dir/binding.json" ] || die "job '$name' binding cannot be a symlink"
+	local expected_binding_sha256=""
+	local -a reconcile_args=()
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--expected-binding-sha256)
+			[ -z "$expected_binding_sha256" ] || die "reconcile received duplicate --expected-binding-sha256"
+			[[ "${2:-}" =~ ^[0-9a-f]{64}$ ]] || die "--expected-binding-sha256 requires 64 lowercase hexadecimal characters"
+			expected_binding_sha256="$2"
+			shift 2
+			;;
+		--primary | --terminal-artifact)
+			reconcile_args+=("$1")
+			shift
+			if [ "$#" -gt 0 ]; then
+				reconcile_args+=("$1")
+				shift
+			fi
+			;;
+		*)
+			reconcile_args+=("$1")
+			shift
+			;;
+		esac
+	done
+	set -- "${reconcile_args[@]}"
 	local binding_schema supplied_artifact="" primary_repo=""
 	binding_schema="$("$PYTHON_BIN" - "$dir/binding.json" <<'PY'
 import json
@@ -2031,7 +2125,7 @@ PY
 			die "reconcile --primary must name the canonical primary repository"
 		dispatch_root="$primary_repo/.audit/dispatch"
 	fi
-	"$PYTHON_BIN" - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" <<'PY'
+	"$PYTHON_BIN" - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" "$expected_binding_sha256" <<'PY'
 import hashlib
 import errno
 import json
@@ -2046,6 +2140,7 @@ supplied_artifact = sys.argv[2]
 exit_path = Path(sys.argv[3])
 receipt_path = Path(sys.argv[4])
 declared_dispatch_root = sys.argv[5]
+expected_binding_sha256 = sys.argv[6]
 
 def read_safe_bytes(path: Path, label: str) -> bytes:
     flags = os.O_RDONLY | os.O_NONBLOCK
@@ -2156,8 +2251,103 @@ def commit_receipt(serialized: str, conflict_message: str) -> None:
     finally:
         os.close(directory_fd)
 
+def preserve_supervision_failure():
+    # All paths are derived from the leased job root; callers cannot supply an archive destination.
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    def open_directory(parent, name, create=False):
+        if create:
+            try:
+                os.mkdir(name, 0o700, dir_fd=parent)
+                os.fsync(parent)
+            except FileExistsError:
+                pass
+        fd = os.open(name, directory_flags, dir_fd=parent)
+        metadata = os.fstat(fd)
+        if metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            os.close(fd)
+            raise ValueError("archive directory is not private")
+        return fd
+    def read_at(parent, name):
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        try:
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise ValueError("archive source is not a safe regular file")
+            with os.fdopen(os.dup(fd), "rb") as stream:
+                return stream.read()
+        finally:
+            os.close(fd)
+    def write_at(parent, name, payload):
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    descriptors = []
+    try:
+        root_fd = os.open(binding_path.parent.parent, directory_flags)
+        descriptors.append(root_fd)
+        job_fd = open_directory(root_fd, binding_path.parent.name)
+        descriptors.append(job_fd)
+        originals = {name: read_at(job_fd, name) for name in sorted(os.listdir(job_fd)) if name != "reconciliation.json"}
+        if "reconciliation.json.tmp" in originals:
+            raise ValueError("original reconciliation reservation must remain untouched")
+        if originals.get("binding.json") != binding_bytes or originals.get("exit_code", b"").strip() != b"125":
+            raise ValueError("original binding or exit changed")
+        manifest = {
+            "schema_version": "job-supervision-archive-v1",
+            "name": binding["name"], "run_id": binding["run_id"], "task_id": binding["task_id"],
+            "binding_sha256": expected_binding_sha256,
+            "absent": ["terminal-envelope.json", "terminal-envelope.sha256"],
+            "files": {name: {"sha256": hashlib.sha256(data).hexdigest(), "size": len(data)} for name, data in originals.items()},
+        }
+        manifest_bytes = (json.dumps(manifest, sort_keys=True, indent=2) + "\n").encode()
+        archive_id = hashlib.sha256(manifest_bytes).hexdigest()
+        receipt = {
+            "schema_version": "job-supervision-failure-v1",
+            "name": binding["name"], "run_id": binding["run_id"], "task_id": binding["task_id"],
+            "failure_class": "terminal-supervision-failure", "observed_exit_code": 125,
+            "binding_sha256": expected_binding_sha256, "archive_sha256": archive_id,
+        }
+        serialized = json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+        # A conflict is rejected before even creating the archive root.
+        if "reconciliation.json" in os.listdir(job_fd) and read_at(job_fd, "reconciliation.json") != serialized.encode():
+            raise ValueError("existing reconciliation conflicts with supervision failure")
+        archives_fd = open_directory(root_fd, ".failure-archives", create=True)
+        descriptors.append(archives_fd)
+        try:
+            os.mkdir(archive_id, 0o700, dir_fd=archives_fd)
+            created = True
+        except FileExistsError:
+            created = False
+        archive_fd = open_directory(archives_fd, archive_id)
+        descriptors.append(archive_fd)
+        originals_fd = open_directory(archive_fd, "original", create=created)
+        descriptors.append(originals_fd)
+        if created:
+            for name, data in originals.items():
+                write_at(originals_fd, name, data)
+            os.fsync(originals_fd)
+            write_at(archive_fd, "manifest.json", manifest_bytes)
+            os.fsync(archive_fd)
+            os.fsync(archives_fd)
+        # An interrupted partial archive is never overwritten or trusted.
+        if set(os.listdir(archive_fd)) != {"original", "manifest.json"} or read_at(archive_fd, "manifest.json") != manifest_bytes:
+            raise ValueError("archive manifest conflicts with originals")
+        if set(os.listdir(originals_fd)) != set(originals) or any(read_at(originals_fd, name) != data for name, data in originals.items()):
+            raise ValueError("archive bytes conflict with originals")
+        commit_receipt(serialized, "job.sh: existing reconciliation conflicts with supervision failure")
+        print(json.dumps(receipt, sort_keys=True))
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"job.sh: supervision failure archive refused: {exc}") from exc
+    finally:
+        for fd in reversed(descriptors):
+            os.close(fd)
+
 try:
     binding_bytes = read_safe_bytes(binding_path, "job binding")
+    if expected_binding_sha256 and hashlib.sha256(binding_bytes).hexdigest() != expected_binding_sha256:
+        raise SystemExit("job.sh: job binding does not match expected SHA-256")
     binding = json.loads(binding_bytes)
 except (OSError, json.JSONDecodeError) as exc:
     raise SystemExit(f"job.sh: job binding is unreadable: {exc}")
@@ -2224,6 +2414,23 @@ else:
         exit_code = int(read_safe_bytes(exit_path, "terminal exit code").decode("utf-8").strip())
     except (UnicodeError, ValueError) as exc:
         raise SystemExit(f"job.sh: authoritative terminal artifact is unreadable: {exc}")
+
+if schema == "job-binding-v2" and exit_code == 125:
+    envelope_path = binding_path.parent / "terminal-envelope.json"
+    digest_path = binding_path.parent / "terminal-envelope.sha256"
+    # Reject links before resolving the binding path, including dangling links.
+    if envelope_path.is_symlink() or digest_path.is_symlink():
+        raise SystemExit("job.sh: durable terminal files cannot be symlinks")
+    if envelope_path.exists() != digest_path.exists():
+        raise SystemExit("job.sh: unsealed job has conflicting partial durable terminal files")
+    if not envelope_path.exists():
+        if binding.get("terminal_envelope") != str(envelope_path):
+            raise SystemExit("job.sh: terminal envelope does not match the job binding")
+        if not expected_binding_sha256:
+            raise SystemExit("job.sh: supervision failure requires --expected-binding-sha256")
+        preserve_supervision_failure()
+        # Internal disposition code: do not add a waited marker to archived originals.
+        raise SystemExit(3)
 
 envelope_path = None
 envelope_sha256 = None
@@ -2413,6 +2620,7 @@ commit_receipt(
 print(json.dumps(receipt, sort_keys=True))
 PY
 	local status=$?
+	[ "$status" -ne 3 ] || return 0
 	[ "$status" -eq 0 ] || return "$status"
 	write_waited_marker "$dir" || die "job '$name' waited marker is unsafe"
 }
