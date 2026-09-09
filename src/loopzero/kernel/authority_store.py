@@ -1008,6 +1008,10 @@ _REVIEW_GATE_ANCHOR_FIELDS = (
     "evidence_manifest",
     "verification_verdict",
     "worker_identity",
+    "worktree",
+    "runtime_effective_model",
+    "lineage",
+    "task_contract",
 )
 
 _REVIEW_GATE_TERMINAL_ONLY_FIELDS = frozenset({"verification_verdict"})
@@ -1036,7 +1040,7 @@ def _compact_retry_outcome(record: Mapping[str, object]) -> dict[str, object]:
         if field in record
     }
     if getattr(record, "checkpoint_authenticated_retention", False) is True:
-        for field in ("accepted_verdict", "superseded_with_result"):
+        for field in ("accepted_verdict", "superseded_with_result", "review_acceptance_verified", "review_gate_supersession"):
             if field in record:
                 compact[field] = record[field]
         if record.get("review_gate_terminal") is True:
@@ -1048,8 +1052,13 @@ def _retry_outcome_projection(
     records: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
     """Project the compact retry state consumed after a checkpoint."""
-    verdicts = authenticated_verdicts(records)
-    review_terminals = authenticated_review_terminals(records)
+    # Historical admission anchors do not provide active review coverage.
+    review_terminals = authenticated_review_terminals(
+        records, _superseded_task_ids=frozenset()
+    )
+    accepted = accepted_review_terminals(records, _superseded_task_ids=frozenset())
+    verdicts = authenticated_verdicts(records, _accepted_terminals=accepted)
+    supersessions = {str(row.get("task_id")): row for row in authenticated_supersessions(records)}
     superseded_with_result = {
         str(record.get("task_id"))
         for record in authenticated_supersessions(records)
@@ -1064,6 +1073,10 @@ def _retry_outcome_projection(
             compact["accepted_verdict"] = verdict.get("verdict")
         if task_id in superseded_with_result:
             compact["superseded_with_result"] = True
+        if task_id in supersessions:
+            compact["review_gate_supersession"] = dict(supersessions[task_id])
+        if task_id in accepted:
+            compact["review_acceptance_verified"] = True
         terminal = review_terminals.get(task_id)
         if (
             terminal is not None
