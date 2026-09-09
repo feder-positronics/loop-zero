@@ -1724,3 +1724,263 @@ def test_review_reentry_preserves_forward_order_and_is_once_per_run():
         module.phase_state(
             [*events, row(5, "start")], skill="work-issue", run_id=run_id
         )
+
+
+@pytest.fixture
+def resume_cli(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    run_id = "sr_0123456789abcdef0123456789abcdef"
+    rows = [
+        _entry(run_id, "in_progress", ts="2026-09-08T10:00:00Z", issue=123, pr=456),
+        _entry(
+            run_id, "blocked", ts="2026-09-09T10:00:00Z", review_passes=2, tokens_in=400
+        ),
+    ]
+    rows[-1].pop("issue")
+    audit = tmp_path / ".audit" / "skill-runs"
+    audit.mkdir(parents=True)
+    log = audit / "2026-09-09.jsonl"
+    log.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    fields = {
+        "ts": "2026-09-09T11:00:00Z",
+        "session_id": "resuming-session",
+        "session_source": "test",
+        "harness": "test",
+        "git_branch": rows[0]["git_branch"],
+    }
+    monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
+    monkeypatch.setattr(module, "common_fields", lambda: fields)
+    monkeypatch.setattr(
+        module, "transition_phase", lambda **_: pytest.fail("resume reset phase")
+    )
+
+    def invoke(*extra):
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "skill_run_log.py",
+                "--skill",
+                "work-issue",
+                "--run-id",
+                run_id,
+                "--resume",
+                "--notes",
+                "Owner resumed delivery after blocker repair",
+                *extra,
+            ],
+        )
+        return module.main()
+
+    return run_id, rows, log, fields, invoke
+
+
+def test_resume_preserves_identity_history_and_counters(resume_cli):
+    run_id, prior, log, fields, invoke = resume_cli
+    assert invoke() == 0
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    assert rows[:2] == prior
+    assert rows[-1]["outcome"] == "in_progress"
+    assert rows[-1]["issue"] == 123 and rows[-1]["pr"] == 456
+    assert prior[-1]["review_passes"] == 2 and prior[-1]["tokens_in"] == 400
+    assert "review_passes" not in rows[-1] and "tokens_in" not in rows[-1]
+    assert rows[-1]["session_id"] == "resuming-session"
+    assert module.active_run(rows, git_branch=fields["git_branch"]) == (
+        run_id,
+        "2026-09-08T10:00:00Z",
+    )
+    assert module.validate_transition(rows, _entry(run_id, "merged")) is True
+    original = log.read_bytes()
+    assert invoke() == 0
+    assert log.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "outcome", ["merged", "abandoned", "resolved_no_change", "in_progress"]
+)
+def test_resume_rejects_other_states(resume_cli, outcome):
+    _, prior, log, _, invoke = resume_cli
+    prior[-1]["outcome"] = outcome
+    log.write_text("".join(json.dumps(row) + "\n" for row in prior))
+    before = log.read_bytes()
+    with pytest.raises(SystemExit, match="2"):
+        invoke()
+    assert log.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ("--notes", "  "),
+        ("--skill", "implement-backend"),
+        ("--issue", "999"),
+        ("--pr", "999"),
+        ("--git-branch", "another-branch"),
+        ("--start",),
+        ("--outcome", "in_progress"),
+        ("--transition", "review"),
+        ("--review-passes", "0"),
+        ("--tokens-in", "0"),
+    ],
+)
+def test_resume_rejects_conflicting_inputs(resume_cli, extra):
+    _, _, log, _, invoke = resume_cli
+    before = log.read_bytes()
+    with pytest.raises(SystemExit, match="2"):
+        invoke(*extra)
+    assert log.read_bytes() == before
+
+
+def test_resume_requires_actual_branch_and_exclusive_owner(resume_cli):
+    _, prior, log, fields, invoke = resume_cli
+    fields["git_branch"] = "different-checkout"
+    with pytest.raises(SystemExit, match="2"):
+        invoke("--git-branch", prior[0]["git_branch"])
+    fields["git_branch"] = prior[0]["git_branch"]
+    other = _entry("sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress")
+    with log.open("a") as stream:
+        stream.write(json.dumps(other) + "\n")
+    with pytest.raises(SystemExit, match="2"):
+        invoke()
+
+
+def test_resume_rejects_missing_run(resume_cli):
+    _, _, log, _, invoke = resume_cli
+    log.write_text("")
+    with pytest.raises(SystemExit, match="2"):
+        invoke()
+
+
+def test_start_cannot_resume_blocked_run(resume_cli, monkeypatch):
+    run_id, _, _, _, _ = resume_cli
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "skill_run_log.py",
+            "--skill",
+            "work-issue",
+            "--run-id",
+            run_id,
+            "--start",
+        ],
+    )
+    with pytest.raises(ValueError, match="contradictory terminal"):
+        module.main()
+
+
+@pytest.mark.parametrize("future_other_run", [False, True])
+def test_resume_rejects_clock_rollback_without_writes(resume_cli, future_other_run):
+    _, _, log, fields, invoke = resume_cli
+    fields["ts"] = "2026-09-08T11:00:00Z"
+    if future_other_run:
+        (log.parent / "2026-09-10.jsonl").write_text(
+            json.dumps(
+                _entry(
+                    "sr_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "blocked",
+                    git_branch="other-delivery",
+                    ts="2026-09-10T10:00:00Z",
+                )
+            )
+            + "\n"
+        )
+    before = {p.name: p.read_bytes() for p in log.parent.glob("*.jsonl")}
+    with pytest.raises(SystemExit, match="2"):
+        invoke()
+    assert {p.name: p.read_bytes() for p in log.parent.glob("*.jsonl")} == before
+
+
+def test_resume_does_not_clone_historical_measurements(resume_cli):
+    _, prior, log, _, invoke = resume_cli
+    prior[-1].update(
+        duration_s=500,
+        review_passes=2,
+        tokens_in=400,
+        session_tokens_in_cumulative=9000,
+        session_tokens_cached_cumulative=8000,
+    )
+    log.write_text("".join(json.dumps(row) + "\n" for row in prior))
+    assert invoke() == 0
+    rows = module.load_entries(log.parent)
+    assert rows[:2] == prior
+    assert not any(
+        key in rows[-1]
+        for key in (
+            "duration_s",
+            "review_passes",
+            "tokens_in",
+            "session_tokens_in_cumulative",
+            "session_tokens_cached_cumulative",
+        )
+    )
+
+
+@pytest.mark.parametrize("fresh_id", [None, "sr_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"])
+def test_start_cannot_replace_blocked_branch_owner(resume_cli, monkeypatch, fresh_id):
+    _, _, log, _, _ = resume_cli
+    args = ["skill_run_log.py", "--skill", "work-issue", "--start"]
+    if fresh_id:
+        args.extend(["--run-id", fresh_id])
+    monkeypatch.setattr(sys, "argv", args)
+    before = log.read_bytes()
+    with pytest.raises(SystemExit, match="2"):
+        module.main()
+    assert log.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "session,source,valid,ceiling,expected",
+    [
+        ("fresh", "codex_thread", True, 43200, 0),
+        ("sess-x", "codex_thread", True, 43200, 3),
+        ("fresh", "derived", True, 43200, 3),
+        ("fresh", "codex_thread", False, 43200, 3),
+        ("fresh", "codex_thread", True, 30, 3),
+        ("", "codex_thread", True, 43200, 3),
+        (" ", "codex_thread", True, 43200, 3),
+        (123, "codex_thread", True, 43200, 3),
+    ],
+)
+def test_session_ceiling_uses_only_fresh_valid_resume(
+    session, source, valid, ceiling, expected
+):
+    now = datetime.now(UTC)
+    start = _row(RID_OLD, "work-issue", "in_progress", _iso(now - timedelta(days=1)))
+    blocked = {**start, "outcome": "blocked"}
+    resume = {
+        **start,
+        "ts": _iso(now - timedelta(minutes=1)),
+        "session_id": session,
+        "session_source": source,
+        "notes": "Continue",
+        "resumed_from_sha256": module._canonical_digest(blocked) if valid else "0" * 64,
+    }
+    rows = [start, blocked, resume]
+    args = argparse.Namespace(run_id=RID_OLD, skill="work-issue", ceiling_s=ceiling)
+    assert module.cmd_check_ceiling(args, rows) == expected
+    # Neither replay nor another block/resume within this context renews its clock.
+    repeated_blocker = {**resume, "outcome": "blocked"}
+    repeated = {
+        **resume,
+        "ts": _iso(now),
+        "resumed_from_sha256": module._canonical_digest(repeated_blocker),
+    }
+    assert (
+        module.cmd_check_ceiling(args, [*rows, resume, repeated_blocker, repeated])
+        == expected
+    )
+    assert rows[0]["ts"] == start["ts"]
+
+    if valid and session == "fresh" and source == "codex_thread":
+        for returning_session in ("sess-x", "fresh"):
+            blocker = {**rows[-1], "outcome": "blocked"}
+            returning = {
+                **resume,
+                "ts": _iso(now),
+                "session_id": returning_session,
+                "resumed_from_sha256": module._canonical_digest(blocker),
+            }
+            rows.extend([blocker, returning])
+            assert module.cmd_check_ceiling(args, rows) == (
+                3 if returning_session == "sess-x" else expected
+            )

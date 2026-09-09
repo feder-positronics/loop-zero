@@ -4,26 +4,15 @@ Called by outer mutating skills, including standalone delivery leaves, to record
 how a logical run progresses and ends. The aggregator at `skill_stats.py` reads
 these logs.
 
-Schema (one append-only JSON object per lifecycle transition):
-{
-  "ts": "2026-05-12T22:30:00Z",          # ISO-8601 UTC
-  "run_id": "sr_<32 lowercase hex>",      # stable across sessions
-  "skill": "work-issue",                  # canonical skill name
-  "duration_s": 1834,                     # wall-clock seconds (optional)
-  "outcome": "in_progress|merged|abandoned|blocked|resolved_no_change",
-  "review_passes": 2,                     # cycles through review-gate (optional)
-  "tokens_in": 1200000,                   # caller-attributed run input tokens (optional)
-  "tokens_out": 45000,                    # caller-attributed run output tokens (optional)
-  "tokens_cached": 1100000,               # caller-attributed run cached input (optional)
-  "token_scope": "run",                  # present only with explicit run tokens
-  "session_tokens_in_cumulative": 1200000, # automatic Codex session snapshot (optional)
-  "session_tokens_out_cumulative": 45000,  # automatic Codex session snapshot (optional)
-  "session_tokens_cached_cumulative": 1100000, # automatic Codex session snapshot
-  "issue": 307,                           # GitHub issue number (optional)
-  "pr": 315,                              # GitHub PR number (optional)
-  "footgun_bypass": false,                # primary-checkout work? (optional)
-  "notes": "free-form short note"         # ≤100 chars (optional)
-}
+Each append-only JSON row contains an ISO-8601 UTC ``ts``, stable logical
+``run_id`` (``sr_`` plus 32 lowercase hex characters), canonical ``skill``,
+and lifecycle ``outcome``. Optional observations include ``duration_s``,
+``review_passes``, ``issue``, ``pr``, ``footgun_bypass``, and short ``notes``
+(at most 100 characters).
+
+Explicit caller-attributed ``tokens_in``, ``tokens_out``, and ``tokens_cached``
+carry ``token_scope="run"``; automatic Codex session snapshots instead use
+``session_tokens_{in,out,cached}_cumulative`` and are not run attribution.
 
 When `--duration-s` is omitted, the script attempts to derive wall-clock time
 from prior `agent_event.py` entries in the same session for the same skill and
@@ -58,16 +47,8 @@ from job_store import JobStoreError, canonical_job_root
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
 VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
-# Campaign session ceiling (#3418 P3): past this wall-clock, a session emits
-# its take-up brief and terminates. Rationale is NOT token cost — orchestrator
-# tokens are ~99% prompt-cached and effectively free (2026-08-10 measurement).
-# The ceiling exists for context-quality drift over very long sessions and to
-# bound T3 host event-store growth (marathon threads melted state.sqlite on
-# 2026-08-09; upstream #4008/#5719 unfixed). Raised 8h → 24h on 2026-08-10,
-# then narrowed to 12h after issue #3812 ran for 22h22m without reaching a
-# natural boundary. The delivery controller now requires an earlier checkpoint;
-# this remains the context-rollover backstop and never terminalizes the logical
-# run or consumes an authorized critical repair edge.
+# Bound session context drift and host event-store growth, not token cost.
+# Callers can override this wall-clock ceiling with --ceiling-s.
 SESSION_CEILING_S = 12 * 3600
 # Stale-run reconcile is DECOUPLED from the ceiling: a genuinely dead session
 # (no run-log activity AND no provider life signs) should be reaped well
@@ -176,7 +157,32 @@ def resolve_start_run_id(
         raise ValueError(
             f"branch {git_branch!r} is already owned by active run {run_id}"
         )
+    if blocked_run_for_branch(entries, git_branch) is not None:
+        raise ValueError("branch has a blocked delivery; use --resume with its existing run ID")
     return f"sr_{uuid4().hex}"
+
+
+def blocked_run_for_branch(entries: list[dict[str, object]], branch: str) -> str | None:
+    for row in reversed(entries):
+        run_id = row.get("run_id")
+        if isinstance(run_id, str) and RUN_ID_RE.fullmatch(run_id) and row.get("git_branch") == branch:
+            return run_id if row.get("outcome") == "blocked" else None
+    return None
+
+
+def is_resume_transition(previous: dict[str, object], row: dict[str, object]) -> bool:
+    """Recognize the exact blocked predecessor bound by the resume writer."""
+    return (
+        previous.get("outcome") == "blocked"
+        and row.get("outcome") == "in_progress"
+        and row.get("resumed_from_sha256") == _canonical_digest(previous)
+        and isinstance(row.get("notes"), str)
+        and bool(str(row["notes"]).strip())
+        and all(previous.get(key) is not None and row.get(key) == previous[key]
+                for key in ("run_id", "skill", "git_branch"))
+        and all(previous.get(key) is None or row.get(key) == previous[key]
+                for key in ("issue", "pr"))
+    )
 
 
 def latest_run_branch(entries: list[dict[str, object]], *, run_id: str) -> str | None:
@@ -221,6 +227,79 @@ def validate_transition(
     if previous != "in_progress" or requested not in TERMINAL_OUTCOMES:
         raise ValueError(f"invalid lifecycle transition for {run_id}")
     return True
+
+
+def build_resume_entry(
+    entries: list[dict[str, object]],
+    args: argparse.Namespace,
+    fields: dict[str, object],
+) -> dict[str, object] | None:
+    """Resume one blocked owner without resetting its delivery history."""
+    if not isinstance(args.run_id, str) or not RUN_ID_RE.fullmatch(args.run_id):
+        raise ValueError("--resume requires an existing --run-id")
+    reason = (args.notes or "").strip()
+    if not reason or len(reason) > 100:
+        raise ValueError("--resume requires a nonblank --notes reason of at most 100 characters")
+    rows = [row for row in entries if row.get("run_id") == args.run_id]
+    if not rows:
+        raise ValueError("--resume requires an existing logical run")
+    if any(row.get("skill") != args.skill for row in rows):
+        raise ValueError("run_id is already owned by another skill")
+    branch = rows[-1].get("git_branch")
+    if (
+        not isinstance(branch, str)
+        or not branch
+        or fields.get("git_branch") != branch
+        or args.git_branch not in (None, branch)
+        or any(row.get("git_branch") != branch for row in rows)
+    ):
+        raise ValueError("--resume must run on the recorded delivery branch")
+    owner = active_run(entries, git_branch=branch)
+    if owner is not None and owner[0] != args.run_id:
+        raise ValueError("delivery branch is owned by another active run")
+    associations = {}
+    for key in ("issue", "pr"):
+        values = {row[key] for row in rows if row.get(key) is not None}
+        if len(values) > 1:
+            raise ValueError(f"run has conflicting historical {key} identities")
+        recorded = next(iter(values), None)
+        requested = getattr(args, key)
+        if requested is not None and requested != recorded:
+            raise ValueError(f"--resume cannot change the recorded {key}")
+        if recorded is not None:
+            associations[key] = recorded
+    previous = rows[-1]
+    if previous.get("outcome") == "in_progress":
+        if (
+            len(rows) >= 2
+            and is_resume_transition(rows[-2], previous)
+            and previous.get("notes") == reason
+        ):
+            return None
+        raise ValueError("--resume requires a blocked run or its exact resume replay")
+    if previous.get("outcome") != "blocked":
+        raise ValueError("--resume requires a blocked run")
+    now = parse_ts(str(fields.get("ts") or ""))
+    timestamps = [parse_ts(str(row.get("ts") or "")) for row in entries]
+    if now is None or any(timestamp is not None and timestamp > now for timestamp in timestamps):
+        raise ValueError("resume clock precedes lifecycle history; correct the clock before resuming")
+    # A resume is an ownership edge, not a second observation of old counters
+    # or another session's measurements. Original rows retain their evidence.
+    resumed = {
+        key: fields[key] for key in (
+            "ts", "session_id", "session_source", "harness", "wrapper"
+        ) if key in fields
+    }
+    resumed.update(associations)
+    resumed.update(
+        run_id=args.run_id,
+        skill=args.skill,
+        git_branch=branch,
+        outcome="in_progress",
+        notes=reason,
+        resumed_from_sha256=_canonical_digest(previous),
+    )
+    return resumed
 
 
 def _canonical_digest(payload: object) -> str:
@@ -1120,7 +1199,20 @@ def cmd_check_ceiling(args: argparse.Namespace, entries: list[dict]) -> int:
     if not rows:
         print(f"unknown run {run_id}")
         return 2
-    started = parse_ts(str(rows[0].get("ts")))
+    def stable_session(row):
+        value = row.get("session_id")
+        if row.get("session_source") in {"env", "codex_thread"} and isinstance(value, str) and value.strip():
+            return value
+        return None
+
+    origins = {stable_session(rows[0]): rows[0]}
+    for previous, row in zip(rows, rows[1:]):
+        session = stable_session(row)
+        previous_session = stable_session(previous)
+        if session and previous_session and previous_session in origins and is_resume_transition(previous, row):
+            origins.setdefault(session, row)
+    origin = origins.get(stable_session(rows[-1]), rows[0])
+    started = parse_ts(str(origin.get("ts")))
     if started is None:
         print(f"run {run_id} has no parseable start timestamp")
         return 2
@@ -1186,6 +1278,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skill", help="Canonical skill name")
     parser.add_argument("--start", action="store_true", help="Start or reuse a run")
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume a blocked run with --run-id and --notes; preserve phase and review history",
+    )
     parser.add_argument("--run-id", help="Stable logical run ID")
     parser.add_argument(
         "--transition",
@@ -1271,6 +1367,16 @@ def main() -> int:
         help="Canonical frozen closeout capsule authorizing stale-abandoned recovery",
     )
     args = parser.parse_args()
+    if args.resume and any((
+        args.start, args.transition, args.outcome is not None,
+        args.check_ceiling, args.check_owner, args.allow_missing_owner,
+        args.reconcile_stale, args.dry_run, args.verified_merged,
+        args.closeout_capsule is not None, args.footgun_bypass,
+        args.duration_s is not None, args.review_passes is not None,
+        args.tokens_in is not None, args.tokens_out is not None,
+        args.tokens_cached is not None,
+    )):
+        parser.error("--resume cannot change lifecycle, phase, counters, or recovery authority")
     if not args.reconcile_stale and not args.skill:
         parser.error("--skill is required except with --reconcile-stale")
     if not args.start and args.outcome == "merged" and not args.verified_merged:
@@ -1286,6 +1392,20 @@ def main() -> int:
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file, fcntl.LOCK_SH if args.check_owner else fcntl.LOCK_EX)
         entries = load_entries(audit_dir)
+
+        if args.resume:
+            try:
+                entry = build_resume_entry(entries, args, common_fields())
+            except ValueError as exc:
+                parser.error(str(exc))
+            if entry is not None:
+                log_path = audit_dir / f"{str(entry['ts'])[:10]}.jsonl"
+                if any(path > log_path for path in audit_dir.glob("*.jsonl")):
+                    parser.error("resume clock precedes the lifecycle log files; correct the clock")
+                with log_path.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(entry) + "\n")
+            print(args.run_id)
+            return 0
 
         if args.check_owner:
             if args.start or args.transition or args.outcome is not None:
@@ -1371,6 +1491,9 @@ def main() -> int:
                         f"branch {branch!r} is already owned by active run "
                         f"{branch_owner[0]}"
                     )
+                blocked_owner = blocked_run_for_branch(entries, branch)
+                if branch_owner is None and blocked_owner not in (None, args.run_id):
+                    parser.error("branch has a blocked delivery; use --resume with its existing run ID")
                 bound_branch = latest_run_branch(entries, run_id=args.run_id)
                 if bound_branch is not None and bound_branch != branch:
                     parser.error(
@@ -1378,12 +1501,15 @@ def main() -> int:
                         f"cannot reuse it on {branch!r} — start a new run or pass "
                         "the matching --git-branch"
                     )
-            args.run_id = args.run_id or resolve_start_run_id(
-                entries,
-                skill=args.skill,
-                issue=args.issue,
-                git_branch=branch,
-            )
+            try:
+                args.run_id = args.run_id or resolve_start_run_id(
+                    entries,
+                    skill=args.skill,
+                    issue=args.issue,
+                    git_branch=branch,
+                )
+            except ValueError as exc:
+                parser.error(str(exc))
         else:
             if args.outcome is None:
                 parser.error("--outcome is required unless --start is used")
