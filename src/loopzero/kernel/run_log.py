@@ -44,6 +44,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from agent_event import cmd_phase, common_fields, repo_root
 from job_store import JobStoreError, canonical_job_root
+from skill_run_identity import (
+    RUN_ID_RE,
+    RUN_ID_MARKER_RE,
+    active_run,
+    bind_delivery_contract,
+    extract_run_id_marker,
+    parse_ts,
+    require_run_owner,
+    run_delivery_contract,
+)
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
 VALID_OUTCOMES = TERMINAL_OUTCOMES | {"in_progress"}
@@ -55,12 +65,8 @@ SESSION_CEILING_S = 12 * 3600
 # before the handoff ceiling, so the run log reflects reality within a work
 # shift rather than a day. This is the idle-liveness window, not the ceiling.
 STALE_RECONCILE_IDLE_S = 8 * 3600
-RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
 CODEX_SESSION_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
-)
-RUN_ID_MARKER_RE = re.compile(
-    r"<!--\s*skill-run-id:\s*(sr_[0-9a-f]{32})\s*-->", re.IGNORECASE
 )
 PHASES = ("implementation", "local-validation", "review", "ci-wait", "closeout")
 PHASE_SKILLS = {"work-issue", "execute-blueprint"}
@@ -86,46 +92,6 @@ def load_entries(audit_dir: Path) -> list[dict[str, object]]:
             if isinstance(entry, dict):
                 entries.append(entry)
     return entries
-
-
-def active_run(
-    entries: list[dict[str, object]], *, git_branch: str
-) -> tuple[str, str | None] | None:
-    """Return the ID and optional start timestamp of the active branch run.
-
-    The run identity is usable by ownership consumers even for legacy rows
-    without timestamps. Consumers that need a temporal boundary must reject
-    a missing timestamp rather than silently choosing "now".
-    """
-    latest_by_run: dict[str, dict[str, object]] = {}
-    start_by_run: dict[str, str] = {}
-    for entry in entries:
-        run_id = entry.get("run_id")
-        if not isinstance(run_id, str) or not RUN_ID_RE.fullmatch(run_id):
-            continue
-        latest_by_run[run_id] = entry
-        timestamp = entry.get("ts")
-        if run_id not in start_by_run and isinstance(timestamp, str):
-            start_by_run[run_id] = timestamp
-    matches = [
-        run_id
-        for run_id, entry in latest_by_run.items()
-        if entry.get("git_branch") == git_branch
-        and entry.get("outcome") == "in_progress"
-    ]
-    if not matches:
-        return None
-    if len(matches) > 1:
-        raise ValueError(f"multiple active logical runs for branch {git_branch!r}")
-    timestamp = start_by_run.get(matches[0])
-    parsed_timestamp = parse_ts(timestamp) if timestamp is not None else None
-    return matches[0], timestamp if parsed_timestamp is not None else None
-
-
-def extract_run_id_marker(body: str) -> str | None:
-    """Read the portable logical-run handoff marker from a PR body."""
-    matches = {match.lower() for match in RUN_ID_MARKER_RE.findall(body)}
-    return matches.pop() if len(matches) == 1 else None
 
 
 def resolve_start_run_id(
@@ -593,34 +559,6 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
     return payload
 
 
-def require_run_owner(
-    entries: list[dict[str, object]],
-    *,
-    run_id: str,
-    skill: str,
-    allow_missing: bool = False,
-) -> str | None:
-    """Validate one existing run's immutable skill owner without appending."""
-    if not RUN_ID_RE.fullmatch(run_id):
-        raise ValueError("run_id must match sr_<32 lowercase hex characters>")
-    rows = [entry for entry in entries if entry.get("run_id") == run_id]
-    if not rows:
-        if allow_missing:
-            return None
-        raise ValueError(f"unknown run_id: {run_id}")
-    owners = {
-        str(entry["skill"])
-        for entry in rows
-        if isinstance(entry.get("skill"), str) and entry.get("skill")
-    }
-    if len(owners) != 1:
-        raise ValueError(f"run_id has contradictory skill owners: {run_id}")
-    owner = owners.pop()
-    if owner != skill:
-        raise ValueError(f"run_id is already owned by {owner}")
-    return owner
-
-
 def load_phase_events(root: Path) -> list[dict[str, object]]:
     """Load phase evidence without rewriting malformed or legacy JSONL rows."""
     legacy: list[tuple[int, int, dict[str, object]]] = []
@@ -821,13 +759,6 @@ def complete_closeout_phase(
         # or a failed measurement write stays absent; never synthesize it or
         # block the authoritative terminal row.
         return False
-
-
-def parse_ts(raw: str) -> datetime | None:
-    try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def derive_duration_s(
@@ -1284,6 +1215,11 @@ def main() -> int:
     )
     parser.add_argument("--run-id", help="Stable logical run ID")
     parser.add_argument(
+        "--print-delivery-contract",
+        action="store_true",
+        help="Print the original contract for --run-id; optionally check --skill ownership",
+    )
+    parser.add_argument(
         "--transition",
         choices=PHASES,
         help="Advance the logical run to this immediate next delivery phase",
@@ -1377,8 +1313,21 @@ def main() -> int:
         args.tokens_cached is not None,
     )):
         parser.error("--resume cannot change lifecycle, phase, counters, or recovery authority")
-    if not args.reconcile_stale and not args.skill:
+    if not args.reconcile_stale and not args.skill and not args.print_delivery_contract:
         parser.error("--skill is required except with --reconcile-stale")
+    if args.print_delivery_contract and (
+        args.run_id is None
+        or args.start
+        or args.resume
+        or args.transition
+        or args.outcome is not None
+        or args.reconcile_stale
+        or args.check_ceiling
+        or (args.check_owner and not args.skill)
+    ):
+        parser.error(
+            "--print-delivery-contract is a read-only query for an existing --run-id"
+        )
     if not args.start and args.outcome == "merged" and not args.verified_merged:
         parser.error("--outcome merged requires --verified-merged")
     if args.closeout_capsule is not None and (
@@ -1390,8 +1339,20 @@ def main() -> int:
     audit_dir.mkdir(parents=True, exist_ok=True)
     lock_path = audit_dir / ".write.lock"
     with lock_path.open("a+", encoding="utf-8") as lock_file:
-        fcntl.flock(lock_file, fcntl.LOCK_SH if args.check_owner else fcntl.LOCK_EX)
+        fcntl.flock(
+            lock_file,
+            fcntl.LOCK_SH
+            if args.check_owner or args.print_delivery_contract
+            else fcntl.LOCK_EX,
+        )
         entries = load_entries(audit_dir)
+
+        if args.print_delivery_contract and not args.check_owner:
+            try:
+                print(run_delivery_contract(entries, args.run_id))
+            except ValueError as exc:
+                parser.error(str(exc))
+            return 0
 
         if args.resume:
             try:
@@ -1423,7 +1384,16 @@ def main() -> int:
                 )
             except ValueError as exc:
                 parser.error(str(exc))
-            if owner is None:
+            if args.print_delivery_contract:
+                try:
+                    print(
+                        run_delivery_contract(entries, args.run_id)
+                        if owner
+                        else "intelflo-v1"
+                    )
+                except ValueError as exc:
+                    parser.error(str(exc))
+            elif owner is None:
                 print(f"Unowned historical run {args.run_id}")
             else:
                 print(f"Owned {owner} run {args.run_id}")
@@ -1464,6 +1434,11 @@ def main() -> int:
                 parser.error("run_id is already owned by another skill")
             if run_rows[-1].get("outcome") != "in_progress":
                 parser.error("phase transition requires an active logical run")
+            if run_delivery_contract(entries, args.run_id) == "loop-zero-v1":
+                print(
+                    "loop-zero delivery has no phase transitions; retain current source and evidence"
+                )
+                return 0
             changed = transition_phase(
                 root=root,
                 skill=args.skill,
@@ -1517,6 +1492,7 @@ def main() -> int:
                 parser.error("--run-id is required for lifecycle transitions")
 
         entry = build_entry(args)
+        bind_delivery_contract(entry, entries, start=args.start)
         day = str(entry["ts"])[:10]
         log_path = audit_dir / f"{day}.jsonl"
         allow_stale_abandoned_merge = False
@@ -1548,6 +1524,7 @@ def main() -> int:
             and not args.start
             and args.outcome == "merged"
             and args.verified_merged
+            and entry["delivery_contract"] == "intelflo-v1"
         ):
             # The remote merge has already been verified by the closeout
             # adapter. Finish timing first so an interrupted lifecycle-log
@@ -1568,7 +1545,11 @@ def main() -> int:
             with log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
 
-        if args.start and args.skill in PHASE_SKILLS:
+        if (
+            args.start
+            and args.skill in PHASE_SKILLS
+            and entry["delivery_contract"] == "intelflo-v1"
+        ):
             active_phase, completed_phase = _phase_history(
                 load_phase_events(root), skill=args.skill, run_id=args.run_id
             )

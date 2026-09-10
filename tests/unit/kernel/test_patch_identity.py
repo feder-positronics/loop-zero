@@ -617,3 +617,87 @@ def test_range_diff_parser_counts_only_file_payload_and_rejects_ambiguity() -> N
         )
         is None
     )
+
+
+@pytest.mark.parametrize(
+    ("after", "allowed"),
+    [
+        ("def f():\n    return (1 + 2)\n", True),
+        ("def f():\n    return 3\n", False),
+        ("def f():\n    return 1+2  # noqa\n", False),
+        ("def f():\n    pass\nreturn 1+2\n", False),
+    ],
+)
+def test_python_format_carry_proves_syntax_and_comment_identity(
+    patch_repo, after, allowed
+):
+    path = patch_repo / "format.py"
+    path.write_text("def f():\n    return 1+2\n")
+    before = commit_all(patch_repo, "before formatting")
+    path.write_text(after)
+    target = commit_all(patch_repo, "candidate")
+    assert module.prove_format_only(patch_repo, before, target) is allowed
+    path.chmod(0o755)
+    mode_change = commit_all(patch_repo, "mode change")
+    assert not module.prove_format_only(patch_repo, before, mode_change)
+
+
+def test_mechanical_carry_retains_original_run_contract(patch_repo):
+    import review_tree_coverage
+
+    path = patch_repo / "format.py"
+    path.write_text("VALUE=1\n")
+    before = commit_all(patch_repo, "original")
+    path.write_text("VALUE = 1\n")
+    after = commit_all(patch_repo, "formatted")
+    run_id = "sr_" + "a" * 32
+    terminal = {
+        "run_id": run_id,
+        "snapshot_tree_sha": git(patch_repo, "rev-parse", before + "^{tree}"),
+    }
+    target = git(patch_repo, "rev-parse", after + "^{tree}")
+    rows = patch_repo / ".audit/skill-runs"
+    rows.mkdir(parents=True)
+    record = rows / "2026-09-10.jsonl"
+    import json
+
+    record.write_text(json.dumps({"run_id": run_id}) + "\n")
+    assert not review_tree_coverage.mechanical_review_carry(
+        patch_repo, terminal, target
+    )
+    record.write_text(
+        json.dumps({"run_id": run_id, "delivery_contract": "loop-zero-v1"}) + "\n"
+    )
+    assert review_tree_coverage.mechanical_review_carry(patch_repo, terminal, target)
+    record.write_text("")
+    assert not review_tree_coverage.mechanical_review_carry(
+        patch_repo, terminal, target
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "expected"),
+    [
+        ("export const value = { a: 1 };\n", True),
+        ("export const value = { a: 2 };\n", False),
+    ],
+)
+def test_javascript_format_carry_uses_isolated_trusted_formatter(
+    patch_repo, monkeypatch, candidate, expected
+):
+    import dispatch_common
+
+    actual_primary = Path(__file__).resolve().parents[4]
+    # Use the prepared repository toolchain; all source and Git refs stay in
+    # the isolated test repository and the formatter receives stdin only.
+    if not (
+        actual_primary / "nextjs-frontend/node_modules/prettier/bin/prettier.cjs"
+    ).is_file():
+        pytest.skip("prepared frontend formatter is unavailable")
+    monkeypatch.setattr(dispatch_common, "primary_repo_root", lambda _: actual_primary)
+    path = patch_repo / "format.ts"
+    path.write_text("export const value={a:1}\n")
+    before = commit_all(patch_repo, "before format")
+    path.write_text(candidate)
+    after = commit_all(patch_repo, "after format")
+    assert module.prove_format_only(patch_repo, before, after) is expected

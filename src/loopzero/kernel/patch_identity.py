@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Deterministic author-patch identity and replay-equivalence receipts."""
 
+import ast
 import hashlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import tokenize
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -125,6 +128,136 @@ def _require_stdout(repo: Path, *args: str) -> str:
     if completed.returncode != 0 or _OID_RE.fullmatch(value) is None:
         raise PatchIdentityError(f"git {args[0]} could not resolve one object")
     return value
+
+
+
+def _javascript_format_identity(repo: Path, source: bytes, path: bytes) -> bytes | None:
+    """Normalize with trusted Prettier in a read-only, credential-free sandbox."""
+    from dispatch_common import primary_repo_root
+    from guardian_sandbox import command, environment
+
+    primary = primary_repo_root(repo)
+    modules = (primary / "nextjs-frontend/node_modules").resolve()
+    prettier = modules / "prettier/bin/prettier.cjs"
+    if not prettier.is_file():
+        return None
+    parser = "typescript" if path.endswith((b".ts", b".tsx")) else "babel"
+    argv = [
+        "node",
+        str(prettier),
+        "--parser",
+        parser,
+        "--stdin-filepath",
+        os.fsdecode(path),
+        "--no-config",
+        "--no-editorconfig",
+        "--ignore-path",
+        "/dev/null",
+    ]
+    try:
+        wrapped = command(
+            argv,
+            worktree=repo,
+            writable_worktree=False,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_roots=(modules,),
+            preserve_fds=(),
+            deny_network=True,
+            include_model_runtime=False,
+            include_corepack_runtime=True,
+        )
+        child_env = {
+            key: value
+            for key, value in environment().items()
+            if "LEASE" not in key and "NONCE" not in key
+        }
+        result = subprocess.run(
+            wrapped,
+            input=source,
+            capture_output=True,
+            env=child_env,
+            check=False,
+            timeout=10,
+            close_fds=True,
+        )
+        return result.stdout if result.returncode == 0 else None
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return None
+
+
+def prove_format_only(repo: Path, before: str, after: str) -> bool:
+    """Prove a narrow mechanical carry without trusting a caller's classification.
+
+    Existing regular Python files need identical syntax and comments. JS/TS
+    must normalize identically under isolated trusted Prettier. Additions, mode changes,
+    config/ratchet edits and every unsupported language require review evidence.
+    This proves source equivalence, never that validation or CI passed.
+    """
+    if not all(_OID_RE.fullmatch(value) for value in (before, after)):
+        return False
+    try:
+        trees = []
+        for ref in (before, after):
+            result = _git(repo, "ls-tree", "-r", "-z", ref)
+            if result.returncode:
+                return False
+            trees.append(
+                dict(
+                    entry.split(b"\t", 1)[::-1]
+                    for entry in result.stdout.split(b"\0")
+                    if entry
+                )
+            )
+        changed = [
+            path
+            for path in trees[0].keys() | trees[1].keys()
+            if trees[0].get(path) != trees[1].get(path)
+        ]
+        if not changed or len(changed) > 64:
+            return False
+        for path in changed:
+            if (
+                not path.endswith((b".py", b".js", b".jsx", b".ts", b".tsx", b".mjs", b".cjs"))
+                or path not in trees[0]
+                or path not in trees[1]
+            ):
+                return False
+            identities = [tree[path].split() for tree in trees]
+            if identities[0][:2] != identities[1][:2] or identities[0][0] not in {
+                b"100644",
+                b"100755",
+            }:
+                return False
+            sources = []
+            for identity in identities:
+                blob = _git(repo, "cat-file", "blob", identity[2].decode("ascii"))
+                if blob.returncode or len(blob.stdout) > 1_048_576:
+                    return False
+                if not path.endswith(b".py"):
+                    formatted = _javascript_format_identity(repo, blob.stdout, path)
+                    if formatted is None:
+                        return False
+                    sources.append(formatted)
+                    continue
+                tokens = list(tokenize.tokenize(io.BytesIO(blob.stdout).readline))
+                comments = [
+                    (token.type, token.string, token.start)
+                    for token in tokens
+                    if token.type in {tokenize.COMMENT, tokenize.ENCODING}
+                ]
+                syntax = ast.dump(
+                    ast.parse(blob.stdout, type_comments=True), include_attributes=False
+                )
+                sources.append((syntax, comments))
+            if sources[0] != sources[1]:
+                return False
+        return True
+    except (OSError, ValueError, SyntaxError, tokenize.TokenError, UnicodeError):
+        return False
 
 
 def _canonical_digest(value: object) -> str:

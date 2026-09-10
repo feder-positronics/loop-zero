@@ -622,15 +622,17 @@ def test_check_owner_is_read_only_and_rejects_a_different_skill(tmp_path: Path) 
     assert log_path.read_bytes() == before
 
 
+@pytest.mark.parametrize("history_present", [True, False])
 def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, history_present: bool
 ) -> None:
     run_id = "sr_0123456789abcdef0123456789abcdef"
     audit_dir = tmp_path / ".audit" / "skill-runs"
     audit_dir.mkdir(parents=True)
     log_path = audit_dir / f"{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
     log_path.write_text(
-        json.dumps(_entry(run_id, "in_progress")) + "\n", encoding="utf-8"
+        json.dumps(_entry(run_id, "in_progress")) + "\n" if history_present else "",
+        encoding="utf-8",
     )
     monkeypatch.setattr(module, "repo_root", lambda: tmp_path)
 
@@ -666,7 +668,10 @@ def test_verified_merge_appends_terminal_row_when_phase_telemetry_raises(
 
     assert module.main() == 0
     rows = module.load_entries(audit_dir)
-    assert [row["outcome"] for row in rows] == ["in_progress", "merged"]
+    assert [row["outcome"] for row in rows] == (
+        ["in_progress", "merged"] if history_present else ["merged"]
+    )
+    assert rows[-1]["delivery_contract"] == "intelflo-v1"
 
 
 def test_in_progress_can_transition_to_terminal_from_another_session() -> None:
@@ -1984,3 +1989,82 @@ def test_session_ceiling_uses_only_fresh_valid_resume(
             assert module.cmd_check_ceiling(args, rows) == (
                 3 if returning_session == "sess-x" else expected
             )
+
+
+def test_delivery_contract_is_fixed_by_first_run_row() -> None:
+    run_id = "sr_" + "9" * 32
+    old = [{"run_id": run_id, "skill": "work-issue"}]
+    assert module.run_delivery_contract(old, run_id) == "intelflo-v1"
+    new = [{"run_id": run_id, "delivery_contract": "loop-zero-v1"}]
+    assert module.run_delivery_contract(new, run_id) == "loop-zero-v1"
+    with pytest.raises(ValueError, match="contract"):
+        module.run_delivery_contract(old + new, run_id)
+    with pytest.raises(ValueError, match="contract"):
+        module.run_delivery_contract(
+            [{"run_id": run_id, "delivery_contract": "unknown"}], run_id
+        )
+
+
+def test_start_binds_new_contract_without_migrating_resumed_runs() -> None:
+    run_id = "sr_" + "9" * 32
+    new = {"run_id": run_id}
+    module.bind_delivery_contract(new, [], start=True)
+    assert new["delivery_contract"] == "loop-zero-v1"
+    old = {"run_id": run_id}
+    module.bind_delivery_contract(old, [{"run_id": run_id}], start=True)
+    assert old["delivery_contract"] == "intelflo-v1"
+
+
+def test_missing_history_terminal_recovery_keeps_legacy_contract() -> None:
+    recovered = {"run_id": "sr_" + "9" * 32, "outcome": "merged"}
+    module.bind_delivery_contract(recovered, [])
+    assert recovered["delivery_contract"] == "intelflo-v1"
+
+
+def test_fresh_cli_entry_selects_loopzero_and_resume_does_not_create_phases(tmp_path):
+    repo = _repo_with_runs(tmp_path, [])
+    started = _run_cli(
+        repo, "--start", "--skill", "work-issue", "--git-branch", "feature/new"
+    )
+    assert started.returncode == 0, started.stderr
+    run_id = started.stdout.strip()
+    assert (
+        module.run_delivery_contract(
+            module.load_entries(repo / ".audit/skill-runs"), run_id
+        )
+        == "loop-zero-v1"
+    )
+    repeated = _run_cli(
+        repo, "--start", "--skill", "work-issue", "--git-branch", "feature/new"
+    )
+    assert repeated.stdout.strip() == run_id
+    transition = _run_cli(
+        repo, "--skill", "work-issue", "--run-id", run_id, "--transition", "review"
+    )
+    assert transition.returncode == 0, transition.stderr
+    assert "no phase transitions" in transition.stdout
+    assert module.load_phase_events(repo) == []
+    owner = _run_cli(
+        repo,
+        "--skill",
+        "work-issue",
+        "--run-id",
+        run_id,
+        "--check-owner",
+        "--print-delivery-contract",
+    )
+    assert owner.returncode == 0 and owner.stdout.strip() == "loop-zero-v1"
+
+
+def test_delivery_contract_query_is_read_only_and_rejects_unknown_run(tmp_path):
+    repo = _repo_with_runs(tmp_path, [])
+    started = _run_cli(
+        repo, "--start", "--skill", "work-issue", "--git-branch", "feature/query"
+    )
+    run_id = started.stdout.strip()
+    before = module.load_entries(repo / ".audit/skill-runs")
+    query = _run_cli(repo, "--run-id", run_id, "--print-delivery-contract")
+    assert query.returncode == 0 and query.stdout.strip() == "loop-zero-v1"
+    assert module.load_entries(repo / ".audit/skill-runs") == before
+    missing = _run_cli(repo, "--run-id", "sr_" + "f" * 32, "--print-delivery-contract")
+    assert missing.returncode != 0
