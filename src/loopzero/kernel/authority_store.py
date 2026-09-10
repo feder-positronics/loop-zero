@@ -845,6 +845,20 @@ def _retention_live_record_ids(
         if record.get("type") == "delivery-control"
         and record.get("action") == "review-reentry"
     }
+    # Keep the exact signed grant and its entire bounded unit history together.
+    # Raw signed starts are the consumption barrier; summary retry flags are not authority.
+    coordinator_ids = _authenticated_coordinator_record_ids(records)
+    retry_units = {
+        (record.get("run_id"), record.get("work_unit_id"))
+        for record in records
+        if record.get("type") == "inconclusive-retry-authorization" and id(record) in coordinator_ids
+    }
+    retry_tasks = {
+        (record.get("run_id"), record.get("task_id"))
+        for record in records
+        if (record.get("run_id"), record.get("work_unit_id")) in retry_units
+        and record.get("type") in {"attempt-start", "attempt-terminal"}
+    }
     active_runs = frozenset(active_run_ids)
     open_units_by_worktree: dict[str, dict[str, list[str]]] = {}
     latest_standing: dict[tuple[object, ...], int] = {}
@@ -901,6 +915,12 @@ def _retention_live_record_ids(
         )
         if (
             id(record) in authenticated_reentry_ids
+            or (record.get("run_id"), record.get("work_unit_id")) in retry_units
+            or (
+                record_type == "verdict"
+                and (record.get("run_id"), record.get("task_id")) in retry_tasks
+                and id(record) in coordinator_ids
+            )
             or record.get("run_id") in active_runs
             or context in open_contexts
             or (worktree is not None and (str(worktree), unit_id) in open_unit_keys)
@@ -1447,6 +1467,7 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "evidence-cleanup",
         "evidence-cleanup-friction",
         "inline",
+        "inconclusive-retry-authorization",
         "review-chain-advisory",
         "review-recovery-verification",
         RETENTION_STATE_TYPE,
