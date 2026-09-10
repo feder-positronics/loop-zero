@@ -1157,6 +1157,7 @@ _REVIEW_GATE_ANCHOR_FIELDS = (
     "root_work_unit_id",
     "review_intent",
     "review_lens",
+    "advisory",
     "source_identity",
     "snapshot_sha",
     "snapshot_tree_sha",
