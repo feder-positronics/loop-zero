@@ -21,6 +21,7 @@ from typing import cast
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dispatch_ledger as authority_ledger
+from dispatch_archived_review import archived_supersession_deposits
 from dispatch_authority import (
     COORDINATOR_AUTHORITY_SCHEME,
     authenticated_gone_owner_abort,
@@ -1401,7 +1402,9 @@ def authenticated_supersessions(
     legacy_compatibility_ids = _legacy_compatibility_ids
     if legacy_compatibility_ids is None:
         legacy_compatibility_ids = _legacy_compatibility_record_ids(authority_history)
-    deposits_by_key: dict[tuple[str, int], list[dict[str, object]]] = {}
+    deposits_by_key = archived_supersession_deposits(
+        retained_retry_outcomes(authority_history), governed_records
+    )
     unkeyed_legacy_deposits: list[dict[str, object]] = []
     for record in governed_records:
         key = _terminal_authority_attempt_key(record)

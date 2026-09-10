@@ -24,6 +24,7 @@ from typing import cast
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import dispatch_ledger as authority_ledger
+from dispatch_archived_review import passing_archive_anchor, passing_archive_ancestry, validate_archived_review_witness
 from dispatch_authority import (
     authenticated_gone_owner_abort,
     CoordinatorAuthority,
@@ -48,6 +49,7 @@ from dispatch_authority_projection import (
     current_telemetry,
     encode_retention_anchor_fields,
     retained_attempt_settlements,
+    retained_retry_outcomes,
     retained_task_ids,
     retained_work_unit_contracts,
 )
@@ -661,6 +663,140 @@ def load_authority_records(repo: Path, days: int) -> list[dict[str, object]]:
         return snapshot.records
     del days  # Authority and cutover state is durable, never an observation window.
     return load_authority_snapshot(repo).records
+
+
+def load_archived_review_recovery(
+    repo: Path,
+    *,
+    task_id: str,
+    authority_history: Sequence[dict[str, object]],
+) -> dict[str, object] | None:
+    """Resolve one accepted review through the protected archive chain.
+
+    No observation window, legacy fallback, or caller-supplied archive path can
+    supply recovery authority. The ordinary authority projection is unchanged.
+    """
+    with authority_ledger_lock(repo):
+        anchor = passing_archive_anchor(
+            retained_retry_outcomes(authority_history), task_id
+        )
+        if anchor is None:
+            return None
+        snapshot = load_authority_snapshot(repo)
+        if snapshot.checkpoint is None or snapshot.records != authority_history:
+            raise DispatchError("archived review recovery authority changed")
+        matches: list[dict[str, object]] = []
+        chain = _load_authenticated_archive_chain(repo, snapshot.checkpoint)
+        for manifest_path, manifest in reversed(chain):
+            for segment in manifest.segments:
+                matches.extend(
+                    row
+                    for row in _read_authenticated_archive_segment(
+                        manifest_path.parent / "segments" / segment.relative_name,
+                        segment,
+                    )
+                    if row.get("task_id") == task_id
+                    and row.get("attempt_index") == anchor.get("attempt_index")
+                    and row.get("type") in {"attempt-start", "attempt-terminal"}
+                )
+        starts = [row for row in matches if row.get("type") == "attempt-start"]
+        terminals = [row for row in matches if row.get("type") == "attempt-terminal"]
+        if len(starts) != 1 or len(terminals) != 1:
+            raise DispatchError(
+                "archived review recovery requires one exact registered terminal"
+            )
+        witness = {"start": starts[0], "terminal": terminals[0]}
+        validate_archived_review_witness(witness, anchor)
+        if load_authority_snapshot(repo).host_state != snapshot.host_state:
+            raise DispatchError("archived review recovery authority changed")
+        return witness
+
+
+def load_archived_review_proof_history(
+    repo: Path,
+    *,
+    task_id: str,
+    authority_history: Sequence[dict[str, object]],
+) -> AuthorityRecordView:
+    """Build an authenticated ancestry view solely for uncarryable-delta proof.
+
+    The ordinary authority reader and all publication consumers retain their
+    compact projection. No historical rows are written back into the ledger.
+    """
+    with authority_ledger_lock(repo):
+        snapshot = load_authority_snapshot(repo)
+        if snapshot.checkpoint is None or snapshot.records != authority_history:
+            raise DispatchError("archived review proof authority changed")
+        anchors = retained_retry_outcomes(snapshot.records)
+        selected = passing_archive_ancestry(anchors, task_id)
+        requested = {row["task_id"] for row in selected}
+        archived = []
+        for manifest_path, manifest in reversed(
+            _load_authenticated_archive_chain(repo, snapshot.checkpoint)
+        ):
+            for segment in manifest.segments:
+                archived.extend(
+                    row
+                    for row in _read_authenticated_archive_segment(
+                        manifest_path.parent / "segments" / segment.relative_name,
+                        segment,
+                    )
+                    if row.get("task_id") in requested
+                    and row.get("type")
+                    in {"attempt-start", "attempt-terminal", "verdict"}
+                )
+        archived.extend(
+            row
+            for row in snapshot.physical_records[1:]
+            if row.get("task_id") in requested
+        )
+        view = snapshot.records.filtered(
+            [
+                row
+                for row in snapshot.records
+                if row.get("type")
+                in {"coordinator-authority-cutover", RETENTION_STATE_TYPE}
+            ]
+        )
+        for anchor in reversed(selected):
+            rows = [row for row in archived if row.get("task_id") == anchor["task_id"]]
+            starts = [
+                row
+                for row in rows
+                if row.get("type") == "attempt-start"
+                and row.get("attempt_index") == anchor.get("attempt_index")
+            ]
+            terminals = [
+                row
+                for row in rows
+                if row.get("type") == "attempt-terminal"
+                and row.get("attempt_index") == anchor.get("attempt_index")
+            ]
+            if len(starts) != 1 or len(terminals) != 1:
+                raise DispatchError(
+                    "archived proof requires one exact registered terminal"
+                )
+            validate_archived_review_witness(
+                {"start": starts[0], "terminal": terminals[0]}, anchor
+            )
+            view.extend(
+                [
+                    starts[0],
+                    terminals[0],
+                    *[row for row in rows if row.get("type") == "verdict"],
+                ]
+            )
+        accepted = accepted_review_terminals(view, _superseded_task_ids=frozenset())
+        verdicts = authenticated_verdicts(view, _accepted_terminals=accepted)
+        if set(accepted) != requested or any(
+            verdicts.get(str(key), {}).get("verdict") != "pass" for key in requested
+        ):
+            raise DispatchError(
+                "archived proof requires authentic accepted passing ancestry"
+            )
+        if load_authority_snapshot(repo).host_state != snapshot.host_state:
+            raise DispatchError("archived review proof authority changed")
+        return view
 
 
 def _stable_record_digests(
