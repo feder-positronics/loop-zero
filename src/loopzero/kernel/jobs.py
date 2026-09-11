@@ -451,6 +451,10 @@ def build_bound_sandbox_arguments(
     must precede the shared jobs-root overlay: a later bind of a common
     ancestor (for example ``/tmp`` in an isolated installation) would otherwise
     hide the read-only jobs mount and silently restore sibling writes.
+    The synthetic root, root-entry binds, home bind, procfs and writable devfs
+    are all broad mounts. They precede authority ancestors and every read-only
+    authority seal, so a state root below ``/dev`` or ``/proc`` cannot be
+    revealed again by a later broad mount.
     """
     if account_home is None:
         try:
@@ -556,6 +560,11 @@ def build_bound_sandbox_arguments(
         "--tmpfs",
         "/",
         *root_view,
+        "--proc",
+        "/proc",
+        "--dev-bind",
+        "/dev",
+        "/dev",
         *authority_mounts,
         *protected_mounts,
         # Keep this after every writable ancestor bind. Bubblewrap applies
@@ -565,11 +574,6 @@ def build_bound_sandbox_arguments(
         "--ro-bind",
         str(protected_authority_root),
         str(protected_authority_root),
-        "--proc",
-        "/proc",
-        "--dev-bind",
-        "/dev",
-        "/dev",
         "--remount-ro",
         "/",
         "--chdir",

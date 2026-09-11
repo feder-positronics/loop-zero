@@ -66,11 +66,19 @@ Final-CI reproduction is no longer a job-runner special case. Invoke
 `job.sh consumer-hook` with explicit `--base`, `--head`, `--task-id`,
 `--result-artifact`, `--coordinator-public-key`, and `--hook` arguments. Base and
 head are full commit SHAs; neither is read from serialized settings. Before
-launch, the kernel proves that `HEAD` is the approved commit and that the index
-and worktree are clean. An intentional dirty-candidate run must additionally
-pass `--allow-dirty-tree`; it is identified with `git write-tree` through an
-isolated `GIT_INDEX_FILE`. The kernel resolves the base with replacement objects
-and ambient Git configuration disabled, reads privileged hooks with
+launch, the kernel proves that `HEAD` is the approved commit and hashes the
+complete exposed worktree independently of its mutable index. An intentional
+dirty-candidate run must additionally pass `--allow-dirty-tree`; it is identified
+with `git write-tree` through an isolated Git directory and index. Ignored files
+are forced into that tree, while the root `.git` administrative entry is sealed
+read-only by the child sandbox. The isolated repository has no candidate config
+and a highest-precedence attributes file disables filters, working-tree encoding,
+ident and EOL conversion. Candidate `.gitattributes` content is itself hashed but
+cannot change how any bytes are hashed; nested Git worktrees are rejected because
+their checked-out contents cannot be represented by the outer tree. Every Git
+process also disables global/system config, replacement objects, prompts and
+optional locks and supplies explicit hooks, fsmonitor, worktree, symlink and
+attribute overrides. The kernel resolves the base, reads privileged hooks with
 `config.effective_hooks`, and launches them with
 `sandbox.run_validation_child` before acquiring job authority.
 

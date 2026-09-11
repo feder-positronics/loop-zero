@@ -454,7 +454,14 @@ def command(
     include_model_runtime: bool = True,
     include_corepack_runtime: bool = False,
 ) -> list[str]:
-    """Build a namespace with no host-root or host-home visibility."""
+    """Build a namespace with no host-root or host-home visibility.
+
+    Mount ordering is security-significant. The broad runtime views are emitted
+    first (``/usr``, selected ``/etc``, procfs, devfs, and ``/tmp``), followed
+    by runtime executables and then caller mounts. Consequently a caller's
+    read-only worktree, Git metadata, or authority mount below ``/dev`` or
+    ``/proc`` is always the final view of that path.
+    """
     resolved_worktree = _validated(worktree, directory=True)
     mounts: list[tuple[str, Path, Path]] = [
         (

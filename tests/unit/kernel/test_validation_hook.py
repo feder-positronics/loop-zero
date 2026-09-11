@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -215,6 +216,70 @@ def test_verifier_provider_failure_is_retryable_not_tampering(
     assert "verifier is unavailable" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+def test_verifier_provider_failure_is_operational_through_job_main(tmp_path):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    empty_allowlist = tmp_path / "empty-allowlist"
+    empty_allowlist.mkdir()
+    bootstrap = tmp_path / "bootstrap"
+    bootstrap.mkdir()
+    (bootstrap / "sitecustomize.py").write_text(
+        "from pathlib import Path\n"
+        "import loopzero.kernel.authority as authority\n"
+        "from loopzero.trust import TrustedExecutableError, resolve_executable\n"
+        f"allowlist = (Path({str(empty_allowlist)!r}),)\n"
+        "def trusted(name):\n"
+        "    found = resolve_executable(Path.cwd(), name, allowlist)\n"
+        "    if found is None:\n"
+        "        raise TrustedExecutableError(f'trusted {name} executable is unavailable')\n"
+        "    return found\n"
+        "authority.system_executable = trusted\n"
+        "authority._openssl.cache_clear()\n",
+        encoding="utf-8",
+    )
+    wrapper = tmp_path / "providerless-python"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"export PYTHONPATH={shlex.quote(str(bootstrap))}:{shlex.quote(str(Path(__file__).resolve().parents[3] / 'src'))}\n"
+        f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    environment = _environment(tmp_path)
+    environment["LOOPZERO_PYTHON"] = str(wrapper)
+
+    result = subprocess.run(
+        [
+            str(JOB_SH),
+            "consumer-hook",
+            "--base",
+            sha,
+            "--head",
+            sha,
+            "--task-id",
+            "task-1",
+            "--result-artifact",
+            str(artifact),
+            "--coordinator-public-key",
+            str(key),
+            "--hook",
+            "acceptance",
+        ],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2, result.stdout + result.stderr
+    assert "validation result verifier is unavailable" in result.stderr
+    assert "trusted Ed25519 provider is unavailable" in result.stderr
+    assert "rejected (unsigned)" not in result.stderr
+    assert "rejected (signature)" not in result.stderr
+    assert "rejected (binding)" not in result.stderr
+
+
 def test_explicit_base_ignores_ambient_serialized_redirect(tmp_path, monkeypatch):
     repo, sha, signer, key, result = _signed_case(tmp_path)
     monkeypatch.setenv("LOOPZERO_KERNEL_SETTINGS", json.dumps({"toolchain": {"approved_base": "refs/heads/attacker"}}))
@@ -300,6 +365,96 @@ def test_validation_accepts_a_tree_hash_bound_dirty_candidate(tmp_path, monkeypa
     ) == 0
 
 
+def test_source_identity_ignores_hostile_local_git_config_and_filters(tmp_path):
+    repo, sha = _repo(tmp_path, ("gnutrue",))
+    attributes = repo / ".gitattributes"
+    attributes.write_text("*.txt filter=hostile text\n", encoding="utf-8")
+    (repo / "candidate.txt").write_bytes(b"raw\r\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "attributes")
+    sha = _git(repo, "rev-parse", "HEAD")
+    expected = validation.source_identity(
+        repo, approved_head=sha, allow_dirty_tree=True
+    )
+    marker = tmp_path / "hostile-git-ran"
+    hostile = tmp_path / "hostile-git"
+    hostile.write_text(
+        f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nprintf 'changed\\n'\n",
+        encoding="utf-8",
+    )
+    hostile.chmod(0o755)
+    outside = tmp_path / "outside-worktree"
+    outside.mkdir()
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo),
+            "config",
+            "--local",
+            "filter.hostile.clean",
+            str(hostile),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo),
+            "config",
+            "--local",
+            "core.fsmonitor",
+            str(hostile),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo),
+            "config",
+            "--local",
+            "core.hooksPath",
+            str(tmp_path / "hostile-hooks"),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(repo),
+            "config",
+            "--local",
+            "core.worktree",
+            str(outside),
+        ],
+        check=True,
+    )
+
+    assert validation.source_identity(
+        repo, approved_head=sha, allow_dirty_tree=True
+    ) == expected
+    assert not marker.exists()
+
+
+def test_source_identity_hashes_ignored_files(tmp_path):
+    repo, sha = _repo(tmp_path, ("gnutrue",))
+    (repo / ".gitignore").write_text("ignored-input\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    _git(repo, "commit", "-qm", "ignore candidate input")
+    sha = _git(repo, "rev-parse", "HEAD")
+    (repo / "ignored-input").write_text("candidate-controlled\n", encoding="utf-8")
+
+    with pytest.raises(validation.ValidationHookError, match="allow-dirty-tree"):
+        validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
+    source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=True)
+    assert source.kind == "tree"
+    assert source.sha != sha
+
+
 def test_final_ci_repro_task_refuses_noncanonical_command_authority(tmp_path):
     repo, sha = _repo(tmp_path, ("/tmp/attacker",))
     with pytest.raises(validation.ValidationHookError, match="shared allowlist"):
@@ -370,6 +525,57 @@ def test_validation_unsafe_or_missing_result_is_bounded_unsigned_rejection(
     assert time.monotonic() - started < 8
     assert result.returncode == 125, result.stdout + result.stderr
     assert "rejected (unsigned)" in result.stderr
+
+
+def test_result_read_deadline_covers_a_slow_growing_regular_file(
+    tmp_path, monkeypatch
+):
+    artifact = tmp_path / "slow-result"
+    artifact.write_bytes(b"{" + b" " * 128)
+    real_read = os.read
+    stopped = threading.Event()
+
+    def grow() -> None:
+        while not stopped.wait(0.005):
+            with artifact.open("ab") as handle:
+                handle.write(b" ")
+
+    def slow_read(descriptor: int, maximum: int) -> bytes:
+        time.sleep(0.02)
+        return real_read(descriptor, min(maximum, 1))
+
+    writer = threading.Thread(target=grow, daemon=True)
+    writer.start()
+    monkeypatch.setattr(validation.os, "read", slow_read)
+    started = time.monotonic()
+    try:
+        with pytest.raises(validation.UnsignedResultError, match="timed out"):
+            validation._read_regular(
+                artifact,
+                maximum=validation.MAX_RESULT_BYTES,
+                label="validation result artifact",
+                error_type=validation.UnsignedResultError,
+                timeout=0.05,
+            )
+    finally:
+        stopped.set()
+        writer.join(timeout=1)
+    assert time.monotonic() - started < 0.5
+
+
+def test_result_read_deadline_rejects_a_fifo_without_blocking(tmp_path):
+    artifact = tmp_path / "result-fifo"
+    os.mkfifo(artifact)
+    started = time.monotonic()
+    with pytest.raises(validation.UnsignedResultError, match="bounded regular file"):
+        validation._read_regular(
+            artifact,
+            maximum=validation.MAX_RESULT_BYTES,
+            label="validation result artifact",
+            error_type=validation.UnsignedResultError,
+            timeout=0.05,
+        )
+    assert time.monotonic() - started < 0.5
 
 
 @pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)

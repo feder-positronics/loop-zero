@@ -44,6 +44,8 @@ export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_TERMINAL_PROMPT=0
+export GIT_ATTR_NOSYSTEM=1
+export GIT_OPTIONAL_LOCKS=0
 
 
 # Namespaced consumer environment. Keep shell aliases local to this process.
@@ -64,7 +66,25 @@ KERNEL_TRUSTED_CONTINUATION="${!_kernel_name-}"
 
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
 JOB_WORKTREE="${KERNEL_DELIVERY_ROOT:-$PWD}"
-REPO_ROOT="$(/usr/bin/git -C "$JOB_WORKTREE" rev-parse --show-toplevel 2>/dev/null || realpath -m -- "$JOB_WORKTREE")"
+# Do not ask repository-configured Git to select the validation root. Walk to
+# the nearest administrative entry without reading it; validation.py performs
+# the bounded no-follow parsing and approved-HEAD check before candidate code.
+repository_root() {
+    local candidate parent
+    candidate="$(realpath -m -- "$1")" || return 1
+    while true; do
+        if { [ -d "$candidate/.git" ] && [ ! -L "$candidate/.git" ] &&
+             [ -f "$candidate/.git/HEAD" ] && [ -d "$candidate/.git/objects" ]; } ||
+           { [ -f "$candidate/.git" ] && [ ! -L "$candidate/.git" ]; }; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+        [ "$candidate" != "/" ] || return 1
+        parent="${candidate%/*}"
+        candidate="${parent:-/}"
+    done
+}
+REPO_ROOT="$(repository_root "$JOB_WORKTREE" || realpath -m -- "$JOB_WORKTREE")"
 JOB_WORKTREE="$REPO_ROOT"
 # The consumer injects its approved installed-package interpreter.
 # TODO(A4): obtain this from the approved toolchain at the composition root.

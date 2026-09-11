@@ -8,6 +8,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +51,36 @@ def _write_executable(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     path.chmod(0o755)
+
+
+def test_validation_child_broad_mounts_precede_dev_and_proc_seals(
+    monkeypatch
+) -> None:
+    def git_path(command, **kwargs):
+        flag = command[-1]
+        selected = {
+            "--git-common-dir": "/proc/loopzero/common",
+            "--git-dir": "/dev/shm/loopzero/git-dir",
+        }[flag]
+        return subprocess.CompletedProcess(command, 0, selected + "\n", "")
+
+    monkeypatch.setattr(subprocess, "run", git_path)
+    monkeypatch.setattr(module, "_validated", lambda path, directory=None: Path(path))
+    monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    arguments = module.validation_command(
+        ["/usr/bin/true"],
+        worktree=Path("/dev/shm/loopzero/worktree"),
+        read_only_roots=(Path("/proc/loopzero/authority"),),
+    )
+
+    dev_seal = arguments.index("/dev/shm/loopzero/git-dir") - 1
+    proc_seal = arguments.index("/proc/loopzero/authority") - 1
+    assert arguments[dev_seal] == "--ro-bind"
+    assert arguments[proc_seal] == "--ro-bind"
+    assert arguments.index("--dev") < min(dev_seal, proc_seal)
+    assert arguments.index("--proc") < min(dev_seal, proc_seal)
 
 
 def test_codex_subscription_credential_opens_and_closes_owner_only_file():
