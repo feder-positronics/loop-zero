@@ -4,6 +4,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 
 import json
+import logging
 import os
 import select
 import signal
@@ -23,6 +24,10 @@ from .contract import (
     RuntimeProgressProtocolError,
     parse_runtime_progress_frame,
 )
+from .containment import worker_child_environment
+
+LOGGER = logging.getLogger(__name__)
+SandboxWrapper = Callable[[Sequence[str]], Sequence[str]]
 
 RAW_API_ENV_VARS = frozenset(
     {
@@ -454,10 +459,34 @@ def launch_cli(
     pass_fds: Sequence[int] = (),
     progress_fd: int | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    sandbox_wrapper: SandboxWrapper | None = None,
+    unsandboxed: bool = False,
+    unsandboxed_reason: str | None = None,
 ) -> ProcessHandle:
-    """Launch a CLI in a dedicated POSIX session so descendants are owned too."""
+    """Launch an allowlisted CLI child inside a caller-supplied sandbox.
+
+    The wrapper receives the original argv and returns isolated argv (for
+    example a closure over :func:`containment.worker_isolated_command`).  A
+    caller may make an exceptional unsandboxed launch only by setting
+    ``unsandboxed=True`` and supplying a nonempty reason, which is logged.
+    """
     if os.name != "posix":
         raise ProcessGroupError("native runtime process groups require POSIX")
+    if sandbox_wrapper is None:
+        if not unsandboxed:
+            raise ProcessGroupError("runtime launch requires a sandbox wrapper")
+        if not isinstance(unsandboxed_reason, str) or not unsandboxed_reason.strip():
+            raise ProcessGroupError("unsandboxed runtime launch requires a reason")
+        LOGGER.warning("unsandboxed runtime launch: %s", unsandboxed_reason.strip())
+        launch_command = list(command)
+    else:
+        if unsandboxed or unsandboxed_reason is not None:
+            raise ProcessGroupError(
+                "sandboxed runtime launch cannot also request an unsandboxed exception"
+            )
+        launch_command = list(sandbox_wrapper(tuple(command)))
+        if not launch_command:
+            raise ProcessGroupError("sandbox wrapper returned an empty command")
     child_markers = {"AGENT_DISPATCH_DEPTH": "1"}
     if (len(command) >= 3 and command[1] == "-I"
             and Path(command[2]).name == get_settings().bridge_path.name):
@@ -468,11 +497,10 @@ def launch_cli(
         _launch_identity_prerequisites() if on_launch is not None else None
     )
     process = subprocess.Popen(
-        list(command),
+        launch_command,
         cwd=cwd,
-        env=filtered_child_environment(
-            env,
-            extra=child_markers,
+        env=worker_child_environment(
+            filtered_child_environment(env, extra=child_markers),
         ),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
@@ -580,6 +608,9 @@ def run_cli(
     max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
     on_progress: RuntimeProgressCallback | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    sandbox_wrapper: SandboxWrapper | None = None,
+    unsandboxed: bool = False,
+    unsandboxed_reason: str | None = None,
 ) -> ProcessResult:
     """Run and collect one owned CLI with bounded pipes and group cleanup."""
     if timeout_s <= 0:
@@ -610,6 +641,9 @@ def run_cli(
             pass_fds=inherited_fds,
             progress_fd=progress_write_fd,
             on_launch=on_launch,
+            sandbox_wrapper=sandbox_wrapper,
+            unsandboxed=unsandboxed,
+            unsandboxed_reason=unsandboxed_reason,
         )
     except BaseException:
         for fd in (progress_read_fd, progress_write_fd):
@@ -751,6 +785,9 @@ def isolated_python_import_available(
     *,
     timeout_s: float,
     env: Mapping[str, str] | None = None,
+    sandbox_wrapper: SandboxWrapper | None = None,
+    unsandboxed: bool = False,
+    unsandboxed_reason: str | None = None,
 ) -> bool:
     """Probe one trusted SDK import under owned, sterile Python isolation."""
     if not python.is_file() or not os.access(python, os.X_OK):
@@ -767,6 +804,9 @@ def isolated_python_import_available(
                 env=filtered_child_environment(env),
                 max_stdout_bytes=64 * 1024,
                 max_stderr_bytes=64 * 1024,
+                sandbox_wrapper=sandbox_wrapper,
+                unsandboxed=unsandboxed,
+                unsandboxed_reason=unsandboxed_reason,
             )
     except (OSError, subprocess.TimeoutExpired, ProcessGroupError):
         return False

@@ -66,6 +66,7 @@ class Profile:
     env_prefix: str = "LOOPZERO"
     audit_root: Path = Path(".audit")
     state_root: str = "~/.local/state/loopzero"
+    state_root_explicit: bool = False
     contract: str = CONTRACT_ID
     epoch: int = 1
     sandbox: str = "bwrap"
@@ -166,6 +167,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     audit_root = package.get("audit_root", ".audit")
     if not isinstance(audit_root, str) or Path(audit_root).is_absolute():
         problems.append("[package].audit_root: must be a relative path")
+    state_root_explicit = "state_root" in package
     state_root = package.get("state_root", "~/.local/state/loopzero")
     if not isinstance(state_root, str) or not state_root:
         problems.append("[package].state_root: must be a nonempty path")
@@ -272,6 +274,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         env_prefix=env_prefix,
         audit_root=Path(audit_root),
         state_root=state_root,
+        state_root_explicit=state_root_explicit,
         contract=contract,
         epoch=epoch,
         sandbox=sandbox,

@@ -27,6 +27,41 @@ PACKAGED_BRIDGE = Path(__file__).resolve().with_name("bridge.py")
 DEFAULT_ENV_PREFIX = "LOOPZERO"
 DEFAULT_STATE_ROOT = "~/.local/state/loopzero"
 DEFAULT_TEMP_PREFIX = "loopzero"
+DEFAULT_CHILD_ENV_ALLOWLIST = frozenset(
+    {
+        "AGENT_DISPATCH_DEPTH",
+        "CODEX_HOME",
+        "COLORTERM",
+        "FORCE_COLOR",
+        "HOME",
+        "LANG",
+        "LANGUAGE",
+        "LOGNAME",
+        "LOOPZERO_RUNTIME_SETTINGS",
+        "NO_COLOR",
+        "PATH",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "USER",
+        "UV_CACHE_DIR",
+        "XDG_CACHE_HOME",
+    }
+)
+_RUNNER_CHILD_ENV_SUFFIXES = frozenset(
+    {
+        "CLAUDE_AUTH_FD",
+        "CLAUDE_AUTH_STATE",
+        "CLAUDE_TOKEN_FILE",
+        "CODEX_AUTH_FD",
+        "CODEX_AUTH_STATE",
+        "CURSOR_AUTH_FD",
+        "CURSOR_AUTH_STATE",
+        "OUTER_WORKER_SANDBOX",
+        "RUNTIME_PROGRESS_FD",
+    }
+)
 
 _ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _TEMP_PREFIX_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -52,6 +87,7 @@ class RuntimeSettings:
     state_root: str | None = None
     temp_prefix: str | None = None
     tooling_root: Path | None = None
+    child_env_allowlist: frozenset[str] = DEFAULT_CHILD_ENV_ALLOWLIST
 
     def __post_init__(self) -> None:
         if self.temp_prefix is None:
@@ -70,6 +106,17 @@ class RuntimeSettings:
             raise TypeError("toolchain_interpreter must be a Path or None")
         if not isinstance(self.bridge_path, Path):
             raise TypeError("bridge_path must be a Path")
+        if not isinstance(self.child_env_allowlist, frozenset) or any(
+            not isinstance(name, str) or not _ENV_NAME_RE.match(name)
+            for name in self.child_env_allowlist
+        ):
+            raise TypeError("child_env_allowlist must be a frozenset of environment names")
+        object.__setattr__(
+            self,
+            "child_env_allowlist",
+            self.child_env_allowlist
+            | {f"{self.env_prefix}_{suffix}" for suffix in _RUNNER_CHILD_ENV_SUFFIXES},
+        )
 
     @classmethod
     def from_profile(cls, profile: Profile) -> RuntimeSettings:
@@ -87,7 +134,7 @@ class RuntimeSettings:
         return cls(
             env_prefix=profile.env_prefix,
             toolchain_interpreter=Path(interpreter) if interpreter else None,
-            state_root=profile.state_root,
+            state_root=profile.state_root if profile.state_root_explicit else None,
             tooling_root=profile.root.resolve(),
             temp_prefix=profile.env_prefix.lower().replace("_", "-"),
         )
@@ -114,6 +161,7 @@ class RuntimeSettings:
             "state_root": self.state_root,
             "temp_prefix": self.temp_prefix,
             "tooling_root": str(self.tooling_root) if self.tooling_root else None,
+            "child_env_allowlist": sorted(self.child_env_allowlist),
         }, separators=(",", ":"))}
 
     @classmethod
@@ -126,6 +174,8 @@ class RuntimeSettings:
         for key in ("toolchain_interpreter", "bridge_path", "tooling_root"):
             if values.get(key) is not None:
                 values[key] = Path(values[key])
+        if "child_env_allowlist" in values:
+            values["child_env_allowlist"] = frozenset(values["child_env_allowlist"])
         return cls(**values)
 
     # Environment and file-name derivation -------------------------------
@@ -226,6 +276,7 @@ def using_adapter_settings(method):
 
 __all__ = [
     "DEFAULT_ENV_PREFIX",
+    "DEFAULT_CHILD_ENV_ALLOWLIST",
     "DEFAULT_SETTINGS",
     "DEFAULT_STATE_ROOT",
     "DEFAULT_TEMP_PREFIX",

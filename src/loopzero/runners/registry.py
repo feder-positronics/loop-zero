@@ -60,33 +60,15 @@ class RuntimeRegistry:
 
 
 def _create_claude_adapter(**kwargs: Any) -> RuntimeAdapter:
-    if not kwargs:
-        return ClaudeAdapter()
-    return ClaudeAdapter(
-        run_cli=kwargs["run_cli"],
-        run_probe=kwargs["run_probe"],
-        which=kwargs["which"],
-    )
+    return ClaudeAdapter(**kwargs)
 
 
 def _create_codex_adapter(**kwargs: Any) -> RuntimeAdapter:
-    if not kwargs:
-        return CodexAdapter()
-    return CodexAdapter(
-        run_cli=kwargs["run_cli"],
-        run_probe=kwargs["run_probe"],
-        which=kwargs["which"],
-    )
+    return CodexAdapter(**kwargs)
 
 
 def _create_cursor_adapter(**kwargs: Any) -> RuntimeAdapter:
-    if not kwargs:
-        return CursorAdapter()
-    return CursorAdapter(
-        run_cli=kwargs["run_cli"],
-        run_probe=kwargs["run_probe"],
-        which=kwargs["which"],
-    )
+    return CursorAdapter(**kwargs)
 
 
 NATIVE_RUNTIME_REGISTRY = RuntimeRegistry(

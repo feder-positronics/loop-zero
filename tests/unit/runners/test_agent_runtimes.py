@@ -16,6 +16,7 @@ from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
+from loopzero.runners.settings import RuntimeSettings
 
 
 def load_package() -> (
@@ -41,6 +42,13 @@ def load_package() -> (
 
 
 contracts, claude, codex, cursor, process, registry, sdk_bridge = load_package()
+
+
+def run_cli_unsandboxed(*args, **kwargs):
+    """Exercise process mechanics without pretending the test owns a sandbox."""
+    kwargs["unsandboxed"] = True
+    kwargs["unsandboxed_reason"] = "unit test exercises process ownership mechanics"
+    return process.run_cli(*args, **kwargs)
 
 
 def test_result_failure_telemetry_vocabularies_are_closed_and_content_free() -> None:
@@ -509,6 +517,8 @@ def test_isolated_python_probe_ignores_worktree_and_pythonpath_modules(
         "json",
         timeout_s=5,
         env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        unsandboxed=True,
+        unsandboxed_reason="unit test exercises isolated import mechanics",
     )
 
     assert available is True
@@ -994,7 +1004,7 @@ def test_native_stream_rejects_non_utf8_terminal_text_as_semantic(
 def test_claude_sdk_recovers_result_accepted_before_budget_terminal(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import (
         AssistantMessage,
         ResultMessage,
@@ -1079,7 +1089,7 @@ def test_claude_sdk_recovers_result_accepted_before_budget_terminal(
 def test_claude_sdk_recovers_accepted_result_omitted_from_success_terminal(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import (
         AssistantMessage,
         ResultMessage,
@@ -1190,7 +1200,7 @@ def test_claude_sdk_recovers_accepted_result_omitted_from_success_terminal(
 def test_claude_sdk_does_not_promote_unaccepted_success_terminal(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import ResultMessage
 
     async def fake_query(**_kwargs):
@@ -1235,7 +1245,7 @@ def test_claude_sdk_does_not_promote_unaccepted_success_terminal(
 def test_claude_sdk_progress_maps_phases_without_retaining_sensitive_content(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
 
     sensitive_prompt = "private prompt alpha"
@@ -1317,7 +1327,7 @@ def test_claude_sdk_progress_maps_phases_without_retaining_sensitive_content(
 def test_claude_structured_output_tool_maps_directly_to_result_packaging(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import AssistantMessage, ResultMessage, ToolUseBlock
 
     async def fake_query(**_kwargs):
@@ -1413,7 +1423,7 @@ def test_claude_stream_tool_start_maps_from_envelope_without_retaining_input(
 def test_claude_sdk_keeps_last_accepted_result_when_later_attempt_is_rejected(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import (
         AssistantMessage,
         ResultMessage,
@@ -1511,7 +1521,7 @@ def test_claude_sdk_keeps_last_accepted_result_when_later_attempt_is_rejected(
 def test_claude_sdk_does_not_promote_unaccepted_budget_terminal_output(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import ResultMessage
 
     unaccepted = {
@@ -1563,7 +1573,7 @@ def test_claude_sdk_does_not_promote_unaccepted_budget_terminal_output(
 def test_claude_sdk_emits_terminal_protocol_failure_for_malformed_result(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import ResultMessage
 
     async def fake_query(**_kwargs):
@@ -1693,7 +1703,7 @@ def test_claude_environment_removes_gateway_and_raw_api_paths() -> None:
 def test_claude_sdk_and_cli_receive_scoped_tools_and_native_schema(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     runtime_request = claude_request(tmp_path)
     bridge_request = sdk_bridge._validate_request_payload(
         {
@@ -2022,13 +2032,17 @@ def test_sdk_bridge_starts_under_isolated_python_mode(
         encoding="utf-8",
     )
 
-    result = process.run_cli(
-        [sys.executable, *command_builder(repo_root)[1:]],
-        cwd=tmp_path,
-        input_text="not-json",
-        timeout_s=5,
-        env={**os.environ, "PYTHONPATH": str(tmp_path)},
-    )
+    with RuntimeSettings(
+        env_prefix="INTELFLO", toolchain_interpreter=Path(sys.executable)
+    ).use():
+        command = command_builder(repo_root)
+        result = run_cli_unsandboxed(
+            command,
+            cwd=tmp_path,
+            input_text="not-json",
+            timeout_s=5,
+            env={**os.environ, "PYTHONPATH": str(tmp_path)},
+        )
 
     assert result.returncode == 2
     assert json.loads(result.stdout) == {"type": "error", "reason": "protocol"}
@@ -2147,7 +2161,7 @@ def test_claude_sdk_readiness_rejects_unsupported_model_before_auth_or_launch(
 def test_selected_claude_sdk_bundle_supports_fable_5_1_without_model_launch(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     repo_root = Path(__file__).resolve().parents[4]
     runtime_request = replace(
         claude_request(tmp_path),
@@ -2155,13 +2169,17 @@ def test_selected_claude_sdk_bundle_supports_fable_5_1_without_model_launch(
         tooling_root=repo_root,
     )
 
-    result = process.run_cli(
-        [sys.executable, *claude.build_sdk_bridge_command(repo_root)[1:]],
-        cwd=tmp_path,
-        input_text=claude._sdk_model_readiness_payload(runtime_request),
-        timeout_s=5,
-        env=claude.filtered_claude_environment(),
-    )
+    with RuntimeSettings(
+        env_prefix="INTELFLO", toolchain_interpreter=Path(sys.executable)
+    ).use():
+        command = claude.build_sdk_bridge_command(repo_root)
+        result = run_cli_unsandboxed(
+            command,
+            cwd=tmp_path,
+            input_text=claude._sdk_model_readiness_payload(runtime_request),
+            timeout_s=5,
+            env=claude.filtered_claude_environment(),
+        )
 
     assert result.returncode == 0
     assert result.stdout == '{"type":"readiness","status":"ready"}\n'
@@ -2628,7 +2646,7 @@ def test_claude_timeout_never_falls_back(tmp_path: Path) -> None:
 
 
 def test_sdk_bridge_options_keep_prompt_out_of_options_repr(tmp_path: Path) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     options = sdk_bridge._options(
         {
             "vendor": "claude",
@@ -2660,7 +2678,7 @@ def test_sdk_bridge_options_keep_prompt_out_of_options_repr(tmp_path: Path) -> N
 def test_claude_structured_output_packaging_latches_before_message_consumption(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import ResultMessage
 
     query_count = 0
@@ -2751,7 +2769,7 @@ def test_claude_structured_output_packaging_latches_before_message_consumption(
 def test_claude_structured_output_packaging_stops_scoped_exploration(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     corpus = evidence / "corpus.json"
@@ -2823,7 +2841,7 @@ def test_claude_structured_output_packaging_hook_and_callback_agree(
     tmp_path: Path,
     profile: str,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     payload = {
         "vendor": "claude",
         "prompt": "private prompt",
@@ -2926,7 +2944,7 @@ def test_sdk_bridge_default_read_hook_allows_in_worktree_calls(
     tool_name: str,
     tool_input: dict[str, str],
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     (tmp_path / "sample.py").write_text("needle\n", encoding="utf-8")
     options = sdk_bridge._options(
         {
@@ -2966,7 +2984,7 @@ def test_sdk_bridge_default_read_hook_allows_in_worktree_calls(
 def test_sdk_bridge_canonical_evidence_read_hook_and_callback_agree(
     monkeypatch, tmp_path: Path, tool_name: str
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     installation = tmp_path / "installation"
     bridge = installation / "scripts" / "util" / "agent_runtimes" / "sdk_bridge.py"
     bridge.parent.mkdir(parents=True)
@@ -3116,7 +3134,7 @@ def test_sdk_bridge_default_read_hook_denies_out_of_scope_calls(
     tool_name: str,
     tool_input: dict[str, str],
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     options = sdk_bridge._options(
         {
             "vendor": "claude",
@@ -3154,7 +3172,7 @@ def test_sdk_bridge_default_read_hook_denies_out_of_scope_calls(
 def test_sdk_bridge_keeps_visibility_separate_from_authorization(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     options = sdk_bridge._options(
         {
             "vendor": "claude",
@@ -3177,7 +3195,7 @@ def test_sdk_bridge_keeps_visibility_separate_from_authorization(
 def test_sdk_bridge_exact_read_and_hash_scope_allows_only_declared_calls(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     corpus = evidence / "corpus.json"
@@ -3262,7 +3280,7 @@ def test_sdk_bridge_scope_hook_denies_unrelated_tools_and_cross_worktree_paths(
     tool_name: str,
     tool_input: dict[str, str],
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     (evidence / "corpus.json").write_text("{}", encoding="utf-8")
@@ -3307,7 +3325,7 @@ def test_sdk_bridge_scope_hook_denies_unrelated_tools_and_cross_worktree_paths(
 def test_sdk_bridge_scope_hook_fails_closed_for_unresolvable_read_path(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     loop = tmp_path / "loop"
     loop.symlink_to(loop)
     options = sdk_bridge._options(
@@ -3344,7 +3362,7 @@ def test_sdk_bridge_scope_hook_fails_closed_for_unresolvable_read_path(
 def test_sdk_bridge_scope_hook_fails_closed_when_hash_path_becomes_unresolvable(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     evidence = tmp_path / "evidence"
     evidence.mkdir()
     corpus = evidence / "corpus.json"
@@ -3385,7 +3403,7 @@ def test_sdk_bridge_scope_hook_fails_closed_when_hash_path_becomes_unresolvable(
 def test_sdk_bridge_scoped_options_do_not_leak_to_later_default_request(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     sdk_bridge._options(
         {
             "vendor": "claude",
@@ -3609,7 +3627,7 @@ def test_codex_environment_removes_openai_gateway_and_raw_api_paths() -> None:
 def test_codex_bridge_thread_kwargs_force_first_party_provider_and_deny_all(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    pytest.importorskip("openai_codex")
+    import openai_codex
     kwargs = sdk_bridge._codex_thread_kwargs(
         {
             "vendor": "codex",
@@ -3684,7 +3702,7 @@ def test_codex_bridge_thread_kwargs_force_first_party_provider_and_deny_all(
 def test_codex_sdk_progress_maps_fake_stream_without_retaining_sensitive_content(
     monkeypatch, tmp_path: Path, capsys
 ) -> None:
-    openai_codex = pytest.importorskip("openai_codex")
+    import openai_codex
     from openai_codex.generated.v2_all import (
         AgentMessageThreadItem,
         CommandExecutionThreadItem,
@@ -3831,7 +3849,7 @@ def test_codex_sdk_progress_maps_fake_stream_without_retaining_sensitive_content
 
 
 def test_codex_completed_item_retention_is_constant_and_size_bounded() -> None:
-    pytest.importorskip("openai_codex")
+    import openai_codex
     from openai_codex.generated.v2_all import (
         AgentMessageThreadItem,
         CommandExecutionThreadItem,
@@ -3886,7 +3904,7 @@ def test_codex_completed_item_retention_is_constant_and_size_bounded() -> None:
 def test_codex_bootstrap_thread_kwargs_replace_project_working_directory(
     tmp_path: Path,
 ) -> None:
-    pytest.importorskip("openai_codex")
+    import openai_codex
     project = tmp_path / "project"
     project.mkdir()
     isolated = tmp_path / "isolated"
@@ -3915,7 +3933,7 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    openai_codex = pytest.importorskip("openai_codex")
+    import openai_codex
 
     credential = tmp_path / "auth.json"
     credential.write_text(json.dumps(_protected_codex_auth()), encoding="utf-8")
@@ -3999,7 +4017,7 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    openai_codex = pytest.importorskip("openai_codex")
+    import openai_codex
 
     credential = tmp_path / "auth.json"
     credential.write_text(json.dumps(_protected_codex_auth()), encoding="utf-8")
@@ -4834,7 +4852,7 @@ def test_codex_cli_defers_to_declared_outer_worker_sandbox(tmp_path: Path) -> No
 
 
 def test_codex_sdk_turn_receives_native_output_schema(tmp_path: Path) -> None:
-    pytest.importorskip("openai_codex")
+    import openai_codex
     runtime_request = codex_request(tmp_path)
     bridge_request = sdk_bridge._validate_request_payload(
         {
@@ -5034,7 +5052,7 @@ def test_run_cli_delivers_progress_before_exit_without_forwarding_stdout(
         f"pathlib.Path({str(finished)!r}).write_text('done')"
     )
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", child_code],
         cwd=tmp_path,
         input_text="",
@@ -5066,7 +5084,7 @@ def test_run_cli_drops_malformed_and_oversized_progress(
     )
     observed: list[object] = []
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", child_code],
         cwd=tmp_path,
         input_text="",
@@ -5091,7 +5109,7 @@ def test_run_cli_drops_flooded_progress(tmp_path: Path) -> None:
     )
     observed: list[object] = []
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", child_code],
         cwd=tmp_path,
         input_text="",
@@ -5213,7 +5231,7 @@ def test_run_cli_drops_callback_failures_and_broken_progress_pipe(
             "activity_age_s": 0.0,
         }
     )
-    callback_result = process.run_cli(
+    callback_result = run_cli_unsandboxed(
         [
             sys.executable,
             "-c",
@@ -5229,7 +5247,7 @@ def test_run_cli_drops_callback_failures_and_broken_progress_pipe(
         env={"PATH": os.environ["PATH"]},
         on_progress=lambda _progress: (_ for _ in ()).throw(RuntimeError("private")),
     )
-    broken_result = process.run_cli(
+    broken_result = run_cli_unsandboxed(
         [
             sys.executable,
             "-c",
@@ -5266,7 +5284,7 @@ def test_progress_heartbeats_never_extend_the_process_timeout(tmp_path: Path) ->
     timeout_s = 1.0
     terminate_grace_s = 0.05
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", child_code],
         cwd=tmp_path,
         input_text="",
@@ -5355,7 +5373,7 @@ def test_progress_reader_reporter_is_cleaned_up_on_terminal_paths(
 ) -> None:
     code = "pass" if mode == "normal" else "import time; time.sleep(60)"
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", code],
         cwd=tmp_path,
         input_text="",
@@ -5400,7 +5418,7 @@ def test_run_cli_lingering_progress_writer_teardown_closes_read_fd_once(
     monkeypatch.setattr(process.os, "close", tracking_close)
 
     try:
-        result = process.run_cli(
+        result = run_cli_unsandboxed(
             [sys.executable, "-c", "pass"],
             cwd=tmp_path,
             input_text="",
@@ -5656,7 +5674,7 @@ def test_semantic_terminal_bridge_error_forbids_read_only_fallback(
 def test_run_cli_uses_a_new_process_group_and_collects_normal_exit(
     tmp_path: Path,
 ) -> None:
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
         cwd=tmp_path,
         input_text="safe input",
@@ -5680,7 +5698,7 @@ def test_run_cli_reaps_descendants_after_normal_parent_exit(tmp_path: Path) -> N
         f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))"
     )
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", parent_code],
         cwd=tmp_path,
         input_text="",
@@ -5707,7 +5725,7 @@ def test_run_cli_preserves_dispatch_depth_and_declared_file_descriptors(
 ) -> None:
     read_fd, write_fd = os.pipe()
     try:
-        result = process.run_cli(
+        result = run_cli_unsandboxed(
             [
                 sys.executable,
                 "-c",
@@ -5732,7 +5750,7 @@ def test_run_cli_preserves_dispatch_depth_and_declared_file_descriptors(
 
 
 def test_run_cli_timeout_terminates_the_owned_process_group(tmp_path: Path) -> None:
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", "import time; time.sleep(60)"],
         cwd=tmp_path,
         input_text="",
@@ -5755,7 +5773,7 @@ def test_run_cli_reports_exact_launch_identity_before_writing_input(
         assert identity.pid == identity.pgid
         assert identity.start_ticks >= identity.prelaunch_tick_lower_bound - 1
 
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", "import sys; print(sys.stdin.read())"],
         cwd=tmp_path,
         input_text="semantic input",
@@ -5783,7 +5801,7 @@ def test_launch_callback_failure_cancels_and_reaps_before_input(
         raise RuntimeError("ownership append unavailable")
 
     with pytest.raises(process.ProcessIdentityError):
-        process.run_cli(
+        run_cli_unsandboxed(
             [
                 sys.executable,
                 "-c",
@@ -5959,7 +5977,7 @@ def test_unreadable_group_member_is_unverifiable(tmp_path: Path) -> None:
 
 
 def test_run_cli_caps_output_and_reaps_the_writer(tmp_path: Path) -> None:
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [
             sys.executable,
             "-c",
@@ -6001,7 +6019,7 @@ def test_run_cli_cancels_owned_process_group_when_parent_is_interrupted(
     monkeypatch.setattr(process.time, "sleep", interrupt)
 
     with pytest.raises(KeyboardInterrupt):
-        process.run_cli(
+        run_cli_unsandboxed(
             ["agent"],
             cwd=tmp_path,
             input_text="",
@@ -6027,7 +6045,7 @@ def test_cancel_cli_terminates_descendants_after_direct_child_exits(
         "time.sleep(60)']); "
         f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))"
     )
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", parent_code],
         cwd=tmp_path,
         input_text="",
@@ -6115,7 +6133,7 @@ def test_runtime_launch_transfers_and_closes_protected_codex_descriptor(
         "PATH": os.environ["PATH"],
         process.CODEX_AUTH_FD_ENV_VAR: str(fd),
     }
-    result = process.run_cli(
+    result = run_cli_unsandboxed(
         [sys.executable, "-c", "import time; time.sleep(0.05)"],
         cwd=tmp_path,
         env=environment,
@@ -6619,7 +6637,7 @@ def test_progress_reporter_recovers_after_transient_pipe_errors(error_type) -> N
 def test_claude_failed_sdk_retains_safe_permission_diagnostics(
     monkeypatch, tmp_path, capsys
 ):
-    claude_agent_sdk = pytest.importorskip("claude_agent_sdk")
+    import claude_agent_sdk
     from claude_agent_sdk import ResultMessage
 
     evidence = tmp_path / ".audit" / "dispatch-inputs" / "copy.json"
@@ -6847,7 +6865,7 @@ def command_completion_stream(monkeypatch, tmp_path):
     import io
     from contextlib import redirect_stdout
 
-    openai_codex = pytest.importorskip("openai_codex")
+    import openai_codex
     from openai_codex.generated.v2_all import (
         AgentMessageThreadItem,
         CommandExecutionThreadItem,

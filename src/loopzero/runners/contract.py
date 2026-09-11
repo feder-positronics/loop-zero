@@ -246,7 +246,7 @@ class RuntimeRequest:
     suppressed so accidental diagnostic logging cannot expose it.
     """
 
-    vendor: Literal["claude", "codex", "cursor"]
+    vendor: Literal["claude", "codex", "cursor", "fake"]
     transport: str
     requested_model: str
     effort: str

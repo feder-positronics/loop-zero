@@ -12,7 +12,20 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.checks == {"required": ("tests",), "advisory": (), "scheduled": ("health",)}
     assert profile.hooks == {"worktree_setup": ("make setup",), "acceptance": ("make test",)}
     assert profile.env_prefix == "LOOPZERO"
+    assert profile.state_root_explicit is False
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
+
+
+def test_profile_records_explicit_state_root(tmp_path: Path):
+    (tmp_path / "workflow.toml").write_text(
+        minimal_workflow(
+            extra='[package]\nenv_prefix = "INTELFLO"\nstate_root = "/var/lib/intelflo"\n'
+        ),
+        encoding="utf-8",
+    )
+    profile = config.load_profile(tmp_path)
+    assert profile.state_root == "/var/lib/intelflo"
+    assert profile.state_root_explicit is True
 
 
 def test_every_problem_is_reported_at_once(tmp_path: Path):
