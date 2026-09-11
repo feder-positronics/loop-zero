@@ -513,11 +513,17 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         sections = []
     elif any(not s.strip() or not _LABEL_KEY_RE.fullmatch(s) for s in sections):
         problems.append("[review].required_sections: section names must be nonempty lowercase identifiers")
+    elif len(sections) != len(set(sections)):
+        problems.append("[review].required_sections: entries must be unique")
     finding_severities = _strings(
         review, "finding_severities", ("critical", "important", "suggestion"), "[review]", problems
     )
     if len(set(finding_severities)) != len(finding_severities):
         problems.append("[review].finding_severities: entries must be unique")
+    if any(value not in {"critical", "important", "suggestion"} for value in finding_severities):
+        problems.append(
+            "[review].finding_severities: values must be critical, important, or suggestion"
+        )
     security_patterns = _strings(review, "security_patterns", (), "[review]", problems)
 
     github = data.get("github", {})
@@ -565,6 +571,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     if type(github_retries) is not int or not 0 <= github_retries <= 10:
         problems.append("[github].retries: must be an integer from 0 through 10")
     body_sections = _strings(github, "body_required_sections", (), "[github]", problems)
+    if len(body_sections) != len(set(body_sections)):
+        problems.append("[github].body_required_sections: entries must be unique")
 
     path_classes: dict[str, tuple[str, ...]] = {}
     path_classes_table = data.get("path_classes", {})
@@ -572,8 +580,19 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         problems.append("[path_classes]: must be a table")
         path_classes_table = {}
     for name, globs in path_classes_table.items():
+        if not _LABEL_KEY_RE.fullmatch(str(name)):
+            problems.append(f"[path_classes].{name}: class names must be lowercase identifiers")
+            continue
         if not isinstance(globs, list) or any(not isinstance(g, str) or not g for g in globs):
             problems.append(f"[path_classes].{name}: must be a list of glob strings")
+            continue
+        if len(globs) != len(set(globs)) or any(
+            "\0" in glob or Path(glob.removeprefix("!")).is_absolute()
+            for glob in globs
+        ):
+            problems.append(
+                f"[path_classes].{name}: globs must be unique relative patterns"
+            )
             continue
         path_classes[str(name)] = tuple(globs)
 

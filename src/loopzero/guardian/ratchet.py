@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
@@ -43,8 +42,10 @@ def _policy_error(claim: Mapping[str, Any]) -> str | None:
 
 def _metric_status(
     claim: Mapping[str, Any], *, root: Path,
-    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    run: Callable[..., object] | None,
 ) -> tuple[str, str, float | None]:
+    if run is None:
+        return "UNSUPPORTED", "metric claims require an injected sandboxed runner", None
     try:
         result = run(
             str(claim["command"]), shell=True, cwd=root, capture_output=True,
@@ -59,7 +60,7 @@ def _metric_status(
         threshold = float(claim["threshold"])
         if not math.isfinite(value):
             raise ValueError("metric value must be finite")
-    except (KeyError, ValueError, OSError, subprocess.TimeoutExpired) as exc:
+    except (KeyError, ValueError, OSError, TimeoutError) as exc:
         return "UNSUPPORTED", str(exc), None
     holds = value <= threshold
     expected = claim.get("expected", "verified")
@@ -77,7 +78,7 @@ def evaluate(
     *,
     claim_group: str,
     checker: ClaimChecker,
-    run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    run: Callable[..., object] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Evaluate one configured manifest group in manifest order.
 

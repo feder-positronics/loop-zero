@@ -98,11 +98,15 @@ default_timeout_s = 0
 high = -1
 [review]
 unknown = true
-required_sections = [""]
+required_sections = ["", "code", "code"]
+finding_severities = ["critical", "unknown"]
 [github]
 unknown = true
 gh_version_floor = "new"
 retries = 11
+body_required_sections = ["Summary", "Summary"]
+[path_classes]
+Bad = ["/absolute"]
 """
         ),
         encoding="utf-8",
@@ -119,9 +123,12 @@ retries = 11
         "[routing.budgets].high",
         "[review].unknown",
         "required_sections",
+        "finding_severities",
         "[github].unknown",
         "gh_version_floor",
         "[github].retries",
+        "body_required_sections",
+        "[path_classes].Bad",
     ):
         assert expected in text
 

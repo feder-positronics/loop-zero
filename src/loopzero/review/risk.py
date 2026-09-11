@@ -61,7 +61,6 @@ def _configured(path_classes, security_patterns, required_sections):
 SCHEMA_VERSION = "delivery-review-risk-v1"
 TIER_RANK = {"T0": 0, "T1": 1, "T2": 2}
 _OID_RE = re.compile(r"[0-9a-f]{40,64}")
-_DOC_SUFFIXES = (".md", ".mdx", ".html")
 _ARTIFACT_KEYS = {
     "base_sha",
     "changed_paths",
@@ -355,9 +354,9 @@ def _artifact(
     except (DispatchError, ReviewRiskError) as exc:
         raise ReviewRiskError(f"security classification failed: {exc}") from exc
 
-    conventional_docs = all(
-        path.startswith("docs/") and path.endswith(_DOC_SUFFIXES)
-        for path in changed_paths
+    docs_patterns = path_classes.get("docs", ())
+    conventional_docs = bool(docs_patterns) and all(
+        _matches(path, docs_patterns) for path in changed_paths
     )
     complete_modes = {path for path, _, _ in modes} == set(changed_paths)
     classifier_disagreement = conventional_docs and not classified.get("docs", False)

@@ -12,7 +12,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ..config import Profile
-from ..trust import git_environment, resolve_executable
+from ..kernel.gitscope import trusted_git_command
+from ..trust import allowed_path, git_environment, resolve_executable
 
 
 class GitHubError(RuntimeError):
@@ -84,9 +85,11 @@ class GitHub:
         self._run = run
         self._sleep = sleep
         executable = resolve_executable(
-            self.root, "gh", (settings.trusted_bin_dir.resolve(strict=False),)
+            self.root, "gh", allowed_path((str(settings.trusted_bin_dir),))
         )
-        self.executable = executable or settings.trusted_bin_dir / "gh"
+        if executable is None:
+            raise GitHubError("trusted gh executable is unavailable")
+        self.executable = executable
         self._checked_version = False
         self._repository: Repository | None = None
 
@@ -119,7 +122,7 @@ class GitHub:
     def repository(self) -> Repository:
         if self._repository is None:
             proc = subprocess.run(
-                ["git", "remote", "get-url", "origin"], cwd=self.root,
+                trusted_git_command(self.root, "remote", "get-url", "origin"), cwd=self.root,
                 env=git_environment(), text=True, capture_output=True,
             )
             if proc.returncode:
