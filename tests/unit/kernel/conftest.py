@@ -24,29 +24,16 @@ def _isolate_git_config_environment(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.delenv(name)
 
 
-def _agent_tooling_lane_was_selected(config: pytest.Config) -> bool:
-    for raw_argument in config.args:
-        path_argument = Path(str(raw_argument).split("::", maxsplit=1)[0])
-        candidate = (
-            path_argument if path_argument.is_absolute() else Path.cwd() / path_argument
-        ).resolve()
-        if candidate == _AGENT_TOOLING_TEST_DIR or candidate.is_relative_to(
-            _AGENT_TOOLING_TEST_DIR
-        ):
-            return True
-    return False
 
+# Imported behavior tests use the original consumer namespace in-process and in
+# subprocesses. New settings tests explicitly exercise a second namespace.
+os.environ["LOOPZERO_ENV_PREFIX"] = "INTELFLO"
+from loopzero.kernel.settings import KernelSettings, configure
+configure(KernelSettings(env_prefix="INTELFLO", toolchain={"interpreter": "fastapi_backend/.venv/bin/python"}))
 
-def pytest_collection_modifyitems(
-    config: pytest.Config,
-    items: list[pytest.Item],
-) -> None:
-    """Skip this isolated suite unless its directory or a child was selected."""
-    if _agent_tooling_lane_was_selected(config):
-        return
-    isolated_lane = pytest.mark.skip(
-        reason="agent-tooling tests run on their explicitly selected lane"
-    )
-    for item in items:
-        if Path(str(item.path)).resolve().is_relative_to(_AGENT_TOOLING_TEST_DIR):
-            item.add_marker(isolated_lane)
+@pytest.fixture(autouse=True)
+def kernel_settings(monkeypatch):
+    import sys
+    monkeypatch.setenv("LOOPZERO_ENV_PREFIX", "INTELFLO")
+    monkeypatch.setenv("LOOPZERO_PYTHON", sys.executable)
+    yield

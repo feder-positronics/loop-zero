@@ -3,7 +3,7 @@
 # Ensures pytest_plugins is only defined in root conftest.py (pytest 8.x requirement)
 set -e
 
-cd fastapi_backend
+cd "${LOOPZERO_PYTEST_ROOT:-.}"
 
 echo "🔍 Checking pytest configuration..."
 
@@ -17,15 +17,15 @@ if find tests -mindepth 2 -name "conftest.py" -exec grep -E "^[[:space:]]*pytest
     echo "Found in:"
     find tests -mindepth 2 -name "conftest.py" -exec grep -l -E "^[[:space:]]*pytest_plugins[[:space:]]*=" {} \;
     echo ""
-    echo "Move pytest_plugins declarations to: fastapi_backend/conftest.py"
+    echo "Move pytest_plugins declarations to: the consumer root conftest.py"
     exit 1
 fi
 
 # Quick pytest collection check (unit tests only — catches conftest import errors fast)
-if ! uv run pytest --collect-only -q tests/unit/ > /dev/null 2>&1; then
+if ! "${LOOPZERO_PYTHON:-python3}" -m pytest --collect-only -q "${LOOPZERO_PYTEST_LANE:-tests/unit/}" > /dev/null 2>&1; then
     echo "❌ ERROR: Pytest test collection failed"
     echo ""
-    echo "Run: cd fastapi_backend && uv run pytest --collect-only"
+    echo "Run: cd "${LOOPZERO_PYTEST_ROOT:-.}" && uv run pytest --collect-only"
     exit 1
 fi
 

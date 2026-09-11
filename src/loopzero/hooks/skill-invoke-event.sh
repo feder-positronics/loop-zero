@@ -24,9 +24,7 @@ set -uo pipefail
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 
-root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-emit="$root/scripts/util/agent_event.py"
-[ -f "$emit" ] || exit 0
+python_bin="${LOOPZERO_PYTHON:-python3}"
 
 # Field paths differ per hook event, and the expansion payload's exact key is not
 # contractually documented, so try the known shapes rather than assuming one.
@@ -47,11 +45,11 @@ skill="${skill##*:}"
 skill="$(printf '%s' "$skill" | tr -d '[:space:]')"
 
 if [ -n "$skill" ]; then
-  python3 "$emit" invoke --skill "$skill" >/dev/null 2>&1 || true
+  "$python_bin" -m loopzero.kernel.events invoke --skill "$skill" >/dev/null 2>&1 || true
   exit 0
 fi
 
 # Unrecognised payload: record the shape rather than nothing.
 event="$(printf '%s' "$payload" | jq -r '.hook_event_name // "unknown"' 2>/dev/null || echo unknown)"
-python3 "$emit" invoke --skill "invoke-unmapped-${event}" >/dev/null 2>&1 || true
+"$python_bin" -m loopzero.kernel.events invoke --skill "invoke-unmapped-${event}" >/dev/null 2>&1 || true
 exit 0

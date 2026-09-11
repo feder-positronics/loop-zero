@@ -1,5 +1,7 @@
 """Security regressions for trusted paths exposed to bound jobs."""
 
+from .package_environment import package_environment
+
 import json
 import os
 import shutil
@@ -10,19 +12,20 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-sys.path.insert(0, str(REPO_ROOT / "scripts" / "util"))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON, HOST_STATE_WRITABLE
 
 requires_nested_user_namespace = pytest.mark.skipif(
-    os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
-    reason="bound-job protection cannot create a nested user namespace",
+    not NAMESPACE_AVAILABLE,
+    reason=NAMESPACE_REASON,
 )
 
 
 def _isolated_job_script(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     script = repo / "scripts" / "util" / "job.sh"
-    shutil.copytree(REPO_ROOT / "scripts" / "util", script.parent)
+    shutil.copytree(REPO_ROOT / "src" / "loopzero" / "kernel", script.parent)
     repo.chmod(0o700)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     return script
@@ -81,7 +84,7 @@ def test_bound_sandbox_denies_continuation_candidate_store_writes(
             str(repo / ".git" / "forged-config"),
         ],
         cwd=repo,
-        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")},
+        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")}),
         capture_output=True,
         text=True,
         timeout=60,
@@ -99,7 +102,7 @@ def test_candidate_store_derivation_ignores_hostile_git_environment(
     monkeypatch: pytest.MonkeyPatch,
     variable: str,
 ) -> None:
-    import job_store
+    from loopzero.kernel import jobs as job_store
 
     script = _isolated_job_script(tmp_path)
     repo = script.resolve().parents[2]
@@ -123,7 +126,7 @@ def test_candidate_store_derivation_ignores_hostile_git_environment(
 def test_candidate_store_protection_pins_linked_worktree_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import job_store
+    from loopzero.kernel import jobs as job_store
 
     primary = tmp_path / "primary"
     primary.mkdir()
@@ -191,7 +194,7 @@ def test_bound_host_dispatcher_accepts_its_canonical_task_result(
     artifact.parent.mkdir(parents=True)
     host_dispatcher.write_text(
         "from pathlib import Path\n"
-        "from worktree_guard import worktree_lease\n"
+        "from loopzero.kernel.worktree_lease import worktree_lease\n"
         f"with worktree_lease(Path({str(repo)!r}), boundary='dispatch-test', git_directory=Path({str(admin)!r})):\n"
         f"    Path({str(artifact)!r}).write_text("
         f"{json.dumps(json.dumps({'task_id': task_id, 'status': 'completed'}))}, "
@@ -223,7 +226,7 @@ def test_bound_host_dispatcher_accepts_its_canonical_task_result(
             *arguments,
         ],
         cwd=repo,
-        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")},
+        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")}),
         capture_output=True,
         text=True,
         timeout=60,
@@ -280,7 +283,7 @@ def test_bound_dispatcher_preserves_external_symlink_artifact(
             "run",
         ],
         cwd=repo,
-        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")},
+        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")}),
         capture_output=True,
         text=True,
         timeout=60,

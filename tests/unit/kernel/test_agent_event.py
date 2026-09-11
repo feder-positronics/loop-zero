@@ -10,15 +10,7 @@ import pytest
 
 
 def load_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    module_path = repo_root / "scripts" / "util" / "agent_event.py"
-    spec = importlib.util.spec_from_file_location("agent_event", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.events')
 
 
 module = load_module()

@@ -416,7 +416,7 @@ def command(
         interpreter = (
             root / "bin" / "python"
             if root.name == ".venv"
-            else root / "fastapi_backend" / ".venv" / "bin" / "python"
+            else root / settings.toolchain.get("interpreter", ".venv/bin/python")
         )
         if interpreter.is_file():
             resolved_interpreter = interpreter.resolve()
@@ -583,3 +583,57 @@ def command(
     )
     built.extend(env_bindings)
     return built
+
+
+def validation_command(argv: Sequence[str], *, worktree: Path,
+                       read_only_roots: Sequence[Path] = (),
+                       deny_network: bool = True) -> list[str]:
+    """Build a validation child boundary covering linked-worktree Git metadata.
+
+    The caller may inspect and adopt child file changes. Git metadata is mounted
+    read-only even when the worktree itself is writable. No authority descriptors
+    are preserved. Use run_validation_child to apply the environment boundary too.
+    """
+    import subprocess
+    worktree = worktree.resolve()
+    git = str(_system_tool("git"))
+    def git_path(flag):
+        result = subprocess.run(
+            [git, "-C", str(worktree), "rev-parse", "--path-format=absolute", flag],
+            env=environment(), capture_output=True, text=True, check=False,
+        )
+        if result.returncode:
+            raise SandboxError("validation worktree Git metadata is unavailable")
+        return Path(result.stdout.strip()).resolve()
+    common = git_path("--git-common-dir")
+    git_dir = git_path("--git-dir")
+    git_entry = worktree / ".git"
+    roots = tuple(dict.fromkeys((*read_only_roots, common, git_dir)))
+    return command(
+        argv, worktree=worktree, writable_worktree=True,
+        audit_source=None, audit_destination=None,
+        git_source=None, git_destination=None, writable_git=False,
+        read_only_roots=roots,
+        read_only_files=(git_entry,) if git_entry.is_file() else (),
+        deny_network=deny_network, include_model_runtime=False,
+    )
+
+
+def run_validation_child(argv: Sequence[str], *, worktree: Path,
+                         source_environment: Mapping[str, str] | None = None,
+                         read_only_roots: Sequence[Path] = (),
+                         timeout: float | None = None):
+    """Spawn with filesystem and environment containment, including descendants."""
+    import subprocess
+    child_environment = environment(source_environment)
+    # A consumer allowlist must never reintroduce lease, nonce or credentials.
+    child_environment = {
+        key: value for key, value in child_environment.items()
+        if not any(part in key.upper() for part in
+                   ("LEASE", "NONCE", "TOKEN", "CREDENTIAL", "AUTH_FD", "SECRET", "PRIVATE_KEY", "SIGNING"))
+    }
+    return subprocess.run(
+        validation_command(argv, worktree=worktree, read_only_roots=read_only_roots),
+        env=child_environment, close_fds=True, pass_fds=(),
+        capture_output=True, text=True, timeout=timeout, check=False,
+    )

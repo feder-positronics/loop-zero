@@ -7,6 +7,7 @@ projections are shared by entry, review, publication and closeout readers.
 from __future__ import annotations
 
 import re
+from .settings import settings
 from datetime import UTC, datetime
 
 RUN_ID_MARKER_RE = re.compile(
@@ -97,8 +98,8 @@ def run_delivery_contract(entries: list[dict[str, object]], run_id: str) -> str:
     rows = [row for row in entries if row.get("run_id") == run_id]
     if not rows:
         raise ValueError("delivery contract requires an existing run")
-    contract = rows[0].get("delivery_contract", "intelflo-v1")
-    if contract not in {"intelflo-v1", "loop-zero-v1"} or any(
+    contract = rows[0].get("delivery_contract", settings.legacy_contract)
+    if contract not in {settings.legacy_contract, "loop-zero-v1"} or any(
         row.get("delivery_contract", contract) != contract for row in rows
     ):
         raise ValueError("delivery contract is invalid or changed within the run")
@@ -113,5 +114,5 @@ def bind_delivery_contract(
     entry["delivery_contract"] = (
         run_delivery_contract(entries, run_id)
         if any(row.get("run_id") == run_id for row in entries)
-        else "loop-zero-v1" if start else "intelflo-v1"
+        else "loop-zero-v1" if start else settings.legacy_contract
     )

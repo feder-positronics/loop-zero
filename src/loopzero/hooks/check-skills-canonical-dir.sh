@@ -12,15 +12,17 @@ cd "$ROOT"
 VIOLATIONS=()
 while IFS= read -r path; do
   [[ -z "$path" ]] && continue
-  if [[ "$path" =~ ^\.agents/skills/[^/]+/ ]] \
-     || [[ "$path" =~ ^\.agent/skills/[^/]+/ ]] \
-     || [[ "$path" =~ ^\.claude/skills/[^/]+/ ]]; then
+  violation=0
+  for directory in ${LOOPZERO_SKILL_MIRRORS:-.agents/skills .agent/skills .claude/skills}; do
+    if [[ "$path" == "$directory"/*/* ]]; then violation=1; fi
+  done
+  if [ "$violation" -eq 1 ]; then
     VIOLATIONS+=("$path")
   fi
 done < <(git diff --cached --name-only)
 
 if [[ ${#VIOLATIONS[@]} -gt 0 ]]; then
-  echo "Skills must be edited only under .cursor/skills/ (canonical)."
+  echo "Skills must be edited only under ${LOOPZERO_CANONICAL_SKILLS:-.cursor/skills}/ (canonical)."
   echo "The following staged paths are under a non-canonical skill dir:"
   printf '  %s\n' "${VIOLATIONS[@]}"
   echo ""

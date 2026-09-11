@@ -2,12 +2,13 @@
 # Ensure local commits use the Vercel-authorized GitHub identity.
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../kernel/settings.sh"
 
-EXPECTED_NAME="${INTELFLO_COMMIT_AUTHOR_NAME:-eowca}"
-EXPECTED_EMAIL="${INTELFLO_COMMIT_AUTHOR_EMAIL:-4008965+eowca@users.noreply.github.com}"
+EXPECTED_NAME="$(loopzero_env COMMIT_AUTHOR_NAME "$(git config user.name)")"
+EXPECTED_EMAIL="$(loopzero_env COMMIT_AUTHOR_EMAIL "$(git config user.email)")"
 
-if [ "${INTELFLO_COMMIT_AUTHOR_BYPASS:-}" = "1" ]; then
-    echo "commit-author-check bypassed via INTELFLO_COMMIT_AUTHOR_BYPASS=1"
+if [ "$(loopzero_env COMMIT_AUTHOR_BYPASS '')" = "1" ]; then
+    echo "commit-author-check bypassed via ${LOOPZERO_ENV_PREFIX:-LOOPZERO}_COMMIT_AUTHOR_BYPASS=1"
     exit 0
 fi
 
@@ -35,7 +36,7 @@ if [ "$author_name" = "$EXPECTED_NAME" ] \
 fi
 
 cat >&2 <<EOF
-Commit identity must use the Vercel-authorized eowca account.
+Commit identity must use the consumer-approved account.
 
 Expected author/committer:
   $EXPECTED_NAME <$EXPECTED_EMAIL>

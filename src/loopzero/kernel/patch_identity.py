@@ -2,6 +2,7 @@
 """Deterministic author-patch identity and replay-equivalence receipts."""
 
 import ast
+from .settings import settings
 import hashlib
 import io
 import json
@@ -136,7 +137,10 @@ def _javascript_format_identity(repo: Path, source: bytes, path: bytes) -> bytes
     from .sandbox import command, environment
 
     primary = primary_repo_root(repo)
-    modules = (primary / "nextjs-frontend/node_modules").resolve()
+    configured = settings.toolchain.get("formatter_modules")
+    if not configured:
+        return None
+    modules = (primary / configured).resolve()
     prettier = modules / "prettier/bin/prettier.cjs"
     if not prettier.is_file():
         return None

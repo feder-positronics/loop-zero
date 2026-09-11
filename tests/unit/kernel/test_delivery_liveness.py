@@ -1,3 +1,5 @@
+
+from .package_environment import package_environment
 import importlib.util
 import os
 import subprocess
@@ -10,15 +12,7 @@ import pytest
 
 
 def load_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    module_path = repo_root / "scripts" / "util" / "delivery_liveness.py"
-    spec = importlib.util.spec_from_file_location("delivery_liveness", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.liveness')
 
 
 module = load_module()
@@ -383,8 +377,9 @@ def _preflight_environment(
     }
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [
             "/bin/bash",
@@ -396,7 +391,7 @@ def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
         text=True,
         check=False,
         timeout=5,
-        env=_preflight_environment(tmp_path, make_body="exit 0"),
+        env=package_environment(_preflight_environment(tmp_path, make_body="exit 0")),
     )
 
     assert result.returncode == 0
@@ -405,8 +400,9 @@ def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
     assert "preflight: OK (#3202)" in result.stdout
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     call_log = tmp_path / "python-calls"
     result = subprocess.run(
         [
@@ -419,11 +415,11 @@ def test_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
         text=True,
         check=False,
         timeout=5,
-        env=_preflight_environment(
+        env=package_environment(_preflight_environment(
             tmp_path,
             make_body="exit 0",
             python_body=f'printf "%s\\n" "$*" >> "{call_log}"; exit 0',
-        ),
+        )),
     )
 
     assert result.returncode == 0
@@ -433,10 +429,11 @@ def test_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
     tmp_path: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     timeout_log = tmp_path / "timeout-calls"
     environment = _preflight_environment(tmp_path, make_body="exit 0")
     fake_bin = tmp_path / "bin"
@@ -456,7 +453,7 @@ def test_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
         text=True,
         check=False,
         timeout=5,
-        env=environment,
+        env=package_environment(environment),
     )
 
     assert result.returncode == 0
@@ -466,8 +463,9 @@ def test_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
     ]
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [
             "/bin/bash",
@@ -479,14 +477,14 @@ def test_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> Non
         text=True,
         check=False,
         timeout=5,
-        env=_preflight_environment(
+        env=package_environment(_preflight_environment(
             tmp_path,
             make_body="exit 0",
             python_body=(
                 "echo 'cursor: authentication check failed; "
                 "run cursor-agent login'; exit 1"
             ),
-        ),
+        )),
     )
 
     assert result.returncode == 1
@@ -496,10 +494,11 @@ def test_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> Non
     assert "== lanes (remote coordination gate) ==" not in result.stdout
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
     tmp_path: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(
         tmp_path, make_body="exit 0", python_body="sleep 2"
     )
@@ -516,7 +515,7 @@ def test_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
         text=True,
         check=False,
         timeout=5,
-        env=environment,
+        env=package_environment(environment),
     )
 
     assert result.returncode == 1
@@ -524,10 +523,11 @@ def test_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
     assert "provider login reported above" not in result.stderr
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
     tmp_path: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(tmp_path, make_body="exit 9", gh_body="exit 9")
     fake_bin = tmp_path / "bin"
     _write_executable(fake_bin / "timeout", 'shift 3; exec "$@"')
@@ -544,7 +544,7 @@ def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
         text=True,
         check=False,
         timeout=5,
-        env=environment,
+        env=package_environment(environment),
     )
 
     assert result.returncode == 1
@@ -555,10 +555,11 @@ def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
     assert result.stdout == ""
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
     tmp_path: Path,
 ) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(tmp_path, make_body="sleep 2")
     environment["PREFLIGHT_STEP_TIMEOUT_SECONDS"] = "0.1"
 
@@ -573,7 +574,7 @@ def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
         text=True,
         check=False,
         timeout=5,
-        env=environment,
+        env=package_environment(environment),
     )
 
     assert result.returncode == 1
@@ -582,8 +583,9 @@ def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
     assert "preflight: OK" not in result.stdout
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [
             "/bin/bash",
@@ -595,7 +597,7 @@ def test_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
         text=True,
         check=False,
         timeout=5,
-        env=_preflight_environment(tmp_path, make_body="exit 0", bash_body="exit 3"),
+        env=package_environment(_preflight_environment(tmp_path, make_body="exit 0", bash_body="exit 3")),
     )
 
     assert result.returncode == 3
@@ -603,8 +605,9 @@ def test_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
     assert "preflight: OK" not in result.stdout
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_collision_timeout_is_failure_not_collision(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(
         tmp_path, make_body="exit 0", bash_body="sleep 2"
     )
@@ -621,15 +624,16 @@ def test_preflight_collision_timeout_is_failure_not_collision(tmp_path: Path) ->
         text=True,
         check=False,
         timeout=5,
-        env=environment,
+        env=package_environment(environment),
     )
 
     assert result.returncode == 1
     assert "preflight: collision guard timed out after 0.1s" in result.stderr
 
 
+@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
 def test_preflight_quiet_auth_timeout_keeps_wrapper_diagnostic(tmp_path: Path) -> None:
-    repo_root = Path(__file__).resolve().parents[4]
+    repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(
         tmp_path, make_body="exit 0", gh_body="sleep 2"
     )
@@ -646,7 +650,7 @@ def test_preflight_quiet_auth_timeout_keeps_wrapper_diagnostic(tmp_path: Path) -
         text=True,
         check=False,
         timeout=5,
-        env=environment,
+        env=package_environment(environment),
     )
 
     assert result.returncode == 1

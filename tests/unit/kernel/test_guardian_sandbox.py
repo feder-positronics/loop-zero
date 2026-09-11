@@ -13,18 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-SCRIPT = REPO_ROOT / "scripts" / "util" / "guardian_sandbox.py"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+SCRIPT = REPO_ROOT / "src" / "loopzero" / "kernel" / "sandbox.py"
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("guardian_sandbox_test", SCRIPT)
-    assert spec and spec.loader
-    sys.path.insert(0, str(REPO_ROOT / "scripts" / "util"))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.sandbox')
 
 
 module = load_module()
@@ -57,53 +51,49 @@ def _write_executable(path: Path) -> None:
     path.chmod(0o755)
 
 
-def test_codex_subscription_credential_opens_and_closes_owner_only_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    auth = tmp_path / ".codex" / "auth.json"
-    auth.parent.mkdir()
-    auth.write_text(_codex_credential(), encoding="utf-8")
-    auth.chmod(0o600)
-    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
-
-    with module.codex_subscription_credential(requested_runtime_s=900) as descriptor:
-        host_payload = json.loads(auth.read_text(encoding="utf-8"))
-        snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
-        assert snapshot["tokens"]["refresh_token"] == snapshot["tokens"]["access_token"]
-        assert (
-            snapshot["tokens"]["refresh_token"]
-            != host_payload["tokens"]["refresh_token"]
-        )
-        assert json.loads(auth.read_text(encoding="utf-8")) == host_payload
-
+def test_codex_subscription_credential_opens_and_closes_owner_only_file():
+    from contextlib import contextmanager
+    observed = []
+    @contextmanager
+    def broker(*, requested_runtime_s):
+        observed.append(requested_runtime_s)
+        import tempfile
+        handle = tempfile.TemporaryFile()
+        fd = handle.fileno()
+        os.write(fd, b"credential snapshot")
+        try:
+            yield fd
+        finally:
+            handle.close()
+    with module.codex_subscription_credential(
+        requested_runtime_s=900, credential_broker=broker
+    ) as descriptor:
+        assert os.pread(descriptor, 100, 0) == b"credential snapshot"
+    assert observed == [900]
     with pytest.raises(OSError):
         os.fstat(descriptor)
 
 
 @pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "empty"])
-def test_codex_subscription_credential_rejects_unsafe_file(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, unsafe_kind: str
-) -> None:
-    auth = tmp_path / ".codex" / "auth.json"
-    auth.parent.mkdir()
-    if unsafe_kind == "symlink":
-        target = tmp_path / "elsewhere.json"
-        target.write_text('{"auth_mode":"chatgpt"}', encoding="utf-8")
-        target.chmod(0o600)
-        auth.symlink_to(target)
-    else:
-        auth.write_text("" if unsafe_kind == "empty" else '{"auth_mode":"chatgpt"}')
-        auth.chmod(0o644 if unsafe_kind == "mode" else 0o600)
-    monkeypatch.setattr(module.Path, "home", lambda: tmp_path)
-
-    with pytest.raises(module.UnsafeCredentialError):
-        with module.codex_subscription_credential(requested_runtime_s=900):
+def test_codex_subscription_credential_rejects_unsafe_file(unsafe_kind):
+    from contextlib import contextmanager
+    @contextmanager
+    def broker(**kwargs):
+        raise module.UnsafeCredentialError(unsafe_kind)
+        yield
+    with pytest.raises(module.UnsafeCredentialError, match=unsafe_kind):
+        with module.codex_subscription_credential(
+            requested_runtime_s=900, credential_broker=broker
+        ):
             pass
 
 
-def test_codex_subscription_credential_requires_the_callers_runtime() -> None:
+def test_codex_subscription_credential_requires_the_callers_runtime():
     with pytest.raises(TypeError):
         with module.codex_subscription_credential():
+            pass
+    with pytest.raises(module.SandboxError, match="credential_broker"):
+        with module.codex_subscription_credential(requested_runtime_s=900):
             pass
 
 

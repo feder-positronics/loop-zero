@@ -42,7 +42,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path.cwd()
 
 BACKEND_WARN = 800
 SCRIPTS_WARN = 800
@@ -58,47 +58,36 @@ FUNCTION_WARN = 150  # warn-only: Python function length signal
 #   path (backend baseline: pre-#765; scripts/tests baseline: pre-#3944).
 #   Exempt to avoid blocking edits. Decompose and remove the entry to lock in
 #   the win.
-ALLOWLIST_PREFIXES: tuple[str, ...] = ("fastapi_backend/app/parsers/",)
-# Cohesive by design: exempt regardless of size.
-COHESIVE_FILES: frozenset[str] = frozenset(
-    {
-        # cohesive JATS XML parser
-        "fastapi_backend/app/etl/fulltext/providers/pmc/jats_parser.py",
-    }
-)
-# Baseline ratchet: exempt only while still over the hard limit; a test fails
-# the entry once the file is decomposed below it, locking in the win.
-BASELINE_FILES: frozenset[str] = frozenset(
-    {
-        # -- scripts baseline over 1600 lines at #3944 adoption (ratchet) --
-        "scripts/deploy/railway-staging-lease.py",
-        "scripts/docs/check_repo_workflow_policy.py",
-        "scripts/ops/compute_monitor.py",
-        "scripts/util/agent_dispatch.py",
-        "scripts/util/agent_runtimes/codex.py",
-        "scripts/util/agent_runtimes/sdk_bridge.py",
-        "scripts/util/audit_manifest.py",
-        "scripts/util/decision_review_dispatch.py",
-        "scripts/util/delivery_control.py",
-        "scripts/util/delivery_pipeline.py",
-        "scripts/util/final_ci_gate.py",
-        "scripts/util/finding_ledger.py",
-        "scripts/util/guardian_delivery.py",
-        "scripts/util/guardian_dispatch.py",
-        "scripts/util/guardian_gate_b.py",
-        "scripts/util/pr_merge_gate.py",
-        "scripts/util/runtime_owner.py",
-        "scripts/util/skill_convergence.py",
-        # -- Python test baseline over 4000 lines at #3944 adoption (ratchet) --
-        "fastapi_backend/tests/integration/api/test_agent_tasks_api.py",
-        "fastapi_backend/tests/unit/agent_runner/test_intelflo_agent.py",
-        "fastapi_backend/tests/unit/scripts/test_agent_dispatch.py",
-        "fastapi_backend/tests/unit/scripts/test_agent_runtimes.py",
-        "fastapi_backend/tests/unit/scripts/test_guardian_dispatch.py",
-        "fastapi_backend/tests/unit/scripts/test_railway_staging_lease.py",
-    }
-)
-ALLOWLIST_FILES: frozenset[str] = COHESIVE_FILES | BASELINE_FILES
+# Consumer policy is injected; package users inherit no product exemptions.
+ALLOWLIST_PREFIXES: tuple[str, ...] = ()
+COHESIVE_FILES: frozenset[str] = frozenset()
+BASELINE_FILES: frozenset[str] = frozenset()
+ALLOWLIST_FILES: frozenset[str] = frozenset()
+BACKEND_ROOT = "src/"
+BACKEND_APP_ROOT = "src/"
+SCRIPTS_ROOT = "scripts/"
+TEST_ROOT = "tests/"
+FRONTEND_ROOT = "frontend/"
+
+
+def configure(*, root: Path, backend_root="src/", backend_app_root="src/",
+              scripts_root="scripts/", test_root="tests/", frontend_root="frontend/",
+              allowlist_prefixes=(), cohesive_files=(), baseline_files=(),
+              thresholds=None):
+    """Install the approved consumer's roots, exemptions and size thresholds."""
+    global REPO_ROOT, BACKEND_ROOT, BACKEND_APP_ROOT, SCRIPTS_ROOT, TEST_ROOT, FRONTEND_ROOT
+    global ALLOWLIST_PREFIXES, COHESIVE_FILES, BASELINE_FILES, ALLOWLIST_FILES
+    REPO_ROOT = root
+    BACKEND_ROOT, BACKEND_APP_ROOT = backend_root, backend_app_root
+    SCRIPTS_ROOT, TEST_ROOT, FRONTEND_ROOT = scripts_root, test_root, frontend_root
+    ALLOWLIST_PREFIXES = tuple(allowlist_prefixes)
+    COHESIVE_FILES, BASELINE_FILES = frozenset(cohesive_files), frozenset(baseline_files)
+    ALLOWLIST_FILES = COHESIVE_FILES | BASELINE_FILES
+    for name, value in (thresholds or {}).items():
+        if name not in {"BACKEND_WARN", "SCRIPTS_WARN", "PY_TEST_WARN", "FRONTEND_WARN",
+                        "HARD_MULTIPLIER", "NEAR_HARD_RATIO", "FUNCTION_WARN"} or value <= 0:
+            raise ValueError("invalid size threshold")
+        globals()[name] = value
 
 # Not source code-debt signal — never checked. Frontend test markers stay here;
 # Python tests are in scope with their own threshold.
@@ -124,7 +113,7 @@ class Finding:
 def is_python_test(path: str) -> bool:
     name = path.rsplit("/", 1)[-1]
     return path.endswith(".py") and (
-        name.startswith("test_") or path.startswith("fastapi_backend/tests/")
+        name.startswith("test_") or path.startswith(TEST_ROOT)
     )
 
 
@@ -134,15 +123,15 @@ def warn_threshold(path: str) -> int | None:
         if is_python_test(path):
             # Any test file under a covered root, including stray test_*.py
             # under fastapi_backend/app/, gets the test threshold.
-            if path.startswith(("fastapi_backend/", "scripts/")):
+            if path.startswith((BACKEND_ROOT, SCRIPTS_ROOT, TEST_ROOT)):
                 return PY_TEST_WARN
             return None
-        if path.startswith("fastapi_backend/app/"):
+        if path.startswith(BACKEND_APP_ROOT):
             return BACKEND_WARN
-        if path.startswith("scripts/"):
+        if path.startswith(SCRIPTS_ROOT):
             return SCRIPTS_WARN
         return None
-    if path.endswith((".ts", ".tsx")) and path.startswith("nextjs-frontend/"):
+    if path.endswith((".ts", ".tsx")) and path.startswith(FRONTEND_ROOT):
         return FRONTEND_WARN
     return None
 

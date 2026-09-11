@@ -12,6 +12,7 @@ make targets own. Cursor-managed worktrees are cleaned by the Cursor harness.
 from __future__ import annotations
 
 import subprocess
+from .settings import settings
 import sys
 import time
 from pathlib import Path
@@ -53,12 +54,14 @@ def tool_tag(path: Path, root: Path) -> str:
     s = str(path)
     if path == root:
         return "primary"
-    if s.startswith(str(root / ".claude" / "worktrees")):
-        return "claude-code"
-    if "/.cursor/worktrees/" in s or s.startswith(str(Path.home() / ".cursor")):
-        return "cursor/codex"
-    if s.startswith(str(root / ".worktrees")):
-        return "manual"
+    for prefix, tag in settings.worktree_tags.items():
+        expanded = Path(prefix).expanduser()
+        candidate = expanded if expanded.is_absolute() else root / expanded
+        if path.is_relative_to(candidate):
+            return tag
+    for marker, tag in settings.worktree_markers.items():
+        if marker in s:
+            return tag
     return "external"
 
 

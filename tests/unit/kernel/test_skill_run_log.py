@@ -1,3 +1,5 @@
+
+from .package_environment import package_environment
 import argparse
 import importlib.util
 import json
@@ -11,28 +13,11 @@ import pytest
 
 
 def load_agent_event_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    module_path = repo_root / "scripts" / "util" / "agent_event.py"
-    spec = importlib.util.spec_from_file_location("agent_event", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.events')
 
 
 def load_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    load_agent_event_module()
-    module_path = repo_root / "scripts" / "util" / "skill_run_log.py"
-    spec = importlib.util.spec_from_file_location("skill_run_log", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.run_log')
 
 
 module = load_module()
@@ -1495,7 +1480,7 @@ def _run_cli(repo, *args, env_extra=None):
     import subprocess
     from pathlib import Path as _P
 
-    script = _P(__file__).resolve().parents[4] / "scripts" / "util" / "skill_run_log.py"
+    script = _P(__file__).resolve().parents[3] / "scripts" / "util" / "skill_run_log.py"
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(repo.parent),
@@ -1504,11 +1489,11 @@ def _run_cli(repo, *args, env_extra=None):
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [sys.executable, str(script), *args],
+        [sys.executable, "-m", "loopzero.kernel.run_log", *args],
         capture_output=True,
         text=True,
         cwd=repo,
-        env=env,
+        env=package_environment(env),
         timeout=60,
     )
 

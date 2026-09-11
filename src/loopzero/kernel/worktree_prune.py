@@ -14,6 +14,7 @@ Safety:
 from __future__ import annotations
 
 import argparse
+from .settings import settings
 import subprocess
 import sys
 from pathlib import Path
@@ -57,7 +58,7 @@ def main() -> int:
         if tag == "primary":
             # Never touch the primary checkout.
             continue
-        if tag != "claude-code":
+        if tag not in settings.prunable_worktree_tags:
             # Lifecycle is not ours — never auto-remove Cursor/Codex/manual worktrees.
             skipped_foreign += 1
             continue

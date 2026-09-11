@@ -18,12 +18,11 @@
 set -e
 
 current="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-case "$current" in
-  staging|main) ;;
-  *)
-    exit 0
-    ;;
-esac
+protected=0
+for branch in ${LOOPZERO_PROTECTED_BRANCHES:-staging main}; do
+  [ "$current" != "$branch" ] || protected=1
+done
+[ "$protected" -eq 1 ] || exit 0
 
 # Compare local HEAD against the last-known origin tip. No fetch.
 if ! git rev-parse --verify --quiet "origin/$current" >/dev/null; then

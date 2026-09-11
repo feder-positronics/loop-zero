@@ -7,8 +7,9 @@ callers must supply settings from an approved Profile, never candidate hooks.
 from __future__ import annotations
 
 import os
+import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,18 +38,25 @@ class KernelSettings:
     sandbox_passthrough: frozenset[str] = frozenset({"LANG", "LC_ALL", "TERM", "TZ"})
     policy_version: str = "2026-08-17-v11"
     telemetry_schema_version: str = "dispatch-telemetry-v9"
-    ledger_domain: bytes = b"intelflo-dispatch-ledger-v3\0"
-    legacy_signature_namespace: str = "intelflo-dispatch-coordinator"
+    ledger_domain: bytes | None = None
+    legacy_signature_namespace: str | None = None
     legacy_public_key: str | None = None
     ledger_max_bytes: int = 16 * 1024 * 1024
     ledger_max_records: int = 20_000
     phase_skills: frozenset[str] = frozenset({"work-issue", "execute-blueprint"})
+    legacy_contract: str = "intelflo-v1"
+    worktree_tags: dict[str, str] = field(default_factory=lambda: {
+        ".claude/worktrees": "claude-code", "~/.cursor": "cursor/codex", ".worktrees": "manual"})
+    worktree_markers: dict[str, str] = field(default_factory=lambda: {"/.cursor/worktrees/": "cursor/codex"})
+    prunable_worktree_tags: frozenset[str] = frozenset({"claude-code"})
     toolchain: dict = field(default_factory=dict)
 
     def __post_init__(self):
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.env_prefix):
             raise ValueError("invalid kernel environment prefix")
         slug = self.env_prefix.lower()
+        object.__setattr__(self, "ledger_domain", self.ledger_domain or f"{slug}-dispatch-ledger-v3\0".encode())
+        object.__setattr__(self, "legacy_signature_namespace", self.legacy_signature_namespace or f"{slug}-dispatch-coordinator")
         object.__setattr__(self, "audit_root", Path(self.audit_root))
         object.__setattr__(self, "state_root", Path(self.state_root or f"~/.local/state/{slug}"))
         object.__setattr__(self, "temp_prefix", self.temp_prefix or f"{slug}-")
@@ -68,7 +76,37 @@ class KernelSettings:
                    state_root=Path(profile.state_root), toolchain=dict(profile.toolchain))
 
 
-settings = KernelSettings(env_prefix=os.environ.get("LOOPZERO_ENV_PREFIX", "LOOPZERO"))
+    def child_environment(self) -> dict[str, str]:
+        """Serialize approved settings for installed-package child entry points."""
+        data = asdict(self)
+        for name, value in list(data.items()):
+            if isinstance(value, Path):
+                data[name] = str(value)
+            elif isinstance(value, bytes):
+                data[name] = value.hex()
+            elif isinstance(value, frozenset):
+                data[name] = sorted(value)
+        return {"LOOPZERO_ENV_PREFIX": self.env_prefix, "LOOPZERO_AUDIT_ROOT": str(self.audit_root),
+                "LOOPZERO_KERNEL_SETTINGS": json.dumps(data)}
+
+    @classmethod
+    def from_environment(cls) -> KernelSettings:
+        payload = os.environ.get("LOOPZERO_KERNEL_SETTINGS")
+        if not payload:
+            return cls(env_prefix=os.environ.get("LOOPZERO_ENV_PREFIX", "LOOPZERO"))
+        data = json.loads(payload)
+        for name in ("sandbox_node_root", "sandbox_bin_root", "sandbox_corepack_home", "sandbox_home"):
+            if name in data:
+                data[name] = Path(data[name])
+        for name in ("sandbox_passthrough", "phase_skills", "prunable_worktree_tags"):
+            if name in data:
+                data[name] = frozenset(data[name])
+        if "ledger_domain" in data:
+            data["ledger_domain"] = bytes.fromhex(data["ledger_domain"])
+        return cls(**data)
+
+
+settings = KernelSettings.from_environment()
 
 
 def configure(value: KernelSettings) -> None:

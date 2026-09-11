@@ -483,7 +483,7 @@ def _format_age(started_at: datetime | None, now: datetime) -> str:
 
 def _release_command(claim: IssueClaim) -> str:
     fields = (
-        "python3 scripts/util/skill_run_log.py"
+        "python3 -m loopzero.kernel.run_log"
         f" --skill {shlex.quote(claim.skill)}"
         f" --run-id {shlex.quote(claim.run_id)}"
         f" --issue {claim.issue}"

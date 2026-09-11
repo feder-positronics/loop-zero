@@ -1,3 +1,5 @@
+
+from .package_environment import package_environment
 import importlib.util
 import os
 import subprocess
@@ -9,17 +11,7 @@ import pytest
 
 
 def load_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    scripts_dir = repo_root / "scripts" / "util"
-    sys.path.insert(0, str(scripts_dir))
-    module_path = scripts_dir / "worktree_guard.py"
-    spec = importlib.util.spec_from_file_location("worktree_guard", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.worktree_lease')
 
 
 module = load_module()
@@ -113,7 +105,7 @@ def test_inherited_descriptor_is_reentrant_for_owned_child(git_repo: Path) -> No
         completed = subprocess.run(
             [
                 sys.executable,
-                str(script),
+                "-m", "loopzero.kernel.worktree_lease",
                 "exec",
                 "--worktree",
                 str(git_repo),
@@ -129,7 +121,7 @@ def test_inherited_descriptor_is_reentrant_for_owned_child(git_repo: Path) -> No
             check=False,
             capture_output=True,
             text=True,
-            env={**os.environ, **lease.child_env()},
+            env=package_environment({**os.environ, **lease.child_env()}),
             pass_fds=lease.pass_fds,
         )
 
@@ -167,7 +159,7 @@ def test_wrong_worktree_inherited_descriptor_does_not_bypass_lock(
         completed = subprocess.run(
             [
                 sys.executable,
-                str(script),
+                "-m", "loopzero.kernel.worktree_lease",
                 "exec",
                 "--worktree",
                 str(other),
@@ -181,7 +173,7 @@ def test_wrong_worktree_inherited_descriptor_does_not_bypass_lock(
             check=False,
             capture_output=True,
             text=True,
-            env={**os.environ, **source.child_env()},
+            env=package_environment({**os.environ, **source.child_env()}),
             pass_fds=source.pass_fds,
         )
 
@@ -200,7 +192,7 @@ def test_fresh_descriptor_for_same_lock_inode_does_not_grant_reentrancy(
             completed = subprocess.run(
                 [
                     sys.executable,
-                    str(script),
+                    "-m", "loopzero.kernel.worktree_lease",
                     "exec",
                     "--worktree",
                     str(git_repo),
@@ -214,7 +206,7 @@ def test_fresh_descriptor_for_same_lock_inode_does_not_grant_reentrancy(
                 check=False,
                 capture_output=True,
                 text=True,
-                env={**os.environ, module.LEASE_FD_ENV: str(fresh_fd)},
+                env=package_environment({**os.environ, module.LEASE_FD_ENV: str(fresh_fd)}),
                 pass_fds=(fresh_fd,),
             )
         finally:
@@ -228,7 +220,7 @@ def test_fresh_descriptor_for_same_lock_inode_does_not_grant_reentrancy(
 
 
 SCRIPT_PATH = (
-    Path(__file__).resolve().parents[4] / "scripts" / "util" / "worktree_guard.py"
+    Path(__file__).resolve().parents[3] / "scripts" / "util" / "worktree_guard.py"
 )
 
 
@@ -244,9 +236,9 @@ def _guard_commit(
     repo: Path, *, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [sys.executable, str(SCRIPT_PATH), "guard-commit", "--worktree", str(repo)],
+        [sys.executable, "-m", "loopzero.kernel.worktree_lease", "guard-commit", "--worktree", str(repo)],
         capture_output=True,
-        env=env,
+        env=package_environment(env),
         text=True,
         timeout=30,
     )
@@ -269,7 +261,7 @@ def test_guard_commit_allows_owned_descendant_after_fd_is_closed(
         completed = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT_PATH),
+                "-m", "loopzero.kernel.worktree_lease",
                 "guard-commit",
                 "--worktree",
                 str(repo),
@@ -277,7 +269,7 @@ def test_guard_commit_allows_owned_descendant_after_fd_is_closed(
             check=False,
             capture_output=True,
             text=True,
-            env=environment,
+            env=package_environment(environment),
             close_fds=True,
         )
 
@@ -303,14 +295,14 @@ def test_guard_commit_allows_owned_descendant_after_descriptor_closes_twice(
                 "-c",
                 descendant,
                 sys.executable,
-                str(SCRIPT_PATH),
+                "-m", "loopzero.kernel.worktree_lease",
                 "guard-commit",
                 "--worktree",
                 str(repo),
             ],
             capture_output=True,
             text=True,
-            env={**os.environ, **lease_environment},
+            env=package_environment({**os.environ, **lease_environment}),
             pass_fds=lease.pass_fds,
             timeout=30,
         )
@@ -334,7 +326,7 @@ def test_guard_commit_blocks_owned_descendant_without_matching_nonce(
         result = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT_PATH),
+                "-m", "loopzero.kernel.worktree_lease",
                 "guard-commit",
                 "--worktree",
                 str(repo),
@@ -342,7 +334,7 @@ def test_guard_commit_blocks_owned_descendant_without_matching_nonce(
             check=False,
             capture_output=True,
             text=True,
-            env=environment,
+            env=package_environment(environment),
             close_fds=True,
             timeout=30,
         )
@@ -364,7 +356,7 @@ def test_guard_commit_rejects_mismatched_descendant_identity(
         completed = subprocess.run(
             [
                 sys.executable,
-                str(SCRIPT_PATH),
+                "-m", "loopzero.kernel.worktree_lease",
                 "guard-commit",
                 "--worktree",
                 str(repo),
@@ -372,7 +364,7 @@ def test_guard_commit_rejects_mismatched_descendant_identity(
             check=False,
             capture_output=True,
             text=True,
-            env=environment,
+            env=package_environment(environment),
             close_fds=True,
         )
 
@@ -397,7 +389,7 @@ def test_guard_commit_blocks_foreign_live_writer_then_releases(
     holder = subprocess.Popen(
         [
             sys.executable,
-            str(SCRIPT_PATH),
+            "-m", "loopzero.kernel.worktree_lease",
             "exec",
             "--worktree",
             str(repo),
@@ -418,11 +410,11 @@ def test_guard_commit_blocks_foreign_live_writer_then_releases(
         lease_fd, lease_nonce = owner_env_path.read_text(encoding="utf-8").splitlines()
         blocked = _guard_commit(
             repo,
-            env={
+            env=package_environment({
                 **os.environ,
                 module.LEASE_FD_ENV: lease_fd,
                 module.LEASE_NONCE_ENV: lease_nonce,
-            },
+            }),
         )
         assert blocked.returncode == 1
         assert "writer lease held" in blocked.stderr
@@ -443,16 +435,16 @@ def test_check_inherited_requires_live_descriptor(
         result = subprocess.run(
             [
                 sys.executable,
-                str(Path(module.__file__).resolve()),
+                "-m", "loopzero.kernel.worktree_lease",
                 "check-inherited",
                 "--worktree",
                 str(git_repo),
             ],
-            env={
+            env=package_environment({
                 **os.environ,
                 **lease.child_env(),
                 module.LEASE_BOUNDARY_ENV: "commit-autofix",
-            },
+            }),
             pass_fds=lease.pass_fds if inherit_fd else (),
             capture_output=True,
             text=True,

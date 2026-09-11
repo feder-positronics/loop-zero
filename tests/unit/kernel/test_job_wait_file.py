@@ -5,6 +5,8 @@ artifact with zero model-side wakes (one blocking call); the killed-worker
 fixture proves the deadman exit routes to the orphan path.
 """
 
+from .package_environment import package_environment
+
 import os
 import subprocess
 import threading
@@ -13,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[4]
-JOB_SH = REPO_ROOT / "scripts" / "util" / "job.sh"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+JOB_SH = REPO_ROOT / "src" / "loopzero" / "kernel" / "job.sh"
 requires_host_job_authority = pytest.mark.skipif(
     os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY") is not None,
     reason="job authority is intentionally outside the nested acceptance sandbox",
@@ -27,7 +29,7 @@ def run_wait_file(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         cwd=cwd,
-        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(cwd / "jobs")},
+        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(cwd / "jobs")}),
         timeout=60,
     )
 
@@ -109,7 +111,7 @@ def test_wait_short_timeout_warns_on_job_wait_too(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(env_dir)},
+        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(env_dir)}),
         timeout=30,
     )
     result = subprocess.run(
@@ -117,7 +119,7 @@ def test_wait_short_timeout_warns_on_job_wait_too(tmp_path: Path) -> None:
         capture_output=True,
         text=True,
         cwd=tmp_path,
-        env={"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(env_dir)},
+        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(env_dir)}),
         timeout=90,
     )
     assert result.returncode == 0, result.stderr

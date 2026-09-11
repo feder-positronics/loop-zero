@@ -9,17 +9,7 @@ import pytest
 
 
 def load_module() -> ModuleType:
-    repo_root = Path(__file__).resolve().parents[4]
-    scripts_dir = repo_root / "scripts" / "util"
-    sys.path.insert(0, str(scripts_dir))
-    module_path = scripts_dir / "dispatch_authority.py"
-    spec = importlib.util.spec_from_file_location("dispatch_authority", module_path)
-    assert spec is not None
-    assert spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return importlib.import_module('loopzero.kernel.authority')
 
 
 module = load_module()
@@ -609,6 +599,7 @@ def test_host_coordinator_proof_is_bound_to_local_trust_root(
 def test_legacy_coordinator_proof_is_available_only_to_explicit_verifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(module, "LEGACY_COORDINATOR_PUBLIC_KEY", "ssh-ed25519 fixture-public-key")
     record = terminal_record()
     proof = {
         "scheme": module.LEGACY_COORDINATOR_AUTHORITY_SCHEME,

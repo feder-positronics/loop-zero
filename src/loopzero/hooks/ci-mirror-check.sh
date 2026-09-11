@@ -3,6 +3,10 @@
 # Mirrors the main local-vs-CI drift checks without running the full CI suite.
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/../kernel/settings.sh"
+# TODO(A4): approved consumer wiring supplies lane roots and helper commands.
+BACKEND_ROOT="${LOOPZERO_BACKEND_ROOT:-backend}"
+FRONTEND_ROOT="${LOOPZERO_FRONTEND_ROOT:-frontend}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo_root"
@@ -34,7 +38,7 @@ emit_tool_event() {
 
     ended_ms="$(now_ms)"
     duration_ms=$((ended_ms - started_ms))
-    python3 scripts/util/agent_event.py tool \
+    "${LOOPZERO_PYTHON:-python3}" -m loopzero.kernel.events tool \
         --skill ci-mirror-check \
         --category "$category" \
         --duration-ms "$duration_ms" \
@@ -49,7 +53,7 @@ observe_validation_receipt() {
         echo "validation-receipt: pre-validation identity unavailable; observation skipped" >&2
         return
     fi
-    python3 scripts/util/ci_mirror_receipts.py \
+    loopzero_consumer CI_MIRROR_RECEIPTS_HOOK \
         --category "$category" \
         --base-ref "$base_ref" \
         --result "$result" \
@@ -59,7 +63,7 @@ observe_validation_receipt() {
 
 capture_validation_receipt_identity() {
     local category="$1"
-    python3 scripts/util/ci_mirror_receipts.py \
+    loopzero_consumer CI_MIRROR_RECEIPTS_HOOK \
         --category "$category" \
         --base-ref "$base_ref" \
         --capture-digest 2>/dev/null || true
@@ -119,10 +123,10 @@ collect_changed_frontend_files() {
     local tmp
     tmp="$(mktemp)"
 
-    git diff --name-only "${base_ref}...HEAD" -- nextjs-frontend >>"$tmp" || true
-    git diff --name-only -- nextjs-frontend >>"$tmp"
-    git diff --cached --name-only -- nextjs-frontend >>"$tmp"
-    git ls-files --others --exclude-standard -- nextjs-frontend >>"$tmp"
+    git diff --name-only "${base_ref}...HEAD" -- "$FRONTEND_ROOT" >>"$tmp" || true
+    git diff --name-only -- "$FRONTEND_ROOT" >>"$tmp"
+    git diff --cached --name-only -- "$FRONTEND_ROOT" >>"$tmp"
+    git ls-files --others --exclude-standard -- "$FRONTEND_ROOT" >>"$tmp"
 
     sort -u "$tmp" | sed '/^$/d'
     rm -f "$tmp"
@@ -207,12 +211,12 @@ elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     elif has_local_changes_in docs/design/blueprints; then
         echo "Local blueprint edits found; running offline structure drift only."
         echo "Online changed-blueprint issue-state drift will run after the edits are committed."
-        blueprint_cmd=(python3 scripts/docs/blueprint-drift-check.py --offline)
+        blueprint_cmd=(loopzero_consumer BLUEPRINT_DRIFT_HOOK --offline)
     elif git diff --quiet "${base_ref}...HEAD" -- docs/design/blueprints; then
         echo "No committed blueprint file changes relative to ${base_ref}; running offline structure drift only."
-        blueprint_cmd=(python3 scripts/docs/blueprint-drift-check.py --offline)
+        blueprint_cmd=(loopzero_consumer BLUEPRINT_DRIFT_HOOK --offline)
     else
-        blueprint_cmd=(python3 scripts/docs/blueprint-drift-check.py --changed-base "${base_ref}")
+        blueprint_cmd=(loopzero_consumer BLUEPRINT_DRIFT_HOOK --changed-base "${base_ref}")
     fi
     if "${blueprint_cmd[@]}"; then
         emit_tool_event "blueprint-drift" "$started_ms" "pass"
@@ -227,7 +231,7 @@ else
 fi
 
 if ! has_relevant_changes_in \
-    fastapi_backend \
+    "$BACKEND_ROOT" \
     .github/workflows/ci.yml \
     .github/workflows/scheduled-ci.yml \
     .github/actions/critical-playwright \
@@ -253,7 +257,7 @@ else
     echo ""
     echo "== Backend lint =="
     started_ms="$(now_ms)"
-    if (cd fastapi_backend && uv run ruff check .); then
+    if (cd "$BACKEND_ROOT" && uv run ruff check .); then
         emit_tool_event "backend-ruff" "$started_ms" "pass"
     else
         emit_tool_event "backend-ruff" "$started_ms" "fail"
@@ -263,7 +267,7 @@ else
     echo ""
     echo "== Backend type check =="
     started_ms="$(now_ms)"
-    if (cd fastapi_backend && uv run mypy app/); then
+    if (cd "$BACKEND_ROOT" && uv run mypy app/); then
         emit_tool_event "backend-mypy" "$started_ms" "pass"
     else
         emit_tool_event "backend-mypy" "$started_ms" "fail"
@@ -272,7 +276,7 @@ else
 fi
 
 if ! has_relevant_changes_in \
-    nextjs-frontend \
+    "$FRONTEND_ROOT" \
     .github/workflows/ci.yml \
     .github/workflows/scheduled-ci.yml \
     .github/actions/critical-playwright \
@@ -287,7 +291,7 @@ else
     frontend_static_receipt_digest="$(capture_validation_receipt_identity "frontend-static")"
     started_ms="$(now_ms)"
     if (
-        cd nextjs-frontend &&
+        cd "$FRONTEND_ROOT" &&
             pnpm run tsc &&
             pnpm run lint &&
             pnpm exec prettier --check '**/*.{js,jsx,ts,tsx,json,css,html}'
@@ -302,7 +306,7 @@ else
 fi
 
 if ! has_relevant_changes_in \
-    nextjs-frontend \
+    "$FRONTEND_ROOT" \
     .github/workflows/ci.yml \
     .github/workflows/scheduled-ci.yml \
     .github/actions/critical-playwright \
@@ -329,14 +333,14 @@ else
     else
         frontend_changed_args=()
         for path in "${frontend_changed_files[@]}"; do
-            frontend_changed_args+=("${path#nextjs-frontend/}")
+            frontend_changed_args+=("${path#"$FRONTEND_ROOT"/}")
         done
         started_ms="$(now_ms)"
         validation_scope_args=("${frontend_changed_files[@]}")
         if [ "$frontend_force" = "1" ]; then
             validation_scope_args=(--force "${validation_scope_args[@]}")
         fi
-        frontend_validation_scope="$(python3 scripts/util/frontend_validation_scope.py "${validation_scope_args[@]}")"
+        frontend_validation_scope="$(loopzero_consumer FRONTEND_VALIDATION_SCOPE_HOOK "${validation_scope_args[@]}")"
         if [ "$frontend_validation_scope" = "full" ]; then
             echo "Shared/broad frontend boundary changed; running the full frontend suite."
             frontend_test_cmd=(pnpm exec vitest run)
@@ -347,7 +351,7 @@ else
             frontend_event="frontend-changed-tests"
             frontend_test_receipt_digest=""
         fi
-        if (cd nextjs-frontend && "${frontend_test_cmd[@]}"); then
+        if (cd "$FRONTEND_ROOT" && "${frontend_test_cmd[@]}"); then
             if [ "$frontend_event" = "frontend-full-tests" ]; then
                 observe_validation_receipt "$frontend_event" "pass" "$frontend_test_receipt_digest"
             fi
@@ -362,7 +366,7 @@ else
         if [ "$frontend_validation_scope" != "full" ]; then
             started_ms="$(now_ms)"
             if (
-                cd nextjs-frontend
+                cd "$FRONTEND_ROOT"
                 shopt -s nullglob
                 guardrail_tests=(
                     __tests__/unit/*guardrail*.test.ts
@@ -383,7 +387,7 @@ else
     fi
 fi
 
-if ! has_relevant_changes_in fastapi_backend; then
+if ! has_relevant_changes_in "$BACKEND_ROOT"; then
     echo ""
     echo "== Backend changed-tests =="
     echo "No backend changes relative to ${base_ref}; skipping backend changed-tests."
@@ -407,7 +411,7 @@ if [ ${#changed_files[@]} -eq 0 ]; then
     semantic_changes=""
 else
     semantic_changes="$(
-        python3 scripts/util/skill_semantic_paths.py -- "${changed_files[@]}"
+        loopzero_consumer SKILL_SEMANTIC_PATHS_HOOK -- "${changed_files[@]}"
     )" || exit 1
 fi
 if [ -z "$semantic_changes" ]; then
@@ -453,7 +457,7 @@ fi
 echo ""
 echo "== Background jobs =="
 started_ms="$(now_ms)"
-if scripts/util/job.sh check; then
+if "$(dirname "${BASH_SOURCE[0]}")/../kernel/job.sh" check; then
     echo "No unfinished background jobs."
     emit_tool_event "job-drain" "$started_ms" "pass"
 else
@@ -470,7 +474,7 @@ echo "== Wait discipline =="
 # requiring an agent lifecycle. Canonical runtime identity lives in agent_event.
 started_ms="$(now_ms)"
 skill_runs_dir="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.audit/skill-runs"
-if ! runtime_kind="$(python3 scripts/util/agent_event.py runtime-kind)"; then
+if ! runtime_kind="$("${LOOPZERO_PYTHON:-python3}" -m loopzero.kernel.events runtime-kind)"; then
     emit_tool_event "poll-gate" "$started_ms" "fail"
     echo "✗ Cannot classify this push as an agent or human runtime." >&2
     exit 1
@@ -481,8 +485,8 @@ if [ -z "$git_branch" ]; then
     echo "✗ Wait-discipline checks require a named branch; detached HEAD is unsupported." >&2
     exit 1
 fi
-if python3 scripts/util/poll_audit.py --gate \
-    --baseline-file "${INTELFLO_JOB_DIR:-.pid/jobs}/../poll-gate-baseline" \
+if loopzero_consumer POLL_AUDIT_HOOK --gate \
+    --baseline-file "$(loopzero_env JOB_DIR '.pid/jobs')/../poll-gate-baseline" \
     --worktree "$(pwd)" \
     --skill-runs-dir "$skill_runs_dir" \
     --git-branch "$git_branch" \
@@ -500,7 +504,7 @@ fi
 # Advisory push-batching signal (#4014): each ready-PR push fires ~3 hosted
 # workflow runs and invalidates the per-SHA final-CI verdict. Local counter
 # only; never changes the hook's exit status.
-push_count_root="${INTELFLO_JOB_DIR:-.pid/jobs}/../push-counts"
+push_count_root="$(loopzero_env JOB_DIR '.pid/jobs')/../push-counts"
 if mkdir -p "$push_count_root" 2>/dev/null; then
     push_count_file="$push_count_root/$(printf '%s' "$git_branch" | tr -c 'A-Za-z0-9._-' '_')"
     previous_pushes="$(cat "$push_count_file" 2>/dev/null || true)"

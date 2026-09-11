@@ -232,8 +232,19 @@ def ensure_job_root(worktree: Path, *, configured: str | None = None) -> Path:
         _ensure_private_directory_chain(root)
         return root
 
-    _validate_account_directory(_account_home())
-    _ensure_private_directory_chain(root)
+    home = _account_home()
+    _validate_account_directory(home)
+    state_root = settings.account_state_root(home)
+    if state_root.is_relative_to(home):
+        cursor = home
+        for part in root.relative_to(home).parts:
+            cursor /= part
+            private = cursor == state_root or cursor.is_relative_to(state_root)
+            _ensure_directory(cursor, private=private)
+            if not private:
+                _validate_account_directory(cursor)
+    else:
+        _ensure_private_directory_chain(root)
     return root
 
 
@@ -299,8 +310,10 @@ def ensure_job_lease(
     return lease
 
 
-def _canonical_candidate_protection_paths() -> tuple[Path, ...]:
-    tool_repository = Path(__file__).resolve().parents[2]
+def _canonical_candidate_protection_paths(tool_repository: Path | None = None) -> tuple[Path, ...]:
+    # The installed package has no repository identity. The trusted launcher
+    # supplies the consumer root; direct library callers default to their cwd.
+    tool_repository = tool_repository or Path.cwd()
     completed = subprocess.run(
         [
             "/usr/bin/git",

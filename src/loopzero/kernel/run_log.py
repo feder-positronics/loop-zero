@@ -1389,7 +1389,7 @@ def main() -> int:
                     print(
                         run_delivery_contract(entries, args.run_id)
                         if owner
-                        else "intelflo-v1"
+                        else settings.legacy_contract
                     )
                 except ValueError as exc:
                     parser.error(str(exc))
@@ -1524,7 +1524,7 @@ def main() -> int:
             and not args.start
             and args.outcome == "merged"
             and args.verified_merged
-            and entry["delivery_contract"] == "intelflo-v1"
+            and entry["delivery_contract"] == settings.legacy_contract
         ):
             # The remote merge has already been verified by the closeout
             # adapter. Finish timing first so an interrupted lifecycle-log
@@ -1548,7 +1548,7 @@ def main() -> int:
         if (
             args.start
             and args.skill in PHASE_SKILLS
-            and entry["delivery_contract"] == "intelflo-v1"
+            and entry["delivery_contract"] == settings.legacy_contract
         ):
             active_phase, completed_phase = _phase_history(
                 load_phase_events(root), skill=args.skill, run_id=args.run_id

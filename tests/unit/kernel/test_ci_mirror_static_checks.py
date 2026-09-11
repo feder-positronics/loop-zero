@@ -1,3 +1,5 @@
+
+from .package_environment import package_environment
 import subprocess
 import sys
 from pathlib import Path
@@ -16,10 +18,10 @@ def _write_executable(path: Path, content: str) -> None:
 
 
 def _prepare_hook_repo(tmp_path: Path) -> Path:
-    root = Path(__file__).resolve().parents[4]
+    root = Path(__file__).resolve().parents[3]
     repo = tmp_path / "repo"
     repo.mkdir()
-    hook = root / "scripts" / "hooks" / "ci-mirror-check.sh"
+    hook = root / "src" / "loopzero" / "hooks" / "ci-mirror-check.sh"
     _write_executable(
         repo / "scripts" / "hooks" / "ci-mirror-check.sh",
         hook.read_text(encoding="utf-8"),
@@ -27,6 +29,11 @@ def _prepare_hook_repo(tmp_path: Path) -> Path:
     _write_executable(
         repo / "scripts" / "util" / "job.sh", "#!/usr/bin/env bash\nexit 0\n"
     )
+    kernel = repo / "scripts/kernel"
+    kernel.mkdir()
+    (kernel / "settings.sh").write_text((root / "src/loopzero/kernel/settings.sh").read_text())
+    (kernel / "job.sh").write_text("#!/bin/sh\nexit 0\n")
+    (kernel / "job.sh").chmod(0o755)
     frontend_file = repo / "nextjs-frontend" / "fixture.ts"
     frontend_file.parent.mkdir(parents=True)
     frontend_file.write_text("export const fixture = 1;\n", encoding="utf-8")
@@ -67,6 +74,10 @@ exit 0
 if [ "$1" = "-c" ]; then
     exec {sys.executable} "$@"
 fi
+if [ "$1" = "-m" ] && [ "$2" = "loopzero.kernel.events" ]; then
+    shift 2
+    set -- scripts/util/agent_event.py "$@"
+fi
 case "$1" in
 scripts/util/ci_mirror_receipts.py)
     if [[ " $* " == *" --capture-digest "* ]]; then
@@ -106,11 +117,20 @@ def _run_hook(
     log = tmp_path / "commands.log"
     env = {
         "CI_MIRROR_BASE_REF": "main",
+        "LOOPZERO_BACKEND_ROOT": "fastapi_backend",
+        "LOOPZERO_FRONTEND_ROOT": "nextjs-frontend",
         "CI_MIRROR_FAIL_STEP": failure or "",
         "CI_MIRROR_TEST_LOG": str(log),
         "LANG": "C.UTF-8",
         "PATH": f"{bin_dir}:/usr/local/bin:/usr/bin:/bin",
     }
+    for name in ("ci_mirror_receipts", "frontend_validation_scope", "poll_audit", "skill_convergence", "skill_semantic_paths"):
+        hook = bin_dir / (name + "-hook")
+        hook.write_text('#!/bin/sh\nexec "' + str(bin_dir / "python3") + '" scripts/util/' + name + '.py "$@"\n')
+        hook.chmod(0o755)
+        env["INTELFLO_" + name.upper() + "_HOOK"] = str(hook)
+    env = package_environment(env)
+    env["LOOPZERO_PYTHON"] = str(bin_dir / "python3")
     result = subprocess.run(
         ["bash", "scripts/hooks/ci-mirror-check.sh"],
         cwd=repo,

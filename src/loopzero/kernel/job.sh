@@ -57,6 +57,21 @@ KERNEL_JOB_TIMEOUT="${!_kernel_name-}"
 _kernel_name="${KERNEL_ENV_PREFIX}_TRUSTED_CONTINUATION"
 KERNEL_TRUSTED_CONTINUATION="${!_kernel_name-}"
 
+# Consumer-only executors (including final-CI reproduction) are invoked here.
+# TODO(A4): the approved-base composition root supplies the hook command. The
+# consumer owns its containment and signed reproduction protocol.
+if [ "${1:-}" = "consumer-hook" ]; then
+    shift
+    [ -n "${LOOPZERO_JOB_CONSUMER_HOOK:-}" ] &&
+        [ -f "$LOOPZERO_JOB_CONSUMER_HOOK" ] &&
+        [ ! -L "$LOOPZERO_JOB_CONSUMER_HOOK" ] &&
+        [ -x "$LOOPZERO_JOB_CONSUMER_HOOK" ] || {
+            echo "job.sh: approved consumer hook is unavailable (A4)" >&2
+            exit 2
+        }
+    exec "$LOOPZERO_JOB_CONSUMER_HOOK" "$@"
+fi
+
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
 REPO_ROOT="$(git -C "$(dirname "$JOB_SCRIPT")" rev-parse --show-toplevel 2>/dev/null || pwd)"
 JOB_WORKTREE="${KERNEL_DELIVERY_ROOT:-$REPO_ROOT}"
@@ -136,6 +151,7 @@ acquire_job_lease() {
 	lease_path="$(job_lease_path "$name")" || return $?
 	exec {held_fd}<>"$lease_path" || return 1
 	if ! "$PYTHON_BIN" - "$held_fd" "$lease_path" <<'PY'
+from loopzero.kernel.settings import settings
 import fcntl
 import os
 import sys
@@ -178,6 +194,7 @@ close_job_lease() {
 write_waited_marker() {
 	local dir="$1"
 	"$PYTHON_BIN" - "$dir" <<'PY'
+from loopzero.kernel.settings import settings
 import os
 import stat
 import sys
@@ -300,6 +317,7 @@ PY
 terminate_job_lease_owner() {
 	local pid_path="$1" identity_path="$2" lease_path="$3"
 	"$PYTHON_BIN" - "$pid_path" "$identity_path" "$lease_path" <<'PY'
+from loopzero.kernel.settings import settings
 import json
 import os
 import re
@@ -358,6 +376,7 @@ PY
 prove_job_lease_exclusion() {
 	local lease_path="$1"
 	"$PYTHON_BIN" - "$lease_path" <<'PY'
+from loopzero.kernel.settings import settings
 import fcntl
 import os
 import sys
@@ -392,6 +411,7 @@ cmd_execute() {
 	# process that holds every sealing descriptor. The wrapped command receives
 	# no token, claim file, directory descriptor, or pending-artifact descriptor.
 	exec "$PYTHON_BIN" - "$dir" "$source_artifact" "$name" "$REPO_ROOT" "$lease_fd" "$@" <<'PY'
+from loopzero.kernel.settings import settings
 import ctypes
 import fcntl
 import hashlib
@@ -420,9 +440,6 @@ job_name = sys.argv[3]
 repo_root = Path(sys.argv[4]).resolve()
 lease_fd = int(sys.argv[5])
 command = sys.argv[6:]
-FINAL_CI_REPRO_TASK_PREFIX = "final-ci-repro:"
-FINAL_CI_REPRO_AUTH_FD_ENV = settings.env("FINAL_CI_REPRO_AUTH_FD")
-FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = settings.env("FINAL_CI_REPRO_PROTECTED_ROOT")
 CODEX_AUTH_FD_ENV = settings.env("CODEX_AUTH_FD")
 WORKTREE_LEASE_FD_ENV = settings.env("WORKTREE_LEASE_FD")
 PROVIDER_SLOT_FD_ENV = settings.env("PROVIDER_CONTINUATION_SLOT_FD")
@@ -598,11 +615,13 @@ try:
     finally:
         os.close(pid_identity_fd)
 
-    dispatcher = repo_root / "scripts" / "util" / "agent_dispatch.py"
-    host_dispatcher = repo_root / "scripts" / "util" / "agent_dispatch_host.py"
-    final_ci_gate = repo_root / "scripts" / "util" / "final_ci_gate.py"
-    continuation_runner = repo_root / "scripts" / "util" / "delivery_pipeline.py"
-    repro_connect_guard = repo_root / "scripts" / "util" / "repro_connect_guard.py"
+    # TODO(A4): inject approved-base executable paths for privileged consumers.
+    def consumer_tool(name):
+        value = settings.toolchain.get(name)
+        return Path(value) if value else Path("/unavailable-consumer-hook")
+    dispatcher = consumer_tool("dispatcher")
+    host_dispatcher = consumer_tool("host_dispatcher")
+    continuation_runner = consumer_tool("continuation_runner")
     executable = shutil.which(command[0]) if command else None
     command_script = Path(command[1]) if len(command) > 1 else None
 
@@ -612,12 +631,12 @@ try:
         ) is None:
             return False
         expected = (
-            repo_root / ".audit" / "dispatch" / "results"
+            repo_root / settings.audit_root / "dispatch" / "results"
             / f"{binding['task_id']}.json"
         )
         if not source_path.is_absolute() or source_path != expected:
             return False
-        roots = (repo_root / ".audit", expected.parent.parent, expected.parent)
+        roots = (repo_root / settings.audit_root, expected.parent.parent, expected.parent)
         try:
             if not all(
                 path.is_dir()
@@ -701,16 +720,16 @@ try:
         continuation_digest = command[6]
         candidate_path = Path(command[4])
         expected_candidate = (
-            repo_root / ".audit" / "delivery-continuations" / "candidates"
+            repo_root / settings.audit_root / "delivery-continuations" / "candidates"
             / f"{continuation_digest}.json"
         )
         expected_result = (
-            repo_root / ".audit" / "delivery-continuations" / "results"
+            repo_root / settings.audit_root / "delivery-continuations" / "results"
             / f"{continuation_digest}.json"
         )
         continuation_roots = (
-            repo_root / ".audit",
-            repo_root / ".audit" / "delivery-continuations",
+            repo_root / settings.audit_root,
+            repo_root / settings.audit_root / "delivery-continuations",
             expected_candidate.parent,
             expected_result.parent,
         )
@@ -859,42 +878,11 @@ try:
                 and provider_fd_valid
             )
 
-    repro_signature = None
-    if (
-        binding is not None
-        and len(command) == 10
-        and executable is not None
-        and Path(executable).resolve() == Path(sys.executable).resolve()
-        and not final_ci_gate.is_symlink()
-        and final_ci_gate.is_file()
-        and command_script is not None
-        and command_script.resolve() == final_ci_gate.resolve()
-        and command[2] == "--pr"
-        and re.fullmatch(r"[1-9][0-9]*", command[3]) is not None
-        and command[4] == "--repo"
-        and Path(command[5]).resolve() == repo_root
-        and command[6] == "--execute-repro"
-        and re.fullmatch(r"[0-9a-f]{64}", command[7]) is not None
-        and command[8] == "--terminal-artifact"
-        and Path(command[9]).resolve() == source_path.resolve()
-        and binding["task_id"]
-        == f"{FINAL_CI_REPRO_TASK_PREFIX}{command[7]}"
-    ):
-        repro_signature = command[7]
-    final_ci_repro_task = (
-        binding is not None
-        and binding["task_id"].startswith(FINAL_CI_REPRO_TASK_PREFIX)
-    )
-    if final_ci_repro_task and repro_signature is None:
-        raise RuntimeError(
-            "bound final-CI reproduction requires the canonical executor command"
-        )
     bwrap = None
     if (
         binding is not None
         and not trusted_dispatcher
         and not trusted_continuation
-        and repro_signature is None
     ):
         try:
             bwrap = str(system_executable("bwrap"))
@@ -932,7 +920,6 @@ try:
 
     child_env = dict(os.environ)
     child_env.pop(settings.env("JOB_TOKEN"), None)
-    child_env.pop(FINAL_CI_REPRO_AUTH_FD_ENV, None)
     if CODEX_AUTH_FD_ENV in child_env:
         # close_fds invalidates the inherited descriptor. Preserve an explicit
         # unusable capability so the host wrapper cannot mistake its absence
@@ -946,99 +933,10 @@ try:
     if trusted_continuation:
         child_env[TRUSTED_CONTINUATION_ENV] = "1"
     wrapped_command = command
-    repro_authorization_key = None
-    repro_lifetime_token = None
-    repro_lifetime_listener = None
-    repro_lifetime_connections = []
-    repro_lifetime_thread = None
-    repro_lifetime_stopping = threading.Event()
-
-    def stop_repro_service(_signum, _frame) -> None:
-        repro_lifetime_stopping.set()
-        if repro_lifetime_listener is not None:
-            repro_lifetime_listener.close()
-        for connection in repro_lifetime_connections:
-            connection.close()
-
-    if repro_signature is not None:
-        repro_authorization_key = os.urandom(32)
-        repro_lifetime_token = os.urandom(32)
-        repro_lifetime_name = f"@{settings.temp_prefix}repro-{os.urandom(16).hex()}"
-        repro_lifetime_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        repro_lifetime_listener.bind("\0" + repro_lifetime_name[1:])
-        repro_lifetime_listener.listen(1)
-
-        def accept_repro_lifetime() -> None:
-            try:
-                connection, _ = repro_lifetime_listener.accept()
-                supplied = b""
-                while len(supplied) < len(repro_lifetime_token):
-                    chunk = connection.recv(len(repro_lifetime_token) - len(supplied))
-                    if not chunk:
-                        break
-                    supplied += chunk
-                if not hmac.compare_digest(supplied, repro_lifetime_token):
-                    connection.close()
-                    return
-                repro_lifetime_connections.append(connection)
-                if repro_lifetime_stopping.is_set():
-                    connection.close()
-            except OSError:
-                return
-
-        repro_lifetime_thread = threading.Thread(
-            target=accept_repro_lifetime,
-            name="repro-lifetime-authority",
-            daemon=True,
-        )
-        repro_lifetime_thread.start()
-        signal.signal(signal.SIGTERM, stop_repro_service)
-        try:
-            systemd_run = str(system_executable("systemd-run"))
-        except TrustedExecutableError as exc:
-            raise RuntimeError(
-                "bound final-CI reproduction requires protected systemd-run"
-            ) from exc
-        protected_authority_root = job_dir.resolve().parent
-        if repro_connect_guard.is_symlink() or not repro_connect_guard.is_file():
-            raise RuntimeError("bound final-CI reproduction connect guard is unavailable")
-        service_environment = [
-            f"--setenv={name}"
-            for name in sorted(child_env)
-            if name not in {
-                "DBUS_SESSION_BUS_ADDRESS",
-                "XDG_RUNTIME_DIR",
-                settings.env("JOB_EXECUTOR_PID"),
-            }
-        ]
-        wrapped_command = [
-            systemd_run,
-            "--user",
-            "--wait",
-            "--collect",
-            "--quiet",
-            "--pipe",
-            "--expand-environment=no",
-            "--service-type=exec",
-            "--property=KillMode=control-group",
-            f"--working-directory={os.getcwd()}",
-            *service_environment,
-            "--setenv=DBUS_SESSION_BUS_ADDRESS=",
-            "--setenv=XDG_RUNTIME_DIR=",
-            f"--setenv={FINAL_CI_REPRO_AUTH_FD_ENV}=0",
-            f"--setenv={FINAL_CI_REPRO_AUTHORITY_ROOT_ENV}={protected_authority_root}",
-            str(sys.executable),
-            str(repro_connect_guard),
-            "--lifetime-socket",
-            repro_lifetime_name,
-            "--",
-            *command,
-        ]
     if (
         binding is not None
         and not trusted_dispatcher
         and not trusted_continuation
-        and repro_signature is None
     ):
         assert bwrap is not None
         # The synthesized-root rationale and invariants live on
@@ -1053,6 +951,7 @@ try:
                 protected_authority_root=job_dir.resolve().parent,
                 working_directory=Path(os.getcwd()),
                 command=list(command),
+                protected_read_only_paths=job_store._canonical_candidate_protection_paths(repo_root),
             )
         except job_store.JobStoreError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -1063,10 +962,7 @@ try:
         "env": child_env,
         "close_fds": True,
     }
-    if repro_authorization_key is None:
-        run_arguments["stdin"] = subprocess.DEVNULL
-    else:
-        run_arguments["input"] = repro_authorization_key + repro_lifetime_token
+    run_arguments["stdin"] = subprocess.DEVNULL
     if trusted_continuation:
         inherited = [continuation_worktree_fd]
         if continuation_provider_fd is not None:
@@ -1078,15 +974,7 @@ try:
     if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
-    try:
-        completed = subprocess.run(wrapped_command, **run_arguments)
-    finally:
-        if repro_lifetime_listener is not None:
-            repro_lifetime_listener.close()
-        for connection in repro_lifetime_connections:
-            connection.close()
-        if repro_lifetime_thread is not None:
-            repro_lifetime_thread.join(timeout=1)
+    completed = subprocess.run(wrapped_command, **run_arguments)
     final_code = completed.returncode
 
     for authority_path, authority_fd in authority_chain:
@@ -1125,30 +1013,6 @@ try:
             raise RuntimeError(
                 f"authoritative terminal artifact is unreadable: {exc}"
             ) from exc
-        if repro_authorization_key is not None:
-            if not isinstance(terminal, dict):
-                raise RuntimeError(
-                    "final-CI reproduction terminal authorization is invalid"
-                )
-            authorization = terminal.get("job_authorization_hmac_sha256")
-            unsigned_terminal = dict(terminal)
-            unsigned_terminal.pop("job_authorization_hmac_sha256", None)
-            expected_authorization = hmac.new(
-                repro_authorization_key,
-                json.dumps(
-                    unsigned_terminal,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=True,
-                ).encode(),
-                hashlib.sha256,
-            ).hexdigest()
-            if not isinstance(authorization, str) or not hmac.compare_digest(
-                authorization, expected_authorization
-            ):
-                raise RuntimeError(
-                    "final-CI reproduction terminal authorization is invalid"
-                )
         if not isinstance(terminal, dict) or terminal.get("task_id") != binding["task_id"]:
             raise RuntimeError("terminal artifact task_id does not match the job binding")
         status = terminal.get("status")
@@ -1334,6 +1198,7 @@ record_retryable_continuation_interruption() {
 	local dir="$1" name="$2" run_id="$3" task_id="$4" terminal_artifact="$5"
 	shift 5
 	"$PYTHON_BIN" - "$REPO_ROOT" "$dir" "$name" "$run_id" "$task_id" "$terminal_artifact" "$@" <<'PY'
+from loopzero.kernel.settings import settings
 import hashlib
 import json
 import os
@@ -1347,20 +1212,20 @@ job_dir = Path(sys.argv[2]).resolve()
 name, run_id, task_id = sys.argv[3:6]
 terminal = Path(sys.argv[6])
 command = sys.argv[7:]
-runner = repo / "scripts" / "util" / "delivery_pipeline.py"
+runner = Path(settings.toolchain.get("continuation_runner", "/unavailable-consumer-hook"))
 if len(command) != 9:
     raise SystemExit(1)
 executable = Path(command[0]).resolve()
 digest = command[6]
 candidate = Path(command[4])
 expected_candidate = (
-    repo / ".audit" / "delivery-continuations" / "candidates" / f"{digest}.json"
+    repo / settings.audit_root / "delivery-continuations" / "candidates" / f"{digest}.json"
 )
 expected_terminal = (
-    repo / ".audit" / "delivery-continuations" / "results" / f"{digest}.json"
+    repo / settings.audit_root / "delivery-continuations" / "results" / f"{digest}.json"
 )
 if not (
-    executable == Path("/usr/bin/python3").resolve()
+    executable == Path(sys.executable).resolve()
     and Path(command[1]).resolve() == runner.resolve()
     and not Path(command[1]).is_symlink()
     and command[2:4] == ["continue", "--candidate-file"]
@@ -1404,9 +1269,9 @@ if exit_path.is_file() and not exit_path.is_symlink():
         receipt["previous_exit_code"] = int(raw_exit)
 encoded = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode()
 receipt_sha256 = hashlib.sha256(encoded).hexdigest()
-interruption_dir = repo / ".audit" / "delivery-continuations" / "interruptions"
+interruption_dir = repo / settings.audit_root / "delivery-continuations" / "interruptions"
 interruption_dir.mkdir(parents=True, mode=0o700, exist_ok=True)
-for directory in (repo / ".audit", interruption_dir.parent, interruption_dir):
+for directory in (repo / settings.audit_root, interruption_dir.parent, interruption_dir):
     metadata = os.lstat(directory)
     if (
         not stat.S_ISDIR(metadata.st_mode)
@@ -1502,6 +1367,7 @@ cmd_start() {
 	: >"$dir/log"
 	if [ -n "$run_id" ]; then
 		"$PYTHON_BIN" - "$dir/binding.json" "$name" "$run_id" "$task_id" "$dir/terminal-envelope.json" <<'PY'
+from loopzero.kernel.settings import settings
 import json
 import sys
 from pathlib import Path
@@ -1561,6 +1427,7 @@ job_running() {
 	[ -f "$lease_path" ] && [ ! -L "$lease_path" ] && [ -O "$lease_path" ] || return 0
 	exec {lease_fd}<>"$lease_path" || return 0
 	if "$PYTHON_BIN" - "$lease_fd" <<'PY'
+from loopzero.kernel.settings import settings
 import fcntl
 import sys
 
@@ -1658,6 +1525,7 @@ cmd_wait() {
 	if [ -z "$authority_fd" ]; then
 		exec {observed_job_fd}<"$dir" || die "cannot pin job '$name' generation"
 		waited_generation="$("$PYTHON_BIN" - "$observed_job_fd" "$dir" <<'PY'
+from loopzero.kernel.settings import settings
 import os
 import stat
 import sys
@@ -1822,7 +1690,6 @@ cmd_run() {
 	shift || true
 	validate_name "$name"
 	local timeout="$DEFAULT_TIMEOUT" tail_lines="$DEFAULT_TAIL"
-	local secure_repro_run=0
 	local bound_task_id="" bound_terminal_artifact=""
 	local -a binding_args=()
 	while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
@@ -1847,19 +1714,6 @@ cmd_run() {
 	done
 	[ "${1:-}" = "--" ] || die "expected '--' before the command"
 	shift
-	if [ "$#" -eq 10 ] &&
-		[[ "$bound_task_id" == final-ci-repro:* ]] &&
-		[ "$(realpath -e -- "$(command -v -- "${1:-}" 2>/dev/null)" 2>/dev/null)" = "$(realpath -e -- "$PYTHON_BIN" 2>/dev/null)" ] &&
-		[ ! -L "${2:-}" ] &&
-		[ "$(realpath -e -- "${2:-}" 2>/dev/null)" = "$REPO_ROOT/scripts/util/final_ci_gate.py" ] &&
-		[ "${3:-}" = "--pr" ] && [[ "${4:-}" =~ ^[1-9][0-9]*$ ]] &&
-		[ "${5:-}" = "--repo" ] && [ "$(realpath -m -- "${6:-}")" = "$REPO_ROOT" ] &&
-		[ "${7:-}" = "--execute-repro" ] && [[ "${8:-}" =~ ^[0-9a-f]{64}$ ]] &&
-		[ "$bound_task_id" = "final-ci-repro:${8:-}" ] &&
-		[ "${9:-}" = "--terminal-artifact" ] &&
-		[ "$(realpath -m -- "${10:-}")" = "$(realpath -m -- "$bound_terminal_artifact")" ]; then
-		secure_repro_run=1
-	fi
 	HOLD_AUTHORITY_FOR_RUN=1
 	cmd_start "$name" "${binding_args[@]}" -- "$@" >/dev/null || return $?
 	HOLD_AUTHORITY_FOR_RUN=0
@@ -1868,14 +1722,6 @@ cmd_run() {
 		--authority-fd "$RUN_AUTHORITY_FD" --expected-pid "$RUN_EXECUTOR_PID"
 	local result=$?
 	RUN_INTERNAL_WAIT=0
-	if [ "$result" -eq 124 ] && [ "$secure_repro_run" -eq 1 ]; then
-		# A bound reproduction cannot be resumed after its caller releases the
-		# held directory authority. Killing the executor closes the authenticated
-		# lifetime channel, which makes the transient service kill its whole group.
-		kill -TERM "$RUN_EXECUTOR_PID" 2>/dev/null || true
-		wait "$RUN_EXECUTOR_PID" 2>/dev/null || true
-		while kill -0 "$RUN_EXECUTOR_PID" 2>/dev/null; do sleep 0.1; done
-	fi
 	exec {RUN_AUTHORITY_FD}<&-
 	RUN_EXECUTOR_PID=""
 	return "$result"
@@ -2005,6 +1851,7 @@ cmd_binding_files() {
 		fi
 	fi
 	"$PYTHON_BIN" - "$run_id" "$skip_name" "${JOB_ROOTS[@]}" <<'PY'
+from loopzero.kernel.settings import settings
 import json
 import sys
 from pathlib import Path
@@ -2091,6 +1938,7 @@ cmd_reconcile() {
 	set -- "${reconcile_args[@]}"
 	local binding_schema supplied_artifact="" primary_repo=""
 	binding_schema="$("$PYTHON_BIN" - "$dir/binding.json" <<'PY'
+from loopzero.kernel.settings import settings
 import json
 import os
 import stat
@@ -2142,9 +1990,10 @@ PY
 			die "cannot resolve the primary repository for job reconciliation"
 		[ "$(dirname "$git_common_dir")" = "$primary_repo" ] ||
 			die "reconcile --primary must name the canonical primary repository"
-		dispatch_root="$primary_repo/.audit/dispatch"
+		dispatch_root="$primary_repo/${LOOPZERO_AUDIT_ROOT:-.audit}/dispatch"
 	fi
 	"$PYTHON_BIN" - "$dir/binding.json" "$supplied_artifact" "$dir/exit_code" "$dir/reconciliation.json" "$dispatch_root" "$expected_binding_sha256" <<'PY'
+from loopzero.kernel.settings import settings
 import hashlib
 import errno
 import json
@@ -2540,7 +2389,7 @@ if status == "blocked":
     if (
         artifact_path.parent.resolve() != (dispatch_root / "results").resolve()
         or dispatch_root.name != "dispatch"
-        or audit_root.name != ".audit"
+        or audit_root.name != settings.audit_root.name
         or any(
             component.is_symlink()
             for component in (artifact_path.parent, dispatch_root, audit_root)
@@ -2552,7 +2401,7 @@ if status == "blocked":
     repo_root = audit_root.parent
 
     from loopzero.kernel.gitscope import DispatchError
-    from loopzero.kernel.seams import load_authority_records
+    from loopzero.kernel.authority_store import load_authority_records
 
     # Keep this explicit allowlist aligned with agent_dispatch.py's compatible
     # telemetry contract; every other row is forensic evidence, not authority.
