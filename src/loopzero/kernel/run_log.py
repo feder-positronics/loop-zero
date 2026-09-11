@@ -25,6 +25,8 @@ PR deliveries hand the run ID across sessions with a hidden
 
 from __future__ import annotations
 
+from .settings import settings
+
 import argparse
 import fcntl
 import hashlib
@@ -39,12 +41,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent_event import cmd_phase, common_fields, repo_root
-from job_store import JobStoreError, canonical_job_root
-from skill_run_identity import (
+from .events import cmd_phase, common_fields, repo_root
+from .jobs import JobStoreError, canonical_job_root
+from .run_identity import (
     RUN_ID_RE,
     RUN_ID_MARKER_RE,
     active_run,
@@ -69,7 +69,7 @@ CODEX_SESSION_ID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 PHASES = ("implementation", "local-validation", "review", "ci-wait", "closeout")
-PHASE_SKILLS = {"work-issue", "execute-blueprint"}
+PHASE_SKILLS = settings.phase_skills
 
 
 class RolloutEvidenceError(ValueError):
@@ -430,7 +430,7 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
     if completed.returncode != 0:
         raise ValueError("canonical closeout capsule root is unavailable")
     common_dir = Path(completed.stdout.strip()).resolve()
-    audit_dir = common_dir.parent / ".audit"
+    audit_dir = common_dir.parent / settings.audit_root
     expected_parent = audit_dir / "delivery-closeout"
     if (
         not path.is_absolute()
@@ -444,7 +444,7 @@ def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]
         lock_path = (
             canonical_job_root(root, configured="")
             / ".leases"
-            / "delivery-closeout.lock"
+            / settings.closeout_lock_name
         )
     except JobStoreError as exc:
         raise ValueError("closeout capsule directory identity is unavailable") from exc
@@ -565,7 +565,7 @@ def load_phase_events(root: Path) -> list[dict[str, object]]:
     ordered: list[tuple[int, int, int, dict[str, object]]] = []
     legacy_sequence = 0
     position = 0
-    audit_dir = root / ".audit" / "agent-events"
+    audit_dir = root / settings.audit_root / "agent-events"
     if not audit_dir.exists():
         return []
     for log_path in sorted(audit_dir.glob("*.jsonl")):
@@ -765,7 +765,7 @@ def derive_duration_s(
     root: Path, skill: str, session_id: str, run_id: str, end_ts: datetime
 ) -> int | None:
     """Derive duration from exact run evidence; never use a session fallback."""
-    audit_dir = root / ".audit" / "agent-events"
+    audit_dir = root / settings.audit_root / "agent-events"
     if not audit_dir.exists():
         return None
 
@@ -1335,9 +1335,9 @@ def main() -> int:
     ):
         parser.error("--closeout-capsule requires a verified merged transition")
     root = repo_root()
-    audit_dir = root / ".audit" / "skill-runs"
+    audit_dir = root / settings.audit_root / "skill-runs"
     audit_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = audit_dir / ".write.lock"
+    lock_path = audit_dir / settings.event_lock_name
     with lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(
             lock_file,

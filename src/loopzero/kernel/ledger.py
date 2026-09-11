@@ -2,6 +2,7 @@
 """Authenticated storage primitives for the durable dispatch authority ledger."""
 
 from __future__ import annotations
+from .settings import settings
 
 import base64
 import binascii
@@ -24,7 +25,7 @@ ARCHIVE_MANIFEST_SCHEME = "dispatch-authority-archive-manifest-v1"
 CHECKPOINT_SCHEME = "dispatch-authority-checkpoint-v1"
 RETAINED_STATE_SCHEME = "dispatch-authority-retained-state-v1"
 HOST_STATE_SCHEME = "dispatch-authority-ledger-host-state-v1"
-_LEDGER_DOMAIN = b"intelflo-dispatch-ledger-v3\0"
+_LEDGER_DOMAIN = settings.ledger_domain
 _RECORD_DOMAIN = b"record\0"
 _HEX_128_RE = re.compile(r"[0-9a-f]{32}")
 _HEX_256_RE = re.compile(r"[0-9a-f]{64}")

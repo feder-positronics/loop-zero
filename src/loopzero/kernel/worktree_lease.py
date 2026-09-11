@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Serialize repository-owned worktree writers and pin exact source state."""
 
+from .settings import settings
+
 import argparse
 import fcntl
 import hashlib
@@ -15,12 +17,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-LEASE_FD_ENV = "INTELFLO_WORKTREE_LEASE_FD"
-LEASE_BOUNDARY_ENV = "INTELFLO_WORKTREE_LEASE_BOUNDARY"
-LEASE_OWNER_PID_ENV = "INTELFLO_WORKTREE_LEASE_OWNER_PID"
-LEASE_NONCE_ENV = "INTELFLO_WORKTREE_LEASE_NONCE"
-LOCK_FILENAME = "worktree-boundary.lock"
-OWNER_FILENAME = "worktree-boundary.owner.json"
+LEASE_FD_ENV = settings.env("WORKTREE_LEASE_FD")
+LEASE_BOUNDARY_ENV = settings.env("WORKTREE_LEASE_BOUNDARY")
+LEASE_OWNER_PID_ENV = settings.env("WORKTREE_LEASE_OWNER_PID")
+LEASE_NONCE_ENV = settings.env("WORKTREE_LEASE_NONCE")
+LOCK_FILENAME = settings.lease_lock_name
+OWNER_FILENAME = settings.lease_owner_name
 
 
 class WorktreeGuardError(RuntimeError):

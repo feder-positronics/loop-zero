@@ -9,6 +9,8 @@ name and never authorizes cleanup.
 
 from __future__ import annotations
 
+from .settings import settings
+
 import argparse
 import concurrent.futures
 import json
@@ -353,7 +355,7 @@ def shared_repo_root(root: Path) -> Path:
 
 def load_skill_runs(root: Path) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
-    directory = root / ".audit" / "skill-runs"
+    directory = root / settings.audit_root / "skill-runs"
     if not directory.is_dir():
         return entries
     for path in sorted(directory.glob("*.jsonl")):

@@ -6,6 +6,8 @@ Move-only extraction: this sibling must not import ``agent_dispatch``.
 
 from __future__ import annotations
 
+from .settings import settings
+
 import fcntl
 import hashlib
 import json
@@ -21,11 +23,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import dispatch_ledger as authority_ledger
-from dispatch_archived_review import passing_archive_anchor, passing_archive_ancestry, validate_archived_review_witness
-from dispatch_authority import (
+from . import ledger as authority_ledger
+from .seams import passing_archive_anchor, passing_archive_ancestry, validate_archived_review_witness
+from .authority import (
     authenticated_gone_owner_abort,
     CoordinatorAuthority,
     TerminalAuthority,
@@ -33,7 +34,7 @@ from dispatch_authority import (
     load_coordinator_ledger_state,
     verify_terminal_authority,
 )
-from dispatch_authority_projection import (
+from .authority_projection import (
     RETENTION_STATE_TYPE,
     RETENTION_STATE_VERSION,
     AuthorityLedgerSnapshot,
@@ -53,13 +54,13 @@ from dispatch_authority_projection import (
     retained_task_ids,
     retained_work_unit_contracts,
 )
-from dispatch_common import (
+from .gitscope import (
     DispatchError,
     primary_repo_root,
     resolved_record_worktree,
     trusted_git_command,
 )
-from dispatch_review_authority import (
+from .seams import (
     _latest_attempt_settlement_indices,
     accepted_review_terminals,
     authenticated_retry_outcomes,
@@ -69,7 +70,7 @@ from dispatch_review_authority import (
     delivery_controller_records,
     latest_explicit_alias_availability,
 )
-from dispatch_routing import (
+from .policy import (
     ATTEMPT_HISTORY_TYPES,
     AUTHORITY_ARCHIVE_DIRECTORY,
     AUTHORITY_DOWNGRADE_BARRIER_NAME,
@@ -81,9 +82,9 @@ from dispatch_routing import (
     RUNTIME_CONTRACT_VERSION,
     TELEMETRY_SCHEMA_VERSION,
 )
-from finding_ledger import canonical_record_digest
-from guardian_sandbox import environment as sandbox_environment
-from skill_run_log import active_run, load_entries as load_skill_run_entries
+from .canonical import canonical_record_digest
+from .sandbox import environment as sandbox_environment
+from .run_log import active_run, load_entries as load_skill_run_entries
 
 _ATTEMPT_LOCK_STATE = threading.local()
 _AUTHORITY_LEDGER_LOCK_STATE = threading.local()
@@ -114,7 +115,7 @@ def active_outer_run_id(
         if authority_repo is not None
         else primary_repo_root(worktree)
     )
-    audit_dir = repo / ".audit" / "skill-runs"
+    audit_dir = repo / settings.audit_root / "skill-runs"
     if not audit_dir.is_dir():
         return None
     branch = branch or worktree_branch(worktree)
@@ -131,7 +132,7 @@ def active_outer_run_id(
 
 def active_outer_run_ids(repo: Path) -> frozenset[str]:
     """Resolve every active delivery run whose authority must survive compaction."""
-    audit_dir = repo.resolve() / ".audit" / "skill-runs"
+    audit_dir = repo.resolve() / settings.audit_root / "skill-runs"
     latest_by_run: dict[str, dict[str, object]] = {}
     for entry in load_skill_run_entries(audit_dir):
         run_id = entry.get("run_id")
@@ -174,7 +175,7 @@ def authority_ledger_lock(repo: Path):
         return
     git_directory = repo / ".git"
     lock_path = (
-        git_directory / "intelflo-authority-ledger.lock"
+        git_directory / settings.authority_lock_name
         if git_directory.is_dir()
         else repo / ".authority-ledger.lock"
     )

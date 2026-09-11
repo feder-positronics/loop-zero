@@ -20,21 +20,20 @@ from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import dispatch_ledger as authority_ledger
-from dispatch_authority import (
+from . import ledger as authority_ledger
+from .authority import (
     PROOF_FIELD,
     TerminalAuthorityError,
     commit_coordinator_ledger_state,
     load_coordinator_ledger_state,
     verify_terminal_authority,
 )
-from dispatch_authority_projection import (
+from .authority_projection import (
     AuthorityLedgerSnapshot,
     _authenticated_coordinator_record_ids,
 )
-from dispatch_authority_store import (
+from .authority_store import (
     AuthorityProjectionBundleV1,
     _authority_repository_binding,
     _load_archive_manifest,
@@ -46,8 +45,8 @@ from dispatch_authority_store import (
     load_authority_snapshot,
     retained_authority_projection,
 )
-from dispatch_common import DispatchError, primary_repo_root
-from dispatch_routing import (
+from .gitscope import DispatchError, primary_repo_root
+from .policy import (
     AUTHORITY_ARCHIVE_DIRECTORY,
     AUTHORITY_DOWNGRADE_BARRIER_NAME,
     AUTHORITY_LEDGER_DIRECTORY,

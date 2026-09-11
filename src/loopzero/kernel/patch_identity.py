@@ -15,9 +15,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 # Keep direct module loading and isolated script execution sibling-import safe.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from trusted_executable import (
+from .trusted_exec import (
     TrustedExecutableError,
     system_executable,
     trusted_subprocess_environment,
@@ -133,8 +132,8 @@ def _require_stdout(repo: Path, *args: str) -> str:
 
 def _javascript_format_identity(repo: Path, source: bytes, path: bytes) -> bytes | None:
     """Normalize with trusted Prettier in a read-only, credential-free sandbox."""
-    from dispatch_common import primary_repo_root
-    from guardian_sandbox import command, environment
+    from .gitscope import primary_repo_root
+    from .sandbox import command, environment
 
     primary = primary_repo_root(repo)
     modules = (primary / "nextjs-frontend/node_modules").resolve()

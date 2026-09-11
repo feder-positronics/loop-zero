@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .settings import settings
+
 import errno
 import grp
 import os
@@ -14,37 +16,18 @@ from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 
-# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from agent_runtimes.codex_credential import (
-    CodexCredentialError,
-    UnsafeCodexCredential,
-    codex_subscription_credential as brokered_codex_subscription_credential,
-)
-from trusted_executable import TrustedExecutableError, system_executable
+from .trusted_exec import TrustedExecutableError, system_executable
 
-CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
-SANDBOX_BOUNDARY_ENV = "INTELFLO_GUARDIAN_SANDBOX_BOUNDARY"
+CODEX_AUTH_FD_ENV = settings.env("CODEX_AUTH_FD")
+SANDBOX_BOUNDARY_ENV = settings.env("GUARDIAN_SANDBOX_BOUNDARY")
 NETWORK_DENIED_BOUNDARY = "network-denied"
 HOST_NETWORK_BOUNDARY = "host-network"
-GUARDIAN_NODE_ROOT = Path("/run/guardian-node")
-GUARDIAN_BIN_ROOT = Path("/run/guardian-bin")
-GUARDIAN_COREPACK_HOME = Path("/run/guardian-corepack-home")
+GUARDIAN_NODE_ROOT = settings.sandbox_node_root
+GUARDIAN_BIN_ROOT = settings.sandbox_bin_root
+GUARDIAN_COREPACK_HOME = settings.sandbox_corepack_home
 _DEFAULT_SANDBOX_PATH = f"{GUARDIAN_BIN_ROOT}:/usr/bin:/bin"
-SAFE_PASSTHROUGH_ENV = frozenset(
-    {
-        SANDBOX_BOUNDARY_ENV,
-        "INTELFLO_WORKTREE_LEASE_BOUNDARY",
-        "INTELFLO_WORKTREE_LEASE_FD",
-        "INTELFLO_WORKTREE_LEASE_NONCE",
-        "INTELFLO_WORKTREE_LEASE_OWNER_PID",
-        "LANG",
-        "LC_ALL",
-        "TERM",
-        "TZ",
-    }
-)
+SAFE_PASSTHROUGH_ENV = settings.sandbox_passthrough | {SANDBOX_BOUNDARY_ENV}
 
 
 class SandboxError(RuntimeError):
@@ -56,17 +39,16 @@ class UnsafeCredentialError(SandboxError):
 
 
 @contextmanager
-def codex_subscription_credential(*, requested_runtime_s: float):
-    """Pass one renewed ChatGPT login snapshot without mounting host state."""
-    try:
-        with brokered_codex_subscription_credential(
-            requested_runtime_s=requested_runtime_s
-        ) as descriptor:
-            yield descriptor
-    except UnsafeCodexCredential as exc:
-        raise UnsafeCredentialError("Codex subscription credential is unsafe") from exc
-    except CodexCredentialError as exc:
-        raise SandboxError("Codex subscription credential is unavailable") from exc
+def codex_subscription_credential(*, requested_runtime_s: float, credential_broker=None):
+    """Delegate credential custody to a trusted, injected runtime broker.
+
+    The broker returns a context manager yielding a descriptor and owns renewal,
+    validation and closure. TODO(A4): wire the runner broker at the composition root.
+    """
+    if credential_broker is None:
+        raise SandboxError("credential_broker is required")
+    with credential_broker(requested_runtime_s=requested_runtime_s) as descriptor:
+        yield descriptor
 
 
 def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -76,7 +58,7 @@ def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     }
     selected.update(
         {
-            "HOME": "/tmp/guardian-home",
+            "HOME": str(settings.sandbox_home),
             "PATH": _sandbox_path(),
             "GIT_CONFIG_COUNT": "3",
             "GIT_CONFIG_KEY_0": "core.hooksPath",
@@ -542,7 +524,7 @@ def command(
             "--tmpfs",
             "/tmp",
             "--dir",
-            "/tmp/guardian-home",
+            str(settings.sandbox_home),
             "--dir",
             "/run",
             "--dir",
@@ -578,7 +560,7 @@ def command(
         "/",
         "--setenv",
         "HOME",
-        "/tmp/guardian-home",
+        str(settings.sandbox_home),
         "--setenv",
         "GH_CONFIG_DIR",
         "/tmp/guardian-gh-config",

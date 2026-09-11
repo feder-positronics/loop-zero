@@ -8,6 +8,8 @@ need without importing the dispatcher. Nothing here may import
 `agent_dispatch`.
 """
 
+from .settings import settings
+
 import fnmatch
 import hashlib
 import json
@@ -18,18 +20,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from guardian_sandbox import (  # noqa: E402
+from .sandbox import (  # noqa: E402
     environment as sandbox_environment,
 )
-from trusted_executable import (  # noqa: E402
+from .trusted_exec import (  # noqa: E402
     TrustedExecutableError,
     system_executable,
 )
 
-DISPATCH_DIR = Path(".audit/dispatch")
+DISPATCH_DIR = settings.audit_root / "dispatch"
 REVIEW_ACCEPTANCE_RECEIPT_SCHEMA_VERSION = "review-acceptance-v2"
 
 

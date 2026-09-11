@@ -18,10 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from worktree_list import age_days, dirty_count, parse_worktrees, repo_root, tool_tag
+from .worktree_list import age_days, dirty_count, parse_worktrees, repo_root, tool_tag
 
 DEFAULT_AGE_DAYS = 7
 

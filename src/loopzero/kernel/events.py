@@ -68,6 +68,8 @@ stderr and exits 0.
 
 from __future__ import annotations
 
+from .settings import settings
+
 import argparse
 import fcntl
 import hashlib
@@ -327,9 +329,9 @@ def _ordered_event(event: dict, audit_dir: Path, lock_file: TextIO) -> dict:
 def write_event(event: dict) -> bool:
     try:
         root = repo_root()
-        audit_dir = root / ".audit" / "agent-events"
+        audit_dir = root / settings.audit_root / "agent-events"
         audit_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = audit_dir / ".write.lock"
+        lock_path = audit_dir / settings.event_lock_name
         with _open_event_lock(lock_path) as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             log_path = audit_dir / f"{datetime.now(UTC).strftime('%Y-%m-%d')}.jsonl"
@@ -346,9 +348,9 @@ def write_unique_event(event: dict, *, key_fields: tuple[str, ...]) -> bool:
     """Append once for an exact logical key; failures remain non-blocking."""
     try:
         root = repo_root()
-        audit_dir = root / ".audit" / "agent-events"
+        audit_dir = root / settings.audit_root / "agent-events"
         audit_dir.mkdir(parents=True, exist_ok=True)
-        lock_path = audit_dir / ".write.lock"
+        lock_path = audit_dir / settings.event_lock_name
         with _open_event_lock(lock_path) as lock_file:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
             for log_path in sorted(audit_dir.glob("*.jsonl")):

@@ -18,11 +18,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import dispatch_ledger as authority_ledger
-from dispatch_archived_review import archived_supersession_deposits
-from dispatch_authority import (
+from . import ledger as authority_ledger
+from .seams import archived_supersession_deposits
+from .authority import (
     COORDINATOR_AUTHORITY_SCHEME,
     authenticated_gone_owner_abort,
     LEGACY_COORDINATOR_AUTHORITY_SCHEME,
@@ -31,8 +30,8 @@ from dispatch_authority import (
     verify_legacy_coordinator_authority,
     verify_terminal_authority,
 )
-from dispatch_common import DispatchError, resolved_record_worktree, trusted_git_command
-from dispatch_routing import (
+from .gitscope import DispatchError, resolved_record_worktree, trusted_git_command
+from .policy import (
     ATTEMPT_ABORT_TYPES,
     ATTEMPT_TERMINAL_TYPES,
     COMPATIBLE_DISPATCH_POLICY_VERSIONS,
@@ -48,8 +47,8 @@ from dispatch_routing import (
     RUNTIME_CONTRACT_VERSION,
     TELEMETRY_SCHEMA_VERSION,
 )
-from finding_ledger import canonical_record_digest
-from guardian_sandbox import environment as sandbox_environment
+from .canonical import canonical_record_digest
+from .sandbox import environment as sandbox_environment
 
 RETENTION_STATE_TYPE = "retained-authority-state"
 RETENTION_STATE_VERSION = 2

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .settings import settings
+
 import base64
 import binascii
 import fcntl
@@ -20,28 +22,23 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 
-# Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from finding_ledger import canonical_record_digest
-from trusted_executable import TrustedExecutableError, system_executable
+from .canonical import canonical_record_digest
+from .trusted_exec import TrustedExecutableError, system_executable
 
 LEGACY_AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v1"
 AUTHORITY_SCHEME = "dispatch-terminal-ed25519-v2"
 SUPPORTED_AUTHORITY_SCHEMES = frozenset({LEGACY_AUTHORITY_SCHEME, AUTHORITY_SCHEME})
 COORDINATOR_AUTHORITY_SCHEME = "dispatch-coordinator-ed25519-v2"
 LEGACY_COORDINATOR_AUTHORITY_SCHEME = "dispatch-coordinator-ssh-ed25519-v1"
-LEGACY_COORDINATOR_SIGNATURE_NAMESPACE = "intelflo-dispatch-coordinator"
-LEGACY_COORDINATOR_PUBLIC_KEY = (
-    "ssh-ed25519 "
-    "AAAAC3NzaC1lZDI1NTE5AAAAIKw0FlrqA1ha584PV/saNa70na108hSaJmrNZEFUMvvG"
-)
+LEGACY_COORDINATOR_SIGNATURE_NAMESPACE = settings.legacy_signature_namespace
+LEGACY_COORDINATOR_PUBLIC_KEY = settings.legacy_public_key
 COORDINATOR_KEY_FILENAME = "coordinator-ed25519.pem"
-COORDINATOR_LOCK_FILENAME = ".coordinator-key.lock"
+COORDINATOR_LOCK_FILENAME = settings.coordinator_lock_name
 MAX_COORDINATOR_KEY_BYTES = 4096
 MAX_COORDINATOR_LEDGER_STATE_BYTES = 1024 * 1024
 COORDINATOR_LEDGER_DIRECTORY = "ledgers"
-COORDINATOR_LEDGER_LOCK_FILENAME = ".ledger-state.lock"
+COORDINATOR_LEDGER_LOCK_FILENAME = settings.ledger_state_lock_name
 _LEDGER_BINDING_RE = re.compile(r"[0-9a-f]{64}")
 AUTHORITY_PROVIDER_TIMEOUT_S = 10.0
 PROOF_FIELD = "terminal_authority_proof"
@@ -101,12 +98,12 @@ def _run_openssl(
 
 def _with_read_descriptor(payload: bytes, operation):
     if not hasattr(os, "memfd_create"):
-        with tempfile.TemporaryFile(prefix="intelflo-dispatch-authority-") as handle:
+        with tempfile.TemporaryFile(prefix=settings.temp_prefix + "dispatch-authority-") as handle:
             handle.write(payload)
             handle.flush()
             handle.seek(0)
             return operation(handle.fileno())
-    read_fd = os.memfd_create("intelflo-dispatch-authority", os.MFD_CLOEXEC)
+    read_fd = os.memfd_create(settings.temp_prefix + "dispatch-authority", os.MFD_CLOEXEC)
     try:
         os.write(read_fd, payload)
         os.lseek(read_fd, 0, os.SEEK_SET)
@@ -334,7 +331,7 @@ def _coordinator_state_directory() -> Path:
         raise TerminalAuthorityError("coordinator account home is unavailable") from exc
     if not account_home.is_absolute():
         raise TerminalAuthorityError("coordinator account home is unsafe")
-    return account_home / ".local" / "state" / "intelflo" / "dispatch-authority"
+    return settings.account_state_root(account_home) / "dispatch-authority"
 
 
 def _private_directory(path: Path) -> Path:
@@ -766,7 +763,7 @@ def _trusted_coordinator_public_key() -> bytes:
     _require_process_memory_isolation()
     guardian_projection = GUARDIAN_COORDINATOR_PUBLIC_KEY_PATH
     if (
-        os.environ.get("INTELFLO_GUARDIAN_SANDBOX_BOUNDARY")
+        os.environ.get(settings.env("GUARDIAN_SANDBOX_BOUNDARY"))
         in {"network-denied", "host-network"}
         and guardian_projection.is_file()
     ):
@@ -833,7 +830,7 @@ def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) -> 
         ssh_keygen = system_executable("ssh-keygen")
     except TrustedExecutableError as exc:
         raise TerminalAuthorityError("trusted SSH verifier is unavailable") from exc
-    with tempfile.TemporaryDirectory(prefix="intelflo-coordinator-verify-") as raw:
+    with tempfile.TemporaryDirectory(prefix=settings.temp_prefix + "coordinator-verify-") as raw:
         directory = Path(raw)
         allowed_path = directory / "allowed-signers"
         signature_path = directory / "signature"

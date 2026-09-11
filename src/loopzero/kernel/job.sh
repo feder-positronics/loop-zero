@@ -28,9 +28,9 @@
 # deadman timeout, which means "worker presumed dead: run the orphan/lease
 # check", never "poll again". Timeouts under 300s draw a warning unless
 # --fast-cadence states why the watched state's own cadence is faster.
-# Jobs live under $INTELFLO_JOB_DIR when explicitly configured. The default is
+# Jobs live under $KERNEL_JOB_DIR when explicitly configured. The default is
 # a worktree-keyed directory under the OS account's durable state root, outside
-# every delegated worktree. Legacy recovery uses INTELFLO_JOB_DIR explicitly.
+# every delegated worktree. Legacy recovery uses KERNEL_JOB_DIR explicitly.
 
 set -uo pipefail
 
@@ -40,17 +40,36 @@ unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE
 export PYTHONNOUSERSITE=1
 export PYTHONSAFEPATH=1
 
+
+# Namespaced consumer environment. Keep shell aliases local to this process.
+KERNEL_ENV_PREFIX="${LOOPZERO_ENV_PREFIX:-LOOPZERO}"
+[[ "$KERNEL_ENV_PREFIX" =~ ^[A-Z][A-Z0-9_]*$ ]] || exit 2
+_kernel_name="${KERNEL_ENV_PREFIX}_DELIVERY_ROOT"
+KERNEL_DELIVERY_ROOT="${!_kernel_name-}"
+_kernel_name="${KERNEL_ENV_PREFIX}_JOB_DIR"
+KERNEL_JOB_DIR="${!_kernel_name-}"
+_kernel_name="${KERNEL_ENV_PREFIX}_JOB_EXECUTOR_PID"
+KERNEL_JOB_EXECUTOR_PID="${!_kernel_name-}"
+_kernel_name="${KERNEL_ENV_PREFIX}_JOB_NAME"
+KERNEL_JOB_NAME="${!_kernel_name-}"
+_kernel_name="${KERNEL_ENV_PREFIX}_JOB_TIMEOUT"
+KERNEL_JOB_TIMEOUT="${!_kernel_name-}"
+_kernel_name="${KERNEL_ENV_PREFIX}_TRUSTED_CONTINUATION"
+KERNEL_TRUSTED_CONTINUATION="${!_kernel_name-}"
+
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-JOB_WORKTREE="${INTELFLO_DELIVERY_ROOT:-$REPO_ROOT}"
-PYTHON_BIN="/usr/bin/python3"
+REPO_ROOT="$(git -C "$(dirname "$JOB_SCRIPT")" rev-parse --show-toplevel 2>/dev/null || pwd)"
+JOB_WORKTREE="${KERNEL_DELIVERY_ROOT:-$REPO_ROOT}"
+# The consumer injects its approved installed-package interpreter.
+# TODO(A4): obtain this from the approved toolchain at the composition root.
+PYTHON_BIN="${LOOPZERO_PYTHON:-/usr/bin/python3}"
 [ -x "$PYTHON_BIN" ] || {
 	echo "job.sh: trusted Python interpreter is unavailable at $PYTHON_BIN" >&2
 	exit 2
 }
-JOB_DIR="$("$PYTHON_BIN" "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-root)" || exit $?
+JOB_DIR="$("$PYTHON_BIN" -m loopzero.kernel.jobs --worktree "$JOB_WORKTREE" --ensure-root)" || exit $?
 JOB_ROOTS=("$JOB_DIR")
-DEFAULT_TIMEOUT="${INTELFLO_JOB_TIMEOUT:-1800}"
+DEFAULT_TIMEOUT="${KERNEL_JOB_TIMEOUT:-1800}"
 DEFAULT_TAIL=40
 RUN_AUTHORITY_FD=""
 RUN_EXECUTOR_PID=""
@@ -99,14 +118,14 @@ job_path() {
 
 executor_matches() {
 	local dir="$1" name="$2" executor_pid="$3"
-	[ "${INTELFLO_JOB_NAME:-}" = "$name" ] &&
-		[ "${INTELFLO_JOB_EXECUTOR_PID:-}" = "$executor_pid" ] &&
+	[ "${KERNEL_JOB_NAME:-}" = "$name" ] &&
+		[ "${KERNEL_JOB_EXECUTOR_PID:-}" = "$executor_pid" ] &&
 		[ "$(cat "$dir/pid" 2>/dev/null || true)" = "$executor_pid" ]
 }
 
 job_lease_path() {
 	local name="$1"
-	"$PYTHON_BIN" "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-job-lease "$name"
+	"$PYTHON_BIN" -m loopzero.kernel.jobs --worktree "$JOB_WORKTREE" --ensure-job-lease "$name"
 }
 
 # Open and acquire the stable per-name lease into the caller-named descriptor
@@ -365,7 +384,7 @@ cmd_execute() {
 	shift 3 || true
 	[ "${1:-}" = "--" ] || die "internal executor expected '--' before the command"
 	shift
-	local name="${INTELFLO_JOB_NAME:-}"
+	local name="${KERNEL_JOB_NAME:-}"
 	validate_name "$name"
 	[ "$dir" = "$(job_path "$name")" ] || die "internal executor job path is invalid"
 	[ -d "$dir" ] && [ ! -L "$dir" ] || die "internal executor job directory is invalid"
@@ -391,9 +410,9 @@ import threading
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(sys.argv[4]).resolve() / "scripts" / "util"))
-import job_store
-from trusted_executable import TrustedExecutableError, system_executable
+from loopzero.kernel import jobs as job_store
+from loopzero.kernel.settings import settings
+from loopzero.kernel.trusted_exec import TrustedExecutableError, system_executable
 
 job_dir = Path(sys.argv[1])
 source_path = Path(sys.argv[2])
@@ -402,12 +421,12 @@ repo_root = Path(sys.argv[4]).resolve()
 lease_fd = int(sys.argv[5])
 command = sys.argv[6:]
 FINAL_CI_REPRO_TASK_PREFIX = "final-ci-repro:"
-FINAL_CI_REPRO_AUTH_FD_ENV = "INTELFLO_FINAL_CI_REPRO_AUTH_FD"
-FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = "INTELFLO_FINAL_CI_REPRO_PROTECTED_ROOT"
-CODEX_AUTH_FD_ENV = "INTELFLO_CODEX_AUTH_FD"
-WORKTREE_LEASE_FD_ENV = "INTELFLO_WORKTREE_LEASE_FD"
-PROVIDER_SLOT_FD_ENV = "INTELFLO_PROVIDER_CONTINUATION_SLOT_FD"
-TRUSTED_CONTINUATION_ENV = "INTELFLO_TRUSTED_CONTINUATION"
+FINAL_CI_REPRO_AUTH_FD_ENV = settings.env("FINAL_CI_REPRO_AUTH_FD")
+FINAL_CI_REPRO_AUTHORITY_ROOT_ENV = settings.env("FINAL_CI_REPRO_PROTECTED_ROOT")
+CODEX_AUTH_FD_ENV = settings.env("CODEX_AUTH_FD")
+WORKTREE_LEASE_FD_ENV = settings.env("WORKTREE_LEASE_FD")
+PROVIDER_SLOT_FD_ENV = settings.env("PROVIDER_CONTINUATION_SLOT_FD")
+TRUSTED_CONTINUATION_ENV = settings.env("TRUSTED_CONTINUATION")
 
 try:
     fcntl.flock(lease_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -912,7 +931,7 @@ try:
     owns_launch = True
 
     child_env = dict(os.environ)
-    child_env.pop("INTELFLO_JOB_TOKEN", None)
+    child_env.pop(settings.env("JOB_TOKEN"), None)
     child_env.pop(FINAL_CI_REPRO_AUTH_FD_ENV, None)
     if CODEX_AUTH_FD_ENV in child_env:
         # close_fds invalidates the inherited descriptor. Preserve an explicit
@@ -922,8 +941,8 @@ try:
     # The supervisor's trusted Python helpers need safe-path mode, but a
     # wrapped Python script must retain its own directory as an import root.
     child_env.pop("PYTHONSAFEPATH", None)
-    child_env["INTELFLO_JOB_NAME"] = job_name
-    child_env["INTELFLO_JOB_EXECUTOR_PID"] = str(os.getpid())
+    child_env[settings.env("JOB_NAME")] = job_name
+    child_env[settings.env("JOB_EXECUTOR_PID")] = str(os.getpid())
     if trusted_continuation:
         child_env[TRUSTED_CONTINUATION_ENV] = "1"
     wrapped_command = command
@@ -944,7 +963,7 @@ try:
     if repro_signature is not None:
         repro_authorization_key = os.urandom(32)
         repro_lifetime_token = os.urandom(32)
-        repro_lifetime_name = f"@intelflo-repro-{os.urandom(16).hex()}"
+        repro_lifetime_name = f"@{settings.temp_prefix}repro-{os.urandom(16).hex()}"
         repro_lifetime_listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         repro_lifetime_listener.bind("\0" + repro_lifetime_name[1:])
         repro_lifetime_listener.listen(1)
@@ -989,7 +1008,7 @@ try:
             if name not in {
                 "DBUS_SESSION_BUS_ADDRESS",
                 "XDG_RUNTIME_DIR",
-                "INTELFLO_JOB_EXECUTOR_PID",
+                settings.env("JOB_EXECUTOR_PID"),
             }
         ]
         wrapped_command = [
@@ -1245,7 +1264,7 @@ finally:
                     except OSError:
                         pass
     if trusted_continuation and continuation_owner_path is not None:
-        nonce = os.environ.get("INTELFLO_WORKTREE_LEASE_NONCE")
+        nonce = os.environ.get(settings.env("WORKTREE_LEASE_NONCE"))
         if nonce:
             try:
                 owner = json.loads(continuation_owner_path.read_text(encoding="utf-8"))
@@ -1472,7 +1491,7 @@ cmd_start() {
 	fi
 	rm -rf "$dir"
 	local created_dir
-	created_dir="$("$PYTHON_BIN" "$REPO_ROOT/scripts/util/job_store.py" --worktree "$JOB_WORKTREE" --ensure-job-directory "$name")" ||
+	created_dir="$("$PYTHON_BIN" -m loopzero.kernel.jobs --worktree "$JOB_WORKTREE" --ensure-job-directory "$name")" ||
 		die "cannot create protected job directory"
 	[ "$created_dir" = "$dir" ] || die "job authority path changed during creation"
 
@@ -1508,7 +1527,7 @@ PY
 
 	# setsid detaches from the agent's shell session, so the job survives the
 	# exec_command timeout that would otherwise orphan or kill it.
-	setsid env INTELFLO_JOB_NAME="$name" \
+	setsid env "${KERNEL_ENV_PREFIX}_JOB_NAME=$name" \
 		"$JOB_SCRIPT" _execute "$dir" "$terminal_artifact" "$lease_fd" -- "$@" \
 		</dev/null >/dev/null 2>&1 &
 	local pid=$!
@@ -1944,9 +1963,9 @@ cmd_check() {
 			# its own wrapper, matched to the create-once executor identity; every
 			# sibling job and every stale result remains visible. Terminal authority
 			# stays in the recorded supervisor and is never exposed to the command.
-			if [ "$name" = "${INTELFLO_JOB_NAME:-}" ] &&
-				[ -n "${INTELFLO_JOB_EXECUTOR_PID:-}" ] &&
-				executor_matches "$dir" "$name" "$INTELFLO_JOB_EXECUTOR_PID"; then
+			if [ "$name" = "${KERNEL_JOB_NAME:-}" ] &&
+				[ -n "${KERNEL_JOB_EXECUTOR_PID:-}" ] &&
+				executor_matches "$dir" "$name" "$KERNEL_JOB_EXECUTOR_PID"; then
 				continue
 			fi
 			if job_running "$dir"; then
@@ -1976,13 +1995,13 @@ cmd_binding_files() {
 	local run_id="${2:-}"
 	[[ "$run_id" =~ ^sr_[0-9a-f]{32}$ ]] || die "binding-files --run-id must match sr_<32 lowercase hex>"
 	local skip_name=""
-	if [ "${INTELFLO_TRUSTED_CONTINUATION:-}" = "1" ] &&
-		[ -n "${INTELFLO_JOB_NAME:-}" ] &&
-		[ -n "${INTELFLO_JOB_EXECUTOR_PID:-}" ]; then
+	if [ "${KERNEL_TRUSTED_CONTINUATION:-}" = "1" ] &&
+		[ -n "${KERNEL_JOB_NAME:-}" ] &&
+		[ -n "${KERNEL_JOB_EXECUTOR_PID:-}" ]; then
 		local current_dir
-		current_dir="$(job_path "$INTELFLO_JOB_NAME")" || return $?
-		if executor_matches "$current_dir" "$INTELFLO_JOB_NAME" "$INTELFLO_JOB_EXECUTOR_PID"; then
-			skip_name="$INTELFLO_JOB_NAME"
+		current_dir="$(job_path "$KERNEL_JOB_NAME")" || return $?
+		if executor_matches "$current_dir" "$KERNEL_JOB_NAME" "$KERNEL_JOB_EXECUTOR_PID"; then
+			skip_name="$KERNEL_JOB_NAME"
 		fi
 	fi
 	"$PYTHON_BIN" - "$run_id" "$skip_name" "${JOB_ROOTS[@]}" <<'PY'
@@ -2531,8 +2550,9 @@ if status == "blocked":
             "job.sh: blocked result has no matching dispatcher terminal telemetry"
         )
     repo_root = audit_root.parent
-    sys.path.insert(0, str(repo_root / "scripts" / "util"))
-    from agent_dispatch import DispatchError, load_authority_records
+
+    from loopzero.kernel.gitscope import DispatchError
+    from loopzero.kernel.seams import load_authority_records
 
     # Keep this explicit allowlist aligned with agent_dispatch.py's compatible
     # telemetry contract; every other row is forensic evidence, not authority.

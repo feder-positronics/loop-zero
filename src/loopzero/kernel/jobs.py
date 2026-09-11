@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .settings import settings
+
 import argparse
 import hashlib
 import os
@@ -42,7 +44,7 @@ def _account_home() -> Path:
 
 
 def _account_state_root() -> Path:
-    return _account_home() / ".local" / "state" / "intelflo" / "jobs"
+    return settings.account_state_root(_account_home()) / "jobs"
 
 
 def _directory_state(path: Path) -> os.stat_result:
@@ -206,7 +208,7 @@ def _ensure_private_directory_chain(
 def canonical_job_root(worktree: Path, *, configured: str | None = None) -> Path:
     """Return one canonical root; legacy recovery requires an explicit override."""
     root = worktree.resolve()
-    raw = os.environ.get("INTELFLO_JOB_DIR") if configured is None else configured
+    raw = os.environ.get(settings.env("JOB_DIR")) if configured is None else configured
     if raw:
         candidate = Path(raw)
         if not candidate.is_absolute():
@@ -222,7 +224,7 @@ def canonical_job_root(worktree: Path, *, configured: str | None = None) -> Path
 def ensure_job_root(worktree: Path, *, configured: str | None = None) -> Path:
     """Create and validate the account-owned job authority boundary."""
     root = canonical_job_root(worktree, configured=configured)
-    raw = os.environ.get("INTELFLO_JOB_DIR") if configured is None else configured
+    raw = os.environ.get(settings.env("JOB_DIR")) if configured is None else configured
     if raw:
         # Pin every component while creating the operator-selected recovery root.
         # This preserves the escape hatch without trusting umask or a path that
@@ -230,17 +232,8 @@ def ensure_job_root(worktree: Path, *, configured: str | None = None) -> Path:
         _ensure_private_directory_chain(root)
         return root
 
-    home = _account_home()
-    _validate_account_directory(home)
-    cursor = home
-    parts = (".local", "state", "intelflo", "jobs", root.name)
-    for index, part in enumerate(parts):
-        cursor /= part
-        _ensure_directory(cursor, private=index >= 2)
-        if index < 2:
-            _validate_account_directory(cursor)
-    if cursor != root:
-        raise JobStoreError("job authority root derivation changed during creation")
+    _validate_account_directory(_account_home())
+    _ensure_private_directory_chain(root)
     return root
 
 
@@ -344,7 +337,7 @@ def _canonical_candidate_protection_paths() -> tuple[Path, ...]:
     common_dir = Path(metadata[2]).resolve()
     primary = common_dir.parent
     candidate_store = (
-        primary / ".audit" / "delivery-continuations" / "candidates"
+        primary / settings.audit_root / "delivery-continuations" / "candidates"
     )
     _ensure_private_directory_chain(
         candidate_store, allow_group_writable_owned_ancestors=True
@@ -498,7 +491,7 @@ def build_bound_sandbox_arguments(
             # its strict ancestors live in the read-only tmpfs root.
             continue
         authority_mounts.extend(("--bind", str(ancestor), str(ancestor)))
-    shared_jobs_root = account_home / ".local" / "state" / "intelflo" / "jobs"
+    shared_jobs_root = settings.account_state_root(account_home) / "jobs"
     shared_root_mount: list[str] = []
     if protected_authority_root.parent == shared_jobs_root:
         shared_root_mount.extend(

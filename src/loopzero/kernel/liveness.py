@@ -8,6 +8,8 @@ product code and never changes the repository, telemetry, or worktrees.
 
 from __future__ import annotations
 
+from .settings import settings
+
 import json
 import os
 import re
@@ -442,7 +444,7 @@ def collect_report(
 ) -> LivenessReport:
     """Read shared local evidence and return a liveness report."""
     root = root or repo_root()
-    audit = root / ".audit"
+    audit = root / settings.audit_root
     return build_report(
         read_jsonl(audit / "skill-runs"),
         read_jsonl(audit / "agent-events"),
