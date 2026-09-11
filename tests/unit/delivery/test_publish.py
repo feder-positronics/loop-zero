@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,64 @@ def test_publication_receipt_is_idempotent_and_conflict_safe(tmp_path: Path):
     assert first == second
     rows = [json.loads(line) for line in first.read_text().splitlines()]
     assert rows == [record]
+
+
+class Runner:
+    def __init__(self, responses):
+        self.responses = responses
+
+    def run(self, args, *, check=True):
+        code, stdout = self.responses[tuple(args)]
+        return subprocess.CompletedProcess(args, code, stdout, "")
+
+
+def test_local_prerequisites_and_rename_paths_fail_closed():
+    runner = Runner(
+        {
+            ("git", "rev-parse", "HEAD"): (0, "a" * 40 + "\n"),
+            ("git", "symbolic-ref", "--quiet", "--short", "HEAD"): (0, "feature\n"),
+            ("git", "status", "--porcelain"): (0, ""),
+            ("git", "diff", "--name-only", "-z", "--no-renames", "base..HEAD"): (
+                0, "old.md\0new.md\0"
+            ),
+        }
+    )
+    publish.require_local_publication_prerequisites(
+        head="feature", expected_head="a" * 40, runner=runner
+    )
+    assert publish.changed_paths_between(runner, "base", "HEAD") == (
+        "old.md", "new.md"
+    )
+
+
+def test_obligation_policy_is_injected():
+    calls = []
+    publish.require_obligation_acknowledgment(
+        base="base", head="head", body="ack",
+        evaluator=lambda *args, **kwargs: calls.append((args, kwargs)) or False,
+    )
+    assert calls[0][1] == {"acknowledgment_text": "ack"}
+    with pytest.raises(publish.PublicationError, match="acknowledgment"):
+        publish.require_obligation_acknowledgment(
+            base="base", head="head", body="", evaluator=lambda *args, **kwargs: True
+        )
+
+
+def test_thread_reader_paginates_through_github_boundary():
+    class Github:
+        def __init__(self):
+            self.calls = 0
+
+        def repository(self):
+            return type("Repo", (), {"owner": "o", "name": "r"})()
+
+        def api(self, endpoint, *, fields):
+            self.calls += 1
+            return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+                "nodes": [],
+                "pageInfo": {"hasNextPage": self.calls == 1, "endCursor": "next"},
+            }}}}}
+
+    github = Github()
+    publish.require_resolved_review_threads(github, pr=7)
+    assert github.calls == 2

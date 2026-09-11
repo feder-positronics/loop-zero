@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Protocol
 
 from ..config import Profile
 from ..integrations.github import GitHub, GitHubError
@@ -17,6 +18,10 @@ from ..integrations.github import GitHub, GitHubError
 
 class PublicationError(RuntimeError):
     pass
+
+
+class CommandRunner(Protocol):
+    def run(self, args: list[str], *, check: bool = True): ...
 
 
 EVIDENCE_START = "<!-- loop-zero-evidence:start -->"
@@ -99,6 +104,105 @@ def validate_contract(
     if draft or standalone or has_standalone_reason(body) or _ISSUE_REFERENCE.search(body):
         return None
     return "No work reference found and no standalone reason was supplied."
+
+
+def require_local_publication_prerequisites(
+    *, head: str, expected_head: str, runner: CommandRunner
+) -> None:
+    """Reject detached, dirty, moved, or differently named publication sources."""
+    if re.fullmatch(r"[0-9a-f]{40}", expected_head) is None:
+        raise PublicationError("expected head must be exactly 40 lowercase hex")
+    local_head = runner.run(["git", "rev-parse", "HEAD"]).stdout.strip()
+    symbolic = runner.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"], check=False
+    )
+    if symbolic.returncode != 0:
+        raise PublicationError("publication requires a named branch")
+    if local_head != expected_head:
+        raise PublicationError("local HEAD does not match expected head")
+    if symbolic.stdout.strip() != head:
+        raise PublicationError("checked-out branch does not match publication head")
+    if runner.run(["git", "status", "--porcelain"]).stdout.strip():
+        raise PublicationError("publication requires a clean worktree")
+
+
+def changed_paths_between(
+    runner: CommandRunner, base_ref: str, head_ref: str
+) -> tuple[str, ...]:
+    """Return both sides of renames by disabling rename detection."""
+    output = runner.run(
+        ["git", "diff", "--name-only", "-z", "--no-renames", f"{base_ref}..{head_ref}"]
+    ).stdout
+    paths = tuple(path for path in output.split("\0") if path)
+    if any(any(ord(character) < 32 for character in path) for path in paths):
+        raise PublicationError("changed path contains a control character")
+    return paths
+
+
+def require_obligation_acknowledgment(
+    *, base: str, head: str, body: str,
+    evaluator,
+) -> None:
+    """Run the consumer's obligation evaluator without importing its policy."""
+    try:
+        missing = evaluator(base, head, acknowledgment_text=body)
+    except Exception as exc:
+        raise PublicationError(f"cannot evaluate obligation changes: {exc}") from exc
+    if missing:
+        raise PublicationError("changed obligations require a substantive acknowledgment")
+
+
+def require_resolved_review_threads(github: GitHub, *, pr: int) -> None:
+    """Read paginated GitHub threads through the sole integration boundary."""
+    repo = github.repository()
+    cursor: str | None = None
+    unresolved: list[dict[str, object]] = []
+    query = (
+        "query($owner:String!,$name:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$name){"
+        "pullRequest(number:$pr){reviewThreads(first:100,after:$after){nodes{id isResolved path comments(first:1){nodes{url}}}"
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+    while True:
+        payload = github.api(
+            "graphql", fields={"query": query, "variables": {
+                "owner": repo.owner, "name": repo.name, "pr": pr, "after": cursor,
+            }}
+        )
+        try:
+            page = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = page["nodes"]
+            info = page["pageInfo"]
+        except (KeyError, TypeError) as exc:
+            raise PublicationError("GitHub returned malformed review-thread evidence") from exc
+        if not isinstance(nodes, list) or not isinstance(info, Mapping):
+            raise PublicationError("GitHub returned malformed review-thread evidence")
+        unresolved.extend(
+            thread for thread in nodes
+            if isinstance(thread, dict) and thread.get("isResolved") is False
+        )
+        if info.get("hasNextPage") is not True:
+            break
+        cursor = info.get("endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise PublicationError("GitHub review-thread pagination is malformed")
+    if unresolved:
+        raise PublicationError(
+            f"PR has {len(unresolved)} unresolved review thread(s), including outdated threads"
+        )
+
+
+def trusted_publication_base_head(github: GitHub, *, pr: int) -> tuple[str, str]:
+    """Return the remote base/head SHAs for one repository-bound PR."""
+    repo = github.repository()
+    payload = github.api(f"repos/{repo.slug}/pulls/{pr}")
+    try:
+        base_sha = payload["base"]["sha"]
+        head_sha = payload["head"]["sha"]
+    except (KeyError, TypeError) as exc:
+        raise PublicationError("GitHub returned malformed PR head identity") from exc
+    if any(re.fullmatch(r"[0-9a-f]{40}", value) is None for value in (base_sha, head_sha)):
+        raise PublicationError("GitHub returned invalid PR commit identity")
+    return base_sha, head_sha
 
 
 def _loopzero_evidence(
@@ -253,7 +357,9 @@ def publish(
 
 __all__ = [
     "BodyContract", "PublicationError", "PublicationRequest", "PublicationResult",
-    "bind_loopzero_evidence", "has_standalone_reason", "publish",
+    "bind_loopzero_evidence", "changed_paths_between", "has_standalone_reason", "publish",
+    "require_local_publication_prerequisites", "require_obligation_acknowledgment",
+    "require_resolved_review_threads", "trusted_publication_base_head",
     "validate_contract", "validate_loopzero_evidence", "validate_required_sections",
     "write_evidence", "write_published_evidence_once",
 ]
