@@ -41,11 +41,11 @@ jobs:
           bwrap --unshare-user --unshare-pid --die-with-parent \
             --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --bind "$VENV_ROOT" /venv \
-            --bind "$UV_CACHE_ROOT" /uv-cache \
+            --bind "$VENV_ROOT" /tmp/venv \
+            --bind "$UV_CACHE_ROOT" /tmp/uv-cache \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
-            --setenv UV_CACHE_DIR /uv-cache --setenv UV_PROJECT_ENVIRONMENT /venv \
+            --setenv UV_CACHE_DIR /tmp/uv-cache --setenv UV_PROJECT_ENVIRONMENT /tmp/venv \
             --setenv UV_PYTHON_DOWNLOADS never \
             --setenv UV_BIN "$UV_BIN" --setenv PYTHON_BIN "$PYTHON_BIN" \
             --chdir /tmp/workspace -- bash -eu -c '
@@ -60,13 +60,13 @@ jobs:
           bwrap --unshare-user --unshare-pid --unshare-net --die-with-parent \
             --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --ro-bind "$VENV_ROOT" /venv \
+            --ro-bind "$VENV_ROOT" /tmp/venv \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
             --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
             --chdir /tmp/workspace -- bash -eu -c '
-              /venv/bin/python -m pytest -q -p no:cacheprovider
-              /venv/bin/python core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
+              /tmp/venv/bin/python -m pytest -q -p no:cacheprovider
+              /tmp/venv/bin/python core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
               base="$CHECK_BASE"
               if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
                 base=$(git -c safe.directory=/tmp/workspace hash-object -t tree /dev/null)
@@ -83,37 +83,37 @@ jobs:
           bwrap --unshare-user --unshare-pid --unshare-net --die-with-parent \
             --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --ro-bind "$VENV_ROOT" /venv \
-            --bind "$ARTIFACT_ROOT" /artifacts \
+            --ro-bind "$VENV_ROOT" /tmp/venv \
+            --bind "$ARTIFACT_ROOT" /tmp/artifacts \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
             --setenv UV_BIN "$UV_BIN" --chdir /tmp/workspace -- bash -eu -c '
               "$UV_BIN" build --offline --no-cache --no-build-isolation \
-                --python /venv/bin/python --out-dir /artifacts/dist /tmp/workspace
-              test "$(find /artifacts/dist -maxdepth 1 -name "*.whl" | wc -l)" -eq 1
-              test "$(find /artifacts/dist -maxdepth 1 -name "*.tar.gz" | wc -l)" -eq 1
-              "$UV_BIN" venv --python /venv/bin/python /artifacts/wheel-venv
+                --python /tmp/venv/bin/python --out-dir /tmp/artifacts/dist /tmp/workspace
+              test "$(find /tmp/artifacts/dist -maxdepth 1 -name "*.whl" | wc -l)" -eq 1
+              test "$(find /tmp/artifacts/dist -maxdepth 1 -name "*.tar.gz" | wc -l)" -eq 1
+              "$UV_BIN" venv --python /tmp/venv/bin/python /tmp/artifacts/wheel-venv
               "$UV_BIN" pip install --offline --no-cache \
-                --python /artifacts/wheel-venv/bin/python /artifacts/dist/*.whl
-              "$UV_BIN" venv --python /venv/bin/python /artifacts/sdist-venv
-              build_site=$(/venv/bin/python -c \
+                --python /tmp/artifacts/wheel-venv/bin/python /tmp/artifacts/dist/*.whl
+              "$UV_BIN" venv --python /tmp/venv/bin/python /tmp/artifacts/sdist-venv
+              build_site=$(/tmp/venv/bin/python -c \
                 "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")
               PYTHONPATH="$build_site" "$UV_BIN" pip install --offline --no-cache \
-                --no-build-isolation --python /artifacts/sdist-venv/bin/python \
-                /artifacts/dist/*.tar.gz
+                --no-build-isolation --python /tmp/artifacts/sdist-venv/bin/python \
+                /tmp/artifacts/dist/*.tar.gz
             '
 
           bwrap --unshare-user --unshare-pid --unshare-net --die-with-parent \
             --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --ro-bind "$ARTIFACT_ROOT" /artifacts \
+            --ro-bind "$ARTIFACT_ROOT" /tmp/artifacts \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /artifacts/wheel-venv/bin:/usr/bin:/bin \
+            --setenv PATH /tmp/artifacts/wheel-venv/bin:/usr/bin:/bin \
             --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
             --chdir /tmp -- bash -eu -c '
-              test "$(/artifacts/wheel-venv/bin/loopzero --version | awk "{print \$2}")" = \
+              test "$(/tmp/artifacts/wheel-venv/bin/loopzero --version | awk "{print \$2}")" = \
                 "$(cat /tmp/workspace/core/VERSION)"
-              test "$(/artifacts/sdist-venv/bin/loopzero --version | awk "{print \$2}")" = \
+              test "$(/tmp/artifacts/sdist-venv/bin/loopzero --version | awk "{print \$2}")" = \
                 "$(cat /tmp/workspace/core/VERSION)"
 
               exercise_artifact() {
@@ -150,6 +150,6 @@ jobs:
                 ! grep -qw pass <<<"$informational_status"
               }
 
-              exercise_artifact /artifacts/wheel-venv wheel
-              exercise_artifact /artifacts/sdist-venv sdist
+              exercise_artifact /tmp/artifacts/wheel-venv wheel
+              exercise_artifact /tmp/artifacts/sdist-venv sdist
             '
