@@ -34,6 +34,7 @@ from .contract import (
     RuntimeUsage,
     SubscriptionEligibility,
     TerminalReason,
+    is_valid_resume_session_id,
 )
 from .process import (
     ProcessHandle,
@@ -268,6 +269,10 @@ def build_codex_command(
     output_schema_path: Path,
 ) -> list[str]:
     """Build the non-interactive Codex CLI backup command."""
+    if request.resume_session_id is not None and not is_valid_resume_session_id(
+        request.resume_session_id
+    ):
+        raise ValueError("Codex resume_session_id is invalid")
     outer_sandbox = dict(request.capability_profile.environment).get(
         get_settings().env_name("OUTER_WORKER_SANDBOX")
     )
@@ -284,9 +289,9 @@ def build_codex_command(
     ]
     for override in codex_runtime_overrides():
         command.extend(("-c", override))
+    command.append("exec")
     command.extend(
         [
-            "exec",
             "-c",
             f"model={request.requested_model}",
             "-c",
@@ -307,9 +312,11 @@ def build_codex_command(
             "--ephemeral",
             "--ignore-user-config",
             "--ignore-rules",
-            "-",
         ]
     )
+    if request.resume_session_id is not None:
+        command.extend(("resume", request.resume_session_id))
+    command.append("-")
     return command
 
 
@@ -2057,19 +2064,6 @@ def _refresh_credential(
                 "cwd": staging_home,
             }
             if run_refresh is _run_refresh_process_group:
-                if sandbox_wrapper is None:
-                    from .containment import worker_isolated_command
-
-                    readable_roots = (
-                        (Path(command[2]).resolve().parent,)
-                        if len(command) >= 3 and Path(command[2]).is_absolute()
-                        else ()
-                    )
-                    sandbox_wrapper = lambda argv: worker_isolated_command(
-                        argv,
-                        writable_root=staging_home,
-                        readable_roots=readable_roots,
-                    )
                 runner_arguments["sandbox_wrapper"] = sandbox_wrapper
             outcome = run_refresh(command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:

@@ -24,6 +24,7 @@ from .contract import (
     RuntimeStatus,
     SubscriptionEligibility,
     TerminalReason,
+    is_valid_resume_session_id,
 )
 from .process import (
     ProcessHandle,
@@ -182,6 +183,10 @@ def build_cursor_command(
     isolated_workspace: Path,
 ) -> list[str]:
     """Build the current Cursor invocation with structured rather than text output."""
+    if request.resume_session_id is not None and not is_valid_resume_session_id(
+        request.resume_session_id
+    ):
+        raise ValueError("Cursor resume_session_id is invalid")
     command = [
         "cursor-agent",
         "-p",

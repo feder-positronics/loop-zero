@@ -33,6 +33,7 @@ from .contract import (
     RuntimeUsage,
     SubscriptionEligibility,
     TerminalReason,
+    is_valid_resume_session_id,
 )
 from .process import (
     ProcessHandle,
@@ -193,6 +194,10 @@ def parse_claude_sdk_readiness(stdout: str) -> ReadinessFailure | None:
 
 def build_claude_command(request: RuntimeRequest) -> list[str]:
     """Build the non-interactive Claude CLI backup command."""
+    if request.resume_session_id is not None and not is_valid_resume_session_id(
+        request.resume_session_id
+    ):
+        raise ValueError("Claude resume_session_id is invalid")
     command = [
         "claude",
         "-p",
@@ -202,7 +207,12 @@ def build_claude_command(request: RuntimeRequest) -> list[str]:
         request.effort,
         "--output-format",
         "json",
-        "--no-session-persistence",
+    ]
+    if request.resume_session_id is None:
+        command.append("--no-session-persistence")
+    else:
+        command.extend(("--resume", request.resume_session_id))
+    command.extend([
         "--safe-mode",
         "--setting-sources",
         "",
@@ -210,7 +220,7 @@ def build_claude_command(request: RuntimeRequest) -> list[str]:
         "--mcp-config",
         '{"mcpServers":{}}',
         "--disable-slash-commands",
-    ]
+    ])
     if request.budget_usd is not None:
         command.extend(("--max-budget-usd", f"{request.budget_usd:.2f}"))
     if request.read_only:
@@ -1892,13 +1902,6 @@ def _refresh_credential(
                 "cwd": staging_home,
             }
             if run_status is _run_refresh_process_group:
-                if sandbox_wrapper is None:
-                    from .containment import worker_isolated_command
-
-                    sandbox_wrapper = lambda argv: worker_isolated_command(
-                        argv,
-                        writable_root=staging_home,
-                    )
                 runner_arguments["sandbox_wrapper"] = sandbox_wrapper
             outcome = run_status(command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:

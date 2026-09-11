@@ -1,0 +1,18 @@
+[
+  {
+    "module": "process.py",
+    "function": "launch_cli",
+    "callee": "subprocess.Popen",
+    "keywords": [
+      "cwd",
+      "env",
+      "pass_fds",
+      "start_new_session",
+      "stderr",
+      "stdin",
+      "stdout",
+      "text"
+    ],
+    "count": 1
+  }
+]

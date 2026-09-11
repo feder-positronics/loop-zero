@@ -1,9 +1,9 @@
 """Injection, package isolation and preserved schema boundaries."""
 
 import ast
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -13,24 +13,11 @@ import sys
 import pytest
 
 from loopzero.config import Profile
-from loopzero.runners import bridge, claude, codex, containment, process
+from loopzero.runners import bridge, claude, codex, process
 from loopzero.runners import claude as claude_token, codex as codex_credential
 from loopzero.runners.contract import governed_result_schema
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
 from loopzero.runners.settings import DEFAULT_SETTINGS, PACKAGED_BRIDGE, RuntimeSettings, get_settings
-
-
-@pytest.fixture
-def intelflo_containment_comparison_fixture():
-    """Import the read-only IntelFlo original only for argv comparison."""
-    path = Path("/home/marcin/dev/intelflo/scripts/util/agent_dispatch.py")
-    spec = importlib.util.spec_from_file_location(
-        "_intelflo_containment_comparison_fixture", path
-    )
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_legacy_names_and_defaults():
@@ -161,95 +148,93 @@ def test_launch_cli_refuses_without_sandbox_wrapper(tmp_path):
         process.launch_cli([sys.executable, "-c", "pass"], cwd=tmp_path, env={})
 
 
-def test_worker_isolated_command_keeps_git_metadata_read_only(tmp_path, monkeypatch):
-    worktree = tmp_path / "worktree"
-    (worktree / ".git").mkdir(parents=True)
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-    monkeypatch.setattr(containment, "_system_executable", lambda _: Path("/usr/bin/bwrap"))
-    command = containment.worker_isolated_command(
-        ["/usr/bin/python3", "-c", "pass"], writable_root=worktree
-    )
-    resolved = str(worktree.resolve())
-    assert command[0] == "/usr/bin/bwrap"
-    assert ["--bind", resolved, resolved] == command[
-        command.index("--bind", command.index("--proc") + 1) :
-        command.index("--bind", command.index("--proc") + 1) + 3
-    ]
-    git_binding = ["--ro-bind", f"{resolved}/.git", f"{resolved}/.git"]
-    assert any(command[index : index + 3] == git_binding for index in range(len(command) - 2))
-    assert command[-4:] == ["--", "/usr/bin/python3", "-c", "pass"]
-
-
-def test_credential_binding_argv_exactly_matches_intelflo_original(
-    tmp_path, monkeypatch, intelflo_containment_comparison_fixture
-):
-    original = intelflo_containment_comparison_fixture
-    writable_root = tmp_path / "worktree"
-    writable_root.mkdir()
-    credential_path = writable_root / ".credentials" / "auth.json"
-    credential_path.parent.mkdir()
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-    monkeypatch.setattr(
-        containment, "_system_executable", lambda _: Path("/usr/bin/bwrap")
-    )
-    monkeypatch.setattr(containment, "_worker_runtime_read_roots", lambda _: ())
-    monkeypatch.setattr(
-        original, "system_executable", lambda _: Path("/usr/bin/bwrap")
-    )
-    monkeypatch.setattr(original, "_worker_runtime_read_roots", lambda _: ())
-    arguments = {
-        "writable_root": writable_root,
-        "credential_bindings": ((37, credential_path),),
-    }
-
-    assert containment.worker_isolated_command(["runtime"], **arguments) == (
-        original.worker_isolated_command(["runtime"], **arguments)
-    )
-
-
-def test_every_runner_subprocess_launch_is_owned_by_a_containment_seam():
+def test_runner_launch_inventory_matches_checked_in_allowlist():
     runners_root = Path(__file__).resolve().parents[3] / "src/loopzero/runners"
-    launch_calls = set()
+    golden_path = Path(__file__).parent / "fixtures/runner_launch_allowlist.json"
+    actual: list[tuple[str, str | None, int, str, tuple[str, ...]]] = []
 
     class LaunchVisitor(ast.NodeVisitor):
-        def __init__(self, filename):
-            self.filename = filename
-            self.functions = []
+        def __init__(self, module: str) -> None:
+            self.module = module
+            self.functions: list[str] = []
+            self.aliases: dict[str, str] = {}
 
-        def visit_FunctionDef(self, node):
+        def visit_Import(self, node: ast.Import) -> None:
+            for item in node.names:
+                self.aliases[item.asname or item.name.split(".")[0]] = item.name
+
+        def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+            if node.module in {"subprocess", "os", "asyncio", "multiprocessing"}:
+                for item in node.names:
+                    self.aliases[item.asname or item.name] = f"{node.module}.{item.name}"
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
             self.functions.append(node.name)
             self.generic_visit(node)
             self.functions.pop()
 
         visit_AsyncFunctionDef = visit_FunctionDef
 
-        def visit_Call(self, node):
-            target = node.func
-            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
-                owner = target.value.id
-                name = target.attr
-                if (
-                    owner == "subprocess"
-                    and name in {"Popen", "run", "call", "check_call", "check_output"}
-                ) or (owner == "os" and name.startswith("exec")):
-                    launch_calls.add(
-                        (
-                            self.filename,
-                            self.functions[-1] if self.functions else None,
-                            f"{owner}.{name}",
-                        )
+        def _qualified_name(self, node: ast.expr) -> str | None:
+            if isinstance(node, ast.Name):
+                return self.aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute):
+                owner = self._qualified_name(node.value)
+                return f"{owner}.{node.attr}" if owner is not None else None
+            return None
+
+        @staticmethod
+        def _is_launch(name: str) -> bool:
+            owner, _, member = name.partition(".")
+            if owner == "subprocess":
+                return member in {
+                    "Popen", "run", "call", "check_call", "check_output",
+                    "getoutput", "getstatusoutput",
+                }
+            if owner == "os":
+                return member == "system" or member == "popen" or (
+                    member.startswith("exec") or member.startswith("spawn")
+                )
+            if owner == "asyncio":
+                return member in {"create_subprocess_exec", "create_subprocess_shell"}
+            return owner == "multiprocessing"
+
+        def visit_Call(self, node: ast.Call) -> None:
+            for keyword in node.keywords:
+                if keyword.arg == "shell" and not (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is False
+                ):
+                    pytest.fail(f"shell=True at {self.module}:{node.lineno}")
+            qualified = self._qualified_name(node.func)
+            if qualified is not None and self._is_launch(qualified):
+                actual.append(
+                    (
+                        self.module,
+                        self.functions[-1] if self.functions else None,
+                        node.lineno,
+                        qualified,
+                        tuple(sorted(keyword.arg or "**" for keyword in node.keywords)),
                     )
+                )
             self.generic_visit(node)
 
     for source in runners_root.glob("*.py"):
-        LaunchVisitor(source.name).visit(
-            ast.parse(source.read_text(encoding="utf-8"))
-        )
+        LaunchVisitor(source.name).visit(ast.parse(source.read_text(encoding="utf-8")))
 
-    assert launch_calls == {
-        ("containment.py", "_exact_repair_file_bindings", "subprocess.run"),
-        ("process.py", "launch_cli", "subprocess.Popen"),
-    }
+    expected_rows = json.loads(golden_path.read_text(encoding="utf-8"))
+    expected = Counter(
+        (
+            row["module"], row["function"], row["callee"], tuple(row["keywords"])
+        )
+        for row in expected_rows
+        for _ in range(row["count"])
+    )
+    observed = Counter(
+        (module, function, callee, keywords)
+        for module, function, _lineno, callee, keywords in actual
+    )
+    assert observed == expected, f"launch inventory with lines: {actual!r}"
 
 
 @pytest.mark.parametrize("module", [False, True])

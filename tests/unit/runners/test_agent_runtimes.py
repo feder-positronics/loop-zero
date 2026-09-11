@@ -1738,6 +1738,15 @@ def test_claude_sdk_and_cli_receive_scoped_tools_and_native_schema(
     )
 
 
+def test_claude_cli_builder_resumes_the_requested_session(tmp_path: Path) -> None:
+    command = claude.build_claude_command(
+        replace(claude_request(tmp_path), resume_session_id="session.valid-_1")
+    )
+
+    assert command[command.index("--resume") + 1] == "session.valid-_1"
+    assert "--no-session-persistence" not in command
+
+
 def test_claude_canonical_evidence_reaches_sdk_and_cli_with_bounded_reads(
     tmp_path: Path,
 ) -> None:
@@ -4452,6 +4461,18 @@ def test_codex_runtime_keeps_only_code_mode_host_enabled_for_terminal_tools(
     assert command[command.index("--sandbox") + 1] == "read-only"
 
 
+def test_codex_cli_builder_resumes_the_requested_session(tmp_path: Path) -> None:
+    command = codex.build_codex_command(
+        replace(codex_request(tmp_path), resume_session_id="thread.valid-._1"),
+        config_lock=tmp_path / "runtime.config.lock.toml",
+        output_schema_path=tmp_path / "result.schema.json",
+    )
+
+    exec_index = command.index("exec")
+    assert command[exec_index] == "exec"
+    assert command[-3:] == ["resume", "thread.valid-._1", "-"]
+
+
 @pytest.mark.parametrize("read_only", [True, False])
 def test_codex_selects_cli_before_launch_when_sdk_is_unavailable(
     tmp_path: Path, read_only: bool
@@ -5763,6 +5784,29 @@ def test_run_cli_timeout_terminates_the_owned_process_group(tmp_path: Path) -> N
     assert result.returncode != 0
 
 
+def test_run_cli_reports_timeout_within_bound_when_leader_ignores_sigterm(
+    tmp_path: Path,
+) -> None:
+    started = time.monotonic()
+    result = run_cli_unsandboxed(
+        [
+            sys.executable,
+            "-c",
+            "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+        ],
+        cwd=tmp_path,
+        input_text="",
+        timeout_s=0.1,
+        env={"PATH": os.environ["PATH"]},
+        terminate_grace_s=0.1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.timed_out is True
+    assert result.returncode == -signal.SIGKILL
+    assert 0.1 <= elapsed < 0.45
+
+
 def test_run_cli_reports_exact_launch_identity_before_writing_input(
     tmp_path: Path,
 ) -> None:
@@ -6119,7 +6163,10 @@ def test_cancel_cli_skips_grace_delay_when_unreaped_group_is_already_gone(
     process.cancel_cli(handle)
 
     assert signals == [(123, signal.SIGTERM)]
-    child.wait.assert_called_once_with()
+    child.wait.assert_called_once()
+    assert child.wait.call_args.kwargs["timeout"] > 0
+    child.communicate.assert_called_once()
+    assert child.communicate.call_args.kwargs["timeout"] > 0
 
 
 def test_runtime_launch_transfers_and_closes_protected_codex_descriptor(
@@ -6173,6 +6220,47 @@ def test_cursor_command_uses_structured_output_and_existing_permissions(
         "--mode",
         "ask",
     ]
+
+
+@pytest.mark.parametrize(
+    "resume_session_id",
+    ["control\ncharacter", "../path-component", "nested/session", "--last", "x" * 129],
+)
+def test_resume_identifiers_are_rejected_before_bridge_or_argv_use(
+    tmp_path: Path,
+    resume_session_id: str,
+) -> None:
+    base = claude_request(tmp_path)
+    payload = {
+        "vendor": "claude",
+        "prompt": base.prompt,
+        "cwd": str(base.cwd),
+        "requested_model": base.requested_model,
+        "effort": base.effort,
+        "read_only": True,
+        "budget_usd": base.budget_usd,
+        "output_schema": base.output_schema,
+        "read_roots": [str(tmp_path.resolve())],
+        "commercial_mode": "subscription-only",
+        "resume_session_id": resume_session_id,
+    }
+    with pytest.raises(sdk_bridge.BridgeInputError, match="resume_session_id"):
+        sdk_bridge._validate_request_payload(payload)
+    with pytest.raises(ValueError, match="resume_session_id"):
+        cursor.build_cursor_command(
+            replace(request(tmp_path), resume_session_id=resume_session_id),
+            isolated_workspace=tmp_path,
+        )
+    with pytest.raises(ValueError, match="resume_session_id"):
+        claude.build_claude_command(
+            replace(claude_request(tmp_path), resume_session_id=resume_session_id)
+        )
+    with pytest.raises(ValueError, match="resume_session_id"):
+        codex.build_codex_command(
+            replace(codex_request(tmp_path), resume_session_id=resume_session_id),
+            config_lock=tmp_path / "runtime.config.lock.toml",
+            output_schema_path=tmp_path / "result.schema.json",
+        )
 
 
 def _cursor_auth_probe(command, **kwargs):
@@ -6555,36 +6643,21 @@ def test_cursor_adapter_keeps_governed_output_out_of_result_repr(
     assert str(tmp_path) in input_text
 
 
-def test_cursor_run_workspace_is_inside_documented_wrapper_bind(
+def test_cursor_run_workspace_is_inside_documented_settings_root(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from loopzero.runners import containment
-
     tooling_root = tmp_path / "tooling"
     worktree = tmp_path / "worktree"
     tooling_root.mkdir()
     worktree.mkdir()
     settings = RuntimeSettings(tooling_root=tooling_root)
     workspace_root = settings.workspace_root(tooling_root)
-    wrapper_argv: list[str] = []
     observed_workspace: Path | None = None
 
-    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
-    monkeypatch.setattr(
-        containment, "_system_executable", lambda _: Path("/usr/bin/bwrap")
-    )
-    monkeypatch.setattr(containment, "_worker_runtime_read_roots", lambda _: ())
-
     def run_success(command, *, cwd, **kwargs):
-        nonlocal wrapper_argv, observed_workspace
-        del kwargs
+        nonlocal observed_workspace
+        del command, kwargs
         observed_workspace = cwd
-        wrapper_argv = containment.worker_isolated_command(
-            command,
-            writable_root=worktree,
-            additional_writable_roots=(workspace_root,),
-        )
         return process.ProcessResult(
             returncode=0,
             stdout=(
@@ -6607,11 +6680,6 @@ def test_cursor_run_workspace_is_inside_documented_wrapper_bind(
     assert outcome.status is contracts.RuntimeStatus.COMPLETED
     assert observed_workspace is not None
     assert observed_workspace.is_relative_to(workspace_root)
-    binding = ["--bind", str(workspace_root), str(workspace_root)]
-    assert any(
-        wrapper_argv[index : index + 3] == binding
-        for index in range(len(wrapper_argv) - 2)
-    )
 
 
 def test_cursor_run_fails_closed_before_launch_when_eligibility_is_ambiguous(

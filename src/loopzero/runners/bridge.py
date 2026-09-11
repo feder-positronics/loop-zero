@@ -56,6 +56,7 @@ from .contract import (
     RuntimePhase,
     RuntimeProgressSignal,
     RuntimeToolLabel,
+    is_valid_resume_session_id,
 )
 
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
@@ -734,6 +735,10 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
     resume_session_id = _bounded_string(
         payload.get("resume_session_id"), "resume_session_id"
     )
+    if resume_session_id is not None and not is_valid_resume_session_id(
+        resume_session_id
+    ):
+        raise BridgeInputError("bridge request resume_session_id is invalid")
     if resume_session_id is not None and vendor_value not in {"claude", "codex"}:
         raise BridgeInputError("bridge request resume_session_id is unexpected")
     commercial_mode = payload.get("commercial_mode", "subscription-only")

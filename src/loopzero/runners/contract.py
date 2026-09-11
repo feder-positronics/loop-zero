@@ -3,6 +3,7 @@
 from ._review_schema import review_sections_schema, validate_review_chain_task
 
 import math
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -14,6 +15,16 @@ MAX_STRUCTURED_OUTPUT_BYTES = 8 * 1024 * 1024
 # A CLI may JSON-escape every non-BMP code point (3x UTF-8 expansion) and
 # duplicate the governed object in both text and structured terminal fields.
 MAX_PROTOCOL_LINE_BYTES = 6 * MAX_STRUCTURED_OUTPUT_BYTES + 64 * 1024
+RESUME_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
+def is_valid_resume_session_id(value: object) -> bool:
+    """Return whether *value* is safe to hand to a vendor resume interface."""
+    return (
+        isinstance(value, str)
+        and not value.startswith("-")
+        and RESUME_SESSION_ID_PATTERN.fullmatch(value) is not None
+    )
 
 
 class SubscriptionEligibility(StrEnum):

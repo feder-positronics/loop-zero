@@ -4,6 +4,7 @@ import base64
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,6 +21,29 @@ def _load_broker():
 
 
 codex_credential = _load_broker()
+
+
+def _test_bwrap_argv(
+    command: list[str],
+    *,
+    tooling_root: Path,
+    venv_root: Path,
+    bridge_dir: Path,
+    workspace_root: Path,
+) -> list[str]:
+    """Small test-only wrapper demonstrating the kernel/runner argv seam."""
+    argv = [
+        "/usr/bin/bwrap",
+        "--die-with-parent",
+        "--unshare-pid",
+        "--ro-bind",
+        "/",
+        "/",
+    ]
+    for root in (tooling_root, venv_root, bridge_dir):
+        argv.extend(("--ro-bind", str(root), str(root)))
+    argv.extend(("--bind", str(workspace_root), str(workspace_root)))
+    return [*argv, "--", *command]
 
 
 def _jwt(*, expires_at_s: int) -> str:
@@ -266,3 +290,68 @@ def test_refresh_bridge_requests_an_explicit_managed_token_refresh(
     assert isinstance(observed["config"], dict)
     assert "codex_bin" not in observed["config"]
     assert json.loads(capsys.readouterr().out) == {"authenticated": True}
+
+
+def test_codex_refresh_wrapper_binds_sdk_venv_bridge_and_workspace(
+    tmp_path: Path,
+) -> None:
+    bwrap = shutil.which("bwrap")
+    if bwrap is None:
+        pytest.skip("bubblewrap unavailable: cannot test the sandbox-wrapper contract")
+    probe = subprocess.run(
+        [bwrap, "--ro-bind", "/", "/", "--", "/bin/true"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        diagnostic = (probe.stderr or probe.stdout).strip().splitlines()
+        detail = diagnostic[-1] if diagnostic else "unknown namespace error"
+        pytest.skip(f"bubblewrap cannot create a namespace: {detail}")
+
+    from loopzero.runners import process
+
+    tooling_root = Path(__file__).resolve().parents[3]
+    venv_root = Path(sys.prefix).resolve()
+    bridge = Path(codex_credential.__file__).resolve().with_name("bridge.py")
+    bridge_dir = bridge.parent
+    workspace_root = tmp_path / "workspace"
+    workspace_root.mkdir()
+    command = [sys.executable, "-I", str(bridge), "--codex-refresh"]
+
+    def wrapper(argv):
+        return _test_bwrap_argv(
+            list(argv),
+            tooling_root=tooling_root,
+            venv_root=venv_root,
+            bridge_dir=bridge_dir,
+            workspace_root=workspace_root,
+        )
+
+    wrapped = wrapper(command)
+    for mode, root in (
+        ("--ro-bind", venv_root),
+        ("--ro-bind", bridge_dir),
+        ("--bind", workspace_root),
+    ):
+        binding = [mode, str(root), str(root)]
+        assert any(wrapped[index : index + 3] == binding for index in range(len(wrapped) - 2))
+    assert (venv_root / "pyvenv.cfg").is_file()
+    assert (venv_root / "bin").is_dir()
+    assert (venv_root / "lib").is_dir()
+
+    result = process.run_cli(
+        command,
+        cwd=workspace_root,
+        input_text="",
+        timeout_s=10,
+        env={
+            "PATH": os.environ["PATH"],
+            "CODEX_HOME": str(workspace_root),
+        },
+        sandbox_wrapper=wrapper,
+    )
+
+    assert result.timed_out is False
+    assert result.returncode == 0
+    assert set(json.loads(result.stdout)) == {"authenticated"}

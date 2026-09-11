@@ -465,8 +465,8 @@ def launch_cli(
 ) -> ProcessHandle:
     """Launch an allowlisted CLI child inside a caller-supplied sandbox.
 
-    The wrapper receives the original argv and returns isolated argv (for
-    example a closure over :func:`containment.worker_isolated_command`).  A
+    The wrapper receives the original argv and returns isolated argv. It is
+    supplied by the dispatcher after kernel sandbox policy is settled. A
     caller may make an exceptional unsandboxed launch only by setting
     ``unsandboxed=True`` and supplying a nonempty reason, which is logged.
     """
@@ -530,21 +530,30 @@ def launch_cli(
     return handle
 
 
-def cancel_cli(handle: ProcessHandle, *, grace_s: float = 2.0) -> None:
-    """Terminate then forcibly reap the exact process group launched by this module."""
+def cancel_cli(handle: ProcessHandle, *, grace_s: float = 2.0) -> bool:
+    """Terminate and reap an owned group within *grace_s*.
+
+    ``False`` reports that the leader could not be reaped before the shared
+    deadline. Every blocking process operation receives only the time remaining
+    on that deadline.
+    """
     if os.name != "posix":
         raise ProcessGroupError("native runtime process groups require POSIX")
+    if grace_s < 0:
+        raise ValueError("grace_s must not be negative")
     # Once Popen has reaped the leader, its numeric PGID can be recycled by an
     # unrelated session. Never signal after that identity reservation is gone.
     if handle.process.returncode is not None:
-        return
+        return True
+    started = time.monotonic()
+    deadline = started + grace_s
+    term_deadline = started + (grace_s / 2)
     try:
         os.killpg(handle.pgid, signal.SIGTERM)
     except ProcessLookupError:
         pass
-    deadline = time.monotonic() + grace_s
     while _process_group_has_live_member(handle.pgid):
-        remaining = deadline - time.monotonic()
+        remaining = term_deadline - time.monotonic()
         if remaining <= 0:
             break
         time.sleep(min(0.01, remaining))
@@ -556,7 +565,31 @@ def cancel_cli(handle: ProcessHandle, *, grace_s: float = 2.0) -> None:
             os.killpg(handle.pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    handle.process.wait()
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        LOGGER.error("runtime process-group cancellation timed out")
+        return False
+    try:
+        handle.process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        LOGGER.error("runtime process-group cancellation timed out")
+        return False
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        LOGGER.error("runtime process-group cancellation timed out")
+        return False
+    try:
+        handle.process.communicate(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        LOGGER.error("runtime process-group cancellation timed out")
+        return False
+    except ValueError:
+        # ValueError is possible when run_cli's dedicated stdin writer already
+        # closed the pipe. The leader has nevertheless been boundedly reaped.
+        if handle.process.returncode is None:
+            LOGGER.error("runtime process-group cancellation timed out")
+            return False
+    return True
 
 
 def _process_group_has_live_member(pgid: int) -> bool:
@@ -732,7 +765,7 @@ def run_cli(
         timed_out = False
         while not _process_exited_without_reaping(handle.process):
             if output_limited.is_set():
-                cancel_cli(handle, grace_s=terminate_grace_s)
+                timed_out = not cancel_cli(handle, grace_s=terminate_grace_s)
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -744,7 +777,7 @@ def run_cli(
             # A successful direct child may still leave SDK/app-server
             # descendants after closing their inherited pipes. Reap them before
             # a same-vendor fallback can begin.
-            cancel_cli(handle, grace_s=terminate_grace_s)
+            timed_out = not cancel_cli(handle, grace_s=terminate_grace_s)
 
         for thread in threads:
             thread.join(timeout=terminate_grace_s)

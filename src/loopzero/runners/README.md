@@ -8,14 +8,12 @@ and importing callers use the new module path.
 `contract.py` includes the names formerly in `contracts.py` and
 `governed_result.py`; `_review_schema.py` holds their unchanged schema helpers.
 
-Configure a consumer and a filesystem sandbox before constructing adapters or
-calling credential helpers. Default adapter construction is useful for parsing
-and dependency injection, but it is not an executable containment boundary:
+Configure a consumer and obtain a filesystem wrapper from the kernel before
+constructing adapters or calling credential helpers. Default adapter
+construction is useful for parsing and dependency injection, but it is not an
+executable containment boundary:
 
 ```python
-from functools import partial
-
-from loopzero.runners.containment import worker_isolated_command
 from loopzero.runners.process import isolated_python_import_available, run_cli
 from loopzero.runners.settings import RuntimeSettings
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
@@ -23,37 +21,39 @@ from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
 settings = RuntimeSettings.from_profile(profile)
 workspace_root = settings.workspace_root(worktree)
 workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-sandbox = partial(
-    worker_isolated_command,
-    writable_root=worktree,
-    additional_writable_roots=(workspace_root,),
-    readable_roots=(settings.tooling_root,),
+# The dispatcher supplies this callable after asking loopzero.kernel.sandbox
+# to settle filesystem authority. Runners only apply it to argv.
+sandbox_wrapper = dispatcher_sandbox_wrapper
+contained_run = lambda argv, **kwargs: run_cli(
+    argv, sandbox_wrapper=sandbox_wrapper, **kwargs
 )
-contained_run = partial(run_cli, sandbox_wrapper=sandbox)
 contained_probe = lambda python, cwd: isolated_python_import_available(
     python, "claude_agent_sdk", timeout_s=5,
-    sandbox_wrapper=sandbox,
+    sandbox_wrapper=sandbox_wrapper,
 )
 with settings.use():
     adapter = NATIVE_RUNTIME_REGISTRY.create(
         "claude", run_cli=contained_run, run_probe=contained_run,
         sdk_available=contained_probe,
     )
-    # Credential helpers build a staging-root wrapper through the same seam.
+    # Credential helpers receive the same wrapper through their sandbox_wrapper
+    # argument; they never construct a filesystem sandbox themselves.
 result = adapter.run(request)  # retains the settings used at construction
 ```
 
 `launch_cli()` and `run_cli()` refuse execution without a caller-supplied
 `sandbox_wrapper`. The exceptional `unsandboxed=True` path also requires a
 nonempty reason and logs it. It is intended for tightly scoped process-mechanics
-tests, not validation children. The built-in `worker_isolated_command()` is the
-ported bubblewrap argv builder: it exposes the selected writable root while
-remounting its `.git` metadata read-only, and exposes only explicit read roots.
-`worker_child_environment()` starts from the settings allowlist and always drops
-GitHub tokens, SSH agent access, and every lease/nonce-named variable.
-Cursor workspaces are created below `settings.workspace_root(tooling_root)`.
-The wrapper must bind that root as an `additional_writable_root`, as above;
-host `/tmp` remains hidden by the sandbox.
+tests, not validation children. The wrapper contract is ``argv -> argv`` and is
+owned by `loopzero.kernel.sandbox`; the dispatcher wires it into runners. The
+wrapper must bind the governed worktree, tooling root, runtime venv root, and
+`settings.workspace_root(tooling_root)`. The venv binding must include the
+interpreter's `pyvenv.cfg`, `bin`, and `lib` so the bridge can import its SDKs.
+Every `.git` path and every linked-worktree gitdir reachable through those
+bindings must remain read-only. Runners neither build bubblewrap argv nor decide
+which roots are writable. `worker_child_environment()` starts from the positive
+settings allowlist and always drops GitHub tokens, SSH agent access, and every
+lease/nonce-named variable.
 
 Existing helper signatures are unchanged. Settings scopes are context-local,
 restore their parent on exit, and do not mutate module globals. Exported string
