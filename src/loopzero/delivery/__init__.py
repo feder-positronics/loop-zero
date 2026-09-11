@@ -1,5 +1,5 @@
 """Publication, closeout, re-entry and deterministic delivery gates."""
 
-from . import gates, publish, reentry
+from . import closeout, gates, publish, reentry
 
-__all__ = ["gates", "publish", "reentry"]
+__all__ = ["closeout", "gates", "publish", "reentry"]
