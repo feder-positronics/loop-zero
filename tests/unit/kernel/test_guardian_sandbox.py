@@ -144,6 +144,40 @@ def test_sandbox_builder_rejects_a_destination_symlinked_by_an_earlier_mount(
         )
 
 
+@pytest.mark.parametrize("root", [Path("/bin"), Path("/lib64")])
+def test_sandbox_builder_rejects_a_file_mount_beneath_a_builder_symlink(
+    root: Path, tmp_path: Path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    mounted_file = tmp_path / "mounted-file"
+    worktree.mkdir()
+    mounted_file.write_text("candidate\n", encoding="utf-8")
+    real_lstat = os.lstat
+
+    def host_without_usr_merge(path):
+        if Path(path) == root:
+            return SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+        return real_lstat(path)
+
+    monkeypatch.setattr(module.os, "lstat", host_without_usr_merge)
+    monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="symlinked component"):
+        module.command(
+            ["/usr/bin/true"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_file_mounts=((mounted_file, root / "loopzero-version"),),
+            deny_network=True,
+        )
+
+
 def test_validation_builder_allows_the_git_directory_beneath_the_worktree(
     tmp_path, monkeypatch
 ) -> None:

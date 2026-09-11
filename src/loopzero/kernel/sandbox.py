@@ -193,9 +193,20 @@ def _reject_kernel_filesystem_path(path: Path, *, label: str) -> None:
 @dataclass(frozen=True)
 class _EmittedMount:
     mode: str
-    source: Path
+    source: Path | None
     destination: Path
     kernel_owned_seal: bool = False
+    symlink_target: str | None = None
+
+
+_ROOT_RECONSTRUCTION_SYMLINKS = (
+    ("usr/bin", Path("/bin")),
+    ("usr/lib", Path("/lib")),
+    ("usr/lib64", Path("/lib64")),
+    ("usr/sbin", Path("/sbin")),
+)
+_RESOLV_CONF_SYMLINK = ("/mnt/wsl/resolv.conf", Path("/etc/resolv.conf"))
+_BUILDER_SYMLINKS = (*_ROOT_RECONSTRUCTION_SYMLINKS, _RESOLV_CONF_SYMLINK)
 
 
 def _validated_destination(
@@ -233,6 +244,10 @@ def _validated_destination(
         )
         if matching is not None:
             mounted_index, matching_mount = matching
+            if matching_mount.mode == "--symlink":
+                raise SandboxError(f"{label} contains a symlinked component")
+            if matching_mount.source is None:
+                raise SandboxError(f"{label} is unavailable")
             mounted_source = matching_mount.source
             mounted_destination = matching_mount.destination
             inspected = mounted_source
@@ -557,18 +572,29 @@ def command(
     argument list is built, so none can shadow the private kernel filesystems.
     """
     resolved_worktree = _validated(worktree, directory=True)
+    emitted_mounts: list[_EmittedMount] = [
+        _EmittedMount(
+            "--symlink",
+            None,
+            destination,
+            symlink_target=target,
+        )
+        for target, destination in _BUILDER_SYMLINKS
+    ]
     worktree_destination = _validated_destination(
-        worktree, label="sandbox worktree destination"
+        worktree,
+        label="sandbox worktree destination",
+        emitted_mounts=emitted_mounts,
     )
     worktree_mode = "--bind" if writable_worktree else "--ro-bind"
-    mounts: list[_EmittedMount] = [
-        _EmittedMount(
-            worktree_mode,
-            resolved_worktree,
-            worktree_destination,
-            kernel_owned_seal=worktree_mode == "--ro-bind",
-        )
-    ]
+    worktree_mount = _EmittedMount(
+        worktree_mode,
+        resolved_worktree,
+        worktree_destination,
+        kernel_owned_seal=worktree_mode == "--ro-bind",
+    )
+    emitted_mounts.append(worktree_mount)
+    mounts = [worktree_mount]
 
     def add_mount(
         mode: str,
@@ -582,17 +608,17 @@ def command(
         validated_destination = _validated_destination(
             destination,
             label=label,
-            emitted_mounts=mounts,
+            emitted_mounts=emitted_mounts,
             builder_emitted=builder_emitted,
         )
-        mounts.append(
-            _EmittedMount(
-                mode,
-                source,
-                validated_destination,
-                kernel_owned_seal=kernel_owned_seal,
-            )
+        mount = _EmittedMount(
+            mode,
+            source,
+            validated_destination,
+            kernel_owned_seal=kernel_owned_seal,
         )
+        emitted_mounts.append(mount)
+        mounts.append(mount)
 
     if audit_source is not None:
         if audit_destination is None or not audit_destination.is_absolute():
@@ -749,18 +775,11 @@ def command(
             "--ro-bind",
             "/usr",
             "/usr",
-            "--symlink",
-            "usr/bin",
-            "/bin",
-            "--symlink",
-            "usr/lib",
-            "/lib",
-            "--symlink",
-            "usr/lib64",
-            "/lib64",
-            "--symlink",
-            "usr/sbin",
-            "/sbin",
+            *(
+                argument
+                for target, destination in _ROOT_RECONSTRUCTION_SYMLINKS
+                for argument in ("--symlink", target, str(destination))
+            ),
             "--dir",
             "/etc",
             "--ro-bind",
@@ -786,8 +805,8 @@ def command(
             "/mnt/wsl/resolv.conf",
             "/mnt/wsl/resolv.conf",
             "--symlink",
-            "/mnt/wsl/resolv.conf",
-            "/etc/resolv.conf",
+            _RESOLV_CONF_SYMLINK[0],
+            str(_RESOLV_CONF_SYMLINK[1]),
             "--proc",
             "/proc",
             "--dev",

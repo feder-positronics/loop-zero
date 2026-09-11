@@ -431,6 +431,7 @@ class _BoundMount:
     source: Path | None
     destination: Path
     kernel_owned_seal: bool = False
+    symlink_target: str | None = None
 
 
 def _validated_bound_destination(
@@ -466,8 +467,10 @@ def _validated_bound_destination(
         )
         if matching is not None:
             mounted_index, mount = matching
-            if mount.source is None:
+            if mount.mode == "--symlink":
                 raise JobStoreError(f"{label} contains a symlinked component")
+            if mount.source is None:
+                raise JobStoreError(f"{label} is unavailable")
             mounted_source = mount.source
             mounted_destination = mount.destination
             inspected = mounted_source
@@ -606,7 +609,14 @@ def build_bound_sandbox_arguments(
         target = read_symlink_target(source)
         if target is not None:
             destination = Path(os.path.abspath(source))
-            emitted_mounts.append(_BoundMount("--symlink", None, destination))
+            emitted_mounts.append(
+                _BoundMount(
+                    "--symlink",
+                    None,
+                    destination,
+                    symlink_target=target,
+                )
+            )
             return ["--symlink", target, str(source)]
         return emit_mount(
             "--bind",

@@ -822,6 +822,27 @@ def test_bound_sandbox_rejects_a_destination_beneath_an_emitted_symlink() -> Non
         )
 
 
+@pytest.mark.parametrize("root", [Path("/bin"), Path("/lib64")])
+def test_bound_sandbox_rejects_a_file_mount_beneath_a_root_symlink(
+    root: Path,
+) -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="symlinked component"):
+        job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            protected_authority_root=Path("/home/user/jobs/current"),
+            working_directory=Path("/home/user/repo"),
+            command=["true"],
+            account_home=Path("/home/user"),
+            protected_read_only_paths=(root / "loopzero-version",),
+            **_fake_filesystem_views(
+                {"/": ["bin", "home", "lib64"], "/home": ["user"]},
+                {"/bin": "usr/bin", "/lib64": "usr/lib64"},
+            ),
+        )
+
+
 def test_bound_sandbox_supports_dev_shm_authority_without_rebinding_dev() -> None:
     from loopzero.kernel import jobs as job_store
 
