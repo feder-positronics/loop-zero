@@ -6555,6 +6555,65 @@ def test_cursor_adapter_keeps_governed_output_out_of_result_repr(
     assert str(tmp_path) in input_text
 
 
+def test_cursor_run_workspace_is_inside_documented_wrapper_bind(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from loopzero.runners import containment
+
+    tooling_root = tmp_path / "tooling"
+    worktree = tmp_path / "worktree"
+    tooling_root.mkdir()
+    worktree.mkdir()
+    settings = RuntimeSettings(tooling_root=tooling_root)
+    workspace_root = settings.workspace_root(tooling_root)
+    wrapper_argv: list[str] = []
+    observed_workspace: Path | None = None
+
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(
+        containment, "_system_executable", lambda _: Path("/usr/bin/bwrap")
+    )
+    monkeypatch.setattr(containment, "_worker_runtime_read_roots", lambda _: ())
+
+    def run_success(command, *, cwd, **kwargs):
+        nonlocal wrapper_argv, observed_workspace
+        del kwargs
+        observed_workspace = cwd
+        wrapper_argv = containment.worker_isolated_command(
+            command,
+            writable_root=worktree,
+            additional_writable_roots=(workspace_root,),
+        )
+        return process.ProcessResult(
+            returncode=0,
+            stdout=(
+                '{"type":"result","subtype":"success","is_error":false,'
+                '"result":"done"}'
+            ),
+            stderr="",
+            duration_s=0.01,
+            timed_out=False,
+        )
+
+    with settings.use():
+        adapter = cursor.CursorAdapter(
+            run_cli=run_success,
+            run_probe=_cursor_auth_probe,
+            which=lambda _name: "/usr/bin/cursor-agent",
+        )
+    outcome = adapter.run(replace(request(worktree), tooling_root=tooling_root))
+
+    assert outcome.status is contracts.RuntimeStatus.COMPLETED
+    assert observed_workspace is not None
+    assert observed_workspace.is_relative_to(workspace_root)
+    binding = ["--bind", str(workspace_root), str(workspace_root)]
+    assert any(
+        wrapper_argv[index : index + 3] == binding
+        for index in range(len(wrapper_argv) - 2)
+    )
+
+
 def test_cursor_run_fails_closed_before_launch_when_eligibility_is_ambiguous(
     tmp_path: Path,
 ) -> None:

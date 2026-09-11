@@ -4,7 +4,6 @@ import base64
 import importlib.util
 import json
 import os
-import signal
 import stat
 import subprocess
 import sys
@@ -194,35 +193,24 @@ def test_codex_refresh_rejects_unadvanced_expiry(
     assert json.loads(credential.read_text(encoding="utf-8")) == original
 
 
-def test_default_refresh_runner_kills_the_entire_process_group_on_timeout(
+def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    killed: list[tuple[int, signal.Signals]] = []
+    observed: dict[str, object] = {}
 
-    class FakeProcess:
-        pid = 4242
-        returncode = -signal.SIGKILL
-        calls = 0
+    def contained_run(command, **kwargs):
+        observed.update(command=command, **kwargs)
+        return codex_credential.ProcessResult(
+            returncode=-9,
+            stdout="bounded-out",
+            stderr="bounded-error",
+            duration_s=1.0,
+            timed_out=True,
+        )
 
-        def communicate(self, *, timeout=None):
-            self.calls += 1
-            if self.calls == 1:
-                raise subprocess.TimeoutExpired(["bridge"], timeout)
-            return "", ""
-
-        def poll(self):
-            return None
-
-    monkeypatch.setattr(
-        codex_credential.subprocess,
-        "Popen",
-        lambda *_args, **_kwargs: FakeProcess(),
-    )
-    monkeypatch.setattr(
-        codex_credential.os,
-        "killpg",
-        lambda pid, sig: killed.append((pid, sig)),
-    )
+    monkeypatch.setattr(codex_credential, "default_run_cli", contained_run)
+    wrapper = lambda command: ["bwrap", "--", *command]
 
     with pytest.raises(subprocess.TimeoutExpired):
         codex_credential._run_refresh_process_group(
@@ -232,9 +220,18 @@ def test_default_refresh_runner_kills_the_entire_process_group_on_timeout(
             capture_output=True,
             text=True,
             env={},
+            cwd=tmp_path,
+            sandbox_wrapper=wrapper,
         )
 
-    assert killed == [(4242, signal.SIGKILL)]
+    assert observed == {
+        "command": ["bridge"],
+        "cwd": tmp_path,
+        "input_text": "",
+        "timeout_s": 1,
+        "env": {},
+        "sandbox_wrapper": wrapper,
+    }
 
 
 def test_refresh_bridge_requests_an_explicit_managed_token_refresh(

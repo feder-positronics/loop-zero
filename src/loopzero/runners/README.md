@@ -21,9 +21,12 @@ from loopzero.runners.settings import RuntimeSettings
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
 
 settings = RuntimeSettings.from_profile(profile)
+workspace_root = settings.workspace_root(worktree)
+workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 sandbox = partial(
     worker_isolated_command,
     writable_root=worktree,
+    additional_writable_roots=(workspace_root,),
     readable_roots=(settings.tooling_root,),
 )
 contained_run = partial(run_cli, sandbox_wrapper=sandbox)
@@ -36,7 +39,7 @@ with settings.use():
         "claude", run_cli=contained_run, run_probe=contained_run,
         sdk_available=contained_probe,
     )
-    # Credential helper calls also belong inside this scope.
+    # Credential helpers build a staging-root wrapper through the same seam.
 result = adapter.run(request)  # retains the settings used at construction
 ```
 
@@ -48,6 +51,9 @@ ported bubblewrap argv builder: it exposes the selected writable root while
 remounting its `.git` metadata read-only, and exposes only explicit read roots.
 `worker_child_environment()` starts from the settings allowlist and always drops
 GitHub tokens, SSH agent access, and every lease/nonce-named variable.
+Cursor workspaces are created below `settings.workspace_root(tooling_root)`.
+The wrapper must bind that root as an `additional_writable_root`, as above;
+host `/tmp` remains hidden by the sandbox.
 
 Existing helper signatures are unchanged. Settings scopes are context-local,
 restore their parent on exit, and do not mutate module globals. Exported string

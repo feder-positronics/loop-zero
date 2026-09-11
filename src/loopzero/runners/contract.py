@@ -267,6 +267,7 @@ class RuntimeRequest:
     )
     visible_tools: tuple[str, ...] | None = None
     allowed_tools: tuple[str, ...] = ()
+    resume_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

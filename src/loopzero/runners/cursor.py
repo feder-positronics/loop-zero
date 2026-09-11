@@ -196,6 +196,8 @@ def build_cursor_command(
         "--skip-worktree-setup",
         "--trust",
     ]
+    if request.resume_session_id is not None:
+        command.extend(("--resume", request.resume_session_id))
     if request.read_only:
         command.extend(("--mode", "ask"))
     else:
@@ -437,7 +439,15 @@ class CursorAdapter:
                 diagnostics=(readiness.repair or "Cursor CLI unavailable",),
             )
         try:
-            with TemporaryDirectory(prefix=get_settings().temp_name("cursor-cli")) as directory:
+            workspace_root = get_settings().workspace_root(
+                request.tooling_root or request.cwd
+            )
+            workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            workspace_root = workspace_root.resolve(strict=True)
+            with TemporaryDirectory(
+                prefix=get_settings().temp_name("cursor-cli"),
+                dir=workspace_root,
+            ) as directory:
                 isolated_workspace = Path(directory)
                 outcome = self._run_cli(
                     build_cursor_command(

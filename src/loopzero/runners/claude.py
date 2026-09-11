@@ -37,6 +37,7 @@ from .contract import (
 from .process import (
     ProcessHandle,
     ProcessResult,
+    SandboxWrapper,
     cancel_cli,
     filtered_child_environment,
     isolated_python_import_available,
@@ -1191,6 +1192,8 @@ class ClaudeAdapter:
             payload_data["visible_tools"] = list(request.visible_tools)
         if request.allowed_tools:
             payload_data["allowed_tools"] = list(request.allowed_tools)
+        if request.resume_session_id is not None:
+            payload_data["resume_session_id"] = request.resume_session_id
         payload = json.dumps(payload_data, ensure_ascii=False)
         try:
             environment = merge_runtime_cache_environment(
@@ -1569,7 +1572,6 @@ import fcntl
 import json
 import os
 import shutil
-import signal
 import stat
 import subprocess
 import tempfile
@@ -1583,7 +1585,6 @@ from pathlib import Path
 
 MAX_CREDENTIAL_BYTES = 1024 * 1024
 REFRESH_TIMEOUT_S = 30.0
-PROCESS_REAP_TIMEOUT_S = 1.0
 REFRESH_SAFETY_MARGIN_S = 5 * 60
 MAX_REFRESH_ATTEMPTS = 2
 BROKER_LOCK_NAME = ".oauth_refresh.lock"
@@ -1828,27 +1829,6 @@ def _status_is_revoked(stdout: str) -> bool:
     return isinstance(status, dict) and status.get("loggedIn") is False
 
 
-def _kill_and_reap_refresh_process_group(
-    process: subprocess.Popen[str],
-) -> None:
-    """Kill the refresh group without waiting indefinitely on inherited pipes."""
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.communicate(timeout=PROCESS_REAP_TIMEOUT_S)
-        return
-    except subprocess.TimeoutExpired:
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                stream.close()
-    try:
-        process.wait(timeout=PROCESS_REAP_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        pass
-
-
 def _run_refresh_process_group(
     command: Sequence[str],
     *,
@@ -1858,29 +1838,26 @@ def _run_refresh_process_group(
     text: bool,
     env: dict[str, str],
     cwd: Path,
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the Claude refresh command as one bounded process group."""
+    """Run Claude refresh through the mandatory contained process seam."""
     if check or not capture_output or not text:
         raise ValueError("Claude refresh runner contract is invalid")
-    process = subprocess.Popen(
-        list(command),
+    result = default_run_cli(
+        command,
         cwd=cwd,
+        input_text="",
+        timeout_s=timeout,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
+        sandbox_wrapper=sandbox_wrapper,
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        _kill_and_reap_refresh_process_group(process)
-        raise subprocess.TimeoutExpired(command, timeout) from exc
-    except BaseException:
-        if process.poll() is None:
-            _kill_and_reap_refresh_process_group(process)
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(
+            command, timeout, output=result.stdout, stderr=result.stderr
+        )
+    return subprocess.CompletedProcess(
+        command, result.returncode, result.stdout, result.stderr
+    )
 
 
 def _refresh_credential(
@@ -1890,8 +1867,11 @@ def _refresh_credential(
     horizon_ms: int,
     claude_binary: Path,
     run_status: Callable[..., subprocess.CompletedProcess[str]],
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> _ValidatedCredential:
-    with tempfile.TemporaryDirectory(prefix=get_settings().temp_name("claude-renewal")) as directory:
+    with tempfile.TemporaryDirectory(
+        prefix=get_settings().temp_name("claude-renewal")
+    ) as directory:
         staging_home = Path(directory)
         staging_home.chmod(0o700)
         staging_directory = staging_home / ".claude"
@@ -1903,15 +1883,24 @@ def _refresh_credential(
         )
         command = [str(claude_binary), "auth", "status", "--json"]
         try:
-            outcome = run_status(
-                command,
-                timeout=REFRESH_TIMEOUT_S,
-                check=False,
-                capture_output=True,
-                text=True,
-                env=_staged_refresh_environment(staging_home),
-                cwd=staging_home,
-            )
+            runner_arguments = {
+                "timeout": REFRESH_TIMEOUT_S,
+                "check": False,
+                "capture_output": True,
+                "text": True,
+                "env": _staged_refresh_environment(staging_home),
+                "cwd": staging_home,
+            }
+            if run_status is _run_refresh_process_group:
+                if sandbox_wrapper is None:
+                    from .containment import worker_isolated_command
+
+                    sandbox_wrapper = lambda argv: worker_isolated_command(
+                        argv,
+                        writable_root=staging_home,
+                    )
+                runner_arguments["sandbox_wrapper"] = sandbox_wrapper
+            outcome = run_status(command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:
             raise ClaudeCredentialRefreshTimeout(
                 "Claude credential refresh timed out"
@@ -2025,6 +2014,7 @@ def _oauth_subscription_credential(
     clock: Callable[[], float] = time.time,
     run_status: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     claude_binary: Path | None = None,
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> Iterator[int]:
     """Renew if needed, then lend one sealed snapshot for a provider command."""
     if requested_runtime_s <= 0:
@@ -2052,6 +2042,7 @@ def _oauth_subscription_credential(
                 horizon_ms=horizon_ms,
                 claude_binary=refresh_binary,
                 run_status=run_status or _run_refresh_process_group,
+                sandbox_wrapper=sandbox_wrapper,
             )
             current = _read_credential(path, now_ms=now_ms)
             if current.oauth != credential.oauth:
@@ -2082,6 +2073,7 @@ def claude_subscription_credential(
     clock: Callable[[], float] = time.time,
     run_status: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     claude_binary: Path | None = None,
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> Iterator[int]:
     """Prefer renewable OAuth; otherwise lend a validated access-only token."""
 
@@ -2093,6 +2085,7 @@ def claude_subscription_credential(
                 clock=clock,
                 run_status=run_status,
                 claude_binary=claude_binary,
+                sandbox_wrapper=sandbox_wrapper,
             ))
         except ClaudeCredentialError:
             descriptor = token_snapshot()

@@ -2,7 +2,6 @@
 
 import json
 import os
-import signal
 import stat
 import subprocess
 import sys
@@ -207,6 +206,7 @@ print(json.dumps({{\"loggedIn\": True}}))
         credential_path=credential,
         clock=lambda: 1_000.0,
         claude_binary=fake_claude,
+        run_status=subprocess.run,
     ) as descriptor:
         snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
 
@@ -425,51 +425,24 @@ def test_refresh_timeout_is_distinct_and_preserves_host_credential(
     assert json.loads(credential.read_text(encoding="utf-8")) == original
 
 
-def test_default_refresh_runner_kills_the_entire_process_group_on_timeout(
+def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    killed: list[tuple[int, signal.Signals]] = []
     observed: dict[str, object] = {}
 
-    class FakePipe:
-        closed = False
+    def contained_run(command, **kwargs):
+        observed.update(command=command, **kwargs)
+        return claude_credential.ProcessResult(
+            returncode=-9,
+            stdout="bounded-out",
+            stderr="bounded-error",
+            duration_s=1.0,
+            timed_out=True,
+        )
 
-        def close(self) -> None:
-            self.closed = True
-
-    class FakeProcess:
-        pid = 4242
-        returncode = -signal.SIGKILL
-        calls = 0
-        stdout = FakePipe()
-        stderr = FakePipe()
-
-        def communicate(self, *, timeout=None):
-            self.calls += 1
-            if self.calls == 1:
-                raise subprocess.TimeoutExpired(["claude"], timeout)
-            assert timeout == claude_credential.PROCESS_REAP_TIMEOUT_S
-            raise subprocess.TimeoutExpired(["claude"], timeout)
-
-        def poll(self):
-            return None
-
-        def wait(self, *, timeout=None):
-            observed["wait_timeout"] = timeout
-            return self.returncode
-
-    def popen(*args, **kwargs):
-        observed["args"] = args
-        observed["kwargs"] = kwargs
-        return FakeProcess()
-
-    monkeypatch.setattr(claude_credential.subprocess, "Popen", popen)
-    monkeypatch.setattr(
-        claude_credential.os,
-        "killpg",
-        lambda pid, sig: killed.append((pid, sig)),
-    )
+    monkeypatch.setattr(claude_credential, "default_run_cli", contained_run)
+    wrapper = lambda command: ["bwrap", "--", *command]
 
     with pytest.raises(subprocess.TimeoutExpired):
         claude_credential._run_refresh_process_group(
@@ -480,19 +453,16 @@ def test_default_refresh_runner_kills_the_entire_process_group_on_timeout(
             text=True,
             env={},
             cwd=tmp_path,
+            sandbox_wrapper=wrapper,
         )
 
-    assert killed == [(4242, signal.SIGKILL)]
-    assert observed["wait_timeout"] == claude_credential.PROCESS_REAP_TIMEOUT_S
-    assert FakeProcess.stdout.closed is True
-    assert FakeProcess.stderr.closed is True
-    assert observed["kwargs"] == {
+    assert observed == {
+        "command": ["claude", "auth", "status", "--json"],
         "cwd": tmp_path,
+        "input_text": "",
+        "timeout_s": 1,
         "env": {},
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.PIPE,
-        "text": True,
-        "start_new_session": True,
+        "sandbox_wrapper": wrapper,
     }
 
 

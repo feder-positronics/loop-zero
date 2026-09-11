@@ -212,6 +212,11 @@ class RuntimeSettings:
         path = Path(root)
         return path if path.is_absolute() else home / path
 
+    def workspace_root(self, tooling_root: Path) -> Path:
+        """Return the settings-owned parent for per-run adapter workspaces."""
+        root = self.repository_root(self.tooling_root or tooling_root)
+        return root / f".{self.temp_prefix}-runner-workspaces"
+
     # Toolchain resolution ------------------------------------------------
 
     def _tooling_anchor(self) -> str | None:

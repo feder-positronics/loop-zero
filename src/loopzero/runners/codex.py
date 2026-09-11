@@ -38,6 +38,7 @@ from .contract import (
 from .process import (
     ProcessHandle,
     ProcessResult,
+    SandboxWrapper,
     cancel_cli,
     filtered_child_environment,
     isolated_python_import_available,
@@ -1428,6 +1429,11 @@ class CodexAdapter:
                     str(root.resolve())
                     for root in request.capability_profile.read_roots
                 ],
+                **(
+                    {"resume_session_id": request.resume_session_id}
+                    if request.resume_session_id is not None
+                    else {}
+                ),
             },
             ensure_ascii=False,
         )
@@ -1780,7 +1786,6 @@ import base64
 import fcntl
 import json
 import os
-import signal
 import stat
 import subprocess
 import tempfile
@@ -1991,32 +1996,27 @@ def _run_refresh_process_group(
     capture_output: bool,
     text: bool,
     env: dict[str, str],
+    cwd: Path,
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run the refresh bridge as one killable process group."""
+    """Run Codex refresh through the mandatory contained process seam."""
     if check or not capture_output or not text:
         raise ValueError("Codex refresh runner contract is invalid")
-    process = subprocess.Popen(
-        list(command),
+    result = default_run_cli(
+        command,
+        cwd=cwd,
+        input_text="",
+        timeout_s=timeout,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
+        sandbox_wrapper=sandbox_wrapper,
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        os.killpg(process.pid, signal.SIGKILL)
-        stdout, stderr = process.communicate()
+    if result.timed_out:
         raise subprocess.TimeoutExpired(
-            command, timeout, output=stdout, stderr=stderr
-        ) from exc
-    except BaseException:
-        if process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
-        raise
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            command, timeout, output=result.stdout, stderr=result.stderr
+        )
+    return subprocess.CompletedProcess(
+        command, result.returncode, result.stdout, result.stderr
+    )
 
 
 def _default_refresh_command() -> tuple[str, ...]:
@@ -2034,22 +2034,44 @@ def _refresh_credential(
     horizon_s: float,
     run_refresh: Callable[..., subprocess.CompletedProcess[str]],
     refresh_command: Sequence[str],
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> _ValidatedCredential:
-    with tempfile.TemporaryDirectory(prefix=get_settings().temp_name("codex-renewal")) as directory:
+    with tempfile.TemporaryDirectory(
+        prefix=get_settings().temp_name("codex-renewal")
+    ) as directory:
         staging_home = Path(directory)
         staging_home.chmod(0o700)
         staging_credential = staging_home / "auth.json"
         _write_private_file(staging_credential, credential.payload)
         command = list(refresh_command)
         try:
-            outcome = run_refresh(
-                command,
-                timeout=REFRESH_TIMEOUT_S,
-                check=False,
-                capture_output=True,
-                text=True,
-                env={**_refresh_environment(staging_home), **get_settings().child_environment()},
-            )
+            runner_arguments = {
+                "timeout": REFRESH_TIMEOUT_S,
+                "check": False,
+                "capture_output": True,
+                "text": True,
+                "env": {
+                    **_refresh_environment(staging_home),
+                    **get_settings().child_environment(),
+                },
+                "cwd": staging_home,
+            }
+            if run_refresh is _run_refresh_process_group:
+                if sandbox_wrapper is None:
+                    from .containment import worker_isolated_command
+
+                    readable_roots = (
+                        (Path(command[2]).resolve().parent,)
+                        if len(command) >= 3 and Path(command[2]).is_absolute()
+                        else ()
+                    )
+                    sandbox_wrapper = lambda argv: worker_isolated_command(
+                        argv,
+                        writable_root=staging_home,
+                        readable_roots=readable_roots,
+                    )
+                runner_arguments["sandbox_wrapper"] = sandbox_wrapper
+            outcome = run_refresh(command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:
             raise CodexCredentialRefreshTimeout(
                 "Codex credential refresh timed out"
@@ -2152,6 +2174,7 @@ def codex_subscription_credential(
     clock: Callable[[], float] = time.time,
     run_refresh: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     refresh_command: Sequence[str] | None = None,
+    sandbox_wrapper: SandboxWrapper | None = None,
 ) -> Iterator[int]:
     """Renew if needed, then lend one sealed snapshot for a provider command."""
     if requested_runtime_s <= 0:
@@ -2167,6 +2190,7 @@ def codex_subscription_credential(
                 horizon_s=horizon_s,
                 run_refresh=run_refresh or _run_refresh_process_group,
                 refresh_command=refresh_command or _default_refresh_command(),
+                sandbox_wrapper=sandbox_wrapper,
             )
             if _read_credential(path).payload != credential.payload:
                 raise CodexCredentialRefreshFailed(

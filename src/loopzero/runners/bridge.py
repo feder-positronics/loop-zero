@@ -474,6 +474,7 @@ class BridgeRequest(TypedDict):
     config_lock_target: NotRequired[str]
     visible_tools: NotRequired[list[str]]
     allowed_tools: NotRequired[list[str]]
+    resume_session_id: NotRequired[str]
 
 
 class CodexThreadKwargs(TypedDict):
@@ -730,6 +731,11 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         "codex-probe",
     }:
         raise BridgeInputError("bridge request vendor is invalid")
+    resume_session_id = _bounded_string(
+        payload.get("resume_session_id"), "resume_session_id"
+    )
+    if resume_session_id is not None and vendor_value not in {"claude", "codex"}:
+        raise BridgeInputError("bridge request resume_session_id is unexpected")
     commercial_mode = payload.get("commercial_mode", "subscription-only")
     if commercial_mode not in {
         "subscription-only",
@@ -855,6 +861,8 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
     }
     if isinstance(config_lock_target, str):
         request["config_lock_target"] = config_lock_target
+    if resume_session_id is not None:
+        request["resume_session_id"] = resume_session_id
     if vendor_value != "claude" and (
         "visible_tools" in payload or "allowed_tools" in payload
     ):
@@ -1418,6 +1426,7 @@ def _options(
         include_hook_events=False,
         max_buffer_size=MAX_BRIDGE_LINE_BYTES,
         stderr=lambda _line: None,
+        resume=request.get("resume_session_id"),
     )
 
 
@@ -1750,7 +1759,13 @@ def _run_codex(
             _enforce_codex_chatgpt_login(codex)
             if auth_path is not None:
                 auth_path.unlink(missing_ok=True)
-            thread = codex.thread_start(**_codex_thread_kwargs(request))
+            thread_kwargs = _codex_thread_kwargs(request)
+            resume_session_id = request.get("resume_session_id")
+            if resume_session_id is None:
+                thread = codex.thread_start(**thread_kwargs)
+            else:
+                thread_kwargs.pop("ephemeral")
+                thread = codex.thread_resume(resume_session_id, **thread_kwargs)
             session_id = _metadata(getattr(thread, "id", None))
             _event_frame(
                 kind="system",

@@ -1,7 +1,9 @@
 """Injection, package isolation and preserved schema boundaries."""
 
+import ast
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,6 +18,19 @@ from loopzero.runners import claude as claude_token, codex as codex_credential
 from loopzero.runners.contract import governed_result_schema
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
 from loopzero.runners.settings import DEFAULT_SETTINGS, PACKAGED_BRIDGE, RuntimeSettings, get_settings
+
+
+@pytest.fixture
+def intelflo_containment_comparison_fixture():
+    """Import the read-only IntelFlo original only for argv comparison."""
+    path = Path("/home/marcin/dev/intelflo/scripts/util/agent_dispatch.py")
+    spec = importlib.util.spec_from_file_location(
+        "_intelflo_containment_comparison_fixture", path
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_legacy_names_and_defaults():
@@ -163,6 +178,78 @@ def test_worker_isolated_command_keeps_git_metadata_read_only(tmp_path, monkeypa
     git_binding = ["--ro-bind", f"{resolved}/.git", f"{resolved}/.git"]
     assert any(command[index : index + 3] == git_binding for index in range(len(command) - 2))
     assert command[-4:] == ["--", "/usr/bin/python3", "-c", "pass"]
+
+
+def test_credential_binding_argv_exactly_matches_intelflo_original(
+    tmp_path, monkeypatch, intelflo_containment_comparison_fixture
+):
+    original = intelflo_containment_comparison_fixture
+    writable_root = tmp_path / "worktree"
+    writable_root.mkdir()
+    credential_path = writable_root / ".credentials" / "auth.json"
+    credential_path.parent.mkdir()
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(
+        containment, "_system_executable", lambda _: Path("/usr/bin/bwrap")
+    )
+    monkeypatch.setattr(containment, "_worker_runtime_read_roots", lambda _: ())
+    monkeypatch.setattr(
+        original, "system_executable", lambda _: Path("/usr/bin/bwrap")
+    )
+    monkeypatch.setattr(original, "_worker_runtime_read_roots", lambda _: ())
+    arguments = {
+        "writable_root": writable_root,
+        "credential_bindings": ((37, credential_path),),
+    }
+
+    assert containment.worker_isolated_command(["runtime"], **arguments) == (
+        original.worker_isolated_command(["runtime"], **arguments)
+    )
+
+
+def test_every_runner_subprocess_launch_is_owned_by_a_containment_seam():
+    runners_root = Path(__file__).resolve().parents[3] / "src/loopzero/runners"
+    launch_calls = set()
+
+    class LaunchVisitor(ast.NodeVisitor):
+        def __init__(self, filename):
+            self.filename = filename
+            self.functions = []
+
+        def visit_FunctionDef(self, node):
+            self.functions.append(node.name)
+            self.generic_visit(node)
+            self.functions.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Call(self, node):
+            target = node.func
+            if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name):
+                owner = target.value.id
+                name = target.attr
+                if (
+                    owner == "subprocess"
+                    and name in {"Popen", "run", "call", "check_call", "check_output"}
+                ) or (owner == "os" and name.startswith("exec")):
+                    launch_calls.add(
+                        (
+                            self.filename,
+                            self.functions[-1] if self.functions else None,
+                            f"{owner}.{name}",
+                        )
+                    )
+            self.generic_visit(node)
+
+    for source in runners_root.glob("*.py"):
+        LaunchVisitor(source.name).visit(
+            ast.parse(source.read_text(encoding="utf-8"))
+        )
+
+    assert launch_calls == {
+        ("containment.py", "_exact_repair_file_bindings", "subprocess.run"),
+        ("process.py", "launch_cli", "subprocess.Popen"),
+    }
 
 
 @pytest.mark.parametrize("module", [False, True])

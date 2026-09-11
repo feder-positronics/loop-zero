@@ -223,6 +223,7 @@ def worker_isolated_command(
     command: Sequence[str],
     *,
     writable_root: Path,
+    additional_writable_roots: Sequence[Path] = (),
     readable_roots: Sequence[Path] = (),
     credential_bindings: Sequence[tuple[int, Path]] = (),
     repair_boundary: tuple[Path, tuple[str, ...], Path] | None = None,
@@ -246,19 +247,43 @@ def worker_isolated_command(
             raise ContainmentError("SSH-agent socket directory is too broad")
     bubblewrap = _system_executable("bwrap")
     resolved_writable_root = writable_root.resolve()
-    git_pointer = resolved_writable_root / ".git"
+    writable_roots = [resolved_writable_root]
+    for root in additional_writable_roots:
+        resolved = root.resolve()
+        if resolved_writable_root.is_relative_to(resolved) and (
+            resolved != resolved_writable_root
+        ):
+            raise ContainmentError(
+                "additional writable root cannot contain the primary root"
+            )
+        if any(
+            resolved == existing or resolved.is_relative_to(existing)
+            for existing in writable_roots
+        ):
+            continue
+        writable_roots = [
+            existing
+            for existing in writable_roots
+            if not existing.is_relative_to(resolved)
+        ]
+        writable_roots.append(resolved)
     protected_write_paths: list[Path] = []
-    if git_pointer.is_symlink():
-        raise ContainmentError("worker Git metadata cannot be a symlink")
-    if git_pointer.is_file() or git_pointer.is_dir():
-        protected_write_paths.append(git_pointer)
+    for root in writable_roots:
+        git_pointer = root / ".git"
+        if git_pointer.is_symlink():
+            raise ContainmentError("worker Git metadata cannot be a symlink")
+        if git_pointer.is_file() or git_pointer.is_dir():
+            protected_write_paths.append(git_pointer)
     candidate_read_roots = [
         *(path.resolve() for path in readable_roots if path.exists()),
         *_worker_runtime_read_roots(command),
     ]
     read_roots: list[Path] = []
     for candidate in candidate_read_roots:
-        if candidate == resolved_writable_root or candidate.is_relative_to(resolved_writable_root):
+        if any(
+            candidate == write_root or candidate.is_relative_to(write_root)
+            for write_root in writable_roots
+        ):
             continue
         if any(candidate.is_relative_to(root) for root in read_roots):
             continue
@@ -274,7 +299,7 @@ def worker_isolated_command(
         if path.exists()
     )
     mount_paths = [
-        *system_files, *read_roots, resolved_writable_root, *protected_write_paths,
+        *system_files, *read_roots, *writable_roots, *protected_write_paths,
         *hidden_directories, *(path for _descriptor, path in credential_bindings),
     ]
     isolated = [
@@ -288,7 +313,8 @@ def worker_isolated_command(
         isolated.extend(("--ro-bind", str(system_path), str(system_path)))
     for read_root in sorted(read_roots, key=str):
         isolated.extend(("--ro-bind", str(read_root), str(read_root)))
-    isolated.extend(("--bind", str(resolved_writable_root), str(resolved_writable_root)))
+    for write_root in sorted(writable_roots, key=str):
+        isolated.extend(("--bind", str(write_root), str(write_root)))
     if repair_boundary is not None:
         source_root, source_files, scratch = repair_boundary
         if resolved_writable_root == source_root.resolve():
@@ -301,7 +327,7 @@ def worker_isolated_command(
         isolated.extend(("--tmpfs", str(directory)))
     for descriptor, destination in credential_bindings:
         isolated.extend(
-            ("--perms", "--perms", "0600", "--ro-bind-data", str(descriptor), str(destination))
+            ("--perms", "0600", "--ro-bind-data", str(descriptor), str(destination))
         )
     return [*isolated, "--", *command]
 

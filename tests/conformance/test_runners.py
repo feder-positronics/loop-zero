@@ -48,8 +48,7 @@ def request(tmp_path, vendor="fake"):
     )
 
 
-@pytest.mark.parametrize("scenario", list(Scenario))
-def test_fake_scenario(scenario, tmp_path):
+def _run_fake_scenario(scenario, tmp_path):
     configured = Scenario.SUCCESS if scenario is Scenario.CANCELLATION else scenario
     adapter = RUNTIME_REGISTRY.create("fake", scenario={"scenario": configured.value})
     req = request(tmp_path)
@@ -110,9 +109,14 @@ class NativeReplayCheckpoint:
     events: tuple[RuntimeEvent, ...]
 
 
-def _native_wire(vendor: str, scenario: Scenario, *, resumed: bool = False) -> ProcessResult:
+def _native_wire(
+    vendor: str,
+    scenario: Scenario,
+    *,
+    resumed_session_id: str | None = None,
+) -> ProcessResult:
     is_cursor = vendor == "cursor"
-    session_id = "native-checkpoint"
+    session_id = resumed_session_id or "native-checkpoint"
     initial = (
         [
             {"type": "system", "subtype": "init"},
@@ -128,9 +132,26 @@ def _native_wire(vendor: str, scenario: Scenario, *, resumed: bool = False) -> P
         ]
     )
     frames = list(initial)
+    if resumed_session_id is not None:
+        frames.append(
+            (
+                {
+                    "type": "system",
+                    "subtype": f"resume-{resumed_session_id}",
+                    "session_id": session_id,
+                }
+                if is_cursor
+                else {
+                    "type": "event",
+                    "kind": "system",
+                    "subtype": f"resume-{resumed_session_id}",
+                    "session_id": session_id,
+                }
+            )
+        )
     if scenario is Scenario.MALFORMED_OUTPUT:
         text = "\n".join(map(json.dumps, frames)) + "\ninvalid-json"
-    elif scenario is Scenario.RESTART_RESUME and is_cursor and not resumed:
+    elif scenario is Scenario.RESTART_RESUME and is_cursor and resumed_session_id is None:
         frames.append(
             {
                 "type": "result", "subtype": "error", "is_error": True,
@@ -140,7 +161,7 @@ def _native_wire(vendor: str, scenario: Scenario, *, resumed: bool = False) -> P
         text = "\n".join(map(json.dumps, frames))
     elif scenario in {
         Scenario.DISCONNECT, Scenario.RESTART_RESUME, Scenario.CANCELLATION,
-    } and not resumed:
+    } and resumed_session_id is None:
         if not is_cursor:
             frames.append({"type": "error", "reason": "disconnect"})
         text = "\n".join(map(json.dumps, frames))
@@ -206,12 +227,23 @@ def _native_expected(vendor: str, scenario: Scenario):
     )
 
 
-@pytest.mark.parametrize("scenario", list(Scenario))
-def test_selected_native_adapter_protocol_replay(scenario, tmp_path, monkeypatch):
-    vendor = os.environ.get("LOOPZERO_CONFORMANCE_RUNNER")
-    if vendor is None:
-        pytest.skip("set LOOPZERO_CONFORMANCE_RUNNER=claude|codex|cursor for native replay")
-    assert vendor in {"claude", "codex", "cursor"}
+SELECTED_VENDOR = os.environ.get("LOOPZERO_CONFORMANCE_RUNNER", "fake")
+assert SELECTED_VENDOR in {"fake", "claude", "codex", "cursor"}
+DEFAULT_CASES = tuple((SELECTED_VENDOR, scenario) for scenario in Scenario)
+
+
+def test_default_selection_contains_all_seven_fake_scenarios():
+    if "LOOPZERO_CONFORMANCE_RUNNER" in os.environ:
+        pytest.skip("real vendor was explicitly selected")
+    assert DEFAULT_CASES == tuple(("fake", scenario) for scenario in Scenario)
+    assert len(DEFAULT_CASES) == 7
+
+
+@pytest.mark.parametrize("vendor,scenario", DEFAULT_CASES)
+def test_selected_adapter_protocol_scenario(vendor, scenario, tmp_path, monkeypatch):
+    if vendor == "fake":
+        _run_fake_scenario(scenario, tmp_path)
+        return
     req = request(tmp_path, vendor)
     calls = []
     outcomes = [_native_wire(vendor, scenario)]
@@ -256,10 +288,20 @@ def test_selected_native_adapter_protocol_replay(scenario, tmp_path, monkeypatch
         resume_calls = []
 
         def resume_transport(*args, **kwargs):
-            resume_calls.append((checkpoint, args, kwargs))
-            assert checkpoint.vendor == vendor
-            assert checkpoint.attempt_id == req.attempt_id
-            return _native_wire(vendor, scenario, resumed=True)
+            resume_calls.append((args, kwargs))
+            if vendor == "cursor":
+                command = list(args[0])
+                consumed_session_id = command[command.index("--resume") + 1]
+            else:
+                consumed_session_id = json.loads(kwargs["input_text"])[
+                    "resume_session_id"
+                ]
+            assert consumed_session_id == checkpoint.session_id
+            return _native_wire(
+                vendor,
+                scenario,
+                resumed_session_id=consumed_session_id,
+            )
 
         adapter = RUNTIME_REGISTRY.create(
             vendor, run_cli=resume_transport, run_probe=resume_transport,
@@ -271,8 +313,15 @@ def test_selected_native_adapter_protocol_replay(scenario, tmp_path, monkeypatch
             monkeypatch.setattr(adapter, "_sdk_launch_readiness", ready)
         else:
             monkeypatch.setattr(adapter, "probe", ready)
-        result = adapter.run(req)
+        resumed_request = replace(req, resume_session_id=checkpoint.session_id)
+        result = adapter.run(resumed_request)
         assert len(resume_calls) == 1
+        assert result.session_id == checkpoint.session_id
+        assert any(
+            event.kind == "system"
+            and event.subtype == f"resume-{checkpoint.session_id}"
+            for event in result.events
+        )
     assert len(calls) == 1
     status, reason, diagnostics = _native_expected(vendor, scenario)
     assert (result.status, result.terminal_reason) == (status, reason)
@@ -284,5 +333,9 @@ def test_selected_native_adapter_protocol_replay(scenario, tmp_path, monkeypatch
         )
     if scenario in {Scenario.SUCCESS, Scenario.RESTART_RESUME}:
         assert result.final_output == "deterministic result"
-        assert [event.kind for event in result.events] == ["system", "assistant", "result"]
+        expected_kinds = ["system", "assistant"]
+        if scenario is Scenario.RESTART_RESUME:
+            expected_kinds.append("system")
+        expected_kinds.append("result")
+        assert [event.kind for event in result.events] == expected_kinds
     assert "private prompt" not in repr(result)
