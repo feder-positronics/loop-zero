@@ -14,6 +14,7 @@ Safety:
 from __future__ import annotations
 
 import argparse
+import os
 from .settings import settings
 import subprocess
 import sys
@@ -77,9 +78,10 @@ def main() -> int:
         print(f"  REMOVE {path} (clean, age={age}d)")
         try:
             subprocess.run(
-                ["git", "worktree", "remove", str(path)],
+                ["/usr/bin/git", "worktree", "remove", str(path)],
                 check=True,
                 stdout=subprocess.DEVNULL,
+                env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
             )
             pruned += 1
         except subprocess.CalledProcessError as exc:

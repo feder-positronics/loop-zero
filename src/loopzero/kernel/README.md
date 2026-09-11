@@ -63,11 +63,21 @@ checks still apply to those paths. Candidate protection receives the consumer
 repository explicitly rather than deriving it from the package installation.
 
 Final-CI reproduction is no longer a job-runner special case. Invoke
-`job.sh consumer-hook <hook-name> ...`. The kernel reads the privileged command
-from the approved base revision of `workflow.toml`, pins its protected system
-executable, and launches it with `sandbox.run_validation_child` before acquiring
-job authority. The child receives settings-derived configuration but no lease,
-nonce, credential, signing, commit, or writable parent-Git authority.
+`job.sh consumer-hook` with explicit `--base`, `--head`, `--task-id`,
+`--result-artifact`, `--coordinator-public-key`, and `--hook` arguments. Base and
+head are full commit SHAs; neither is read from serialized settings. The kernel
+resolves the base with replacement objects and ambient Git configuration
+disabled, reads privileged hooks with `config.effective_hooks`, and launches
+them with `sandbox.run_validation_child` before acquiring job authority.
+
+Executable selection uses the package-wide symlink-free allowlist. This trusts
+only `argv[0]`. Hook operands, interpreted scripts, and candidate test inputs are
+candidate-controlled by design. A zero child exit is therefore not acceptance:
+the parent snapshots the supplied coordinator public key before child launch and
+then verifies a coordinator-signed result bound to the task ID, base SHA, head
+SHA, hook name, and exact resolved command vectors. Unsigned, tampered, and
+misbound artifacts are distinct failures. Candidate code is never imported or
+executed by that verifier.
 
 The toolchain also accepts `interpreter` (sandbox runtime mounting) and
 `formatter_modules` (the approved formatter installation). Missing formatter
@@ -95,7 +105,6 @@ its fixed authorized identity; other consumers must configure both. An optional
 shared-state CLI warning uses
 `LOOPZERO_SHARED_STATE_COMMAND`.
 
-The composition root supplies a different approved base, when needed, through
-`settings.toolchain['approved_base']` (default `origin/main`) and may extend the
-safe environment allowlist. Shell fragments are integration assets, not a
+The composition root supplies the approved base and candidate head explicitly
+for each validation invocation. Shell fragments are integration assets, not a
 substitute for that policy.

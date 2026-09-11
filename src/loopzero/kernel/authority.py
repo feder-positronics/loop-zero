@@ -1002,6 +1002,7 @@ def verify_terminal_authority(
     *,
     registration: Mapping[str, object] | None,
     expected_kind: AuthorityKind,
+    coordinator_public_key: bytes | None = None,
 ) -> None:
     proof = record.get(PROOF_FIELD)
     if not isinstance(proof, dict):
@@ -1015,16 +1016,19 @@ def verify_terminal_authority(
         ):
             raise TerminalAuthorityError("coordinator authority kind is invalid")
         public_key = _decode(proof.get("public_key"), label="public key", maximum=2048)
-        try:
-            trusted_public_key = _trusted_coordinator_public_key()
-        except TerminalAuthorityOperationalError as exc:
-            raise TerminalAuthorityOperationalError(
-                "coordinator authority key is unavailable"
-            ) from exc
-        except TerminalAuthorityError as exc:
-            raise TerminalAuthorityError(
-                "coordinator authority key is unavailable"
-            ) from exc
+        if coordinator_public_key is None:
+            try:
+                trusted_public_key = _trusted_coordinator_public_key()
+            except TerminalAuthorityOperationalError as exc:
+                raise TerminalAuthorityOperationalError(
+                    "coordinator authority key is unavailable"
+                ) from exc
+            except TerminalAuthorityError as exc:
+                raise TerminalAuthorityError(
+                    "coordinator authority key is unavailable"
+                ) from exc
+        else:
+            trusted_public_key = coordinator_public_key
         if public_key != trusted_public_key or proof.get(
             "key_id"
         ) != _coordinator_key_id(trusted_public_key):

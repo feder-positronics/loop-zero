@@ -421,11 +421,12 @@ def validate_stale_abandoned_merge_recovery(
 def load_canonical_closeout_capsule(root: Path, path: Path) -> dict[str, object]:
     """Load only the canonical primary worktree's closeout capsule."""
     completed = subprocess.run(
-        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        ["/usr/bin/git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
         cwd=root,
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
     )
     if completed.returncode != 0:
         raise ValueError("canonical closeout capsule root is unavailable")

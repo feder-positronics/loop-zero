@@ -84,7 +84,7 @@ def test_codex_subscription_credential_opens_and_closes_owner_only_file():
         os.fstat(descriptor)
 
 
-@pytest.mark.parametrize("unsafe_kind", ["type", "mode", "empty", "invalid-json"])
+@pytest.mark.parametrize("unsafe_kind", ["type", "pipe", "empty", "invalid-json"])
 def test_codex_subscription_credential_rejects_unsafe_file(unsafe_kind):
     from contextlib import contextmanager
     @contextmanager
@@ -93,7 +93,7 @@ def test_codex_subscription_credential_rejects_unsafe_file(unsafe_kind):
             yield "not-a-descriptor"
             return
         read_fd, write_fd = os.pipe()
-        if unsafe_kind == "mode":
+        if unsafe_kind == "pipe":
             path = Path(f"/proc/self/fd/{read_fd}")
             assert path.exists()
             os.close(write_fd)
@@ -111,6 +111,28 @@ def test_codex_subscription_credential_rejects_unsafe_file(unsafe_kind):
         finally:
             handle.close()
     with pytest.raises(module.UnsafeCredentialError):
+        with module.codex_subscription_credential(
+            requested_runtime_s=900, credential_broker=broker
+        ):
+            pass
+
+
+def test_codex_subscription_credential_rejects_world_readable_regular_file(tmp_path):
+    from contextlib import contextmanager
+
+    credential = tmp_path / "credential.json"
+    credential.write_text(_codex_credential(), encoding="utf-8")
+    credential.chmod(0o644)
+
+    @contextmanager
+    def broker(**kwargs):
+        descriptor = os.open(credential, os.O_RDONLY)
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    with pytest.raises(module.UnsafeCredentialError, match="unsafe"):
         with module.codex_subscription_credential(
             requested_runtime_s=900, credential_broker=broker
         ):

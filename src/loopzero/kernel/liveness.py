@@ -43,6 +43,8 @@ def _run_git(
     args: list[str], *, collector: str, environment: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run one Git collector with a hard deadline and an actionable error."""
+    environment = dict(os.environ if environment is None else environment)
+    environment.update({"GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
     try:
         result = subprocess.run(
             args,
@@ -154,7 +156,7 @@ def read_jsonl(directory: Path) -> list[dict[str, object]]:
 def repo_root() -> Path:
     """Return the shared checkout root used by local audit telemetry."""
     result = _run_git(
-        ["git", "rev-parse", "--git-common-dir"],
+        ["/usr/bin/git", "rev-parse", "--git-common-dir"],
         collector="git-common-dir",
     )
     if not result.stdout.strip():
@@ -186,7 +188,7 @@ def parse_registered_worktrees(output: str) -> tuple[RegisteredWorktree, ...]:
 def registered_worktrees(root: Path) -> tuple[RegisteredWorktree, ...]:
     """Read all worktrees registered for the repository at ``root``."""
     result = _run_git(
-        ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+        ["/usr/bin/git", "-C", str(root), "worktree", "list", "--porcelain"],
         collector=f"registered-worktrees [{root}]",
     )
     return parse_registered_worktrees(result.stdout)
@@ -224,7 +226,7 @@ def _status_paths(worktree: Path) -> tuple[str, ...]:
     environment["GIT_OPTIONAL_LOCKS"] = "0"
     result = _run_git(
         [
-            "git",
+            "/usr/bin/git",
             "-C",
             str(worktree),
             "status",

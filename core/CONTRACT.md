@@ -27,6 +27,11 @@ or merge credentials and no writable parent Git metadata. Privileged hooks are
 read from the approved base revision of `workflow.toml`, never from the
 candidate worktree; a candidate that changes `[hooks]` runs under the base
 policy until that change is merged. Record the actual narrowed check and result.
+Executable allowlisting establishes only `argv[0]`; operands and interpreted
+candidate scripts remain candidate-controlled because validation exists to run
+candidate tests. Trust in a successful result requires separate host-side
+verification of a coordinator-signed artifact bound to the exact task, base,
+head, and hook command.
 A missing prerequisite or nonzero check is never a pass; apply the check classes
 below to distinguish merge blockers, health reports and infrastructure.
 

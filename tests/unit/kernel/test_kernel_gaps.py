@@ -167,6 +167,38 @@ def test_canonical_job_root_is_keyed_to_repository_not_invocation_directory(tmp_
     assert jobs.canonical_job_root(repo) == jobs.canonical_job_root(nested)
 
 
+def test_canonical_job_root_is_shared_by_real_linked_worktrees(tmp_path):
+    from loopzero.kernel import jobs
+
+    repo = tmp_path / "repo"
+    linked = tmp_path / "linked"
+    repo.mkdir()
+    subprocess.run(["/usr/bin/git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    (repo / "tracked").write_text("base\n", encoding="utf-8")
+    subprocess.run(["/usr/bin/git", "add", "tracked"], cwd=repo, check=True)
+    subprocess.run(
+        ["/usr/bin/git", "-c", "user.name=Test", "-c",
+         "user.email=test@example.invalid", "commit", "-qm", "base"],
+        cwd=repo, check=True,
+    )
+    subprocess.run(
+        ["/usr/bin/git", "worktree", "add", "-q", "-b", "linked", str(linked)],
+        cwd=repo, check=True,
+    )
+
+    assert jobs.canonical_job_root(repo) == jobs.canonical_job_root(linked)
+
+
+def test_bwrap_capability_probe_exercises_required_filesystem_effects():
+    from loopzero.kernel.capabilities import bwrap_probe_command
+
+    command = bwrap_probe_command("/usr/bin/bwrap")
+    assert ["--ro-bind", "/", "/"] == command[command.index("--ro-bind"):command.index("--ro-bind") + 3]
+    assert "--dev-bind" in command and "--proc" in command
+    assert "--perms" in command and "--remount-ro" in command
+    assert "/usr/bin/chmod" in command[-1] and "/usr/bin/true" in command[-1]
+
+
 def test_missing_legacy_key_is_a_typed_rejection(monkeypatch):
     from loopzero.kernel import authority
     monkeypatch.setattr(authority, "LEGACY_COORDINATOR_PUBLIC_KEY", None)

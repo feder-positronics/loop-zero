@@ -2225,129 +2225,6 @@ def _run_final_ci_repro_job(
     return result, artifact, job_dir
 
 
-@requires_nested_user_namespace
-def _legacy_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespace(
-    tmp_path: Path,
-) -> None:
-    result, _, job_dir = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        probe_provider_sandbox=True,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    envelope = json.loads(
-        (job_dir / "terminal-envelope.json").read_text(encoding="utf-8")
-    )
-    terminal = envelope["terminal"]
-    assert len(terminal["job_authorization_hmac_sha256"]) == 64
-    assert envelope["command_exit_code"] == 0
-    assert terminal["outcome"] == "not_reproduced"
-
-
-@requires_nested_user_namespace
-def _legacy_signed_final_ci_repro_reaps_delayed_descendants(tmp_path: Path) -> None:
-    result, artifact, _ = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        spawn_delayed_descendant=True,
-        extra_args=(),
-    )
-    marker = artifact.parent / "delayed-descendant"
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    time.sleep(0.6)
-    assert not marker.exists()
-
-
-@requires_nested_user_namespace
-def _legacy_signed_final_ci_repro_timeout_reaps_its_secure_executor(
-    tmp_path: Path,
-) -> None:
-    result, artifact, job_dir = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        delay_seconds=10,
-        run_timeout="1",
-    )
-    executor_pid = int((job_dir / "pid").read_text(encoding="ascii"))
-
-    assert result.returncode == 124, result.stdout + result.stderr
-    with pytest.raises(ProcessLookupError):
-        os.kill(executor_pid, 0)
-    assert not artifact.exists()
-    assert not (job_dir / "terminal-envelope.json").exists()
-
-
-@requires_nested_user_namespace
-def _legacy_signed_final_ci_repro_rejects_authority_path_substitution(
-    tmp_path: Path,
-) -> None:
-    result, _, job_dir = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        substitute_authority=True,
-    )
-
-    assert result.returncode == 125, result.stdout + result.stderr
-    assert not (job_dir / "terminal-envelope.json").exists()
-    moved_log = (
-        job_dir.parent.with_name(job_dir.parent.name + "-moved") / job_dir.name / "log"
-    )
-    assert "authority path changed" in moved_log.read_text(encoding="utf-8")
-
-
-@requires_nested_user_namespace
-def _legacy_signed_final_ci_repro_blocks_user_manager_escape(tmp_path: Path) -> None:
-    result, _, job_dir = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        probe_manager_escape=True,
-    )
-
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert (job_dir / "terminal-envelope.json").exists()
-
-
-@requires_nested_user_namespace
-def _legacy_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path: Path) -> None:
-    result, _, job_dir = _run_final_ci_repro_job(tmp_path, signed=False)
-
-    assert result.returncode == 125, result.stdout + result.stderr
-    assert not (job_dir / "terminal-envelope.json").exists()
-    assert "authorization" in (job_dir / "log").read_text(encoding="utf-8")
-
-
-def _legacy_final_ci_repro_fails_closed_without_systemd_boundary(tmp_path: Path) -> None:
-    result, artifact, job_dir = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        allow_systemd=False,
-    )
-
-    assert result.returncode == 125, result.stdout + result.stderr
-    assert not artifact.exists()
-    assert not (job_dir / "terminal-envelope.json").exists()
-    assert "requires protected systemd-run" in (job_dir / "log").read_text(
-        encoding="utf-8"
-    )
-
-
-def _legacy_final_ci_repro_task_refuses_noncanonical_command_authority(
-    tmp_path: Path,
-) -> None:
-    result, artifact, job_dir = _run_final_ci_repro_job(
-        tmp_path,
-        signed=True,
-        extra_args=("--unexpected-command-authority",),
-    )
-
-    assert result.returncode != 0, result.stdout + result.stderr
-    assert not artifact.exists()
-    log = (job_dir / "log").read_text(encoding="utf-8")
-    assert "canonical executor command" in log
-
-
 def _blocked_dispatch_evidence(
     repo: Path,
     *,
@@ -3056,6 +2933,7 @@ def test_bound_job_rejects_missing_terminal_before_exposing_success(
     assert "unreadable" in (job_dir / "log").read_text(encoding="utf-8")
 
 
+@requires_nested_user_namespace
 def test_bound_job_replaces_command_failure_when_terminal_sealing_fails(
     tmp_path: Path,
 ) -> None:

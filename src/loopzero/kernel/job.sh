@@ -39,6 +39,11 @@ set -uo pipefail
 unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONUSERBASE
 export PYTHONNOUSERSITE=1
 export PYTHONSAFEPATH=1
+export GIT_NO_REPLACE_OBJECTS=1
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_TERMINAL_PROMPT=0
 
 
 # Namespaced consumer environment. Keep shell aliases local to this process.
@@ -59,7 +64,7 @@ KERNEL_TRUSTED_CONTINUATION="${!_kernel_name-}"
 
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
 JOB_WORKTREE="${KERNEL_DELIVERY_ROOT:-$PWD}"
-REPO_ROOT="$(git -C "$JOB_WORKTREE" rev-parse --show-toplevel 2>/dev/null || realpath -m -- "$JOB_WORKTREE")"
+REPO_ROOT="$(/usr/bin/git -C "$JOB_WORKTREE" rev-parse --show-toplevel 2>/dev/null || realpath -m -- "$JOB_WORKTREE")"
 JOB_WORKTREE="$REPO_ROOT"
 # The consumer injects its approved installed-package interpreter.
 # TODO(A4): obtain this from the approved toolchain at the composition root.
@@ -75,11 +80,11 @@ PYTHON_BIN="${LOOPZERO_PYTHON:-/usr/bin/python3}"
 if [ "${1:-}" = "consumer-hook" ]; then
     shift
     [ "$#" -gt 0 ] || {
-        echo "job.sh: consumer-hook requires a privileged hook name" >&2
+        echo "job.sh: consumer-hook requires explicit validation arguments" >&2
         exit 2
     }
     exec "$PYTHON_BIN" -m loopzero.kernel.validation \
-        --worktree "$REPO_ROOT" --hook "$1" -- "${@:2}"
+        --worktree "$REPO_ROOT" "$@"
 fi
 
 # Diagnose incomplete bound-job options before touching the durable store. This
@@ -786,7 +791,7 @@ try:
                 git_dir = Path(
                     subprocess.run(
                         [
-                            "git", "-C", os.getcwd(), "rev-parse",
+                            "/usr/bin/git", "-C", os.getcwd(), "rev-parse",
                             "--path-format=absolute", "--git-dir",
                         ],
                         capture_output=True,
@@ -816,7 +821,7 @@ try:
                     common_dir = Path(
                         subprocess.run(
                             [
-                                "git", "-C", os.getcwd(), "rev-parse",
+                                "/usr/bin/git", "-C", os.getcwd(), "rev-parse",
                                 "--path-format=absolute", "--git-common-dir",
                             ],
                             capture_output=True,
@@ -912,21 +917,8 @@ try:
             raise RuntimeError(
                 "bound job supervision requires protected bubblewrap"
             ) from exc
-        capability_probe = subprocess.run(
-            [bwrap, "--help"],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        capability_surface = capability_probe.stdout + capability_probe.stderr
-        if (
-            "--perms" not in capability_surface
-            or "--remount-ro" not in capability_surface
-        ):
-            raise RuntimeError(
-                "bound job supervision requires bubblewrap with --perms and "
-                "--remount-ro support"
-            )
+        from loopzero.kernel.capabilities import require_bwrap_capability
+        require_bwrap_capability(bwrap)
 
     durable_names = ["exit_code"]
     if binding is not None:
@@ -2008,7 +2000,7 @@ PY
 	local git_common_dir dispatch_root=""
 	if [ -n "$primary_repo" ]; then
 		primary_repo="$(realpath -e -- "$primary_repo")" || die "reconcile primary repository is unreadable"
-		git_common_dir="$(git -C "$primary_repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+		git_common_dir="$(/usr/bin/git -C "$primary_repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
 			die "cannot resolve the primary repository for job reconciliation"
 		[ "$(dirname "$git_common_dir")" = "$primary_repo" ] ||
 			die "reconcile --primary must name the canonical primary repository"

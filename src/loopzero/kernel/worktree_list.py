@@ -12,6 +12,7 @@ make targets own. Cursor-managed worktrees are cleaned by the Cursor harness.
 from __future__ import annotations
 
 import subprocess
+import os
 from .settings import settings
 import sys
 import time
@@ -21,9 +22,10 @@ from pathlib import Path
 def repo_root() -> Path | None:
     try:
         out = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["/usr/bin/git", "rev-parse", "--show-toplevel"],
             stderr=subprocess.DEVNULL,
             text=True,
+            env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
         ).strip()
         return Path(out) if out else None
     except subprocess.CalledProcessError:
@@ -32,7 +34,7 @@ def repo_root() -> Path | None:
 
 def parse_worktrees(root: Path) -> list[tuple[Path, str]]:
     """Return [(path, branch_or_detached)] for every worktree registered to this repo."""
-    out = subprocess.check_output(["git", "worktree", "list", "--porcelain"], text=True)
+    out = subprocess.check_output(["/usr/bin/git", "-C", str(root), "worktree", "list", "--porcelain"], text=True, env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
     entries: list[tuple[Path, str]] = []
     current_path: Path | None = None
     current_branch: str = "(detached)"
@@ -68,9 +70,10 @@ def tool_tag(path: Path, root: Path) -> str:
 def dirty_count(path: Path) -> int:
     try:
         out = subprocess.check_output(
-            ["git", "-C", str(path), "status", "--porcelain"],
+            ["/usr/bin/git", "-C", str(path), "status", "--porcelain"],
             stderr=subprocess.DEVNULL,
             text=True,
+            env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
         )
     except subprocess.CalledProcessError:
         return -1

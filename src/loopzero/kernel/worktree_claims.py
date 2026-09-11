@@ -85,6 +85,7 @@ class IssueClaim:
 def _run_git(args: list[str], *, collector: str) -> subprocess.CompletedProcess[str]:
     environment = os.environ.copy()
     environment["GIT_OPTIONAL_LOCKS"] = "0"
+    environment.update({"GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
     try:
         result = subprocess.run(
             args,
@@ -107,7 +108,7 @@ def _run_git(args: list[str], *, collector: str) -> subprocess.CompletedProcess[
 
 def current_worktree() -> Path:
     result = _run_git(
-        ["git", "rev-parse", "--show-toplevel"],
+        ["/usr/bin/git", "rev-parse", "--show-toplevel"],
         collector="current-worktree",
     )
     path = result.stdout.strip()
@@ -138,7 +139,7 @@ def parse_registered_worktrees(output: str) -> tuple[RegisteredWorktree, ...]:
 
 def registered_worktrees(root: Path) -> tuple[RegisteredWorktree, ...]:
     result = _run_git(
-        ["git", "-C", str(root), "worktree", "list", "--porcelain"],
+        ["/usr/bin/git", "-C", str(root), "worktree", "list", "--porcelain"],
         collector="registered-worktrees",
     )
     return tuple(
@@ -197,7 +198,7 @@ def dirty_paths(path: Path) -> tuple[str, ...] | None:
     try:
         result = _run_git(
             [
-                "git",
+                "/usr/bin/git",
                 "-C",
                 str(path),
                 "status",
@@ -338,7 +339,7 @@ def collect_claims(root: Path | None = None) -> tuple[WorktreeClaim, ...]:
 def shared_repo_root(root: Path) -> Path:
     result = _run_git(
         [
-            "git",
+            "/usr/bin/git",
             "-C",
             str(root),
             "rev-parse",

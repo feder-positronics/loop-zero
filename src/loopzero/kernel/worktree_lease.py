@@ -68,9 +68,10 @@ def inherited_pass_fds() -> tuple[int, ...]:
 
 def _git_bytes(worktree: Path, *args: str) -> bytes:
     completed = subprocess.run(
-        ["git", "-C", str(worktree), *args],
+        ["/usr/bin/git", "-C", str(worktree), *args],
         capture_output=True,
         check=False,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
     )
     if completed.returncode != 0:
         raise WorktreeGuardError(f"git {args[0]} failed in {worktree}")
@@ -286,7 +287,7 @@ def worktree_lease(
 def _status_paths(worktree: Path) -> list[str]:
     completed = subprocess.run(
         [
-            "git",
+            "/usr/bin/git",
             "-C",
             str(worktree),
             "status",
@@ -296,6 +297,7 @@ def _status_paths(worktree: Path) -> list[str]:
         capture_output=True,
         check=False,
         text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
     )
     if completed.returncode != 0:
         raise WorktreeGuardError(f"git status failed in {worktree}")
@@ -336,10 +338,11 @@ def source_identity(worktree: Path) -> dict[str, int | str]:
     resolved = worktree.resolve()
     head = _git_text(resolved, "rev-parse", "HEAD")
     symbolic_ref = subprocess.run(
-        ["git", "-C", str(resolved), "symbolic-ref", "--quiet", "HEAD"],
+        ["/usr/bin/git", "-C", str(resolved), "symbolic-ref", "--quiet", "HEAD"],
         capture_output=True,
         check=False,
         text=True,
+        env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
     )
     ref = symbolic_ref.stdout.strip() if symbolic_ref.returncode == 0 else "<detached>"
     state = {

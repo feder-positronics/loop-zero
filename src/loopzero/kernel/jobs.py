@@ -15,6 +15,8 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+from loopzero.trust import git_environment
+
 
 class JobStoreError(RuntimeError):
     """The detached-job authority root cannot be derived safely."""
@@ -208,29 +210,35 @@ def _ensure_private_directory_chain(
 def canonical_job_root(worktree: Path, *, configured: str | None = None) -> Path:
     """Return one canonical root; legacy recovery requires an explicit override."""
     root = worktree.resolve()
+    common_git_directory = root
     try:
         discovered = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            [
+                "/usr/bin/git", "-C", str(root), "rev-parse",
+                "--path-format=absolute", "--show-toplevel", "--git-common-dir",
+            ],
             capture_output=True,
             text=True,
             check=False,
-            env={
-                "PATH": "/usr/bin:/bin",
-                "GIT_CONFIG_GLOBAL": "/dev/null",
-                "GIT_CONFIG_NOSYSTEM": "1",
-            },
+            env=git_environment({"PATH": "/usr/bin:/bin"}),
         )
     except OSError:
         discovered = None
     if discovered is not None and discovered.returncode == 0:
-        root = Path(discovered.stdout.strip()).resolve()
+        identity = discovered.stdout.splitlines()
+        if len(identity) == 2:
+            root = Path(identity[0]).resolve()
+            common_git_directory = Path(identity[1]).resolve()
+        else:
+            discovered = None
     raw = os.environ.get(settings.env("JOB_DIR")) if configured is None else configured
     if raw:
         candidate = Path(raw)
         if not candidate.is_absolute():
             candidate = root / candidate
     else:
-        key = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]
+        store_identity = common_git_directory if discovered is not None else root
+        key = hashlib.sha256(str(store_identity).encode("utf-8")).hexdigest()[:16]
         candidate = _account_state_root() / key
     candidate = candidate.absolute()
     _reject_symlink_components(candidate)
