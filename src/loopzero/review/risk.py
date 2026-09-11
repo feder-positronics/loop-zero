@@ -91,6 +91,9 @@ class ReviewRiskError(RuntimeError):
     """The exact candidate cannot carry the claimed review-risk authority."""
 
 
+SecurityReviewScopeError = ReviewRiskError
+
+
 class CommandOutcome(Protocol):
     returncode: int
     stdout: str
@@ -171,10 +174,13 @@ def security_trigger_paths_between(
     base_ref: str,
     head_ref: str,
     *,
-    runner: CommandRunner,
-    security_patterns: Sequence[str],
+    runner: CommandRunner | None = None,
+    security_patterns: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
-    del worktree
+    configured = _SETTINGS.get()
+    if security_patterns is None:
+        security_patterns = configured.security_patterns if configured else ()
+    runner = runner or _runner(worktree)
     raw = _run(
         runner,
         ["git", "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", base_ref, head_ref, "--"],

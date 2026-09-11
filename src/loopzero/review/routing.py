@@ -221,6 +221,15 @@ RUNTIME_CONTRACT_VERSION = 4
 
 
 def __getattr__(name: str):
+    dynamic = {
+        "ROUTING", "TIER_DEFAULTS", "MODEL_VERIFIER_ALIASES", "DEFAULT_TIMEOUT_S",
+        "DEFAULT_MEDIUM_BUDGET_USD", "DEFAULT_HIGH_BUDGET_USD",
+        "TELEMETRY_SCHEMA_VERSION", "DISPATCH_POLICY_VERSION",
+        "COMPATIBLE_DISPATCH_POLICY_VERSIONS", "ENGINE_COOLDOWN_S",
+        "SKILL_RUN_ID_ENV", "RESULT_ARTIFACT_DIR",
+    }
+    if name not in dynamic:
+        raise AttributeError(name)
     configured = settings()
     values = {
         "ROUTING": configured.aliases,
@@ -236,9 +245,7 @@ def __getattr__(name: str):
         "SKILL_RUN_ID_ENV": f"{configured.env_prefix}_SKILL_RUN_ID",
         "RESULT_ARTIFACT_DIR": configured.audit_root / "dispatch" / "results",
     }
-    if name in values:
-        return values[name]
-    raise AttributeError(name)
+    return values[name]
 
 
 __all__ = [

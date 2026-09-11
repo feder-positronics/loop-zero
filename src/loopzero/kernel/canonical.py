@@ -26,3 +26,8 @@ def _canonical_json(value: object) -> str:
 def canonical_record_digest(record: Mapping[str, object]) -> str:
     """Hash every persisted field of a latest record using canonical JSON."""
     return hashlib.sha256(_canonical_json(dict(record)).encode("utf-8")).hexdigest()
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    """Encode a JSON value with the kernel's canonical representation."""
+    return _canonical_json(value).encode("utf-8")
