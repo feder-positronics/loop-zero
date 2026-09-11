@@ -12,7 +12,7 @@ def reentry_decisions(
     records: Sequence[dict[str, object]], run_id: object
 ) -> list[dict[str, object]]:
     """Return the authenticated review-reentry decisions of one run."""
-    from ..kernel.seams import delivery_controller_records
+    from ..review.authority import delivery_controller_records
 
     return [
         row

@@ -949,7 +949,11 @@ def _open_anchored_directory(path: Path) -> int:
                     not stat.S_ISDIR(before.st_mode)
                     or not stat.S_ISDIR(opened.st_mode)
                     or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
-                    or opened.st_uid not in {0, os.getuid()}
+                    # Rootless containers may map the filesystem root owner
+                    # outside the process uid.  That immutable mount owner is
+                    # as trusted as uid 0 while caller-owned descendants must
+                    # still belong to this process.
+                    or opened.st_uid not in {0, os.getuid(), os.stat("/").st_uid}
                     or (
                         (
                             opened.st_mode & 0o002

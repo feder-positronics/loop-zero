@@ -50,3 +50,24 @@ def test_unknown_label_and_old_cli_fail_closed(tmp_path: Path):
         client.check_version()
     with pytest.raises(GitHubError, match="unknown configured label"):
         client.labels(["standalone"])
+
+
+def test_non_idempotent_api_mutation_is_never_retried(tmp_path: Path):
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == "version":
+            return subprocess.CompletedProcess(argv, 0, "gh version 2.40.1\n", "")
+        return subprocess.CompletedProcess(argv, 1, "", "connection reset")
+
+    client = GitHub(
+        tmp_path,
+        GitHubSettings(labels={}, retries=5),
+        run=run,
+        sleep=lambda _: pytest.fail("mutation retry slept"),
+    )
+    client.check_version()
+    with pytest.raises(GitHubError, match="connection reset"):
+        client.api("repos/acme/widget/pulls", method="POST", fields={"title": "x"})
+    assert len(calls) == 2
