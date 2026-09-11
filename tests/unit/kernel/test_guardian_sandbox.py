@@ -8,6 +8,7 @@ import fcntl
 import importlib.util
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -53,34 +54,86 @@ def _write_executable(path: Path) -> None:
     path.chmod(0o755)
 
 
-def test_validation_child_broad_mounts_precede_dev_and_proc_seals(
-    monkeypatch
+@pytest.mark.parametrize(
+    ("worktree", "protected"),
+    [
+        (Path("/proc/loopzero/worktree"), Path("/home/user/protected")),
+        (Path("/sys/loopzero/worktree"), Path("/home/user/protected")),
+        (Path("/dev/loopzero/worktree"), Path("/home/user/protected")),
+        (Path("/home/user/worktree"), Path("/proc/loopzero/protected")),
+        (Path("/home/user/worktree"), Path("/sys/loopzero/protected")),
+        (Path("/home/user/worktree"), Path("/dev/loopzero/protected")),
+    ],
+)
+def test_sandbox_builder_rejects_kernel_filesystem_mounts(
+    monkeypatch, worktree: Path, protected: Path
 ) -> None:
-    def git_path(command, **kwargs):
-        flag = command[-1]
-        selected = {
-            "--git-common-dir": "/proc/loopzero/common",
-            "--git-dir": "/dev/shm/loopzero/git-dir",
-        }[flag]
-        return subprocess.CompletedProcess(command, 0, selected + "\n", "")
-
-    monkeypatch.setattr(subprocess, "run", git_path)
     monkeypatch.setattr(module, "_validated", lambda path, directory=None: Path(path))
     monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
     monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
 
-    arguments = module.validation_command(
+    with pytest.raises(module.SandboxError, match="cannot be located"):
+        module.command(
+            ["/usr/bin/true"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_roots=(protected,),
+            deny_network=True,
+        )
+
+
+def test_validation_child_overlays_config_and_forces_safe_git_settings(
+    tmp_path, monkeypatch
+) -> None:
+    destination = tmp_path / "repository-config"
+    destination.write_text("candidate\n", encoding="utf-8")
+    observed: dict[str, object] = {}
+
+    def validation_command(argv, **kwargs):
+        mounts = kwargs["read_only_file_mounts"]
+        assert len(mounts) == 1
+        source, target = mounts[0]
+        observed["payload"] = source.read_bytes()
+        observed["mode"] = stat.S_IMODE(source.stat().st_mode)
+        observed["destination"] = target
+        return list(argv)
+
+    def run(command, **kwargs):
+        observed["environment"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(module, "validation_command", validation_command)
+    monkeypatch.setattr(subprocess, "run", run)
+    payload = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
+
+    result = module.run_validation_child(
         ["/usr/bin/true"],
-        worktree=Path("/dev/shm/loopzero/worktree"),
-        read_only_roots=(Path("/proc/loopzero/authority"),),
+        worktree=tmp_path,
+        git_config_overlays=((destination, payload),),
     )
 
-    dev_seal = arguments.index("/dev/shm/loopzero/git-dir") - 1
-    proc_seal = arguments.index("/proc/loopzero/authority") - 1
-    assert arguments[dev_seal] == "--ro-bind"
-    assert arguments[proc_seal] == "--ro-bind"
-    assert arguments.index("--dev") < min(dev_seal, proc_seal)
-    assert arguments.index("--proc") < min(dev_seal, proc_seal)
+    assert result.returncode == 0
+    assert observed["payload"] == payload
+    assert observed["mode"] == 0o444
+    assert observed["destination"] == destination
+    environment = observed["environment"]
+    assert isinstance(environment, dict)
+    configured = {
+        environment[f"GIT_CONFIG_KEY_{index}"]:
+        environment[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(int(environment["GIT_CONFIG_COUNT"]))
+    }
+    assert configured["core.hooksPath"] == "/dev/null"
+    assert configured["core.fsmonitor"] == "false"
+    assert configured["core.sshCommand"] == ""
+    assert configured["core.pager"] == "cat"
+    assert configured["core.editor"] == "false"
+    assert configured["core.worktree"] == ""
 
 
 def test_codex_subscription_credential_opens_and_closes_owner_only_file():

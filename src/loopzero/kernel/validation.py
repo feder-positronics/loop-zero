@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,7 @@ from .authority import (
     TerminalAuthorityOperationalError,
     verify_terminal_authority,
 )
+from .git_config_security import validated_git_config_entries
 from .sandbox import SandboxError, run_validation_child
 from .settings import settings
 
@@ -64,6 +66,7 @@ class SourceIdentity:
 
     kind: str
     sha: str
+    filesystem_sha256: str
 
 
 @dataclass(frozen=True)
@@ -71,6 +74,12 @@ class _RepositoryLayout:
     git_dir: Path
     common_dir: Path
     object_dir: Path
+
+
+@dataclass(frozen=True)
+class _GitConfigOverlay:
+    destination: Path
+    payload: bytes
 
 
 @contextmanager
@@ -252,25 +261,50 @@ def _git_output(
     return completed.stdout.strip()
 
 
-def _resolved_git_directory(path: Path, *, label: str) -> Path:
+def _no_follow_state(path: Path, *, label: str) -> tuple[Path, os.stat_result]:
+    """Walk one lexical path without allowing any component to be a symlink."""
+    lexical = path if path.is_absolute() else Path.cwd() / path
+    current = Path(lexical.anchor)
     try:
-        if path.is_symlink():
-            raise ValidationHookError(f"validation worktree {label} is unsafe")
-        resolved = path.resolve(strict=True)
-        if not resolved.is_dir():
-            raise ValidationHookError(f"validation worktree {label} is unavailable")
-        return resolved
+        state = os.lstat(current)
+        parts = lexical.parts[1:]
+        for index, part in enumerate(parts):
+            if part == "..":
+                current = current.parent
+                state = os.lstat(current)
+                continue
+            if part == ".":
+                continue
+            current /= part
+            state = os.lstat(current)
+            if stat.S_ISLNK(state.st_mode):
+                raise ValidationHookError(
+                    f"validation worktree {label} contains a symlinked component"
+                )
+            if index < len(parts) - 1 and not stat.S_ISDIR(state.st_mode):
+                raise ValidationHookError(
+                    f"validation worktree {label} is unavailable"
+                )
+        return Path(os.path.normpath(current)), state
+    except ValidationHookError:
+        raise
     except OSError as exc:
         raise ValidationHookError(f"validation worktree {label} is unavailable") from exc
 
 
+def _resolved_git_directory(path: Path, *, label: str) -> Path:
+    lexical, state = _no_follow_state(path, label=label)
+    if not stat.S_ISDIR(state.st_mode):
+        raise ValidationHookError(f"validation worktree {label} is unavailable")
+    return lexical
+
+
 def _repository_layout(root: Path) -> _RepositoryLayout:
     """Locate Git metadata without asking candidate-configured Git to do so."""
-    entry = root / ".git"
-    try:
-        entry_state = entry.lstat()
-    except OSError as exc:
-        raise ValidationHookError("validation worktree Git metadata is unavailable") from exc
+    root, root_state = _no_follow_state(root, label="root")
+    if not stat.S_ISDIR(root_state.st_mode):
+        raise ValidationHookError("validation worktree root is unavailable")
+    entry, entry_state = _no_follow_state(root / ".git", label="Git metadata")
     if stat.S_ISDIR(entry_state.st_mode):
         git_dir = _resolved_git_directory(entry, label="Git directory")
     elif stat.S_ISREG(entry_state.st_mode):
@@ -314,6 +348,148 @@ def _repository_layout(root: Path) -> _RepositoryLayout:
         common_dir = git_dir
     object_dir = _resolved_git_directory(common_dir / "objects", label="object directory")
     return _RepositoryLayout(git_dir, common_dir, object_dir)
+
+
+def _config_quote(value: str) -> str:
+    escaped = (
+        value.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        .replace("\b", "\\b")
+    )
+    return f'"{escaped}"'
+
+
+def _sanitized_config(entries: tuple[tuple[str, str | None], ...]) -> bytes:
+    """Retain only inert repository identity and tracking configuration."""
+    lines = ["[core]", "\trepositoryformatversion = 0", "\tbare = false"]
+    for key, value in entries:
+        if value is None:
+            continue
+        normalized = key.casefold()
+        pieces = key.split(".")
+        if (
+            len(pieces) >= 3
+            and normalized.startswith("remote.")
+            and pieces[-1].casefold() in {"url", "fetch"}
+        ):
+            subsection = ".".join(pieces[1:-1])
+            lines.extend(
+                (
+                    f'[remote {_config_quote(subsection)}]',
+                    f"\t{pieces[-1]} = {_config_quote(value)}",
+                )
+            )
+        elif (
+            len(pieces) >= 3
+            and normalized.startswith("branch.")
+            and pieces[-1].casefold() in {"merge", "remote"}
+        ):
+            subsection = ".".join(pieces[1:-1])
+            lines.extend(
+                (
+                    f'[branch {_config_quote(subsection)}]',
+                    f"\t{pieces[-1]} = {_config_quote(value)}",
+                )
+            )
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _repository_config_overlays(
+    layout: _RepositoryLayout,
+) -> tuple[_GitConfigOverlay, ...]:
+    overlays: list[_GitConfigOverlay] = []
+    for config in dict.fromkeys(
+        (layout.git_dir / "config", layout.common_dir / "config")
+    ):
+        try:
+            config_state = config.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise ValidationHookError(
+                "validation worktree Git configuration is unavailable"
+            ) from exc
+        if not stat.S_ISREG(config_state.st_mode):
+            raise ValidationHookError(
+                "validation worktree Git configuration is unsafe"
+            )
+        try:
+            raw = _read_regular(
+                config,
+                maximum=_MAX_GIT_CONTROL_BYTES,
+                label="validation worktree Git configuration",
+            )
+        except ValidationHookError as exc:
+            raise ValidationHookError(
+                "validation worktree Git configuration is unavailable"
+            ) from exc
+        try:
+            entries = validated_git_config_entries(raw)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            raise ValidationHookError(
+                "validation worktree Git configuration is unsafe"
+            ) from exc
+        overlays.append(_GitConfigOverlay(config, _sanitized_config(entries)))
+    return tuple(overlays)
+
+
+def _source_filesystem_sha256(root: Path) -> str:
+    """Digest every exposed node that Git's index cannot fully represent."""
+    digest = hashlib.sha256()
+
+    def add(value: bytes) -> None:
+        digest.update(len(value).to_bytes(8, "big"))
+        digest.update(value)
+
+    def walk(path: Path, relative: Path) -> None:
+        try:
+            state = path.lstat()
+        except OSError as exc:
+            raise ValidationHookError(
+                "validation worktree filesystem identity is unavailable"
+            ) from exc
+        mode = stat.S_IMODE(state.st_mode)
+        if stat.S_ISREG(state.st_mode):
+            kind = b"file"
+        elif stat.S_ISDIR(state.st_mode):
+            kind = b"directory"
+        elif stat.S_ISLNK(state.st_mode):
+            kind = b"symlink"
+        else:
+            raise ValidationHookError(
+                "validation worktree contains an unsupported special node"
+            )
+        add(os.fsencode(str(relative)))
+        add(kind)
+        add(f"{mode:o}".encode("ascii"))
+        if kind == b"symlink":
+            try:
+                add(os.fsencode(os.readlink(path)))
+            except OSError as exc:
+                raise ValidationHookError(
+                    "validation worktree filesystem identity is unavailable"
+                ) from exc
+            return
+        if kind != b"directory":
+            return
+        try:
+            children = sorted(
+                path.iterdir(), key=lambda child: os.fsencode(child.name)
+            )
+        except OSError as exc:
+            raise ValidationHookError(
+                "validation worktree filesystem identity is unavailable"
+            ) from exc
+        for child in children:
+            child_relative = relative / child.name if relative != Path(".") else Path(child.name)
+            if child_relative == Path(".git"):
+                continue
+            walk(child, child_relative)
+
+    walk(root, Path("."))
+    return digest.hexdigest()
 
 
 def _valid_ref_name(name: str) -> bool:
@@ -475,26 +651,36 @@ def _dirty_tree_sha(
     return tree, head_tree
 
 
-def source_identity(
+def _prepared_source_identity(
     root: Path, *, approved_head: str, allow_dirty_tree: bool
-) -> SourceIdentity:
+) -> tuple[SourceIdentity, tuple[_GitConfigOverlay, ...]]:
     """Prove HEAD and bind either its clean commit or an intentional dirty tree."""
     layout = _repository_layout(root)
+    overlays = _repository_config_overlays(layout)
     head = _head_sha(layout)
     if head != approved_head:
         raise ValidationHookError(
             "validation worktree HEAD does not match the approved head"
         )
+    filesystem_sha256 = _source_filesystem_sha256(root)
     tree, head_tree = _dirty_tree_sha(
         root, approved_head=approved_head, layout=layout
     )
     if tree == head_tree:
-        return SourceIdentity("commit", approved_head)
+        return SourceIdentity("commit", approved_head, filesystem_sha256), overlays
     if not allow_dirty_tree:
         raise ValidationHookError(
             "validation worktree is dirty; --allow-dirty-tree is required"
         )
-    return SourceIdentity("tree", tree)
+    return SourceIdentity("tree", tree, filesystem_sha256), overlays
+
+
+def source_identity(
+    root: Path, *, approved_head: str, allow_dirty_tree: bool
+) -> SourceIdentity:
+    return _prepared_source_identity(
+        root, approved_head=approved_head, allow_dirty_tree=allow_dirty_tree
+    )[0]
 
 
 def read_coordinator_public_key(path: Path) -> bytes:
@@ -546,6 +732,7 @@ def verify_result_artifact(
         "head_sha": head_sha,
         "source_kind": source.kind,
         "source_sha": source.sha,
+        "source_filesystem_sha256": source.filesystem_sha256,
         "hook": hook,
         "hook_commands": hook_commands,
         "status": "completed",
@@ -574,12 +761,15 @@ def run_hook(
     extra: list[str],
     allow_dirty_tree: bool = False,
 ) -> int:
-    root = worktree.resolve()
+    root = worktree.absolute()
     if hook not in PRIVILEGED_HOOKS:
         raise ValidationHookError(f"{hook!r} is not a privileged validation hook")
+    # Reject unsafe metadata and snapshot the only repository configuration the
+    # child may see before any candidate-governed validation process starts.
+    _repository_config_overlays(_repository_layout(root))
     approved_base = resolve_base(root, base=base_sha)
     approved_head = resolve_base(root, base=head_sha)
-    source = source_identity(
+    source, config_overlays = _prepared_source_identity(
         root, approved_head=approved_head, allow_dirty_tree=allow_dirty_tree
     )
     profile = load_profile(root)
@@ -595,7 +785,14 @@ def run_hook(
     for command in commands:
         argv = _command_argv(root, command, extra)
         actual_commands.append(shlex.join(argv))
-        result = run_validation_child(argv, worktree=root, timeout=float(timeout))
+        result = run_validation_child(
+            argv,
+            worktree=root,
+            timeout=float(timeout),
+            git_config_overlays=tuple(
+                (overlay.destination, overlay.payload) for overlay in config_overlays
+            ),
+        )
         if result.stdout:
             sys.stdout.write(result.stdout)
         if result.stderr:

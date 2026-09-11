@@ -71,6 +71,7 @@ def git_config_key_can_redirect(name: str) -> bool:
     if normalized in {
         "extensions.worktreeconfig",
         "core.askpass",
+        "core.editor",
         "core.fsmonitor",
         "core.gitproxy",
         "core.hookspath",

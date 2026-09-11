@@ -75,11 +75,13 @@ def _actual(repo: Path, commands: tuple[str, ...], extra: tuple[str, ...] = ()) 
 def _artifact(path: Path, signer: authority.CoordinatorAuthority, *, task: str,
               base: str, head: str, hook: str, commands: list[str],
               source_kind: str = "commit", source_sha: str | None = None,
+              source_filesystem_sha256: str = "0" * 64,
               **changes) -> None:
     row = {
         "schema_version": validation.RESULT_SCHEMA, "task_id": task,
         "base_sha": base, "head_sha": head, "hook": hook,
         "source_kind": source_kind, "source_sha": source_sha or head,
+        "source_filesystem_sha256": source_filesystem_sha256,
         "hook_commands": commands, "status": "completed", "exit_code": 0,
     }
     row.update(changes)
@@ -117,8 +119,12 @@ def _signed_case(tmp_path: Path, commands: tuple[str, ...] = ("gnutrue",)):
     key = tmp_path / "coordinator.der"
     key.write_bytes(signer.public_key)
     result = tmp_path / "result.json"
-    _artifact(result, signer, task="task-1", base=sha, head=sha,
-              hook="acceptance", commands=_actual(repo, commands))
+    source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
+    _artifact(
+        result, signer, task="task-1", base=sha, head=sha,
+        hook="acceptance", commands=_actual(repo, commands),
+        source_filesystem_sha256=source.filesystem_sha256,
+    )
     return repo, sha, signer, key, result
 
 
@@ -135,8 +141,12 @@ def _script_case(tmp_path: Path, body: str, *, name: str = "collector"):
     key = tmp_path / "coordinator.der"
     key.write_bytes(signer.public_key)
     artifact = tmp_path / "result.json"
-    _artifact(artifact, signer, task="task-1", base=sha, head=sha,
-              hook="acceptance", commands=_actual(repo, commands))
+    source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
+    _artifact(
+        artifact, signer, task="task-1", base=sha, head=sha,
+        hook="acceptance", commands=_actual(repo, commands),
+        source_filesystem_sha256=source.filesystem_sha256,
+    )
     return repo, sha, signer, key, artifact
 
 
@@ -148,14 +158,15 @@ def _direct_child(argv, *, worktree, timeout, **kwargs):
 
 
 def _source(sha: str) -> validation.SourceIdentity:
-    return validation.SourceIdentity("commit", sha)
+    return validation.SourceIdentity("commit", sha, "0" * 64)
 
 
 def test_signed_result_accepts_real_coordinator_signature(tmp_path):
     repo, sha, signer, key, result = _signed_case(tmp_path)
+    source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
     assert validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
         task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance",
-        hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))["status"] == "completed"
+        hook_commands=_actual(repo, ("gnutrue",)), source=source)["status"] == "completed"
 
 
 def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path):
@@ -176,7 +187,8 @@ def test_signed_result_rejects_real_tampering(tmp_path):
 
 
 @pytest.mark.parametrize("field,value", [("task_id", "other"), ("base_sha", "f" * 40),
-                                          ("head_sha", "e" * 40), ("hook_commands", ["false"])])
+                                          ("head_sha", "e" * 40), ("hook_commands", ["false"]),
+                                          ("source_filesystem_sha256", "f" * 64)])
 def test_signed_result_rejects_unbound_fields(tmp_path, field, value):
     repo, sha, signer, key, result = _signed_case(tmp_path)
     _artifact(result, signer, task="task-1", base=sha, head=sha, hook="acceptance",
@@ -354,6 +366,7 @@ def test_validation_accepts_a_tree_hash_bound_dirty_candidate(tmp_path, monkeypa
         artifact, signer, task="task-1", base=sha, head=sha,
         hook="acceptance", commands=_actual(repo, ("gnutrue",)),
         source_kind=source.kind, source_sha=source.sha,
+        source_filesystem_sha256=source.filesystem_sha256,
     )
     monkeypatch.setattr(validation, "run_validation_child", _direct_child)
 
@@ -365,38 +378,17 @@ def test_validation_accepts_a_tree_hash_bound_dirty_candidate(tmp_path, monkeypa
     ) == 0
 
 
-def test_source_identity_ignores_hostile_local_git_config_and_filters(tmp_path):
-    repo, sha = _repo(tmp_path, ("gnutrue",))
-    attributes = repo / ".gitattributes"
-    attributes.write_text("*.txt filter=hostile text\n", encoding="utf-8")
-    (repo / "candidate.txt").write_bytes(b"raw\r\n")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "attributes")
-    sha = _git(repo, "rev-parse", "HEAD")
-    expected = validation.source_identity(
-        repo, approved_head=sha, allow_dirty_tree=True
-    )
+def test_validation_rejects_hostile_local_git_config_without_executing_it(
+    tmp_path, monkeypatch
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
     marker = tmp_path / "hostile-git-ran"
-    hostile = tmp_path / "hostile-git"
+    hostile = repo / ".git" / "hostile-git"
     hostile.write_text(
         f"#!/bin/sh\nprintf ran > {shlex.quote(str(marker))}\nprintf 'changed\\n'\n",
         encoding="utf-8",
     )
     hostile.chmod(0o755)
-    outside = tmp_path / "outside-worktree"
-    outside.mkdir()
-    subprocess.run(
-        [
-            "/usr/bin/git",
-            "-C",
-            str(repo),
-            "config",
-            "--local",
-            "filter.hostile.clean",
-            str(hostile),
-        ],
-        check=True,
-    )
     subprocess.run(
         [
             "/usr/bin/git",
@@ -409,35 +401,100 @@ def test_source_identity_ignores_hostile_local_git_config_and_filters(tmp_path):
         ],
         check=True,
     )
-    subprocess.run(
-        [
-            "/usr/bin/git",
-            "-C",
-            str(repo),
-            "config",
-            "--local",
-            "core.hooksPath",
-            str(tmp_path / "hostile-hooks"),
-        ],
-        check=True,
-    )
-    subprocess.run(
-        [
-            "/usr/bin/git",
-            "-C",
-            str(repo),
-            "config",
-            "--local",
-            "core.worktree",
-            str(outside),
-        ],
-        check=True,
+    launched = False
+
+    def child(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        return _direct_child(*args, **kwargs)
+
+    monkeypatch.setattr(validation, "run_validation_child", child)
+    with pytest.raises(validation.ValidationHookError, match="configuration is unsafe"):
+        validation.run_hook(
+            worktree=repo, hook="acceptance", base_sha=sha, head_sha=sha,
+            task_id="task-1", result_artifact=artifact,
+            coordinator_public_key=signer.public_key, extra=[],
+        )
+    assert not launched
+    assert not marker.exists()
+
+
+def test_validation_detects_an_empty_directory_created_by_the_child(
+    tmp_path, monkeypatch
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+
+    def add_empty_directory(argv, **kwargs):
+        (repo / "untracked-empty").mkdir()
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(validation, "run_validation_child", add_empty_directory)
+    with pytest.raises(validation.UnboundResultError, match="source changed"):
+        validation.run_hook(
+            worktree=repo, hook="acceptance", base_sha=sha, head_sha=sha,
+            task_id="task-1", result_artifact=artifact,
+            coordinator_public_key=signer.public_key, extra=[],
+        )
+
+
+def test_source_identity_rejects_a_symlinked_git_path_ancestor(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    repo, sha = _repo(real, ("gnutrue",))
+    alias = tmp_path / "alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(validation.ValidationHookError, match="symlinked component"):
+        validation.source_identity(
+            alias / repo.name, approved_head=sha, allow_dirty_tree=False
+        )
+
+
+def test_source_identity_rejects_a_symlinked_gitdir_ancestor(tmp_path):
+    repo, sha = _repo(tmp_path, ("gnutrue",))
+    metadata_parent = tmp_path / "metadata"
+    metadata_parent.mkdir()
+    moved_git = metadata_parent / "git-dir"
+    (repo / ".git").rename(moved_git)
+    alias = repo / "metadata-alias"
+    alias.symlink_to(metadata_parent, target_is_directory=True)
+    (repo / ".git").write_text(
+        "gitdir: metadata-alias/git-dir\n", encoding="utf-8"
     )
 
-    assert validation.source_identity(
-        repo, approved_head=sha, allow_dirty_tree=True
-    ) == expected
-    assert not marker.exists()
+    with pytest.raises(validation.ValidationHookError, match="symlinked component"):
+        validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
+
+
+def test_source_identity_rejects_special_filesystem_nodes(tmp_path):
+    repo, sha = _repo(tmp_path, ("gnutrue",))
+    os.mkfifo(repo / "candidate-fifo")
+
+    with pytest.raises(validation.ValidationHookError, match="special node"):
+        validation.source_identity(repo, approved_head=sha, allow_dirty_tree=True)
+
+
+def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
+    repo, sha = _repo(tmp_path, ("gnutrue",))
+    _git(repo, "config", "--local", "user.name", "Candidate")
+    _git(repo, "config", "--local", "remote.backup.url", "file:///srv/repo")
+    _git(repo, "config", "--local", "remote.backup.fetch", "+refs/*:refs/*")
+    _git(repo, "config", "--local", "branch.main.remote", "backup")
+    _git(repo, "config", "--local", "branch.main.merge", "refs/heads/main")
+
+    overlays = validation._repository_config_overlays(
+        validation._repository_layout(repo)
+    )
+    assert len(overlays) == 1
+    entries = validation.validated_git_config_entries(overlays[0].payload)
+    assert entries == (
+        ("core.repositoryformatversion", "0"),
+        ("core.bare", "false"),
+        ("remote.backup.url", "file:///srv/repo"),
+        ("remote.backup.fetch", "+refs/*:refs/*"),
+        ("branch.main.remote", "backup"),
+        ("branch.main.merge", "refs/heads/main"),
+    )
 
 
 def test_source_identity_hashes_ignored_files(tmp_path):
@@ -586,8 +643,10 @@ def test_signed_final_ci_repro_reaps_delayed_descendants(tmp_path):
     (repo / "orphan").chmod(0o755); _git(repo, "add", "."); _git(repo, "commit", "-qm", "script")
     sha = _git(repo, "rev-parse", "HEAD")
     signer = _signer(); key = tmp_path / "key"; key.write_bytes(signer.public_key)
+    source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
     artifact = tmp_path / "result"; _artifact(artifact, signer, task="task-1", base=sha, head=sha,
-        hook="acceptance", commands=_actual(repo, ("./orphan",)))
+        hook="acceptance", commands=_actual(repo, ("./orphan",)),
+        source_filesystem_sha256=source.filesystem_sha256)
     result = _run(repo, sha, artifact, key, env=_environment(tmp_path, 0.2))
     assert result.returncode == 124
     time.sleep(1.2); assert not marker.exists()
@@ -599,8 +658,10 @@ def test_signed_final_ci_repro_blocks_user_manager_escape(tmp_path):
     (repo / "escape").write_text("#!/bin/sh\n! /usr/bin/systemctl --user start forged.service >/dev/null 2>&1\n", encoding="utf-8")
     (repo / "escape").chmod(0o755); _git(repo, "add", "."); _git(repo, "commit", "-qm", "escape")
     sha = _git(repo, "rev-parse", "HEAD"); signer = _signer(); key = tmp_path / "key"; key.write_bytes(signer.public_key)
+    source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
     artifact = tmp_path / "result"; _artifact(artifact, signer, task="task-1", base=sha, head=sha,
-        hook="acceptance", commands=_actual(repo, ("./escape",)))
+        hook="acceptance", commands=_actual(repo, ("./escape",)),
+        source_filesystem_sha256=source.filesystem_sha256)
     assert _run(repo, sha, artifact, key, env=_environment(tmp_path)).returncode == 0
 
 

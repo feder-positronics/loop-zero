@@ -552,6 +552,37 @@ def test_bound_job_runs_inside_private_pid_namespace(tmp_path: Path) -> None:
 
 
 @requires_nested_user_namespace
+def test_bound_job_private_procfs_hides_the_parent_pid(tmp_path: Path) -> None:
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+
+    result = _job(
+        tmp_path,
+        "run",
+        "private-procfs",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "sh",
+        "-c",
+        'test ! -e "/proc/$1"',
+        "sh",
+        str(os.getpid()),
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@requires_nested_user_namespace
 def test_bound_wrapped_command_cannot_substitute_an_authority_ancestor(
     tmp_path: Path,
 ) -> None:
@@ -667,7 +698,7 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
         protected_read_only_paths=(candidate_store,),
         **_fake_filesystem_views(
             {
-                "/": ["bin", "dev", "etc", "proc", "usr", "var"],
+                "/": ["bin", "dev", "etc", "proc", "sys", "usr", "var"],
                 "/var": ["home", "lib", "log"],
                 "/var/home": ["other", "user"],
             },
@@ -690,6 +721,7 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert _window(arguments, ["--symlink", "usr/bin", "/bin"])
     assert bind("/proc") != _window(arguments, bind("/proc"))
     assert bind("/dev") != _window(arguments, bind("/dev"))
+    assert bind("/sys") != _window(arguments, bind("/sys"))
     # Strict home ancestors are synthesized 0555; the home itself is bound.
     assert _window(arguments, ["--perms", "0555", "--dir", "/var"])
     assert _window(arguments, ["--perms", "0555", "--dir", "/var/home"])
@@ -733,48 +765,64 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert tail == ["--remount-ro", "/", "--chdir", "/var/home/user/repo", "--", "true"]
     assert arguments.index("--proc") < arguments.index("--remount-ro")
     assert arguments.index("--dev-bind") < arguments.index("--remount-ro")
+    proc_index = arguments.index("--proc")
+    forbidden_destinations = {Path("/"), Path("/proc"), Path("/sys"), Path("/dev")}
+    for index in range(proc_index + 2, len(arguments) - 2):
+        if arguments[index] in {"--bind", "--ro-bind"}:
+            assert Path(arguments[index + 2]) not in forbidden_destinations
 
 
-@pytest.mark.parametrize(
-    ("authority_root", "protected_path", "broad_option"),
-    [
-        (Path("/dev/shm/loopzero/jobs/current"), Path("/proc/loopzero/seal"), "--dev-bind"),
-        (Path("/proc/loopzero/jobs/current"), Path("/dev/shm/loopzero/seal"), "--proc"),
-    ],
-)
-def test_bound_sandbox_broad_device_and_proc_mounts_precede_authority_seals(
-    authority_root: Path, protected_path: Path, broad_option: str
+@pytest.mark.parametrize("root", [Path("/proc/jobs"), Path("/sys/jobs"), Path("/dev/jobs")])
+def test_bound_sandbox_rejects_kernel_filesystem_authority_roots(root: Path) -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="cannot be located"):
+        job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            protected_authority_root=root,
+            working_directory=Path("/home/user/repo"),
+            command=["true"],
+            account_home=Path("/home/user"),
+            protected_read_only_paths=(),
+        )
+
+
+@pytest.mark.parametrize("protected", [Path("/proc/seal"), Path("/sys/seal"), Path("/dev/seal")])
+def test_bound_sandbox_rejects_kernel_filesystem_protected_paths(
+    protected: Path,
 ) -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="cannot be located"):
+        job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            protected_authority_root=Path("/home/user/jobs/current"),
+            working_directory=Path("/home/user/repo"),
+            command=["true"],
+            account_home=Path("/home/user"),
+            protected_read_only_paths=(protected,),
+        )
+
+
+def test_bound_sandbox_supports_dev_shm_authority_without_rebinding_dev() -> None:
     from loopzero.kernel import jobs as job_store
 
     arguments = job_store.build_bound_sandbox_arguments(
         "/usr/bin/bwrap",
-        protected_authority_root=authority_root,
+        protected_authority_root=Path("/dev/shm/loopzero/jobs/current"),
         working_directory=Path("/home/user/repo"),
         command=["true"],
         account_home=Path("/home/user"),
-        protected_read_only_paths=(protected_path,),
+        protected_read_only_paths=(),
         **_fake_filesystem_views(
-            {"/": ["dev", "home", "proc", "usr"], "/home": ["user"]},
+            {"/": ["dev", "home", "proc", "sys", "usr"], "/home": ["user"]},
             {},
         ),
     )
 
-    authority_seal = ["--ro-bind", str(authority_root), str(authority_root)]
-    protected_seal = ["--ro-bind", str(protected_path), str(protected_path)]
-    authority_index = next(
-        index
-        for index in range(len(arguments) - 2)
-        if arguments[index : index + 3] == authority_seal
-    )
-    protected_index = next(
-        index
-        for index in range(len(arguments) - 2)
-        if arguments[index : index + 3] == protected_seal
-    )
-    assert arguments.index("--dev-bind") < min(authority_index, protected_index)
-    assert arguments.index("--proc") < min(authority_index, protected_index)
-    assert arguments.index(broad_option) < min(authority_index, protected_index)
+    assert _window(arguments, ["--bind", "/dev", "/dev"]) is None
+    assert _window(arguments, ["--bind", "/sys", "/sys"]) is None
+    assert _window(arguments, ["--bind", "/dev/shm", "/dev/shm"])
 
 
 def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:

@@ -175,10 +175,25 @@ def _parents(path: Path) -> list[Path]:
     return list(reversed(parents))
 
 
+_KERNEL_FILESYSTEM_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
+
+
+def _reject_kernel_filesystem_path(path: Path, *, label: str) -> None:
+    lexical = path.absolute()
+    if lexical == Path("/") or any(
+        lexical == root or lexical.is_relative_to(root)
+        for root in _KERNEL_FILESYSTEM_ROOTS
+    ):
+        raise SandboxError(
+            f"{label} cannot be located at / or under /proc, /sys, or /dev"
+        )
+
+
 def _validated(path: Path, *, directory: bool | None = None) -> Path:
     if path.is_symlink():
         raise SandboxError("sandbox mount source contains a direct symlink")
     resolved = path.resolve()
+    _reject_kernel_filesystem_path(resolved, label="sandbox mount source")
     if directory is True and not resolved.is_dir():
         raise SandboxError("sandbox directory mount source is unavailable")
     if directory is False and not resolved.is_file():
@@ -449,6 +464,7 @@ def command(
     read_only_roots: Sequence[Path] = (),
     read_only_files: Sequence[Path] = (),
     read_only_mounts: Sequence[tuple[Path, Path]] = (),
+    read_only_file_mounts: Sequence[tuple[Path, Path]] = (),
     preserve_fds: Sequence[int] = (),
     deny_network: bool,
     include_model_runtime: bool = True,
@@ -458,10 +474,27 @@ def command(
 
     Mount ordering is security-significant. The broad runtime views are emitted
     first (``/usr``, selected ``/etc``, procfs, devfs, and ``/tmp``), followed
-    by runtime executables and then caller mounts. Consequently a caller's
-    read-only worktree, Git metadata, or authority mount below ``/dev`` or
-    ``/proc`` is always the final view of that path.
+    by runtime executables and then caller mounts. Caller-controlled mount
+    paths below ``/proc``, ``/sys``, or ``/dev`` are rejected before any
+    argument list is built, so none can shadow the private kernel filesystems.
     """
+    _reject_kernel_filesystem_path(worktree, label="sandbox worktree")
+    for path in read_only_roots:
+        _reject_kernel_filesystem_path(path, label="sandbox protected path")
+    for path in read_only_files:
+        _reject_kernel_filesystem_path(path, label="sandbox protected path")
+    for source, destination in (*read_only_mounts, *read_only_file_mounts):
+        _reject_kernel_filesystem_path(source, label="sandbox protected source")
+        _reject_kernel_filesystem_path(destination, label="sandbox protected destination")
+    for source, destination, label in (
+        (audit_source, audit_destination, "sandbox audit path"),
+        (git_source, git_destination, "sandbox Git path"),
+    ):
+        if source is not None:
+            _reject_kernel_filesystem_path(source, label=label)
+        if destination is not None:
+            _reject_kernel_filesystem_path(destination, label=label)
+
     resolved_worktree = _validated(worktree, directory=True)
     mounts: list[tuple[str, Path, Path]] = [
         (
@@ -498,6 +531,10 @@ def command(
         ("--ro-bind", _validated(source, directory=True), destination.absolute())
         for source, destination in read_only_mounts
     )
+    mounts.extend(
+        ("--ro-bind", _validated(source, directory=False), destination.absolute())
+        for source, destination in read_only_file_mounts
+    )
     runtime_roots: set[tuple[Path, Path]] = set()
     for root in (
         *(_validated(path, directory=True) for path in read_only_roots),
@@ -513,11 +550,18 @@ def command(
             resolved_interpreter = interpreter.resolve()
             if not resolved_interpreter.is_relative_to(root):
                 resolved_runtime = resolved_interpreter.parent.parent
+                _reject_kernel_filesystem_path(
+                    resolved_runtime, label="sandbox interpreter runtime"
+                )
                 runtime_roots.add((resolved_runtime, resolved_runtime))
                 if interpreter.is_symlink():
                     lexical = Path(os.readlink(interpreter))
                     if lexical.is_absolute():
-                        runtime_roots.add((resolved_runtime, lexical.parent.parent))
+                        destination = lexical.parent.parent
+                        _reject_kernel_filesystem_path(
+                            destination, label="sandbox interpreter destination"
+                        )
+                        runtime_roots.add((resolved_runtime, destination))
     mounts.extend(
         ("--ro-bind", source, destination)
         for source, destination in sorted(runtime_roots)
@@ -676,36 +720,38 @@ def command(
     return built
 
 
-def validation_command(argv: Sequence[str], *, worktree: Path,
-                       read_only_roots: Sequence[Path] = (),
-                       deny_network: bool = True) -> list[str]:
+def validation_command(
+    argv: Sequence[str],
+    *,
+    worktree: Path,
+    read_only_roots: Sequence[Path] = (),
+    read_only_file_mounts: Sequence[tuple[Path, Path]] = (),
+    deny_network: bool = True,
+) -> list[str]:
     """Build a validation child boundary covering linked-worktree Git metadata.
 
     The caller may inspect and adopt child file changes. Git metadata is mounted
     read-only even when the worktree itself is writable. No authority descriptors
     are preserved. Use run_validation_child to apply the environment boundary too.
     """
-    import subprocess
-    worktree = worktree.resolve()
-    git = str(_system_tool("git"))
-    def git_path(flag):
-        result = subprocess.run(
-            [git, "-C", str(worktree), "rev-parse", "--path-format=absolute", flag],
-            env=environment(), capture_output=True, text=True, check=False,
-        )
-        if result.returncode:
-            raise SandboxError("validation worktree Git metadata is unavailable")
-        return Path(result.stdout.strip()).resolve()
-    common = git_path("--git-common-dir")
-    git_dir = git_path("--git-dir")
+    from .validation import ValidationHookError, _repository_layout
+
+    worktree = worktree.absolute()
+    try:
+        layout = _repository_layout(worktree)
+    except ValidationHookError as exc:
+        raise SandboxError(str(exc)) from exc
     git_entry = worktree / ".git"
-    roots = tuple(dict.fromkeys((*read_only_roots, common, git_dir)))
+    roots = tuple(
+        dict.fromkeys((*read_only_roots, layout.common_dir, layout.git_dir))
+    )
     return command(
         argv, worktree=worktree, writable_worktree=True,
         audit_source=None, audit_destination=None,
         git_source=None, git_destination=None, writable_git=False,
         read_only_roots=roots,
         read_only_files=(git_entry,) if git_entry.is_file() else (),
+        read_only_file_mounts=read_only_file_mounts,
         deny_network=deny_network, include_model_runtime=False,
     )
 
@@ -713,9 +759,24 @@ def validation_command(argv: Sequence[str], *, worktree: Path,
 def run_validation_child(argv: Sequence[str], *, worktree: Path,
                          source_environment: Mapping[str, str] | None = None,
                          read_only_roots: Sequence[Path] = (),
+                         git_config_overlays: Sequence[tuple[Path, bytes]] | None = None,
                          timeout: float | None = None):
     """Spawn with filesystem and environment containment, including descendants."""
     import subprocess
+    if git_config_overlays is None:
+        from .validation import (
+            ValidationHookError,
+            _repository_config_overlays,
+            _repository_layout,
+        )
+
+        try:
+            overlays = _repository_config_overlays(_repository_layout(worktree))
+        except ValidationHookError as exc:
+            raise SandboxError(str(exc)) from exc
+        git_config_overlays = tuple(
+            (overlay.destination, overlay.payload) for overlay in overlays
+        )
     child_environment = environment(source_environment)
     child_environment.update(settings.child_environment())
     # A consumer allowlist must never reintroduce lease, nonce or credentials.
@@ -727,8 +788,40 @@ def run_validation_child(argv: Sequence[str], *, worktree: Path,
                     "ACCESS_KEY", "PASSWORD", "COOKIE", "SESSION",
                     "SSH_AUTH", "BEARER"))
     }
-    return subprocess.run(
-        validation_command(argv, worktree=worktree, read_only_roots=read_only_roots),
-        env=child_environment, close_fds=True, pass_fds=(),
-        capture_output=True, text=True, timeout=timeout, check=False,
+    for key in tuple(child_environment):
+        if key == "GIT_CONFIG_COUNT" or key.startswith(
+            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
+        ):
+            child_environment.pop(key)
+    git_overrides = (
+        ("core.hooksPath", "/dev/null"),
+        ("core.fsmonitor", "false"),
+        ("core.sshCommand", ""),
+        ("core.pager", "cat"),
+        ("core.editor", "false"),
+        ("core.worktree", ""),
+        ("credential.https://github.com.helper", ""),
+        ("credential.https://gist.github.com.helper", ""),
     )
+    child_environment["GIT_CONFIG_COUNT"] = str(len(git_overrides))
+    for index, (key, value) in enumerate(git_overrides):
+        child_environment[f"GIT_CONFIG_KEY_{index}"] = key
+        child_environment[f"GIT_CONFIG_VALUE_{index}"] = value
+
+    with tempfile.TemporaryDirectory(prefix="loopzero-validation-config-") as raw:
+        config_mounts: list[tuple[Path, Path]] = []
+        for index, (destination, payload) in enumerate(git_config_overlays):
+            snapshot = Path(raw) / f"config-{index}"
+            snapshot.write_bytes(payload)
+            snapshot.chmod(0o444)
+            config_mounts.append((snapshot, destination))
+        return subprocess.run(
+            validation_command(
+                argv,
+                worktree=worktree,
+                read_only_roots=read_only_roots,
+                read_only_file_mounts=config_mounts,
+            ),
+            env=child_environment, close_fds=True, pass_fds=(),
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )

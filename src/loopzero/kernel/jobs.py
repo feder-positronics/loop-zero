@@ -25,6 +25,28 @@ class JobStoreError(RuntimeError):
 _PRIVATE_MODE = 0o700
 _LEASE_MODE = 0o600
 _JOB_NAME = re.compile(r"(?![.-])[A-Za-z0-9._-]+\Z")
+_KERNEL_FILESYSTEM_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
+
+
+def _reject_kernel_filesystem_path(
+    path: Path, *, label: str, allow_dev_shm_authority: bool = False
+) -> None:
+    lexical = path.absolute()
+    resolved = lexical.resolve(strict=False)
+    if (
+        allow_dev_shm_authority
+        and lexical.is_relative_to(Path("/dev/shm"))
+        and resolved.is_relative_to(Path("/dev/shm"))
+    ):
+        return
+    for candidate in (lexical, resolved):
+        if candidate == Path("/") or any(
+            candidate == root or candidate.is_relative_to(root)
+            for root in _KERNEL_FILESYSTEM_ROOTS
+        ):
+            raise JobStoreError(
+                f"{label} cannot be located at / or under /proc, /sys, or /dev"
+            )
 
 
 def _reject_symlink_components(path: Path) -> None:
@@ -241,6 +263,11 @@ def canonical_job_root(worktree: Path, *, configured: str | None = None) -> Path
         key = hashlib.sha256(str(store_identity).encode("utf-8")).hexdigest()[:16]
         candidate = _account_state_root() / key
     candidate = candidate.absolute()
+    _reject_kernel_filesystem_path(
+        candidate,
+        label="job authority root",
+        allow_dev_shm_authority=True,
+    )
     _reject_symlink_components(candidate)
     return candidate
 
@@ -405,9 +432,11 @@ def _protected_read_only_mounts(
     for protected in paths:
         if not protected.is_absolute() or protected == Path("/"):
             raise JobStoreError("protected read-only path is invalid")
+        _reject_kernel_filesystem_path(protected, label="protected read-only path")
         for ancestor in reversed(protected.parents):
             if (
                 ancestor == Path("/")
+                or ancestor in _KERNEL_FILESYSTEM_ROOTS
                 or ancestor == account_home
                 or ancestor in account_home.parents
                 or ancestor in bound
@@ -453,8 +482,9 @@ def build_bound_sandbox_arguments(
     hide the read-only jobs mount and silently restore sibling writes.
     The synthetic root, root-entry binds, home bind, procfs and writable devfs
     are all broad mounts. They precede authority ancestors and every read-only
-    authority seal, so a state root below ``/dev`` or ``/proc`` cannot be
-    revealed again by a later broad mount.
+    authority seal. State, authority, and protected paths below kernel
+    filesystems are rejected up front; the sole exception is an authority
+    rooted below ``/dev/shm``, whose ancestors never re-bind ``/dev`` itself.
     """
     if account_home is None:
         try:
@@ -463,6 +493,26 @@ def build_bound_sandbox_arguments(
             raise JobStoreError("OS account home is unavailable") from exc
     if not account_home.is_absolute() or account_home == Path("/"):
         raise JobStoreError("bound job supervision requires a private account home")
+    _reject_kernel_filesystem_path(account_home, label="account home")
+    if not protected_authority_root.is_absolute() or protected_authority_root == Path("/"):
+        raise JobStoreError("protected authority path is invalid")
+    _reject_kernel_filesystem_path(
+        protected_authority_root,
+        label="protected authority path",
+        allow_dev_shm_authority=True,
+    )
+    if not working_directory.is_absolute():
+        raise JobStoreError("bound job working directory is invalid")
+    if protected_read_only_paths is None:
+        protected_read_only_paths = _canonical_candidate_protection_paths()
+    for protected in protected_read_only_paths:
+        _reject_kernel_filesystem_path(protected, label="protected read-only path")
+    shared_jobs_root = settings.account_state_root(account_home) / "jobs"
+    _reject_kernel_filesystem_path(
+        shared_jobs_root,
+        label="job state root",
+        allow_dev_shm_authority=True,
+    )
 
     if list_directory is None:
 
@@ -492,8 +542,8 @@ def build_bound_sandbox_arguments(
     root_view: list[str] = []
     for entry in root_entries:
         entry_path = Path("/", entry)
-        if entry_path in (Path("/proc"), Path("/dev")):
-            continue  # replaced by --proc and --dev-bind below
+        if entry_path in _KERNEL_FILESYSTEM_ROOTS:
+            continue  # procfs/devfs are private; sysfs is not exposed
         if entry_path == home_top:
             continue  # synthesized with its real entries below
         root_view.extend(bind_entry(entry_path))
@@ -528,6 +578,7 @@ def build_bound_sandbox_arguments(
     for ancestor in reversed(protected_authority_root.parents):
         if (
             ancestor == Path("/")
+            or ancestor in _KERNEL_FILESYSTEM_ROOTS
             or ancestor == account_home
             or ancestor in account_home.parents
         ):
@@ -535,14 +586,11 @@ def build_bound_sandbox_arguments(
             # its strict ancestors live in the read-only tmpfs root.
             continue
         authority_mounts.extend(("--bind", str(ancestor), str(ancestor)))
-    shared_jobs_root = settings.account_state_root(account_home) / "jobs"
     shared_root_mount: list[str] = []
     if protected_authority_root.parent == shared_jobs_root:
         shared_root_mount.extend(
             ("--ro-bind", str(shared_jobs_root), str(shared_jobs_root))
         )
-    if protected_read_only_paths is None:
-        protected_read_only_paths = _canonical_candidate_protection_paths()
     protected_mounts = _protected_read_only_mounts(
         protected_read_only_paths,
         account_home=account_home,
