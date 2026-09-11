@@ -5,11 +5,17 @@ from ..config import Profile
 from ..kernel import settings as kernel_settings
 
 
-def configure(profile: Profile, *, uncarryable_delta_authority_is_valid=None) -> None:
+def configure(
+    profile: Profile,
+    *,
+    uncarryable_delta_authority_is_valid=None,
+    append_authoritative_record=None,
+) -> None:
     """Configure all review mechanisms and bind their declared kernel seams."""
     kernel_settings.configure(kernel_settings.KernelSettings.from_profile(profile))
     for mechanism in (acceptance, chain, evidence, findings, risk, routing):
         mechanism.configure(profile)
+    harness.configure(profile, append_authority=append_authoritative_record)
     authority.configure(
         uncarryable_delta_authority_is_valid=uncarryable_delta_authority_is_valid
     )

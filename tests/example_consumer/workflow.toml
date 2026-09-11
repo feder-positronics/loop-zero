@@ -8,9 +8,9 @@ revision = "0123456789abcdef0123456789abcdef01234567"
 path = "vendor/loop-zero"
 
 [package]
-env_prefix = "EXAMPLE"
+env_prefix = "INTELFLO"
 audit_root = ".audit"
-state_root = "~/.local/state/example"
+state_root = "~/.local/state/intelflo"
 contract = "loop-zero-v1"
 epoch = 1
 sandbox = "bwrap"
@@ -34,50 +34,41 @@ check_integration = "not-applicable: fixture repository, no integration behavior
 interpreter = ".venv/bin/python"
 shared_artifacts = [".venv"]
 dotenv = ".env"
-db_url_vars = ["TEST_DATABASE_URL"]
+db_url_vars = ["TEST_DATABASE_URL", "DATABASE_URL"]
 db_default_url = "postgresql://localhost:5433/test_db"
-db_lock = "/tmp/example-testdb.lock"
+db_lock = "/tmp/intelflo-testdb-5433.lock"
 db_targets = ["test-integration"]
 trusted_bin_dir = "/usr/bin"
 closeout_snapshot_path = "vendor/loop-zero"
 closeout_temp_prefix = "example-closeout-"
 
-[routing.aliases]
-fake = { runner = "fake", model = "fake-1", write = true }
-
-[routing.tiers]
-C = { alias = "fake", effort = "low" }
-
 [routing]
-policy_version = "example-policy-v1"
-telemetry_schema_version = "example-telemetry-v1"
-compatible_policy_versions = ["example-policy-v1"]
-default_timeout_s = 120
-engine_cooldown_s = 30
+policy_version = "2026-08-17-v11"
+telemetry_schema_version = "dispatch-telemetry-v9"
+compatible_policy_versions = ["2026-07-24-v9", "2026-08-06-v10", "2026-08-17-v11"]
+default_timeout_s = 900
+engine_cooldown_s = 600
 
 [routing.budgets]
-low = 0.0
+medium = 5.0
+high = 10.0
 
 [review]
 max_reviews_per_pr = 1
 max_delta_reviews = 1
-required_sections = ["acceptance", "risk", "gates"]
+required_sections = ["code", "security"]
 finding_severities = ["critical", "important", "suggestion"]
-security_patterns = ["**/auth/**", "**/config.*"]
+security_patterns = ["*dependencies*.py", "*middleware*", "*/integrations/*", "*config.py", "*.env*"]
 
 [github]
 native_protection = true
 workflow = ".github/workflows/ci.yml"
 labels = { in_progress = "in-progress", blocked = "blocked", standalone = "standalone" }
-check_commands = { unit = "python3 -m unittest discover -s tests" }
+check_commands = { test = "make test", test_be = "make test-be", test_fe = "make test-fe" }
 ref_namespace = "refs/heads"
 gh_version_floor = "2.40.0"
 retries = 2
-body_required_sections = ["Summary", "Validation", "Review evidence"]
-
-[path_classes]
-source = ["src/**"]
-docs = ["docs/**", "*.md"]
+body_required_sections = ["Context and goal", "Validation"]
 
 [hooks]
 worktree_setup = ["bash -c true"]

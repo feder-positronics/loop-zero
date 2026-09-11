@@ -15,7 +15,11 @@ def test_composition_root_configures_kernel_seams(tmp_path):
         (risk._SETTINGS, risk._SETTINGS.get()),
         (routing._SETTINGS, routing._SETTINGS.get()),
     )
-    old_findings = findings._SETTINGS
+    old_findings = (
+        findings.FINDINGS_DIR, findings.OPERATIONS_DIR, findings._SEVERITY_RANK,
+        findings._SECURITY_PATH_PATTERNS, findings._CONFIGURED_ROOT,
+        findings._REQUIRE_PR_SCOPE,
+    )
     profile = SimpleNamespace(
         root=tmp_path, env_prefix="CONSUMER", audit_root=Path("private"),
         state_root="~/.local/state/consumer", toolchain={},
@@ -36,4 +40,8 @@ def test_composition_root_configures_kernel_seams(tmp_path):
         kernel_settings.configure(old_kernel)
         for context, value in contexts:
             context.set(value)
-        findings._SETTINGS = old_findings
+        (
+            findings.FINDINGS_DIR, findings.OPERATIONS_DIR, findings._SEVERITY_RANK,
+            findings._SECURITY_PATH_PATTERNS, findings._CONFIGURED_ROOT,
+            findings._REQUIRE_PR_SCOPE,
+        ) = old_findings

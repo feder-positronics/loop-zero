@@ -15,8 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from ..config import Profile
-from ._ci_path_classifier import classify_paths
+from ..config import Profile, load_profile
+from ._ci_path_classifier import classify_paths, _matches_patterns as _matches
 
 
 @dataclass(frozen=True)
@@ -575,6 +575,7 @@ def verify_publication_review_risk(
     expected_base: str | None = None,
     runner: CommandRunner | None = None,
     authority_repo: Path | None = None,
+    authority_records: Sequence[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Verify publication evidence and rederive current exact-head risk.
 
@@ -588,7 +589,10 @@ def verify_publication_review_risk(
     from ..kernel.authority_store import load_authority_records
 
     generation = publication_generation(
-        load_authority_records(authority_repo or repo, 30), run_id
+        list(authority_records)
+        if authority_records is not None
+        else load_authority_records(authority_repo or repo, 30),
+        run_id,
     )
     record = load_publication_review_risk(
         evidence_dir,

@@ -126,12 +126,18 @@ class Tier:
 class GithubConfig:
     native_protection: bool = True
     workflow: str = ".github/workflows/ci.yml"
-    labels: dict[str, str] = field(default_factory=dict)
-    check_commands: dict[str, str] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=lambda: {
+        "in_progress": "in-progress", "blocked": "blocked",
+        "standalone": "standalone", "ci": "ci",
+    })
+    check_commands: dict[str, str] = field(default_factory=lambda: {
+        "test": "make test", "test_be": "make test-be",
+        "test_fe": "make test-fe",
+    })
     ref_namespace: str = "refs/heads"
     gh_version_floor: tuple[int, int, int] = (2, 40, 0)
     retries: int = 2
-    body_required_sections: tuple[str, ...] = ()
+    body_required_sections: tuple[str, ...] = ("Context and goal", "Validation")
 
 
 DEFAULT_ROUTING_ALIASES: dict[str, dict[str, Any]] = {
@@ -218,9 +224,9 @@ class Profile:
     core_path: Path
     profiles: tuple[str, ...]
     checks: dict[str, tuple[str, ...]]
-    env_prefix: str = "LOOPZERO"
+    env_prefix: str = "INTELFLO"
     audit_root: Path = Path(".audit")
-    state_root: str = "~/.local/state/loopzero"
+    state_root: str = "~/.local/state/intelflo"
     state_root_explicit: bool = False
     contract: str = CONTRACT_ID
     epoch: int = 1
@@ -239,7 +245,10 @@ class Profile:
     max_delta_reviews: int = 1
     required_sections: tuple[str, ...] = ("code", "security")
     finding_severities: tuple[str, ...] = ("critical", "important", "suggestion")
-    security_patterns: tuple[str, ...] = ()
+    security_patterns: tuple[str, ...] = (
+        "*dependencies*.py", "*middleware*", "*/integrations/*", "*config.py",
+        "*.env*",
+    )
     cross_harness_routes: dict[str, str] = field(
         default_factory=lambda: {"codex": "opus", "claude": "sol"}
     )
@@ -436,14 +445,14 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     if not isinstance(package, dict):
         problems.append("[package]: must be a table")
         package = {}
-    env_prefix = package.get("env_prefix", "LOOPZERO")
+    env_prefix = package.get("env_prefix", "INTELFLO")
     if not isinstance(env_prefix, str) or not _PREFIX_RE.match(env_prefix):
         problems.append("[package].env_prefix: must match [A-Z][A-Z0-9_]*")
     audit_root = package.get("audit_root", ".audit")
     if not isinstance(audit_root, str) or Path(audit_root).is_absolute():
         problems.append("[package].audit_root: must be a relative path")
     state_root_explicit = "state_root" in package
-    state_root = package.get("state_root", "~/.local/state/loopzero")
+    state_root = package.get("state_root", "~/.local/state/intelflo")
     if not isinstance(state_root, str) or not state_root:
         problems.append("[package].state_root: must be a nonempty path")
     contract = package.get("contract", CONTRACT_ID)
@@ -691,7 +700,12 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         problems.append(
             "[review].finding_severities: values must be critical, important, or suggestion"
         )
-    security_patterns = _strings(review, "security_patterns", (), "[review]", problems)
+    security_patterns = _strings(
+        review, "security_patterns",
+        ("*dependencies*.py", "*middleware*", "*/integrations/*", "*config.py",
+         "*.env*"),
+        "[review]", problems,
+    )
     cross_harness_table = review.get(
         "cross_harness_routes",
         {"codex": "opus", "claude": "sol"} if using_default_aliases else {},
@@ -723,7 +737,10 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     github_workflow = _relative_path(
         github, "workflow", ".github/workflows/ci.yml", "[github]", problems
     )
-    labels_table = github.get("labels", {})
+    labels_table = github.get("labels", {
+        "in_progress": "in-progress", "blocked": "blocked",
+        "standalone": "standalone", "ci": "ci",
+    })
     labels: dict[str, str] = {}
     if not isinstance(labels_table, dict):
         problems.append("[github].labels: must be a table")
@@ -735,7 +752,9 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 problems.append(f"[github].labels.{name}: must be a nonempty string")
             else:
                 labels[str(name)] = value
-    commands_table = github.get("check_commands", {})
+    commands_table = github.get("check_commands", {
+        "test": "make test", "test_be": "make test-be", "test_fe": "make test-fe",
+    })
     check_commands: dict[str, str] = {}
     if not isinstance(commands_table, dict):
         problems.append("[github.check_commands]: must be a table")
@@ -756,17 +775,28 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     github_retries = github.get("retries", 2)
     if type(github_retries) is not int or not 0 <= github_retries <= 10:
         problems.append("[github].retries: must be an integer from 0 through 10")
-    body_sections = _strings(github, "body_required_sections", (), "[github]", problems)
+    body_sections = _strings(
+        github, "body_required_sections", ("Context and goal", "Validation"),
+        "[github]", problems,
+    )
     if len(body_sections) != len(set(body_sections)):
         problems.append("[github].body_required_sections: entries must be unique")
 
     path_classes: dict[str, tuple[str, ...]] = {}
-    path_classes_table = data.get("path_classes", {})
+    using_default_path_classes = "path_classes" not in data
+    if using_default_path_classes:
+        from .review._ci_path_classifier import _DEFAULT_PATH_CLASSES
+
+        path_classes_table = {
+            name: list(patterns) for name, patterns in _DEFAULT_PATH_CLASSES.items()
+        }
+    else:
+        path_classes_table = data.get("path_classes", {})
     if not isinstance(path_classes_table, dict):
         problems.append("[path_classes]: must be a table")
         path_classes_table = {}
     for name, globs in path_classes_table.items():
-        if not _LABEL_KEY_RE.fullmatch(str(name)):
+        if not _ALIAS_RE.fullmatch(str(name)):
             problems.append(f"[path_classes].{name}: class names must be lowercase identifiers")
             continue
         if not isinstance(globs, list) or any(not isinstance(g, str) or not g for g in globs):
@@ -790,7 +820,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             "blueprints": "docs",
             "governance": "docs",
         }
-        if not path_classes
+        if using_default_path_classes
         else {},
     )
     path_class_parents: dict[str, str] = {}
@@ -834,9 +864,9 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 "fastapi_backend/.venv", "nextjs-frontend/node_modules"
             ],
             "dotenv": "fastapi_backend/.env",
-            "db_url_vars": ["TEST_DATABASE_URL"],
+            "db_url_vars": ["TEST_DATABASE_URL", "DATABASE_URL"],
             "db_default_url": "postgresql://localhost:5433/test_db",
-            "db_lock": "/tmp/intelflo-testdb.lock",
+            "db_lock": "/tmp/intelflo-testdb-5433.lock",
             "db_targets": [
                 "test", "test-be", "test-be-integration", "test-be-slow",
                 "test-be-critical-integration", "test-be-coverage",

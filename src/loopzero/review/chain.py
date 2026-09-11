@@ -18,6 +18,7 @@ from ..config import Profile
 
 REVIEW_CHAIN_RECEIPT_SCHEMA = "ReviewChainReceiptV1"
 REVIEW_CHAIN_ADVISORY_RECEIPT_SCHEMA = "ReviewChainAdvisoryReceiptV1"
+REVIEW_CHAIN_SECTIONS = ("code", "security")
 _PROFILE: ContextVar[Profile | None] = ContextVar("review_chain_profile", default=None)
 
 
@@ -27,7 +28,9 @@ def configure(profile: Profile) -> None:
 
 def _required_sections() -> tuple[str, ...]:
     profile = _PROFILE.get()
-    if profile is None or not profile.required_sections:
+    if profile is None:
+        return REVIEW_CHAIN_SECTIONS
+    if not profile.required_sections:
         raise ReviewChainError("review chain requires configured required sections")
     return profile.required_sections
 
@@ -45,8 +48,16 @@ def enforce_review_budget(*, completed_reviews: int, completed_delta_reviews: in
         raise ReviewChainError("review chain requires configured review budget")
     full_limit = min(profile.max_reviews_per_pr, 1)
     delta_limit = min(profile.max_delta_reviews, 1)
-    if requested == "review" and completed_reviews >= full_limit:
+    if type(completed_reviews) is not int or type(completed_delta_reviews) is not int:
+        raise ReviewChainError("review budget counters must be integers")
+    if completed_reviews < 0 or completed_delta_reviews < 0:
+        raise ReviewChainError("review budget counters cannot be negative")
+    if requested == "review" and (
+        completed_reviews >= full_limit or completed_delta_reviews != 0
+    ):
         raise ReviewChainError("primary review budget exhausted")
+    if requested == "delta" and completed_reviews != 1:
+        raise ReviewChainError("delta review requires exactly one primary review")
     if requested == "delta" and completed_delta_reviews >= delta_limit:
         raise ReviewChainError("delta review budget exhausted")
     if requested not in {"review", "delta"}:

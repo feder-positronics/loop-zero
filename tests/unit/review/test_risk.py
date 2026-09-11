@@ -36,6 +36,27 @@ def load_module(name: str = "delivery_review_risk"):
 
 module = load_module()
 
+
+@pytest.fixture(autouse=True)
+def configured_target_risk_policy():
+    module.configure(
+        SimpleNamespace(
+            path_classes={
+                "docs": ("docs/**",),
+                "backend": ("fastapi_backend/**",),
+                "frontend": ("nextjs-frontend/**",),
+                "tooling": ("scripts/**",),
+            },
+            path_class_parents={},
+            security_patterns=(
+                "**/*.sh", "**/*.bash", "**/*.zsh", "**/*.ps1",
+                "**/config.py", "**/auth/**", "**/middleware/**",
+                "**/integrations/**", "pyproject.toml", "package.json",
+            ),
+            required_sections=("code",),
+        )
+    )
+
 from loopzero.kernel import seams
 
 seams.configure(delivery_controller_records=lambda rows: rows)

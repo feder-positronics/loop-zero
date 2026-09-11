@@ -27,7 +27,7 @@ from ._visual_evidence import evaluate as evaluate_visual_evidence
 from ..kernel.run_identity import extract_run_id_marker
 
 if TYPE_CHECKING:
-    from pr_publish import PublicationRequest
+    from .publish import PublicationRequest
 
 TRUSTED_BODY_CHECKER_PATH = "scripts/util/pr_body_check.py"
 EVIDENCE_START = "<!-- loop-zero-evidence:start -->"

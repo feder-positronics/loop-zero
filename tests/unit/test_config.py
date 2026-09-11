@@ -11,10 +11,22 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.core_revision == REVISION
     assert profile.checks == {"required": ("tests",), "advisory": (), "scheduled": ("health",)}
     assert profile.hooks == {"worktree_setup": ("make setup",), "acceptance": ("make test",)}
-    assert profile.env_prefix == "LOOPZERO"
+    assert profile.env_prefix == "INTELFLO"
     assert profile.state_root_explicit is False
     assert profile.toolchain["dotenv"] == "fastapi_backend/.env"
     assert profile.toolchain["db_targets"][0] == "test"
+    assert profile.state_root == "~/.local/state/intelflo"
+    assert profile.routing_budgets == {"medium": 5.0, "high": 10.0}
+    assert profile.compatible_policy_versions == (
+        "2026-07-24-v9", "2026-08-06-v10", "2026-08-17-v11"
+    )
+    assert {"fable", "opus", "sol", "terra", "luna"} <= profile.aliases.keys()
+    assert profile.toolchain["db_url_vars"] == ["TEST_DATABASE_URL", "DATABASE_URL"]
+    assert profile.toolchain["db_lock"] == "/tmp/intelflo-testdb-5433.lock"
+    assert profile.security_patterns
+    assert profile.path_classes["backend-risk"]
+    assert profile.github.labels["standalone"] == "standalone"
+    assert profile.github.body_required_sections == ("Context and goal", "Validation")
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
 
 
@@ -76,9 +88,9 @@ def test_mechanism_configuration_is_typed_and_retained():
         Path(__file__).resolve().parents[1] / "example_consumer"
     )
     assert profile.toolchain["db_targets"] == ["test-integration"]
-    assert profile.routing_budgets == {"low": 0.0}
-    assert profile.routing_policy_version == "example-policy-v1"
-    assert profile.required_sections == ("acceptance", "risk", "gates")
+    assert profile.routing_budgets == {"medium": 5.0, "high": 10.0}
+    assert profile.routing_policy_version == "2026-08-17-v11"
+    assert profile.required_sections == ("code", "security")
     assert profile.github.labels["standalone"] == "standalone"
     assert profile.github.gh_version_floor == (2, 40, 0)
 

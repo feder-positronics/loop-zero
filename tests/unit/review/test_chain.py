@@ -90,6 +90,10 @@ def test_review_budget_cannot_be_widened_and_can_be_narrowed() -> None:
         module.enforce_review_budget(
             completed_reviews=0, completed_delta_reviews=1, requested="delta"
         )
+    with pytest.raises(module.ReviewChainError, match="exactly one primary"):
+        module.enforce_review_budget(
+            completed_reviews=0, completed_delta_reviews=0, requested="delta"
+        )
 
     module.configure(
         SimpleNamespace(

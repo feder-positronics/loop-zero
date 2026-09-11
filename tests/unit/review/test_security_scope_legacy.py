@@ -9,6 +9,14 @@ import pytest
 from loopzero.review import _security_scope as module
 
 
+@pytest.fixture(autouse=True)
+def exact_intelflo_security_policy():
+    module.configure(
+        security_patterns=module._DEFAULT_SECURITY_PATTERNS,
+        required_sections=("code",),
+    )
+
+
 def test_required_review_sections_follow_trigger_paths() -> None:
     assert module.required_review_sections(()) == ("code",)
     assert module.required_review_sections(("app/config.py",)) == (

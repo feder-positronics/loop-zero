@@ -9,6 +9,11 @@ import pytest
 from loopzero.review import _ci_path_classifier as module
 
 
+@pytest.fixture(autouse=True)
+def exact_intelflo_path_tables():
+    module.configure(module._DEFAULT_PATH_CLASSES, module._DEFAULT_PARENT_CLASSES)
+
+
 @pytest.mark.parametrize(
     ("paths", "expected_true"),
     [
