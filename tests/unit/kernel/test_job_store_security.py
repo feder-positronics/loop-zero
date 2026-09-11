@@ -84,7 +84,7 @@ def test_bound_sandbox_denies_continuation_candidate_store_writes(
             str(repo / ".git" / "forged-config"),
         ],
         cwd=repo,
-        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")}),
+        env=consumer_environment(repo, tmp_path),
         capture_output=True,
         text=True,
         timeout=60,
@@ -112,7 +112,7 @@ def test_candidate_store_derivation_ignores_hostile_git_environment(
     subprocess.run(["git", "init", "-q"], cwd=attacker, check=True)
     monkeypatch.setenv(variable, str(attacker / ".git"))
 
-    protected = job_store._canonical_candidate_protection_paths()
+    protected = job_store._canonical_candidate_protection_paths(repo)
     candidate_store = protected[-1]
 
     assert protected[0] == repo / ".git"
@@ -156,7 +156,7 @@ def test_candidate_store_protection_pins_linked_worktree_metadata(
         job_store, "__file__", str(linked / "scripts" / "util" / "job_store.py")
     )
 
-    protected = job_store._canonical_candidate_protection_paths()
+    protected = job_store._canonical_candidate_protection_paths(linked)
     git_dir = Path(
         subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-dir"],
@@ -221,12 +221,12 @@ def test_bound_host_dispatcher_accepts_its_canonical_task_result(
             "--terminal-artifact",
             str(artifact),
             "--",
-            "/usr/bin/python3",
+            sys.executable,
             str(host_dispatcher),
             *arguments,
         ],
         cwd=repo,
-        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")}),
+        env=consumer_environment(repo, tmp_path),
         capture_output=True,
         text=True,
         timeout=60,
@@ -278,15 +278,25 @@ def test_bound_dispatcher_preserves_external_symlink_artifact(
             "--terminal-artifact",
             str(artifact),
             "--",
-            "/usr/bin/python3",
+            sys.executable,
             str(dispatcher),
             "run",
         ],
         cwd=repo,
-        env=package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs")}),
+        env=consumer_environment(repo, tmp_path),
         capture_output=True,
         text=True,
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(target.read_text()) == json.loads(payload)
+
+
+def consumer_environment(repo, tmp_path):
+    from loopzero.kernel.settings import KernelSettings
+    settings = KernelSettings(env_prefix="INTELFLO", toolchain={
+        "dispatcher": str(repo / "scripts/util/agent_dispatch.py"),
+        "host_dispatcher": str(repo / "scripts/util/agent_dispatch_host.py"),
+    })
+    return package_environment({"PATH": "/usr/bin:/bin", "INTELFLO_JOB_DIR": str(tmp_path / "jobs"),
+                                **settings.child_environment()})

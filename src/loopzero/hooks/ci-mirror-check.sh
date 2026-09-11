@@ -181,7 +181,7 @@ echo "   Base ref: ${base_ref}"
 echo ""
 echo "== GitHub Actions branch policy =="
 started_ms="$(now_ms)"
-if make check-actions-branch-policy; then
+if loopzero_consumer ACTIONS_BRANCH_POLICY_HOOK; then
     emit_tool_event "branch-policy" "$started_ms" "pass"
 else
     emit_tool_event "branch-policy" "$started_ms" "fail"
@@ -191,7 +191,7 @@ fi
 echo ""
 echo "== Repository workflow policy =="
 started_ms="$(now_ms)"
-if make check-repo-workflow-policy; then
+if loopzero_consumer REPO_WORKFLOW_POLICY_HOOK; then
     emit_tool_event "repo-workflow-policy" "$started_ms" "pass"
 else
     emit_tool_event "repo-workflow-policy" "$started_ms" "fail"
@@ -207,7 +207,7 @@ if ! should_run_blueprint_drift; then
 elif command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
     started_ms="$(now_ms)"
     if [ "${CI_MIRROR_BLUEPRINT_DRIFT:-}" = "1" ]; then
-        blueprint_cmd=(make blueprint-drift-check)
+        blueprint_cmd=(loopzero_consumer BLUEPRINT_DRIFT_HOOK)
     elif has_local_changes_in docs/design/blueprints; then
         echo "Local blueprint edits found; running offline structure drift only."
         echo "Online changed-blueprint issue-state drift will run after the edits are committed."
@@ -247,7 +247,7 @@ else
     echo "== Backend complexity ratchet =="
     echo "Local comparison uses ${base_ref}; hosted CI remains authoritative for the immutable PR base SHA."
     started_ms="$(now_ms)"
-    if make guardian-complexity-check BASE_SHA="$base_ref"; then
+    if loopzero_consumer COMPLEXITY_HOOK BASE_SHA="$base_ref"; then
         emit_tool_event "backend-complexity" "$started_ms" "pass"
     else
         emit_tool_event "backend-complexity" "$started_ms" "fail"
@@ -257,7 +257,7 @@ else
     echo ""
     echo "== Backend lint =="
     started_ms="$(now_ms)"
-    if (cd "$BACKEND_ROOT" && uv run ruff check .); then
+    if (cd "$BACKEND_ROOT" && loopzero_consumer BACKEND_LINT_HOOK); then
         emit_tool_event "backend-ruff" "$started_ms" "pass"
     else
         emit_tool_event "backend-ruff" "$started_ms" "fail"
@@ -267,7 +267,7 @@ else
     echo ""
     echo "== Backend type check =="
     started_ms="$(now_ms)"
-    if (cd "$BACKEND_ROOT" && uv run mypy app/); then
+    if (cd "$BACKEND_ROOT" && loopzero_consumer BACKEND_TYPES_HOOK); then
         emit_tool_event "backend-mypy" "$started_ms" "pass"
     else
         emit_tool_event "backend-mypy" "$started_ms" "fail"
@@ -292,9 +292,9 @@ else
     started_ms="$(now_ms)"
     if (
         cd "$FRONTEND_ROOT" &&
-            pnpm run tsc &&
-            pnpm run lint &&
-            pnpm exec prettier --check '**/*.{js,jsx,ts,tsx,json,css,html}'
+            loopzero_consumer FRONTEND_TYPES_HOOK &&
+            loopzero_consumer FRONTEND_LINT_HOOK &&
+            loopzero_consumer FRONTEND_FORMAT_HOOK '**/*.{js,jsx,ts,tsx,json,css,html}'
     ); then
         observe_validation_receipt "frontend-static" "pass" "$frontend_static_receipt_digest"
         emit_tool_event "frontend-static" "$started_ms" "pass"
@@ -343,11 +343,11 @@ else
         frontend_validation_scope="$(loopzero_consumer FRONTEND_VALIDATION_SCOPE_HOOK "${validation_scope_args[@]}")"
         if [ "$frontend_validation_scope" = "full" ]; then
             echo "Shared/broad frontend boundary changed; running the full frontend suite."
-            frontend_test_cmd=(pnpm exec vitest run)
+            frontend_test_cmd=(loopzero_consumer FRONTEND_TESTS_HOOK run)
             frontend_event="frontend-full-tests"
             frontend_test_receipt_digest="$(capture_validation_receipt_identity "$frontend_event")"
         else
-            frontend_test_cmd=(pnpm exec vitest related --run --passWithNoTests "${frontend_changed_args[@]}")
+            frontend_test_cmd=(loopzero_consumer FRONTEND_TESTS_HOOK related --run --passWithNoTests "${frontend_changed_args[@]}")
             frontend_event="frontend-changed-tests"
             frontend_test_receipt_digest=""
         fi
@@ -376,7 +376,7 @@ else
                     echo "No frontend repository guardrail tests found." >&2
                     exit 1
                 fi
-                pnpm exec vitest run "${guardrail_tests[@]}"
+                loopzero_consumer FRONTEND_TESTS_HOOK run "${guardrail_tests[@]}"
             ); then
                 emit_tool_event "frontend-guardrail-tests" "$started_ms" "pass"
             else
@@ -425,7 +425,7 @@ else
     printf '%s\n' "$semantic_changes"
     agent_config_receipt_digest="$(capture_validation_receipt_identity "agent-config-sync")"
     started_ms="$(now_ms)"
-    if make check-agent-configs; then
+    if loopzero_consumer AGENT_CONFIGS_HOOK; then
         observe_validation_receipt "agent-config-sync" "pass" "$agent_config_receipt_digest"
         emit_tool_event "agent-config-sync" "$started_ms" "pass"
     else
@@ -446,7 +446,7 @@ if ! has_relevant_changes_in \
     emit_tool_event "skill-convergence-tests" "$(now_ms)" "skip"
 else
     started_ms="$(now_ms)"
-    if make check-skill-convergence-tests; then
+    if loopzero_consumer SKILL_CONVERGENCE_TESTS_HOOK; then
         emit_tool_event "skill-convergence-tests" "$started_ms" "pass"
     else
         emit_tool_event "skill-convergence-tests" "$started_ms" "fail"

@@ -120,3 +120,49 @@ def test_gitscope_hash_ignores_mutable_fields_and_enforces_scope():
 def test_git_configuration_digest_ignores_branch_metadata():
     base = b'[remote "origin"]\nurl = https://example.invalid/repo\n'
     assert git_config_security.security_projection_sha256(base) == git_config_security.security_projection_sha256(base + b'[branch "topic"]\nremote = origin\n')
+
+
+def test_settings_round_trip_in_installed_child_and_shell_job(tmp_path):
+    import os
+    settings = KernelSettings(env_prefix="ACME", audit_root=Path("evidence"),
+                              state_root=tmp_path / "state", temp_prefix="acme-test-")
+    child_env = {**os.environ, **settings.child_environment(),
+                 "LOOPZERO_PYTHON": sys.executable, "ACME_JOB_DIR": str(tmp_path / "jobs")}
+    observed = subprocess.check_output(
+        [sys.executable, "-m", "loopzero.kernel.worktree_lease", "--help"],
+        env=child_env, text=True,
+    )
+    assert "worktree" in observed
+    code = "from loopzero.kernel.settings import settings; print(settings.env('JOB_DIR'), settings.audit_root, settings.temp_prefix)"
+    assert subprocess.check_output([sys.executable, "-c", code], env=child_env, text=True).strip() == "ACME_JOB_DIR evidence acme-test-"
+    job_script = Path(__file__).resolve().parents[3] / "src/loopzero/kernel/job.sh"
+    result = subprocess.run([str(job_script), "run", "acme-job", "--timeout", "30", "--", "/bin/echo", "injected"],
+                            env=child_env, cwd=tmp_path, text=True, capture_output=True, timeout=40)
+    assert result.returncode == 0, result.stderr
+    assert "injected" in result.stdout
+    assert (tmp_path / "jobs/acme-job/exit_code").read_text().strip() == "0"
+
+
+def test_missing_legacy_key_is_a_typed_rejection(monkeypatch):
+    from loopzero.kernel import authority
+    monkeypatch.setattr(authority, "LEGACY_COORDINATOR_PUBLIC_KEY", None)
+    with pytest.raises(authority.TerminalAuthorityError):
+        authority.verify_legacy_coordinator_authority({authority.PROOF_FIELD: {
+            "scheme": authority.LEGACY_COORDINATOR_AUTHORITY_SCHEME,
+            "authority_kind": "coordinator", "public_key": None,
+        }})
+
+
+def test_pidfd_fallback_retains_stable_process_identity(monkeypatch):
+    import os
+    import signal
+    from loopzero.kernel import linux
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.delattr(signal, "pidfd_send_signal", raising=False)
+    descriptor = linux.pidfd_open(os.getpid())
+    try:
+        linux.pidfd_send_signal(descriptor, 0)
+    finally:
+        os.close(descriptor)
+    with pytest.raises(OSError):
+        linux.pidfd_send_signal(descriptor, 0)

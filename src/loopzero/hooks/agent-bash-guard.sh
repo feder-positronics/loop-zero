@@ -18,11 +18,10 @@ cmd="$(printf '%s' "$payload" | jq -r '.tool_input.command // empty' 2>/dev/null
 
 warn() { printf 'bash-guard warning: %s\n' "$1"; }
 
-case "$cmd" in
-  *"railway link"*)
-    warn "'railway link' writes shared link-state that races across parallel worktrees — scope per command with -s/-e instead (observability rule)."
-    ;;
-esac
+# Consumer shared-state CLIs can add one literal command warning.
+if [ -n "${LOOPZERO_SHARED_STATE_COMMAND:-}" ] && [[ "$cmd" == *"$LOOPZERO_SHARED_STATE_COMMAND"* ]]; then
+  warn "'$LOOPZERO_SHARED_STATE_COMMAND' writes shared state; use the consumer's reservation mechanism."
+fi
 
 if printf '%s' "$cmd" | grep -qE '(^|[;&|[:space:]])git stash (pop|apply|drop)\b' \
   && ! printf '%s' "$cmd" | grep -q 'commit-autofix-temp'; then

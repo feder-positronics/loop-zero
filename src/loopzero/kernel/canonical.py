@@ -3,7 +3,11 @@ import hashlib
 import json
 from collections.abc import Mapping
 
-class LedgerConflict(ValueError):
+class LedgerError(RuntimeError):
+    """Base error for a governed ledger operation."""
+
+
+class LedgerConflict(LedgerError):
     """The persisted payload cannot be represented as canonical JSON."""
 
 

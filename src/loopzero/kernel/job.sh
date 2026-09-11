@@ -355,7 +355,8 @@ try:
         or identity.get("lease_ino") != lease.st_ino
     ):
         raise OSError("pid identity does not match job authority")
-    pidfd = os.pidfd_open(pid)
+    from loopzero.kernel.linux import pidfd_open, pidfd_send_signal
+    pidfd = pidfd_open(pid)
     stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rpartition(") ")[2].split()
     if len(stat_fields) < 20 or stat_fields[19] != identity["starttime"]:
         raise OSError("pid identity is stale")
@@ -363,7 +364,7 @@ except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
     raise SystemExit(1)
 
 try:
-    signal.pidfd_send_signal(pidfd, signal.SIGTERM)
+    pidfd_send_signal(pidfd, signal.SIGTERM)
 except OSError:
     raise SystemExit(1)
 finally:

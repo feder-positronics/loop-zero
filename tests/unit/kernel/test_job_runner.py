@@ -487,8 +487,8 @@ def test_bound_sandbox_preserves_authority_ancestor_ownership_walk(
         encoding="utf-8",
     )
     probe = (
-        "import sys; sys.path.insert(0, sys.argv[1]); "
-        "from pathlib import Path; import dispatch_ledger; "
+        "import sys; "
+        "from pathlib import Path; from loopzero.kernel import ledger as dispatch_ledger; "
         "dispatch_ledger._open_anchored_directory(Path(sys.argv[1]))"
     )
 
@@ -3720,7 +3720,7 @@ def _lease_path(tmp_path: Path, name: str) -> Path:
     completed = subprocess.run(
         [
             sys.executable,
-            str(REPO_ROOT / "scripts/util/job_store.py"),
+            "-m", "loopzero.kernel.jobs",
             "--worktree",
             str(REPO_ROOT),
             "--ensure-job-lease",

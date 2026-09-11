@@ -129,6 +129,22 @@ def _run_hook(
         hook.write_text('#!/bin/sh\nexec "' + str(bin_dir / "python3") + '" scripts/util/' + name + '.py "$@"\n')
         hook.chmod(0o755)
         env["INTELFLO_" + name.upper() + "_HOOK"] = str(hook)
+    lane_commands = {
+        "ACTIONS_BRANCH_POLICY": "make check-actions-branch-policy",
+        "REPO_WORKFLOW_POLICY": "make check-repo-workflow-policy",
+        "BLUEPRINT_DRIFT": "make blueprint-drift-check",
+        "COMPLEXITY": "make guardian-complexity-check",
+        "BACKEND_LINT": "true", "BACKEND_TYPES": "true",
+        "FRONTEND_TYPES": "pnpm run tsc", "FRONTEND_LINT": "pnpm run lint",
+        "FRONTEND_FORMAT": "pnpm exec prettier --check", "FRONTEND_TESTS": "pnpm exec vitest",
+        "AGENT_CONFIGS": "make check-agent-configs",
+        "SKILL_CONVERGENCE_TESTS": "make check-skill-convergence-tests",
+    }
+    for name, command in lane_commands.items():
+        lane = bin_dir / name.lower()
+        lane.write_text('#!/bin/sh\nexec ' + command + ' "$@"\n')
+        lane.chmod(0o755)
+        env["INTELFLO_" + name + "_HOOK"] = str(lane)
     env = package_environment(env)
     env["LOOPZERO_PYTHON"] = str(bin_dir / "python3")
     result = subprocess.run(

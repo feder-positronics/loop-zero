@@ -883,7 +883,8 @@ def verify_legacy_coordinator_authority(record: Mapping[str, object]) -> None:
     """Verify one retired SSH coordinator proof for cutover adoption only."""
     proof = record.get(PROOF_FIELD)
     if (
-        not isinstance(proof, dict)
+        not LEGACY_COORDINATOR_PUBLIC_KEY
+        or not isinstance(proof, dict)
         or proof.get("scheme") != LEGACY_COORDINATOR_AUTHORITY_SCHEME
         or proof.get("authority_kind") != "coordinator"
         or proof.get("public_key") != LEGACY_COORDINATOR_PUBLIC_KEY
