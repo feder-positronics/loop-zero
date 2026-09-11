@@ -23,6 +23,19 @@ class TrustedExecutableError(RuntimeError):
     """A required executable does not satisfy the shared allowlist policy."""
 
 
+def _writable_by_current_account(metadata: os.stat_result) -> bool:
+    """Match the legacy protected-system-path ownership decision exactly."""
+    if os.geteuid() == 0:
+        return metadata.st_uid != 0 or bool(
+            metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        )
+    if metadata.st_uid == os.geteuid():
+        return bool(metadata.st_mode & stat.S_IWUSR)
+    if metadata.st_gid in {os.getegid(), *os.getgroups()}:
+        return bool(metadata.st_mode & stat.S_IWGRP)
+    return bool(metadata.st_mode & stat.S_IWOTH)
+
+
 def no_symlink_components(path: Path) -> bool:
     if not path.is_absolute() or ".." in path.parts:
         return False
@@ -111,9 +124,28 @@ def resolve_executable(root: Path, token: str, allowed: tuple[Path, ...]) -> Pat
 def system_executable(name: str) -> Path:
     if not name or Path(name).name != name:
         raise TrustedExecutableError("trusted executable name must be one basename")
-    executable = resolve_executable(Path.cwd(), name, allowed_path(()))
-    if executable is None:
+    found = next(
+        (
+            Path(directory) / name
+            for directory in os.defpath.split(os.pathsep)
+            if (Path(directory) / name).is_file()
+            and os.access(Path(directory) / name, os.X_OK)
+        ),
+        None,
+    )
+    if found is None:
         raise TrustedExecutableError(f"trusted {name} executable is unavailable")
+    executable = found.resolve()
+    try:
+        metadata = tuple(component.stat() for component in (executable, *executable.parents))
+    except OSError as exc:
+        raise TrustedExecutableError(f"trusted {name} executable is unavailable") from exc
+    if (
+        not executable.is_file()
+        or not os.access(executable, os.X_OK)
+        or any(_writable_by_current_account(item) for item in metadata)
+    ):
+        raise TrustedExecutableError(f"trusted {name} executable is not protected")
     return executable
 
 

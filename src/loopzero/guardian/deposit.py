@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +34,18 @@ PROMOTABLE_RECORD_TYPES = frozenset(
         "attempt-terminal",
     }
 )
+_AUTHORITY_APPEND: ContextVar[
+    Callable[[Path, list[dict[str, object]]], None] | None
+] = ContextVar("guardian_deposit_authority_append", default=None)
+
+
+def configure(
+    *, append_authority_records: Callable[[Path, list[dict[str, object]]], None]
+) -> None:
+    """Bind the excluded dispatch-runtime append seam."""
+    if not callable(append_authority_records):
+        raise TypeError("Guardian deposit authority append seam must be callable")
+    _AUTHORITY_APPEND.set(append_authority_records)
 
 
 class AuditDepositError(RuntimeError):
@@ -469,9 +482,12 @@ def _deposited_records(deposit: AuditDeposit) -> list[dict[str, object]]:
 def promote(
     deposit: AuditDeposit,
     *,
-    append_authority_records: Callable[[Path, list[dict[str, object]]], None],
+    append_authority_records: Callable[[Path, list[dict[str, object]]], None] | None = None,
 ) -> Path:
     """Promote only task-bound telemetry and its bounded terminal result."""
+    append_authority_records = append_authority_records or _AUTHORITY_APPEND.get()
+    if append_authority_records is None:
+        raise AuditDepositError("dispatch deposit authority append seam is unavailable")
     launch = _launch_binding(deposit)
     dispatch = deposit.audit_root / "dispatch"
     result_relative = f"results/{deposit.task_id}.json"
@@ -706,7 +722,7 @@ def promote(
 def promote_completed(
     deposit: AuditDeposit,
     *,
-    append_authority_records: Callable[[Path, list[dict[str, object]]], None],
+    append_authority_records: Callable[[Path, list[dict[str, object]]], None] | None = None,
 ) -> Path | None:
     """Retry promotion while private result evidence remains available."""
     if not deposit.result_path.is_file():

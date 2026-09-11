@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import subprocess
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol
@@ -20,23 +21,30 @@ STATUSES = ("VERIFIED", "KNOWN-GAP", "VIOLATED", "FIXED?!", "UNSUPPORTED")
 
 
 def _policy_error(claim: Mapping[str, Any]) -> str | None:
-    if claim.get("type") not in {"metric_max", "predicate"}:
-        return "claim type must be metric_max or predicate"
-    for field in ("id", "claim", "command"):
-        if not isinstance(claim.get(field), str) or not claim[field].strip():
-            return f"claim requires non-empty {field}"
-    repair_scope = claim.get("repair_scope")
-    if not isinstance(repair_scope, list) or any(
-        not isinstance(path, str) or not path for path in repair_scope
+    if claim.get("type") != "metric_max":
+        return "quality claim type must be metric_max"
+    for field in (
+        "id",
+        "claim",
+        "command",
+        "acceptance_command",
+        "candidate_command",
     ):
-        return "claim requires non-empty string repair_scope entries"
+        if not isinstance(claim.get(field), str) or not claim[field].strip():
+            return f"quality claim requires non-empty {field}"
+    repair_scope = claim.get("repair_scope")
+    if (
+        not isinstance(repair_scope, list)
+        or not repair_scope
+        or not all(isinstance(path, str) and path for path in repair_scope)
+    ):
+        return "quality claim requires non-empty repair_scope"
     if claim.get("expected", "verified") not in {"verified", "known-gap"}:
-        return "claim expected must be verified or known-gap"
-    if claim.get("type") == "metric_max":
-        for field in ("threshold", "headroom"):
-            value = claim.get(field)
-            if type(value) not in (int, float) or not math.isfinite(float(value)):
-                return f"metric claim requires finite {field}"
+        return "quality claim expected must be verified or known-gap"
+    for field in ("threshold", "headroom"):
+        value = claim.get(field)
+        if type(value) not in (int, float) or not math.isfinite(float(value)):
+            return f"quality claim requires finite {field}"
     return None
 
 
@@ -60,7 +68,7 @@ def _metric_status(
         threshold = float(claim["threshold"])
         if not math.isfinite(value):
             raise ValueError("metric value must be finite")
-    except (KeyError, ValueError, OSError, TimeoutError) as exc:
+    except (KeyError, ValueError, OSError, TimeoutError, subprocess.TimeoutExpired) as exc:
         return "UNSUPPORTED", str(exc), None
     holds = value <= threshold
     expected = claim.get("expected", "verified")
@@ -69,7 +77,11 @@ def _metric_status(
     if not holds and expected == "known-gap":
         return "KNOWN-GAP", f"metric {value:.3f} exceeds threshold {threshold:.3f}", value
     if holds:
-        return "FIXED?!", "gap appears closed", value
+        return (
+            "FIXED?!",
+            "gap appears closed — flip `expected: verified` and close the tracking note",
+            value,
+        )
     return "VIOLATED", f"metric {value:.3f} exceeds threshold {threshold:.3f}", value
 
 

@@ -14,7 +14,7 @@ class Checker:
 def test_evaluate_uses_configured_manifest_group(tmp_path: Path):
     manifest = tmp_path / "claims.yaml"
     manifest.write_text(
-        """portable:\n  - id: P-1\n    claim: metric stays bounded\n    type: metric_max\n    command: measure\n    threshold: 2\n    headroom: 1\n    repair_scope: [src/**]\n""",
+        """portable:\n  - id: P-1\n    claim: metric stays bounded\n    type: metric_max\n    command: measure\n    threshold: 2\n    headroom: 1\n    repair_scope: [src/**]\n    acceptance_command: pytest guardian\n    candidate_command: printf src\n""",
         encoding="utf-8",
     )
 

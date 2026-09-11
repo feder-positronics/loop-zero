@@ -9,7 +9,7 @@ def test_reentry_generation_and_pending_projection_are_preserved(monkeypatch):
         {"type": "delivery-control", "action": "review-reentry", "run_id": "run"},
     ]
     monkeypatch.setattr(
-        "loopzero.kernel.seams.delivery_controller_records", lambda rows: rows
+        "loopzero.review.authority.delivery_controller_records", lambda rows: rows
     )
     assert reentry.publication_generation(records, "run") == 2
     assert reentry.pending_reentry(records, [], "run") is records[0]
