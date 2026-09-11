@@ -36,6 +36,59 @@ _BASE_REF_RE = re.compile(
     r"^refs/(?:heads/[A-Za-z0-9][A-Za-z0-9._/-]*|"
     r"remotes/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._/-]*)$"
 )
+_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
+_LABEL_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+TOOLCHAIN_KEYS = frozenset(
+    {
+        "interpreter",
+        "shared_artifacts",
+        "dotenv",
+        "db_url_vars",
+        "db_lock",
+        "db_targets",
+        "dispatcher",
+        "host_dispatcher",
+        "continuation_runner",
+        "formatter_modules",
+        "trusted_bin_dir",
+        "closeout_snapshot_path",
+        "closeout_temp_prefix",
+    }
+)
+ROUTING_KEYS = frozenset(
+    {
+        "aliases",
+        "tiers",
+        "budgets",
+        "policy_version",
+        "telemetry_schema_version",
+        "compatible_policy_versions",
+        "default_timeout_s",
+        "engine_cooldown_s",
+    }
+)
+REVIEW_KEYS = frozenset(
+    {
+        "max_reviews_per_pr",
+        "max_delta_reviews",
+        "required_sections",
+        "finding_severities",
+        "security_patterns",
+    }
+)
+GITHUB_KEYS = frozenset(
+    {
+        "native_protection",
+        "workflow",
+        "labels",
+        "check_commands",
+        "ref_namespace",
+        "gh_version_floor",
+        "retries",
+        "body_required_sections",
+    }
+)
 
 
 class ConfigError(ValueError):
@@ -62,6 +115,18 @@ class Tier:
 
 
 @dataclass(frozen=True)
+class GithubConfig:
+    native_protection: bool = True
+    workflow: str = ".github/workflows/ci.yml"
+    labels: dict[str, str] = field(default_factory=dict)
+    check_commands: dict[str, str] = field(default_factory=dict)
+    ref_namespace: str = "refs/heads"
+    gh_version_floor: tuple[int, int, int] = (2, 40, 0)
+    retries: int = 2
+    body_required_sections: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Profile:
     """Validated view of ``workflow.toml``. Paths are relative to ``root``."""
 
@@ -81,13 +146,26 @@ class Profile:
     toolchain: dict[str, Any] = field(default_factory=dict)
     aliases: dict[str, Alias] = field(default_factory=dict)
     tiers: dict[str, Tier] = field(default_factory=dict)
+    routing_budgets: dict[str, float] = field(default_factory=dict)
+    routing_policy_version: str = "2026-08-17-v11"
+    telemetry_schema_version: str = "dispatch-telemetry-v9"
+    compatible_policy_versions: tuple[str, ...] = ()
+    default_timeout_s: int = 900
+    engine_cooldown_s: int = 600
     max_reviews_per_pr: int = 1
     max_delta_reviews: int = 1
     required_sections: tuple[str, ...] = ()
-    native_protection: bool = True
+    finding_severities: tuple[str, ...] = ("critical", "important", "suggestion")
+    security_patterns: tuple[str, ...] = ()
+    github: GithubConfig = field(default_factory=GithubConfig)
     path_classes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     hooks: dict[str, tuple[str, ...]] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
+
+    @property
+    def native_protection(self) -> bool:
+        """Compatibility spelling retained for the skeleton's callers."""
+        return self.github.native_protection
 
     @property
     def snapshot_dir(self) -> Path:
@@ -128,6 +206,55 @@ def _commands(value: Any, where: str, problems: list[str]) -> tuple[str, ...]:
 def _fail(problems: list[str], message: str) -> tuple[str, ...]:
     problems.append(message)
     return ()
+
+
+def _unknown_fields(
+    table: dict[str, Any], allowed: frozenset[str], where: str, problems: list[str]
+) -> None:
+    for name in sorted(table.keys() - allowed):
+        problems.append(f"{where}.{name}: unknown field")
+
+
+def _string(
+    table: dict[str, Any], name: str, default: str, where: str, problems: list[str]
+) -> str:
+    value = table.get(name, default)
+    if not isinstance(value, str) or not value.strip():
+        problems.append(f"{where}.{name}: must be a nonempty string")
+        return default
+    return value
+
+
+def _strings(
+    table: dict[str, Any], name: str, default: tuple[str, ...], where: str,
+    problems: list[str], *, paths: bool = False,
+) -> tuple[str, ...]:
+    value = table.get(name, list(default))
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        problems.append(f"{where}.{name}: must be an array of nonempty strings")
+        return default
+    if paths and any(Path(item).is_absolute() or ".." in Path(item).parts for item in value):
+        problems.append(f"{where}.{name}: paths must be repository-relative without traversal")
+        return default
+    return tuple(value)
+
+
+def _relative_path(
+    table: dict[str, Any], name: str, default: str, where: str, problems: list[str]
+) -> str:
+    value = _string(table, name, default, where, problems)
+    if Path(value).is_absolute() or ".." in Path(value).parts:
+        problems.append(f"{where}.{name}: must be repository-relative without traversal")
+        return default
+    return value
+
+
+def _version_tuple(value: str, where: str, problems: list[str]) -> tuple[int, int, int]:
+    parts = value.split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        problems.append(f"{where}: must be a dotted three-integer version")
+        return (2, 40, 0)
+    return tuple(int(part) for part in parts)  # type: ignore[return-value]
 
 
 def _hooks(data: dict[str, Any], where: str, problems: list[str]) -> dict[str, tuple[str, ...]]:
@@ -239,13 +366,42 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     if not isinstance(toolchain, dict):
         problems.append("[toolchain]: must be a table")
         toolchain = {}
+    _unknown_fields(toolchain, TOOLCHAIN_KEYS, "[toolchain]", problems)
+    for key in ("interpreter", "dotenv", "dispatcher", "host_dispatcher", "continuation_runner",
+                "closeout_snapshot_path"):
+        if key in toolchain:
+            _relative_path(toolchain, key, "unused", "[toolchain]", problems)
+    for key in ("shared_artifacts", "formatter_modules"):
+        if key in toolchain:
+            _strings(toolchain, key, (), "[toolchain]", problems, paths=True)
+    for key in ("db_url_vars", "db_targets"):
+        if key in toolchain:
+            _strings(toolchain, key, (), "[toolchain]", problems)
+    if "db_url_vars" in toolchain:
+        for name in toolchain.get("db_url_vars", []):
+            if not _PREFIX_RE.fullmatch(name):
+                problems.append(f"[toolchain].db_url_vars: {name!r} is not an environment name")
+    if "db_lock" in toolchain:
+        lock = toolchain["db_lock"]
+        if not isinstance(lock, str) or not lock or not Path(lock).is_absolute():
+            problems.append("[toolchain].db_lock: must be a nonempty absolute path")
+    if "trusted_bin_dir" in toolchain:
+        trusted_bin = toolchain["trusted_bin_dir"]
+        if not isinstance(trusted_bin, str) or not trusted_bin or not Path(trusted_bin).is_absolute():
+            problems.append("[toolchain].trusted_bin_dir: must be a nonempty absolute path")
+    if "closeout_temp_prefix" in toolchain:
+        prefix = toolchain["closeout_temp_prefix"]
+        if not isinstance(prefix, str) or not prefix or "/" in prefix:
+            problems.append("[toolchain].closeout_temp_prefix: must be a nonempty filename prefix")
 
     routing = data.get("routing", {})
     aliases: dict[str, Alias] = {}
     tiers: dict[str, Tier] = {}
     if not isinstance(routing, dict):
         problems.append("[routing]: must be a table")
+        routing = {}
     else:
+        _unknown_fields(routing, ROUTING_KEYS, "[routing]", problems)
         aliases_table = routing.get("aliases", {})
         if not isinstance(aliases_table, dict):
             problems.append("[routing.aliases]: must be a table")
@@ -308,10 +464,41 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             if valid:
                 tiers[name] = Tier(alias=alias, effort=effort, read_only=read_only)
 
+    budgets_table = routing.get("budgets", {})
+    routing_budgets: dict[str, float] = {}
+    if not isinstance(budgets_table, dict):
+        problems.append("[routing.budgets]: must be a table")
+    else:
+        for name, value in budgets_table.items():
+            if not isinstance(name, str) or not _ALIAS_RE.fullmatch(name):
+                problems.append(f"[routing.budgets].{name}: budget names match [a-z][a-z0-9-]*")
+            elif type(value) not in (int, float) or value < 0:
+                problems.append(f"[routing.budgets].{name}: must be a non-negative number")
+            else:
+                routing_budgets[name] = float(value)
+    policy_version = _string(routing, "policy_version", "2026-08-17-v11", "[routing]", problems)
+    telemetry_version = _string(
+        routing, "telemetry_schema_version", "dispatch-telemetry-v9", "[routing]", problems
+    )
+    for label, value in (("policy_version", policy_version), ("telemetry_schema_version", telemetry_version)):
+        if not _VERSION_RE.fullmatch(value):
+            problems.append(f"[routing].{label}: contains unsupported characters")
+    compatible_versions = _strings(
+        routing, "compatible_policy_versions", (policy_version,), "[routing]", problems
+    )
+    if any(not _VERSION_RE.fullmatch(value) for value in compatible_versions):
+        problems.append("[routing].compatible_policy_versions: contains an invalid version")
+    default_timeout_s = routing.get("default_timeout_s", 900)
+    engine_cooldown_s = routing.get("engine_cooldown_s", 600)
+    for label, value in (("default_timeout_s", default_timeout_s), ("engine_cooldown_s", engine_cooldown_s)):
+        if type(value) is not int or value < 1:
+            problems.append(f"[routing].{label}: must be a positive integer")
+
     review = data.get("review", {})
     if not isinstance(review, dict):
         problems.append("[review]: must be a table")
         review = {}
+    _unknown_fields(review, REVIEW_KEYS, "[review]", problems)
     max_reviews = review.get("max_reviews_per_pr", 1)
     max_delta = review.get("max_delta_reviews", 1)
     for label, value in (("max_reviews_per_pr", max_reviews), ("max_delta_reviews", max_delta)):
@@ -321,14 +508,60 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     if not isinstance(sections, list) or any(not isinstance(s, str) for s in sections):
         problems.append("[review].required_sections: must be a list of strings")
         sections = []
+    elif any(not s.strip() or not _LABEL_KEY_RE.fullmatch(s) for s in sections):
+        problems.append("[review].required_sections: section names must be nonempty lowercase identifiers")
+    finding_severities = _strings(
+        review, "finding_severities", ("critical", "important", "suggestion"), "[review]", problems
+    )
+    if len(set(finding_severities)) != len(finding_severities):
+        problems.append("[review].finding_severities: entries must be unique")
+    security_patterns = _strings(review, "security_patterns", (), "[review]", problems)
 
     github = data.get("github", {})
     if not isinstance(github, dict):
         problems.append("[github]: must be a table")
         github = {}
+    _unknown_fields(github, GITHUB_KEYS, "[github]", problems)
     native_protection = github.get("native_protection", True)
     if not isinstance(native_protection, bool):
         problems.append("[github].native_protection: must be a boolean")
+    github_workflow = _relative_path(
+        github, "workflow", ".github/workflows/ci.yml", "[github]", problems
+    )
+    labels_table = github.get("labels", {})
+    labels: dict[str, str] = {}
+    if not isinstance(labels_table, dict):
+        problems.append("[github].labels: must be a table")
+    else:
+        for name, value in labels_table.items():
+            if not _LABEL_KEY_RE.fullmatch(str(name)):
+                problems.append(f"[github].labels.{name}: label keys must be lowercase identifiers")
+            elif not isinstance(value, str) or not value.strip():
+                problems.append(f"[github].labels.{name}: must be a nonempty string")
+            else:
+                labels[str(name)] = value
+    commands_table = github.get("check_commands", {})
+    check_commands: dict[str, str] = {}
+    if not isinstance(commands_table, dict):
+        problems.append("[github.check_commands]: must be a table")
+    else:
+        for name, value in commands_table.items():
+            if not isinstance(name, str) or not name.strip() or not isinstance(value, str) or not value.strip():
+                problems.append("[github.check_commands]: names and commands must be nonempty strings")
+            else:
+                check_commands[name] = value
+    ref_namespace = _string(github, "ref_namespace", "refs/heads", "[github]", problems)
+    if not ref_namespace.startswith("refs/") or ".." in ref_namespace or ref_namespace.endswith("/"):
+        problems.append("[github].ref_namespace: must be a normalized refs/ namespace")
+    gh_floor = github.get("gh_version_floor", "2.40.0")
+    if not isinstance(gh_floor, str):
+        problems.append("[github].gh_version_floor: must be a dotted version string")
+        gh_floor = "2.40.0"
+    gh_version_floor = _version_tuple(gh_floor, "[github].gh_version_floor", problems)
+    github_retries = github.get("retries", 2)
+    if type(github_retries) is not int or not 0 <= github_retries <= 10:
+        problems.append("[github].retries: must be an integer from 0 through 10")
+    body_sections = _strings(github, "body_required_sections", (), "[github]", problems)
 
     path_classes: dict[str, tuple[str, ...]] = {}
     path_classes_table = data.get("path_classes", {})
@@ -363,10 +596,27 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         toolchain=dict(toolchain),
         aliases=aliases,
         tiers=tiers,
+        routing_budgets=routing_budgets,
+        routing_policy_version=policy_version,
+        telemetry_schema_version=telemetry_version,
+        compatible_policy_versions=compatible_versions,
+        default_timeout_s=default_timeout_s,
+        engine_cooldown_s=engine_cooldown_s,
         max_reviews_per_pr=max_reviews,
         max_delta_reviews=max_delta,
         required_sections=tuple(sections),
-        native_protection=native_protection,
+        finding_severities=finding_severities,
+        security_patterns=security_patterns,
+        github=GithubConfig(
+            native_protection=native_protection,
+            workflow=github_workflow,
+            labels=labels,
+            check_commands=check_commands,
+            ref_namespace=ref_namespace,
+            gh_version_floor=gh_version_floor,
+            retries=github_retries,
+            body_required_sections=body_sections,
+        ),
         path_classes=path_classes,
         hooks=hooks,
         raw=data,

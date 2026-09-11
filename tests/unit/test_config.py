@@ -69,6 +69,61 @@ def test_routing_tiers_must_reference_aliases(tmp_path: Path):
     assert "[routing.tiers].B" in str(info.value)
 
 
+def test_mechanism_configuration_is_typed_and_retained():
+    profile = config.load_profile(
+        Path(__file__).resolve().parents[1] / "example_consumer"
+    )
+    assert profile.toolchain["db_targets"] == ["test-integration"]
+    assert profile.routing_budgets == {"low": 0.0}
+    assert profile.routing_policy_version == "example-policy-v1"
+    assert profile.required_sections == ("acceptance", "risk", "gates")
+    assert profile.github.labels["standalone"] == "standalone"
+    assert profile.github.gh_version_floor == (2, 40, 0)
+
+
+def test_mechanism_configuration_reports_all_invalid_keys(tmp_path: Path):
+    (tmp_path / "workflow.toml").write_text(
+        minimal_workflow(
+            extra="""
+[toolchain]
+unknown = true
+db_lock = "relative.lock"
+db_url_vars = ["bad-name"]
+[routing]
+unknown = true
+default_timeout_s = 0
+[routing.budgets]
+high = -1
+[review]
+unknown = true
+required_sections = [""]
+[github]
+unknown = true
+gh_version_floor = "new"
+retries = 11
+"""
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(config.ConfigError) as info:
+        config.load_profile(tmp_path)
+    text = str(info.value)
+    for expected in (
+        "[toolchain].unknown",
+        "[toolchain].db_lock",
+        "[toolchain].db_url_vars",
+        "[routing].unknown",
+        "[routing].default_timeout_s",
+        "[routing.budgets].high",
+        "[review].unknown",
+        "required_sections",
+        "[github].unknown",
+        "gh_version_floor",
+        "[github].retries",
+    ):
+        assert expected in text
+
+
 def test_missing_file_is_a_config_error(tmp_path: Path):
     with pytest.raises(config.ConfigError):
         config.load_profile(tmp_path)

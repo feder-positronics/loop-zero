@@ -30,18 +30,49 @@ setup = ["python3 -m venv .venv"]
 check_fast = ["python3 -m unittest discover -s tests"]
 check_integration = "not-applicable: fixture repository, no integration behavior"
 
+[toolchain]
+interpreter = ".venv/bin/python"
+shared_artifacts = [".venv"]
+dotenv = ".env"
+db_url_vars = ["TEST_DATABASE_URL"]
+db_lock = "/tmp/example-testdb.lock"
+db_targets = ["test-integration"]
+trusted_bin_dir = "/usr/bin"
+closeout_snapshot_path = "vendor/loop-zero"
+closeout_temp_prefix = "example-closeout-"
+
 [routing.aliases]
 fake = { runner = "fake", model = "fake-1", write = true }
 
 [routing.tiers]
 C = { alias = "fake", effort = "low" }
 
+[routing]
+policy_version = "example-policy-v1"
+telemetry_schema_version = "example-telemetry-v1"
+compatible_policy_versions = ["example-policy-v1"]
+default_timeout_s = 120
+engine_cooldown_s = 30
+
+[routing.budgets]
+low = 0.0
+
 [review]
 max_reviews_per_pr = 1
 max_delta_reviews = 1
+required_sections = ["acceptance", "risk", "gates"]
+finding_severities = ["critical", "important", "suggestion"]
+security_patterns = ["**/auth/**", "**/config.*"]
 
 [github]
 native_protection = true
+workflow = ".github/workflows/ci.yml"
+labels = { in_progress = "in-progress", blocked = "blocked", standalone = "standalone" }
+check_commands = { unit = "python3 -m unittest discover -s tests" }
+ref_namespace = "refs/heads"
+gh_version_floor = "2.40.0"
+retries = 2
+body_required_sections = ["Summary", "Validation", "Review evidence"]
 
 [path_classes]
 source = ["src/**"]
