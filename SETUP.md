@@ -67,6 +67,22 @@ Missing applicable setup/check capability is a blocker, not not-applicable.
 Profiles are selected from `python`, `fastapi`, `nextjs`, `angular`; profile
 selection does not import commands. Keep local secrets outside this file.
 
+## Install the package
+
+The executable mechanisms live in the `loopzero` package. Install it from the
+same full commit SHA as the snapshot, as a Git dependency in the consumer's
+existing Python project, with only the extras the consumer's runtimes need:
+
+```sh
+uv add "loopzero[claude,codex] @ git+https://github.com/feder-positronics/loop-zero@$LOOP_ZERO_REVISION"
+```
+
+The base package has no third-party dependencies and requires Python 3.12 or
+later on Linux. `loopzero status` reports the installed package version and
+the vendored snapshot's `core/VERSION`; they must be equal. `loopzero sync`
+renders the consumer's runtime wiring from `workflow.toml` into checked-in
+files, and `loopzero sync --check` fails when those files drift. Run it in CI.
+
 ## Connect the existing runtime entry points
 
 Add one local instruction to the existing `AGENTS.md` directing Codex to read

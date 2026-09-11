@@ -4,10 +4,15 @@ A small, versioned agent workflow shared by repositories. This repository owns
 the core; product repositories consume identical pinned snapshots and retain
 their own commands, architecture, security and release policy.
 
-The portable distribution is [`core/`](core/CONTRACT.md): four skills, one
-handoff, thin Codex and Claude entry points, four conditional framework profiles
-and read-only pin and check-policy tools. There is no dispatcher, task runner or
-installer.
+The portable distribution has two parts pinned by one commit SHA. The vendored
+[`core/`](core/CONTRACT.md) snapshot holds the contract, four skills, one
+handoff, thin Codex and Claude entry points, four conditional framework
+profiles and read-only pin and check-policy tools. The `loopzero` Python
+package, installed from the same SHA, holds the executable mechanisms: the
+worktree lease, sandboxed validation children, the signed evidence ledger,
+detached jobs, runner adapters, the dispatcher and the delivery state machine,
+plus a generator for consumer wiring. The core ships no scheduler service,
+dashboard, cloud control plane or installer beyond that generator.
 
 See [setup and revision updates](SETUP.md). Run the source tests with
 `python3 -m unittest discover -s tests -v` (Python 3.11+ and Git).

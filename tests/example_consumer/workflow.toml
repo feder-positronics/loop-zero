@@ -1,0 +1,52 @@
+# Example consumer used by the conformance and installed-artifact tests.
+# Commands run from the repository root; narrow checks to the affected area.
+profiles = ["python"]
+
+[core]
+repository = "https://github.com/feder-positronics/loop-zero"
+revision = "0123456789abcdef0123456789abcdef01234567"
+path = "vendor/loop-zero"
+
+[package]
+env_prefix = "EXAMPLE"
+audit_root = ".audit"
+state_root = "~/.local/state/example"
+contract = "loop-zero-v1"
+epoch = 1
+sandbox = "bwrap"
+
+[checks]
+required = ["unit"]
+advisory = []
+scheduled = ["health"]
+
+[paths]
+source = "src"
+tests = "tests"
+constraints = "AGENTS.md"
+
+[commands]
+setup = ["python3 -m venv .venv"]
+check_fast = ["python3 -m unittest discover -s tests"]
+check_integration = "not-applicable: fixture repository, no integration behavior"
+
+[routing.aliases]
+fake = { runner = "fake", model = "fake-1", write = true }
+
+[routing.tiers]
+C = { alias = "fake", effort = "low" }
+
+[review]
+max_reviews_per_pr = 1
+max_delta_reviews = 1
+
+[github]
+native_protection = true
+
+[path_classes]
+source = ["src/**"]
+docs = ["docs/**", "*.md"]
+
+[hooks]
+worktree_setup = ["true"]
+acceptance = ["python3 -m unittest discover -s tests"]

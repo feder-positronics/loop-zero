@@ -5,33 +5,51 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
       - name: Install validation sandbox
         run: |
           sudo apt-get update
           sudo apt-get install --yes bubblewrap
           # Let the runner user create its sandbox on this disposable Ubuntu VM.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Resolve the development environment outside the sandbox
+        run: |
+          uv python install "${{ matrix.python }}"
+          uv sync --python "${{ matrix.python }}" --group dev
       - name: Validate without parent Git write authority
         env:
           CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          bwrap --unshare-user --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
+          bwrap --unshare-user --unshare-net --ro-bind / / --tmpfs /tmp --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
+            --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
             --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
             --chdir /tmp/workspace -- bash -eu -c '
-              python3 -m unittest discover -s tests -v
-              python3 core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
+              .venv/bin/python -m pytest -q -p no:cacheprovider
+              .venv/bin/python core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
               base="$CHECK_BASE"
               if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
                 base=$(git -c safe.directory=/tmp/workspace hash-object -t tree /dev/null)
               fi
               git -c safe.directory=/tmp/workspace diff --check "$base" "$CHECK_HEAD"
             '
+      - name: Installed-artifact test
+        run: |
+          uv build --python "${{ matrix.python }}"
+          uv venv --python "${{ matrix.python }}" /tmp/artifact-venv
+          uv pip install --python /tmp/artifact-venv/bin/python dist/loopzero-*.whl
+          /tmp/artifact-venv/bin/loopzero --version
+          test "$(/tmp/artifact-venv/bin/loopzero --version | awk '{print $2}')" = "$(cat core/VERSION)"
+          /tmp/artifact-venv/bin/loopzero doctor || true
