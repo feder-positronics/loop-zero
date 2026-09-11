@@ -6,12 +6,11 @@ non-blocking near-hard warning at 90% of the hard threshold; hard-fail above 2x.
 Only the files passed in (pre-commit's staged set) are checked by the normal
 hook mode. Health inventory mode scans every tracked guarded file.
 
-Thresholds (soft / near-hard / hard):
-    fastapi_backend/app/**.py           800 / 1440 / 1600
-    scripts/**.py                       800 / 1440 / 1600
-    Python test files (test_*.py or
-    under fastapi_backend/tests/)      2000 / 3600 / 4000
-    nextjs-frontend/**.{ts,tsx}         400 /  720 /  800
+Default thresholds (soft / near-hard / hard):
+    configured backend/app Python      800 / 1440 / 1600
+    configured scripts Python          800 / 1440 / 1600
+    configured Python tests           2000 / 3600 / 4000
+    configured frontend TypeScript     400 /  720 /  800
 
 Frontend test files (`.test.`, `.spec.`, `__tests__/`) stay out of scope.
 
@@ -27,8 +26,8 @@ ratchet-tested list: once a file drops below its hard limit, a unit test fails
 until its entry is removed, locking in the win.
 
 Usage (pre-commit passes staged paths as args; falls back to the staged set):
-    python3 scripts/hooks/size_lint.py [path ...]
-    python3 scripts/hooks/size_lint.py --health-inventory
+    python3 -m loopzero.hooks.size_lint [path ...]
+    python3 -m loopzero.hooks.size_lint --health-inventory
 
 Exit codes:
     0  no file over the hard limit (warnings are non-blocking)
@@ -122,7 +121,7 @@ def warn_threshold(path: str) -> int | None:
     if path.endswith(".py"):
         if is_python_test(path):
             # Any test file under a covered root, including stray test_*.py
-            # under fastapi_backend/app/, gets the test threshold.
+            # under the configured backend app root, gets the test threshold.
             if path.startswith((BACKEND_ROOT, SCRIPTS_ROOT, TEST_ROOT)):
                 return PY_TEST_WARN
             return None

@@ -1,5 +1,5 @@
 
-from .package_environment import package_environment
+from .package_environment import PACKAGE_PYTHON, package_environment
 import importlib.util
 import os
 import subprocess
@@ -388,8 +388,9 @@ def test_guard_commit_blocks_foreign_live_writer_then_releases(
     )
     holder = subprocess.Popen(
         [
-            sys.executable,
-            "-m", "loopzero.kernel.worktree_lease",
+            str(PACKAGE_PYTHON),
+            "-m",
+            "loopzero.kernel.worktree_lease",
             "exec",
             "--worktree",
             str(repo),
@@ -400,7 +401,8 @@ def test_guard_commit_blocks_foreign_live_writer_then_releases(
             "-c",
             publish_owner_env,
             str(owner_env_path),
-        ]
+        ],
+        env=package_environment(os.environ),
     )
     try:
         deadline = time.time() + 10

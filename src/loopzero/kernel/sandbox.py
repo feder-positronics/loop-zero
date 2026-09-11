@@ -6,11 +6,14 @@ from __future__ import annotations
 from .settings import settings
 
 import errno
+import fcntl
 import grp
+import json
 import os
 import pwd
 import stat
 import sys
+import tempfile
 from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -38,17 +41,97 @@ class UnsafeCredentialError(SandboxError):
     """A provider credential exists but violates the owner-only safety contract."""
 
 
+MAX_CREDENTIAL_BYTES = 1024 * 1024
+
+
+def _credential_snapshot_payload(descriptor: int) -> bytes:
+    """Validate broker output and remove durable refresh authority."""
+    if isinstance(descriptor, bool) or not isinstance(descriptor, int) or descriptor < 0:
+        raise UnsafeCredentialError("Codex credential descriptor is invalid")
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as exc:
+        raise UnsafeCredentialError("Codex credential descriptor is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) & 0o077
+        or metadata.st_size <= 2
+        or metadata.st_size > MAX_CREDENTIAL_BYTES
+    ):
+        raise UnsafeCredentialError("Codex credential descriptor is unsafe")
+    try:
+        payload = os.pread(descriptor, metadata.st_size, 0)
+        decoded = json.loads(payload)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise UnsafeCredentialError("Codex credential JSON is invalid") from exc
+    if len(payload) != metadata.st_size or not isinstance(decoded, dict):
+        raise UnsafeCredentialError("Codex credential snapshot is incomplete")
+    if decoded.get("auth_mode") != "chatgpt" or decoded.get("OPENAI_API_KEY") not in (None, ""):
+        raise UnsafeCredentialError("Codex ChatGPT credential is unsafe")
+    tokens = decoded.get("tokens")
+    if not isinstance(tokens, dict):
+        raise UnsafeCredentialError("Codex token set is missing")
+    for name in ("access_token", "id_token", "refresh_token", "account_id"):
+        if not isinstance(tokens.get(name), str) or not tokens[name]:
+            raise UnsafeCredentialError(f"Codex credential {name} is invalid")
+    # The access token already bounds the child to the current login lifetime.
+    # Substituting it for the refresh token preserves the Codex file schema while
+    # removing the durable capability, byte-for-byte with the original broker.
+    tokens["refresh_token"] = tokens["access_token"]
+    return json.dumps(decoded, separators=(",", ":")).encode("utf-8")
+
+
+def _sealed_snapshot(payload: bytes) -> int:
+    if hasattr(os, "memfd_create"):
+        descriptor = os.memfd_create(
+            "loopzero-codex-auth", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING
+        )
+        try:
+            written = 0
+            while written < len(payload):
+                written += os.write(descriptor, payload[written:])
+            os.fchmod(descriptor, 0o400)
+            fcntl.fcntl(
+                descriptor,
+                fcntl.F_ADD_SEALS,
+                fcntl.F_SEAL_WRITE
+                | fcntl.F_SEAL_GROW
+                | fcntl.F_SEAL_SHRINK
+                | fcntl.F_SEAL_SEAL,
+            )
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+    writable, raw_path = tempfile.mkstemp(prefix=settings.temp_prefix + "codex-auth-")
+    path = Path(raw_path)
+    try:
+        written = 0
+        while written < len(payload):
+            written += os.write(writable, payload[written:])
+        os.fchmod(writable, 0o400)
+        readonly = os.open(path, os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+    finally:
+        os.close(writable)
+        path.unlink(missing_ok=True)
+    return readonly
+
+
 @contextmanager
 def codex_subscription_credential(*, requested_runtime_s: float, credential_broker=None):
-    """Delegate credential custody to a trusted, injected runtime broker.
-
-    The broker returns a context manager yielding a descriptor and owns renewal,
-    validation and closure. TODO(A4): wire the runner broker at the composition root.
-    """
+    """Lend one kernel-validated, refresh-free, sealed credential snapshot."""
+    if requested_runtime_s <= 0:
+        raise ValueError("requested_runtime_s must be positive")
     if credential_broker is None:
         raise SandboxError("credential_broker is required")
     with credential_broker(requested_runtime_s=requested_runtime_s) as descriptor:
-        yield descriptor
+        snapshot = _sealed_snapshot(_credential_snapshot_payload(descriptor))
+    try:
+        yield snapshot
+    finally:
+        os.close(snapshot)
 
 
 def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -413,12 +496,13 @@ def command(
         *(_validated(path, directory=True) for path in read_only_roots),
         *(_validated(source, directory=True) for source, _ in read_only_mounts),
     ):
-        interpreter = (
-            root / "bin" / "python"
-            if root.name == ".venv"
-            else root / settings.toolchain.get("interpreter", ".venv/bin/python")
+        configured_interpreter = settings.toolchain.get("interpreter")
+        if configured_interpreter is None and settings.env_prefix == "INTELFLO":
+            configured_interpreter = "fastapi_backend/.venv/bin/python"
+        interpreter = root / "bin" / "python" if root.name == ".venv" else (
+            root / configured_interpreter if configured_interpreter else None
         )
-        if interpreter.is_file():
+        if interpreter is not None and interpreter.is_file():
             resolved_interpreter = interpreter.resolve()
             if not resolved_interpreter.is_relative_to(root):
                 resolved_runtime = resolved_interpreter.parent.parent
@@ -626,11 +710,15 @@ def run_validation_child(argv: Sequence[str], *, worktree: Path,
     """Spawn with filesystem and environment containment, including descendants."""
     import subprocess
     child_environment = environment(source_environment)
+    child_environment.update(settings.child_environment())
     # A consumer allowlist must never reintroduce lease, nonce or credentials.
     child_environment = {
         key: value for key, value in child_environment.items()
         if not any(part in key.upper() for part in
-                   ("LEASE", "NONCE", "TOKEN", "CREDENTIAL", "AUTH_FD", "SECRET", "PRIVATE_KEY", "SIGNING"))
+                   ("LEASE", "NONCE", "TOKEN", "CREDENTIAL", "AUTH_FD",
+                    "SECRET", "PRIVATE_KEY", "SIGNING", "API_KEY",
+                    "ACCESS_KEY", "PASSWORD", "COOKIE", "SESSION",
+                    "SSH_AUTH", "BEARER"))
     }
     return subprocess.run(
         validation_command(argv, worktree=worktree, read_only_roots=read_only_roots),

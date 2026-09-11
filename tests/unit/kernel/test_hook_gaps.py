@@ -68,6 +68,14 @@ def test_commit_author_uses_injected_namespace_and_identity(repo):
     assert hook("commit-author-check.sh", repo, env=env).returncode == 1
 
 
+def test_intelflo_commit_author_default_is_the_legacy_authorized_identity(repo):
+    result = hook(
+        "commit-author-check.sh", repo, env={"LOOPZERO_ENV_PREFIX": "INTELFLO"}
+    )
+    assert result.returncode == 1
+    assert "eowca <4008965+eowca@users.noreply.github.com>" in result.stderr
+
+
 def test_canonical_skill_hook_rejects_copied_skill_content(repo):
     path = repo / ".claude/skills/example/SKILL.md"
     path.parent.mkdir(parents=True)
@@ -83,5 +91,18 @@ def test_pytest_config_hook_rejects_nested_plugin_declaration(repo):
     path.parent.mkdir(parents=True)
     path.write_text("pytest_plugins = ['example']\n")
     result = hook("pytest-config-check.sh", repo, env={"LOOPZERO_PYTEST_ROOT": str(repo), "LOOPZERO_PYTHON": sys.executable})
+    assert result.returncode == 1
+    assert "pytest_plugins" in result.stdout
+
+
+def test_intelflo_pytest_hook_defaults_to_fastapi_backend(repo):
+    path = repo / "fastapi_backend/tests/unit/nested/conftest.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("pytest_plugins = ['example']\n")
+    result = hook(
+        "pytest-config-check.sh",
+        repo,
+        env={"LOOPZERO_ENV_PREFIX": "INTELFLO", "LOOPZERO_PYTHON": sys.executable},
+    )
     assert result.returncode == 1
     assert "pytest_plugins" in result.stdout

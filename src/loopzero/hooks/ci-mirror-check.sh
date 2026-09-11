@@ -4,11 +4,18 @@
 
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../kernel/settings.sh"
-# TODO(A4): approved consumer wiring supplies lane roots and helper commands.
-BACKEND_ROOT="${LOOPZERO_BACKEND_ROOT:-backend}"
-FRONTEND_ROOT="${LOOPZERO_FRONTEND_ROOT:-frontend}"
+# IntelFlo retains its established layout. Other consumers must declare roots;
+# guessing would silently validate the wrong tree.
+if [ "${LOOPZERO_ENV_PREFIX:-LOOPZERO}" = "INTELFLO" ]; then
+    BACKEND_ROOT="${LOOPZERO_BACKEND_ROOT:-fastapi_backend}"
+    FRONTEND_ROOT="${LOOPZERO_FRONTEND_ROOT:-nextjs-frontend}"
+else
+    BACKEND_ROOT="${LOOPZERO_BACKEND_ROOT:?LOOPZERO_BACKEND_ROOT is required}"
+    FRONTEND_ROOT="${LOOPZERO_FRONTEND_ROOT:?LOOPZERO_FRONTEND_ROOT is required}"
+fi
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+delivery_root="$(loopzero_env DELIVERY_ROOT "$PWD")"
+repo_root="$(git -C "$delivery_root" rev-parse --show-toplevel)"
 cd "$repo_root"
 
 # Git exports repository-local variables to hooks. If they reach a test that
@@ -473,7 +480,7 @@ echo "== Wait discipline =="
 # advance the existing baseline. Human pushes use the same baseline without
 # requiring an agent lifecycle. Canonical runtime identity lives in agent_event.
 started_ms="$(now_ms)"
-skill_runs_dir="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/.audit/skill-runs"
+skill_runs_dir="$repo_root/${LOOPZERO_AUDIT_ROOT:-.audit}/skill-runs"
 if ! runtime_kind="$("${LOOPZERO_PYTHON:-python3}" -m loopzero.kernel.events runtime-kind)"; then
     emit_tool_event "poll-gate" "$started_ms" "fail"
     echo "✗ Cannot classify this push as an agent or human runtime." >&2

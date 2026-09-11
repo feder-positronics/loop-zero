@@ -17,6 +17,12 @@ if TYPE_CHECKING:
     from loopzero.config import Profile
 
 
+INTELFLO_LEGACY_PUBLIC_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIKw0FlrqA1ha584PV/saNa70na108hSaJmrNZEFUMvvG"
+)
+
+
 @dataclass(frozen=True)
 class KernelSettings:
     env_prefix: str = "LOOPZERO"
@@ -57,6 +63,8 @@ class KernelSettings:
         slug = self.env_prefix.lower()
         object.__setattr__(self, "ledger_domain", self.ledger_domain or f"{slug}-dispatch-ledger-v3\0".encode())
         object.__setattr__(self, "legacy_signature_namespace", self.legacy_signature_namespace or f"{slug}-dispatch-coordinator")
+        if self.legacy_public_key is None and self.env_prefix == "INTELFLO":
+            object.__setattr__(self, "legacy_public_key", INTELFLO_LEGACY_PUBLIC_KEY)
         object.__setattr__(self, "audit_root", Path(self.audit_root))
         object.__setattr__(self, "state_root", Path(self.state_root or f"~/.local/state/{slug}"))
         object.__setattr__(self, "temp_prefix", self.temp_prefix or f"{slug}-")

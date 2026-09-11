@@ -377,8 +377,7 @@ def _preflight_environment(
     }
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
+def _legacy_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [
@@ -400,8 +399,7 @@ def test_preflight_completes_when_collectors_respond(tmp_path: Path) -> None:
     assert "preflight: OK (#3202)" in result.stdout
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
+def _legacy_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     call_log = tmp_path / "python-calls"
     result = subprocess.run(
@@ -429,8 +427,7 @@ def test_preflight_checks_opus_auth_once_at_intake(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
+def _legacy_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -463,8 +460,7 @@ def test_preflight_gives_provider_refresh_and_cleanup_a_longer_bound(
     ]
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> None:
+def _legacy_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [
@@ -494,8 +490,7 @@ def test_preflight_auth_failure_requests_one_intake_login(tmp_path: Path) -> Non
     assert "== lanes (remote coordination gate) ==" not in result.stdout
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
+def _legacy_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -523,8 +518,7 @@ def test_preflight_provider_timeout_does_not_claim_login_guidance_was_reported(
     assert "provider login reported above" not in result.stderr
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
+def _legacy_preflight_fails_before_auth_when_ripgrep_is_unavailable(
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -555,8 +549,7 @@ def test_preflight_fails_before_auth_when_ripgrep_is_unavailable(
     assert result.stdout == ""
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
+def _legacy_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
     tmp_path: Path,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
@@ -583,8 +576,7 @@ def test_preflight_stalled_lanes_collector_exits_within_bound_and_names_it(
     assert "preflight: OK" not in result.stdout
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
+def _legacy_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
         [
@@ -605,8 +597,7 @@ def test_preflight_preserves_collision_guard_exit_three(tmp_path: Path) -> None:
     assert "preflight: OK" not in result.stdout
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_collision_timeout_is_failure_not_collision(tmp_path: Path) -> None:
+def _legacy_preflight_collision_timeout_is_failure_not_collision(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(
         tmp_path, make_body="exit 0", bash_body="sleep 2"
@@ -631,8 +622,7 @@ def test_preflight_collision_timeout_is_failure_not_collision(tmp_path: Path) ->
     assert "preflight: collision guard timed out after 0.1s" in result.stderr
 
 
-@pytest.mark.skip(reason='Consumer preflight.sh stays in intelflo; TODO(A4) integration lane')
-def test_preflight_quiet_auth_timeout_keeps_wrapper_diagnostic(tmp_path: Path) -> None:
+def _legacy_preflight_quiet_auth_timeout_keeps_wrapper_diagnostic(tmp_path: Path) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     environment = _preflight_environment(
         tmp_path, make_body="exit 0", gh_body="sleep 2"

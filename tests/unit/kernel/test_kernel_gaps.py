@@ -12,6 +12,7 @@ from loopzero.kernel import (authority_projection, authority_store, canonical,
                              run_identity, seams, trusted_exec, worktree_list,
                              worktree_prune)
 from loopzero.kernel.settings import KernelSettings
+from .package_environment import package_environment
 
 
 def test_canonical_digest_is_order_independent_and_preserves_unicode():
@@ -36,6 +37,12 @@ def test_settings_from_profile_preserves_consumer_roots(tmp_path):
     legacy = KernelSettings(env_prefix="INTELFLO")
     assert legacy.temp_prefix == "intelflo-"
     assert legacy.env("JOB_DIR") == "INTELFLO_JOB_DIR"
+    assert legacy.legacy_signature_namespace == "intelflo-dispatch-coordinator"
+    assert legacy.legacy_public_key == (
+        "ssh-ed25519 "
+        "AAAAC3NzaC1lZDI1NTE5AAAAIKw0FlrqA1ha584PV/saNa70na108hSaJmrNZEFUMvvG"
+    )
+    assert KernelSettings(env_prefix="ACME").legacy_public_key is None
 
 
 def test_named_review_seam_delegates_and_fails_closed(monkeypatch):
@@ -126,21 +133,38 @@ def test_settings_round_trip_in_installed_child_and_shell_job(tmp_path):
     import os
     settings = KernelSettings(env_prefix="ACME", audit_root=Path("evidence"),
                               state_root=tmp_path / "state", temp_prefix="acme-test-")
-    child_env = {**os.environ, **settings.child_environment(),
-                 "LOOPZERO_PYTHON": sys.executable, "ACME_JOB_DIR": str(tmp_path / "jobs")}
+    child_env = package_environment({
+        **os.environ,
+        **settings.child_environment(),
+        "ACME_JOB_DIR": str(tmp_path / "jobs"),
+    })
+    child_env["LOOPZERO_ENV_PREFIX"] = "ACME"
     observed = subprocess.check_output(
-        [sys.executable, "-m", "loopzero.kernel.worktree_lease", "--help"],
+        [child_env["LOOPZERO_PYTHON"], "-m", "loopzero.kernel.worktree_lease", "--help"],
         env=child_env, text=True,
     )
     assert "worktree" in observed
     code = "from loopzero.kernel.settings import settings; print(settings.env('JOB_DIR'), settings.audit_root, settings.temp_prefix)"
-    assert subprocess.check_output([sys.executable, "-c", code], env=child_env, text=True).strip() == "ACME_JOB_DIR evidence acme-test-"
+    assert subprocess.check_output(
+        [child_env["LOOPZERO_PYTHON"], "-c", code], env=child_env, text=True
+    ).strip() == "ACME_JOB_DIR evidence acme-test-"
     job_script = Path(__file__).resolve().parents[3] / "src/loopzero/kernel/job.sh"
     result = subprocess.run([str(job_script), "run", "acme-job", "--timeout", "30", "--", "/bin/echo", "injected"],
                             env=child_env, cwd=tmp_path, text=True, capture_output=True, timeout=40)
     assert result.returncode == 0, result.stderr
     assert "injected" in result.stdout
     assert (tmp_path / "jobs/acme-job/exit_code").read_text().strip() == "0"
+
+
+def test_canonical_job_root_is_keyed_to_repository_not_invocation_directory(tmp_path):
+    from loopzero.kernel import jobs
+
+    repo = tmp_path / "repo"
+    nested = repo / "one" / "two"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    assert jobs.canonical_job_root(repo) == jobs.canonical_job_root(nested)
 
 
 def test_missing_legacy_key_is_a_typed_rejection(monkeypatch):

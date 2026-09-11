@@ -4,8 +4,19 @@
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/../kernel/settings.sh"
 
-EXPECTED_NAME="$(loopzero_env COMMIT_AUTHOR_NAME "$(git config user.name)")"
-EXPECTED_EMAIL="$(loopzero_env COMMIT_AUTHOR_EMAIL "$(git config user.email)")"
+if [ "${LOOPZERO_ENV_PREFIX:-LOOPZERO}" = "INTELFLO" ]; then
+    default_name="eowca"
+    default_email="4008965+eowca@users.noreply.github.com"
+else
+    default_name=""
+    default_email=""
+fi
+EXPECTED_NAME="$(loopzero_env COMMIT_AUTHOR_NAME "$default_name")"
+EXPECTED_EMAIL="$(loopzero_env COMMIT_AUTHOR_EMAIL "$default_email")"
+[ -n "$EXPECTED_NAME" ] && [ -n "$EXPECTED_EMAIL" ] || {
+    echo "Commit identity policy is not configured for ${LOOPZERO_ENV_PREFIX:-LOOPZERO}." >&2
+    exit 1
+}
 
 if [ "$(loopzero_env COMMIT_AUTHOR_BYPASS '')" = "1" ]; then
     echo "commit-author-check bypassed via ${LOOPZERO_ENV_PREFIX:-LOOPZERO}_COMMIT_AUTHOR_BYPASS=1"

@@ -24,9 +24,9 @@ with `dataclasses.replace` before `configure`. `child_environment()` serializes
 these settings for installed-package subprocesses. The bootstrap variables are
 `LOOPZERO_ENV_PREFIX`, `LOOPZERO_KERNEL_SETTINGS` and `LOOPZERO_AUDIT_ROOT`.
 Without configuration, the namespace is `LOOPZERO`. Selecting `INTELFLO`
-reproduces its environment names, state/temp prefixes, ledger hash domain and
-legacy signature namespace. The historical public key is not shipped; a
-consumer explicitly supplies `legacy_public_key` for legacy verification.
+reproduces its environment names, state/temp prefixes, ledger hash domain,
+legacy signature namespace, and historical public key byte-for-byte. Other
+namespaces explicitly supply `legacy_public_key` when adopting legacy records.
 Persisted legacy contract identifiers remain readable through `legacy_contract`.
 
 ## Validation and credentials
@@ -42,9 +42,10 @@ for privileged coordinators; it is not itself the validation-child API.
 
 `sandbox.codex_subscription_credential` requires an injected `credential_broker`.
 The callable receives `requested_runtime_s` and returns a context manager yielding
-one descriptor. The broker owns renewal, validation and closure, and should
-raise `UnsafeCredentialError` or `SandboxError` for its error categories. The
-kernel does not import runner SDKs or read provider credential stores.
+one owner-private descriptor. The broker owns renewal and closure. The kernel
+validates and snapshots its bytes, removes durable refresh authority, and lends
+only a sealed/read-only descriptor. It does not import runner SDKs or read
+provider credential stores.
 
 ## Review adapters and jobs
 
@@ -61,15 +62,18 @@ semantics. Its privileged dispatcher and continuation paths are supplied through
 checks still apply to those paths. Candidate protection receives the consumer
 repository explicitly rather than deriving it from the package installation.
 
-Final-CI reproduction is no longer a job-runner special case. The consumer may
-invoke `job.sh consumer-hook ...`, with `LOOPZERO_JOB_CONSUMER_HOOK` pointing to
-its approved executable. This delegates before the kernel acquires job authority
-or signing descriptors. The consumer owns that executor's isolation, signing,
-service lifetime and result protocol; wiring remains TODO(A4).
+Final-CI reproduction is no longer a job-runner special case. Invoke
+`job.sh consumer-hook <hook-name> ...`. The kernel reads the privileged command
+from the approved base revision of `workflow.toml`, pins its protected system
+executable, and launches it with `sandbox.run_validation_child` before acquiring
+job authority. The child receives settings-derived configuration but no lease,
+nonce, credential, signing, commit, or writable parent-Git authority.
 
 The toolchain also accepts `interpreter` (sandbox runtime mounting) and
 `formatter_modules` (the approved formatter installation). Missing formatter
-configuration produces no format-equivalence proof.
+configuration produces no format-equivalence proof. IntelFlo interpreter
+discovery retains `fastapi_backend/.venv/bin/python`; other consumers configure
+`interpreter` explicitly.
 
 ## Shipped hooks
 
@@ -80,15 +84,18 @@ executables fail. Backend/frontend roots use `LOOPZERO_BACKEND_ROOT` and
 `LOOPZERO_FRONTEND_ROOT`; pytest collection uses `LOOPZERO_PYTEST_ROOT`,
 `LOOPZERO_PYTEST_LANE` and `LOOPZERO_PYTHON`. Size policy is installed through
 `loopzero.hooks.size_lint.configure`, including roots, thresholds and exemptions.
-No product exemption list is installed by default.
+No product exemption list is installed by default. IntelFlo retains its
+`fastapi_backend`, `nextjs-frontend`, and `fastapi_backend` pytest-root defaults;
+other consumers must configure these roots, and missing roots fail closed.
 
 Protected branches use `LOOPZERO_PROTECTED_BRANCHES`; skill directory wiring uses
 `LOOPZERO_CANONICAL_SKILLS` and `LOOPZERO_SKILL_MIRRORS`. Commit identity uses the
-namespaced `COMMIT_AUTHOR_NAME`/`COMMIT_AUTHOR_EMAIL` fields, defaulting to the
-consumer Git identity. An optional shared-state CLI warning uses
+namespaced `COMMIT_AUTHOR_NAME`/`COMMIT_AUTHOR_EMAIL` fields. IntelFlo retains
+its fixed authorized identity; other consumers must configure both. An optional
+shared-state CLI warning uses
 `LOOPZERO_SHARED_STATE_COMMAND`.
 
-The A4 composition root must obtain privileged hook commands from the approved
-base profile, perform executable admissibility checks, and run hooks as sandboxed
-validation children with the required read-only interpreter/tool mounts. Shell
-fragments are integration assets, not a substitute for that composition root.
+The composition root supplies a different approved base, when needed, through
+`settings.toolchain['approved_base']` (default `origin/main`) and may extend the
+safe environment allowlist. Shell fragments are integration assets, not a
+substitute for that policy.

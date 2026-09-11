@@ -80,4 +80,3 @@ def supersession_reason_matches_terminal(*args, **kwargs):
 def validate_archived_review_witness(*args, **kwargs):
     # TODO(A4): inject the consumer review/delivery mechanism.
     return _invoke('validate_archived_review_witness', *args, **kwargs)
-

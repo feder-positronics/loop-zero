@@ -29,11 +29,13 @@ def _isolate_git_config_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 # subprocesses. New settings tests explicitly exercise a second namespace.
 os.environ["LOOPZERO_ENV_PREFIX"] = "INTELFLO"
 from loopzero.kernel.settings import KernelSettings, configure
+from .package_environment import PACKAGE_PYTHON
 configure(KernelSettings(env_prefix="INTELFLO", toolchain={"interpreter": "fastapi_backend/.venv/bin/python"}))
 
 @pytest.fixture(autouse=True)
 def kernel_settings(monkeypatch):
     import sys
     monkeypatch.setenv("LOOPZERO_ENV_PREFIX", "INTELFLO")
-    monkeypatch.setenv("LOOPZERO_PYTHON", sys.executable)
+    monkeypatch.setenv("LOOPZERO_PYTHON", str(PACKAGE_PYTHON))
+    monkeypatch.setenv("LOOPZERO_TEST_PYTHON", sys.executable)
     yield

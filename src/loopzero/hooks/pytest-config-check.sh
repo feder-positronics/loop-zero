@@ -3,7 +3,15 @@
 # Ensures pytest_plugins is only defined in root conftest.py (pytest 8.x requirement)
 set -e
 
-cd "${LOOPZERO_PYTEST_ROOT:-.}"
+if [ -n "${LOOPZERO_PYTEST_ROOT:-}" ]; then
+    pytest_root="$LOOPZERO_PYTEST_ROOT"
+elif [ "${LOOPZERO_ENV_PREFIX:-LOOPZERO}" = "INTELFLO" ]; then
+    pytest_root="fastapi_backend"
+else
+    echo "LOOPZERO_PYTEST_ROOT is required for this consumer." >&2
+    exit 1
+fi
+cd "$pytest_root"
 
 echo "🔍 Checking pytest configuration..."
 
@@ -25,7 +33,7 @@ fi
 if ! "${LOOPZERO_PYTHON:-python3}" -m pytest --collect-only -q "${LOOPZERO_PYTEST_LANE:-tests/unit/}" > /dev/null 2>&1; then
     echo "❌ ERROR: Pytest test collection failed"
     echo ""
-    echo "Run: cd "${LOOPZERO_PYTEST_ROOT:-.}" && uv run pytest --collect-only"
+    echo "Run: cd $pytest_root && uv run pytest --collect-only"
     exit 1
 fi
 

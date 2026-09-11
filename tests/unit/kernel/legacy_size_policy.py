@@ -40,4 +40,3 @@ BASELINE_FILES: frozenset[str] = frozenset(
     }
 )
 ALLOWLIST_FILES: frozenset[str] = COHESIVE_FILES | BASELINE_FILES
-

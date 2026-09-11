@@ -57,24 +57,10 @@ KERNEL_JOB_TIMEOUT="${!_kernel_name-}"
 _kernel_name="${KERNEL_ENV_PREFIX}_TRUSTED_CONTINUATION"
 KERNEL_TRUSTED_CONTINUATION="${!_kernel_name-}"
 
-# Consumer-only executors (including final-CI reproduction) are invoked here.
-# TODO(A4): the approved-base composition root supplies the hook command. The
-# consumer owns its containment and signed reproduction protocol.
-if [ "${1:-}" = "consumer-hook" ]; then
-    shift
-    [ -n "${LOOPZERO_JOB_CONSUMER_HOOK:-}" ] &&
-        [ -f "$LOOPZERO_JOB_CONSUMER_HOOK" ] &&
-        [ ! -L "$LOOPZERO_JOB_CONSUMER_HOOK" ] &&
-        [ -x "$LOOPZERO_JOB_CONSUMER_HOOK" ] || {
-            echo "job.sh: approved consumer hook is unavailable (A4)" >&2
-            exit 2
-        }
-    exec "$LOOPZERO_JOB_CONSUMER_HOOK" "$@"
-fi
-
 JOB_SCRIPT="$(realpath -m -- "${BASH_SOURCE[0]}")"
-REPO_ROOT="$(git -C "$(dirname "$JOB_SCRIPT")" rev-parse --show-toplevel 2>/dev/null || pwd)"
-JOB_WORKTREE="${KERNEL_DELIVERY_ROOT:-$REPO_ROOT}"
+JOB_WORKTREE="${KERNEL_DELIVERY_ROOT:-$PWD}"
+REPO_ROOT="$(git -C "$JOB_WORKTREE" rev-parse --show-toplevel 2>/dev/null || realpath -m -- "$JOB_WORKTREE")"
+JOB_WORKTREE="$REPO_ROOT"
 # The consumer injects its approved installed-package interpreter.
 # TODO(A4): obtain this from the approved toolchain at the composition root.
 PYTHON_BIN="${LOOPZERO_PYTHON:-/usr/bin/python3}"
@@ -82,6 +68,41 @@ PYTHON_BIN="${LOOPZERO_PYTHON:-/usr/bin/python3}"
 	echo "job.sh: trusted Python interpreter is unavailable at $PYTHON_BIN" >&2
 	exit 2
 }
+
+# Consumer hooks are policy-selected from the approved base, then launched as
+# validation children before any job authority is acquired. Environment paths
+# can no longer select or replace the executable.
+if [ "${1:-}" = "consumer-hook" ]; then
+    shift
+    [ "$#" -gt 0 ] || {
+        echo "job.sh: consumer-hook requires a privileged hook name" >&2
+        exit 2
+    }
+    exec "$PYTHON_BIN" -m loopzero.kernel.validation \
+        --worktree "$REPO_ROOT" --hook "$1" -- "${@:2}"
+fi
+
+# Diagnose incomplete bound-job options before touching the durable store. This
+# keeps usage errors identical across Python versions and independent of account
+# state availability.
+if [ "${1:-}" = "start" ] || [ "${1:-}" = "run" ]; then
+    argument_index=3
+    while [ "$argument_index" -le "$#" ]; do
+        argument="${!argument_index}"
+        [ "$argument" = "--" ] && break
+        case "$argument" in
+        --run-id | --task-id | --terminal-artifact)
+            if [ "$argument_index" -eq "$#" ]; then
+                echo "job.sh: $argument requires a value" >&2
+                exit 2
+            fi
+            argument_index=$((argument_index + 2))
+            ;;
+        *) argument_index=$((argument_index + 1)) ;;
+        esac
+    done
+fi
+
 JOB_DIR="$("$PYTHON_BIN" -m loopzero.kernel.jobs --worktree "$JOB_WORKTREE" --ensure-root)" || exit $?
 JOB_ROOTS=("$JOB_DIR")
 DEFAULT_TIMEOUT="${KERNEL_JOB_TIMEOUT:-1800}"

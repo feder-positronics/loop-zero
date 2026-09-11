@@ -108,7 +108,8 @@ esac
 
 
 def _run_hook(
-    tmp_path: Path, failure: str | None
+    tmp_path: Path, failure: str | None, *, packaged: bool = False,
+    audit_root: str = ".audit",
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     repo = _prepare_hook_repo(tmp_path)
     bin_dir = tmp_path / "bin"
@@ -121,12 +122,19 @@ def _run_hook(
         "LOOPZERO_FRONTEND_ROOT": "nextjs-frontend",
         "CI_MIRROR_FAIL_STEP": failure or "",
         "CI_MIRROR_TEST_LOG": str(log),
+        "LOOPZERO_AUDIT_ROOT": audit_root,
+        "INTELFLO_JOB_DIR": str(tmp_path / "jobs"),
         "LANG": "C.UTF-8",
         "PATH": f"{bin_dir}:/usr/local/bin:/usr/bin:/bin",
     }
     for name in ("ci_mirror_receipts", "frontend_validation_scope", "poll_audit", "skill_convergence", "skill_semantic_paths"):
         hook = bin_dir / (name + "-hook")
-        hook.write_text('#!/bin/sh\nexec "' + str(bin_dir / "python3") + '" scripts/util/' + name + '.py "$@"\n')
+        if name == "poll_audit":
+            hook.write_text(
+                f'#!/bin/sh\nprintf "poll %s\\n" "$*" >> "{log}"\n'
+            )
+        else:
+            hook.write_text('#!/bin/sh\nexec "' + str(bin_dir / "python3") + '" scripts/util/' + name + '.py "$@"\n')
         hook.chmod(0o755)
         env["INTELFLO_" + name.upper() + "_HOOK"] = str(hook)
     lane_commands = {
@@ -146,10 +154,17 @@ def _run_hook(
         lane.chmod(0o755)
         env["INTELFLO_" + name + "_HOOK"] = str(lane)
     env = package_environment(env)
-    env["LOOPZERO_PYTHON"] = str(bin_dir / "python3")
+    if not packaged:
+        env["LOOPZERO_PYTHON"] = str(bin_dir / "python3")
+    hook_path = (
+        Path(__file__).resolve().parents[3] / "src/loopzero/hooks/ci-mirror-check.sh"
+        if packaged
+        else Path("scripts/hooks/ci-mirror-check.sh")
+    )
+    cwd = repo / "nextjs-frontend" if packaged else repo
     result = subprocess.run(
-        ["bash", "scripts/hooks/ci-mirror-check.sh"],
-        cwd=repo,
+        ["bash", str(hook_path)],
+        cwd=cwd,
         capture_output=True,
         text=True,
         env=env,
@@ -209,3 +224,14 @@ def test_frontend_static_success_runs_every_check_and_records_pass(
         in "\n".join(frontend_static_events)
     )
     assert "--result pass" in "\n".join(frontend_static_events)
+
+
+def test_packaged_hook_discovers_consumer_and_configured_audit_root(tmp_path: Path) -> None:
+    result, commands = _run_hook(
+        tmp_path, None, packaged=True, audit_root="evidence"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    poll = next(command for command in commands if command.startswith("poll "))
+    assert "--skill-runs-dir" in poll
+    assert "/evidence/skill-runs" in poll

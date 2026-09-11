@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import fcntl
 import importlib.util
 import json
 import os
@@ -60,7 +61,7 @@ def test_codex_subscription_credential_opens_and_closes_owner_only_file():
         import tempfile
         handle = tempfile.TemporaryFile()
         fd = handle.fileno()
-        os.write(fd, b"credential snapshot")
+        os.write(fd, _codex_credential().encode())
         try:
             yield fd
         finally:
@@ -68,20 +69,48 @@ def test_codex_subscription_credential_opens_and_closes_owner_only_file():
     with module.codex_subscription_credential(
         requested_runtime_s=900, credential_broker=broker
     ) as descriptor:
-        assert os.pread(descriptor, 100, 0) == b"credential snapshot"
+        snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
+        assert snapshot["tokens"]["refresh_token"] == snapshot["tokens"]["access_token"]
+        assert snapshot["tokens"]["refresh_token"] != "refresh"
+        assert os.fstat(descriptor).st_mode & 0o777 == 0o400
+        if hasattr(os, "memfd_create"):
+            seals = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+            assert seals & fcntl.F_SEAL_WRITE
+            assert seals & fcntl.F_SEAL_GROW
+            assert seals & fcntl.F_SEAL_SHRINK
+            assert seals & fcntl.F_SEAL_SEAL
     assert observed == [900]
     with pytest.raises(OSError):
         os.fstat(descriptor)
 
 
-@pytest.mark.parametrize("unsafe_kind", ["symlink", "mode", "empty"])
+@pytest.mark.parametrize("unsafe_kind", ["type", "mode", "empty", "invalid-json"])
 def test_codex_subscription_credential_rejects_unsafe_file(unsafe_kind):
     from contextlib import contextmanager
     @contextmanager
     def broker(**kwargs):
-        raise module.UnsafeCredentialError(unsafe_kind)
-        yield
-    with pytest.raises(module.UnsafeCredentialError, match=unsafe_kind):
+        if unsafe_kind == "type":
+            yield "not-a-descriptor"
+            return
+        read_fd, write_fd = os.pipe()
+        if unsafe_kind == "mode":
+            path = Path(f"/proc/self/fd/{read_fd}")
+            assert path.exists()
+            os.close(write_fd)
+            try:
+                yield read_fd
+            finally:
+                os.close(read_fd)
+            return
+        import tempfile
+        handle = tempfile.TemporaryFile()
+        if unsafe_kind == "invalid-json":
+            handle.write(b"not-json")
+        try:
+            yield handle.fileno()
+        finally:
+            handle.close()
+    with pytest.raises(module.UnsafeCredentialError):
         with module.codex_subscription_credential(
             requested_runtime_s=900, credential_broker=broker
         ):

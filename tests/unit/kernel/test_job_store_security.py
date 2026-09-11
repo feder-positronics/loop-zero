@@ -14,7 +14,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON, HOST_STATE_WRITABLE
+from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON
 
 requires_nested_user_namespace = pytest.mark.skipif(
     not NAMESPACE_AVAILABLE,

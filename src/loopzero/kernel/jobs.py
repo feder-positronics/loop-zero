@@ -208,6 +208,22 @@ def _ensure_private_directory_chain(
 def canonical_job_root(worktree: Path, *, configured: str | None = None) -> Path:
     """Return one canonical root; legacy recovery requires an explicit override."""
     root = worktree.resolve()
+    try:
+        discovered = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=False,
+            env={
+                "PATH": "/usr/bin:/bin",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+        )
+    except OSError:
+        discovered = None
+    if discovered is not None and discovered.returncode == 0:
+        root = Path(discovered.stdout.strip()).resolve()
     raw = os.environ.get(settings.env("JOB_DIR")) if configured is None else configured
     if raw:
         candidate = Path(raw)

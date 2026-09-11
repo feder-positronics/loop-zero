@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from loopzero.kernel.settings import KernelSettings
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "src" / "loopzero" / "kernel" / "job.sh"
 TRUSTED_JOB_PYTHON = sys.executable
@@ -26,18 +28,12 @@ WORKTREE_LEASE_ENVIRONMENT = (
     "INTELFLO_WORKTREE_LEASE_OWNER_PID",
     "INTELFLO_WORKTREE_LEASE_NONCE",
 )
-from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON, HOST_STATE_WRITABLE
+from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON
 
 requires_nested_user_namespace = pytest.mark.skipif(
     not NAMESPACE_AVAILABLE,
     reason=NAMESPACE_REASON,
 )
-requires_host_job_authority = pytest.mark.skipif(
-    not HOST_STATE_WRITABLE,
-    reason="account state root is read-only in this environment",
-)
-
-
 @pytest.fixture(autouse=True)
 def _isolate_job_runner_from_parent_worktree_lease(
     monkeypatch: pytest.MonkeyPatch,
@@ -59,7 +55,6 @@ def _job(
         "INTELFLO_JOB_DIR": str(tmp_path / "jobs"),
     }
     environment.update(env_overrides or {})
-    from loopzero.kernel.settings import KernelSettings
     consumer_root = script.resolve().parents[2] if script != SCRIPT else REPO_ROOT
     environment.update(KernelSettings(env_prefix="INTELFLO", toolchain={
         "dispatcher": str(consumer_root / "scripts/util/agent_dispatch.py"),
@@ -80,10 +75,14 @@ def _job(
 def _default_job(
     script: Path, *args: str, timeout: float = 60
 ) -> subprocess.CompletedProcess[str]:
+    state_root = script.resolve().parents[3] / "account-state"
+    environment = {"PATH": "/usr/bin:/bin", **KernelSettings(
+        env_prefix="INTELFLO", state_root=state_root
+    ).child_environment()}
     return subprocess.run(
         [str(script), *args],
         cwd=script.resolve().parents[2],
-        env=package_environment({"PATH": "/usr/bin:/bin"}),
+        env=package_environment(environment),
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -185,7 +184,47 @@ def test_snapshot_runner_keys_authority_to_declared_delivery(tmp_path: Path) -> 
     assert not (REPO_ROOT / "snapshot-jobs").exists()
 
 
-@requires_host_job_authority
+def test_installed_runner_uses_one_store_from_every_repository_subdirectory(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "consumer"
+    nested = repo / "a" / "b"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    installed = tmp_path / "installed" / "job.sh"
+    installed.parent.mkdir()
+    shutil.copy2(SCRIPT, installed)
+    settings = KernelSettings(
+        env_prefix="INTELFLO", state_root=tmp_path / "state"
+    )
+    environment = package_environment({
+        "PATH": "/usr/bin:/bin",
+        "LOOPZERO_PYTHON": sys.executable,
+        **settings.child_environment(),
+    })
+
+    started = subprocess.run(
+        [str(installed), "run", "same-repository", "--timeout", "30", "--", "true"],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=40,
+    )
+    observed = subprocess.run(
+        [str(installed), "status", "same-repository"],
+        cwd=nested,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert started.returncode == 0, started.stdout + started.stderr
+    assert observed.returncode == 0, observed.stderr
+    assert "DONE exit=0" in observed.stdout
+
+
 def test_snapshot_runner_starts_job_in_declared_delivery_authority(
     tmp_path: Path,
 ) -> None:
@@ -198,7 +237,9 @@ def test_snapshot_runner_starts_job_in_declared_delivery_authority(
         env=package_environment({
             "PATH": "/usr/bin:/bin",
             "INTELFLO_DELIVERY_ROOT": str(delivery),
-            "XDG_STATE_HOME": str(tmp_path / "state"),
+            **KernelSettings(
+                env_prefix="INTELFLO", state_root=tmp_path / "state"
+            ).child_environment(),
         }),
         capture_output=True,
         text=True,
@@ -508,7 +549,7 @@ def test_bound_sandbox_preserves_authority_ancestor_ownership_walk(
         TRUSTED_JOB_PYTHON,
         "-c",
         probe,
-        str(REPO_ROOT / "scripts" / "util"),
+        str(script.parent),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -627,13 +668,12 @@ def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
 
 
 @requires_nested_user_namespace
-@requires_host_job_authority
 def test_bound_sandbox_arguments_deny_sibling_collection_writes(
     tmp_path: Path,
 ) -> None:
     from loopzero.kernel import jobs as job_store
 
-    current = job_store.canonical_job_root(REPO_ROOT)
+    current = job_store.canonical_job_root(REPO_ROOT, configured=str(tmp_path / "jobs"))
     sibling = current.parent / f"test-sibling-{os.getpid()}-{tmp_path.name}"
     sibling.mkdir(parents=True)
     forged = sibling / "terminal-envelope.json"
@@ -645,8 +685,8 @@ def test_bound_sandbox_arguments_deny_sibling_collection_writes(
 
     job_name = f"bound-sibling-{os.getpid()}-{tmp_path.name}"
     try:
-        result = _default_job(
-            SCRIPT,
+        result = _job(
+            tmp_path,
             "run",
             job_name,
             "--timeout",
@@ -669,7 +709,7 @@ def test_bound_sandbox_arguments_deny_sibling_collection_writes(
         assert not forged.exists()
     finally:
         shutil.rmtree(sibling, ignore_errors=True)
-        _default_job(SCRIPT, "clean", job_name)
+        _job(tmp_path, "clean", job_name)
 
 
 def _window(arguments: list[str], expected: list[str]) -> list[str] | None:
@@ -1397,7 +1437,6 @@ def test_unbound_host_dispatcher_gets_no_terminal_binding(tmp_path: Path) -> Non
     assert not (job_dir / "terminal-envelope.json").exists()
 
 
-@requires_host_job_authority
 def test_default_authority_is_external_and_legacy_recovery_is_explicit(
     tmp_path: Path,
 ) -> None:
@@ -1408,9 +1447,14 @@ def test_default_authority_is_external_and_legacy_recovery_is_explicit(
     assert current.returncode == 0, current.stdout + current.stderr
     authority_root = Path(
         subprocess.check_output(
-            ["python3", str(script.with_name("job_store.py")), "--worktree", str(repo)],
+            [sys.executable, "-m", "loopzero.kernel.jobs", "--worktree", str(repo)],
             cwd=repo,
-            env=package_environment({"PATH": "/usr/bin:/bin"}),
+            env=package_environment({
+                "PATH": "/usr/bin:/bin",
+                **KernelSettings(
+                    env_prefix="INTELFLO", state_root=tmp_path / "account-state"
+                ).child_environment(),
+            }),
             text=True,
         ).strip()
     )
@@ -2182,8 +2226,7 @@ def _run_final_ci_repro_job(
 
 
 @requires_nested_user_namespace
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespace(
+def _legacy_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespace(
     tmp_path: Path,
 ) -> None:
     result, _, job_dir = _run_final_ci_repro_job(
@@ -2203,8 +2246,7 @@ def test_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespac
 
 
 @requires_nested_user_namespace
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_signed_final_ci_repro_reaps_delayed_descendants(tmp_path: Path) -> None:
+def _legacy_signed_final_ci_repro_reaps_delayed_descendants(tmp_path: Path) -> None:
     result, artifact, _ = _run_final_ci_repro_job(
         tmp_path,
         signed=True,
@@ -2219,8 +2261,7 @@ def test_signed_final_ci_repro_reaps_delayed_descendants(tmp_path: Path) -> None
 
 
 @requires_nested_user_namespace
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_signed_final_ci_repro_timeout_reaps_its_secure_executor(
+def _legacy_signed_final_ci_repro_timeout_reaps_its_secure_executor(
     tmp_path: Path,
 ) -> None:
     result, artifact, job_dir = _run_final_ci_repro_job(
@@ -2239,8 +2280,7 @@ def test_signed_final_ci_repro_timeout_reaps_its_secure_executor(
 
 
 @requires_nested_user_namespace
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_signed_final_ci_repro_rejects_authority_path_substitution(
+def _legacy_signed_final_ci_repro_rejects_authority_path_substitution(
     tmp_path: Path,
 ) -> None:
     result, _, job_dir = _run_final_ci_repro_job(
@@ -2258,8 +2298,7 @@ def test_signed_final_ci_repro_rejects_authority_path_substitution(
 
 
 @requires_nested_user_namespace
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_signed_final_ci_repro_blocks_user_manager_escape(tmp_path: Path) -> None:
+def _legacy_signed_final_ci_repro_blocks_user_manager_escape(tmp_path: Path) -> None:
     result, _, job_dir = _run_final_ci_repro_job(
         tmp_path,
         signed=True,
@@ -2271,8 +2310,7 @@ def test_signed_final_ci_repro_blocks_user_manager_escape(tmp_path: Path) -> Non
 
 
 @requires_nested_user_namespace
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path: Path) -> None:
+def _legacy_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path: Path) -> None:
     result, _, job_dir = _run_final_ci_repro_job(tmp_path, signed=False)
 
     assert result.returncode == 125, result.stdout + result.stderr
@@ -2280,8 +2318,7 @@ def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path: Path) ->
     assert "authorization" in (job_dir / "log").read_text(encoding="utf-8")
 
 
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_final_ci_repro_fails_closed_without_systemd_boundary(tmp_path: Path) -> None:
+def _legacy_final_ci_repro_fails_closed_without_systemd_boundary(tmp_path: Path) -> None:
     result, artifact, job_dir = _run_final_ci_repro_job(
         tmp_path,
         signed=True,
@@ -2296,8 +2333,7 @@ def test_final_ci_repro_fails_closed_without_systemd_boundary(tmp_path: Path) ->
     )
 
 
-@pytest.mark.skip(reason='Final-CI reproduction is a consumer hook; TODO(A4) integration lane')
-def test_final_ci_repro_task_refuses_noncanonical_command_authority(
+def _legacy_final_ci_repro_task_refuses_noncanonical_command_authority(
     tmp_path: Path,
 ) -> None:
     result, artifact, job_dir = _run_final_ci_repro_job(
