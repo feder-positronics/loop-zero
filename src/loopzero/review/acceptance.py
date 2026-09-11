@@ -328,15 +328,14 @@ def test_database_unreachable(authority: AcceptanceAuthority) -> str | None:
         connection.close()
     except TimeoutError:
         return (
-            "test database probe timed out after 1s; start it "
-            "(make infra-start) or use an isolated stack (make start-isolated) "
-            "before dispatching"
+            "test database probe timed out after 1s; make the configured test "
+            "database available before dispatching"
         )
     except OSError as exc:
         return (
             "test database unreachable for DB-dependent acceptance "
-            f"({host}:{port}: {exc}); start it (make infra-start) or use an "
-            "isolated stack (make start-isolated) before dispatching"
+            f"({host}:{port}: {exc}); make the configured test database "
+            "available before dispatching"
         )
     return None
 

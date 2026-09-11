@@ -13,6 +13,8 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.hooks == {"worktree_setup": ("make setup",), "acceptance": ("make test",)}
     assert profile.env_prefix == "LOOPZERO"
     assert profile.state_root_explicit is False
+    assert profile.toolchain["dotenv"] == "fastapi_backend/.env"
+    assert profile.toolchain["db_targets"][0] == "test"
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
 
 

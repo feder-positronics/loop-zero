@@ -315,6 +315,28 @@ def accepted_review_terminals(
     }
 
 
+def accepted_review_producers(
+    records: Sequence[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Bind accepted recovery evidence to its authenticated original producer."""
+    accepted = accepted_review_terminals(records)
+    terminal_ids = _authenticated_attempt_terminal_ids(records)
+    producers: dict[str, dict[str, object]] = {}
+    for task, row in accepted.items():
+        if row.get("type") != "attempt-recovery":
+            producers[task] = row
+            continue
+        deposits = [
+            candidate for candidate in records
+            if candidate.get("type") == "attempt-terminal"
+            and id(candidate) in terminal_ids
+            and _recovery_matches_deposit(row, candidate)
+        ]
+        if len(deposits) == 1:
+            producers[task] = deposits[0]
+    return producers
+
+
 def authenticated_verdicts(
     records: Sequence[dict[str, object]], *,
     _accepted_terminals: Mapping[str, dict[str, object]] | None = None,
@@ -409,7 +431,7 @@ def configure_kernel_seams() -> None:
 
 
 __all__ = [
-    "accepted_review_terminals", "archived_supersession_deposits",
+    "accepted_review_producers", "accepted_review_terminals", "archived_supersession_deposits",
     "authenticated_retry_outcomes", "authenticated_review_terminals",
     "authenticated_supersessions", "authenticated_verdicts", "configure",
     "configure_kernel_seams", "delivery_controller_records",

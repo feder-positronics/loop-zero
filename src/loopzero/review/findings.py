@@ -60,7 +60,7 @@ def configure(profile: Profile) -> None:
 def _root(repo: Path | str) -> Path:
     if _SETTINGS is not None:
         return _SETTINGS.root
-    return Path(repo).resolve() / ".loopzero" / "findings"
+    raise LedgerConflict("finding ledger requires a configured Profile")
 
 
 def _pr(pr: int) -> int:
