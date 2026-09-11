@@ -2043,8 +2043,12 @@ def _refresh_credential(
     refresh_command: Sequence[str],
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> _ValidatedCredential:
+    settings = get_settings()
+    tooling_root = settings.tooling_root or Path.cwd()
+    workspace_root = settings.workspace_root(tooling_root)
+    workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
-        prefix=get_settings().temp_name("codex-renewal")
+        prefix=settings.temp_name("codex-renewal"), dir=workspace_root
     ) as directory:
         staging_home = Path(directory)
         staging_home.chmod(0o700)
@@ -2059,7 +2063,7 @@ def _refresh_credential(
                 "text": True,
                 "env": {
                     **_refresh_environment(staging_home),
-                    **get_settings().child_environment(),
+                    **settings.child_environment(),
                 },
                 "cwd": staging_home,
             }

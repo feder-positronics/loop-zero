@@ -86,7 +86,12 @@ def test_fresh_credential_is_snapshotted_without_refresh(tmp_path: Path) -> None
 def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
     tmp_path: Path,
 ) -> None:
+    from loopzero.runners.settings import RuntimeSettings
+
     credential = tmp_path / ".claude" / ".credentials.json"
+    tooling_root = tmp_path / "tooling"
+    settings = RuntimeSettings(tooling_root=tooling_root)
+    workspace_root = settings.workspace_root(tooling_root)
     original = _credential(expires_at_ms=1_100_000, access_token="old")
     refreshed = _credential(expires_at_ms=3_000_000, access_token="new")
     _write_credential(credential, original)
@@ -103,6 +108,9 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
         assert capture_output is True
         assert text is True
         assert cwd == Path(env["HOME"])
+        assert cwd.parent == workspace_root
+        assert stat.S_IMODE(cwd.stat().st_mode) == 0o700
+        observed_lock["staging_home"] = cwd
         staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
         staged = json.loads(staging_credential.read_text(encoding="utf-8"))
         assert staged["claudeAiOauth"]["expiresAt"] < 1_000_000
@@ -122,19 +130,22 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
             stderr="",
         )
 
-    with claude_credential.claude_subscription_credential(
-        requested_runtime_s=600,
-        credential_path=credential,
-        clock=lambda: 1_000.0,
-        run_status=refresh,
-        claude_binary=Path("/trusted/claude"),
-    ) as descriptor:
-        snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
-        assert snapshot == _runtime_snapshot(refreshed)
+    with settings.use():
+        with claude_credential.claude_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+            run_status=refresh,
+            claude_binary=Path("/trusted/claude"),
+        ) as descriptor:
+            snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
+            assert snapshot == _runtime_snapshot(refreshed)
 
     assert json.loads(credential.read_text(encoding="utf-8")) == refreshed
     assert stat.S_IMODE(credential.stat().st_mode) == 0o600
-    assert observed_lock == {"mode": 0o600, "uid": os.getuid()}
+    assert observed_lock["mode"] == 0o600
+    assert observed_lock["uid"] == os.getuid()
+    assert not Path(observed_lock["staging_home"]).exists()
 
 
 def test_refresh_accepts_claude_binary_rewrite_with_same_validated_oauth_fields(

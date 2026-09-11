@@ -103,7 +103,12 @@ def test_fresh_codex_credential_is_snapshotted_without_refresh(
 def test_near_expiry_codex_credential_refreshes_and_persists_rotated_token(
     tmp_path: Path,
 ) -> None:
+    from loopzero.runners.settings import RuntimeSettings
+
     credential = tmp_path / ".codex" / "auth.json"
+    tooling_root = tmp_path / "tooling"
+    settings = RuntimeSettings(tooling_root=tooling_root)
+    workspace_root = settings.workspace_root(tooling_root)
     original = _credential(expires_at_s=1_100, refresh_token="old-refresh")
     refreshed = _credential(expires_at_s=3_000, refresh_token="new-refresh")
     _write_credential(credential, original)
@@ -113,6 +118,9 @@ def test_near_expiry_codex_credential_refreshes_and_persists_rotated_token(
         observed["command"] = command
         observed["timeout"] = kwargs["timeout"]
         staging = Path(env["CODEX_HOME"]) / "auth.json"
+        assert staging.parent.parent == workspace_root
+        assert stat.S_IMODE(staging.parent.stat().st_mode) == 0o700
+        observed["staging_home"] = staging.parent
         assert json.loads(staging.read_text(encoding="utf-8")) == original
         _write_credential(staging, refreshed)
         return subprocess.CompletedProcess(
@@ -122,29 +130,33 @@ def test_near_expiry_codex_credential_refreshes_and_persists_rotated_token(
             stderr="",
         )
 
-    with codex_credential.codex_subscription_credential(
-        requested_runtime_s=600,
-        credential_path=credential,
-        clock=lambda: 1_000.0,
-        run_refresh=refresh,
-        refresh_command=("trusted-python", "trusted-bridge", "trusted-codex"),
-    ) as descriptor:
-        assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == _runtime_snapshot(
-            refreshed
-        )
+    with settings.use():
+        with codex_credential.codex_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+            run_refresh=refresh,
+            refresh_command=("trusted-python", "trusted-bridge", "trusted-codex"),
+        ) as descriptor:
+            assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == _runtime_snapshot(
+                refreshed
+            )
 
     assert json.loads(credential.read_text(encoding="utf-8")) == refreshed
     assert stat.S_IMODE(credential.stat().st_mode) == 0o600
     assert (
         stat.S_IMODE(
-            (credential.parent / codex_credential.BROKER_LOCK_NAME).stat().st_mode
+            (credential.parent / settings.lock_name("codex-refresh")).stat().st_mode
         )
         == 0o600
     )
-    assert observed == {
-        "command": ["trusted-python", "trusted-bridge", "trusted-codex"],
-        "timeout": codex_credential.REFRESH_TIMEOUT_S,
-    }
+    assert observed["command"] == [
+        "trusted-python",
+        "trusted-bridge",
+        "trusted-codex",
+    ]
+    assert observed["timeout"] == codex_credential.REFRESH_TIMEOUT_S
+    assert not Path(observed["staging_home"]).exists()
 
 
 @pytest.mark.parametrize(
@@ -305,9 +317,16 @@ def test_codex_refresh_wrapper_binds_sdk_venv_bridge_and_workspace(
         check=False,
     )
     if probe.returncode != 0:
-        diagnostic = (probe.stderr or probe.stdout).strip().splitlines()
+        output = probe.stderr or probe.stdout
+        diagnostic = output.strip().splitlines()
         detail = diagnostic[-1] if diagnostic else "unknown namespace error"
-        pytest.skip(f"bubblewrap cannot create a namespace: {detail}")
+        namespace_denied = (
+            "No permissions to create a new namespace",
+            "Creating new namespace failed: Operation not permitted",
+        )
+        if any(message in output for message in namespace_denied):
+            pytest.skip(f"bubblewrap cannot create a user namespace: {detail}")
+        pytest.fail(f"bubblewrap probe failed for a non-namespace reason: {detail}")
 
     from loopzero.runners import process
 

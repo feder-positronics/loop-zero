@@ -49,6 +49,9 @@ owned by `loopzero.kernel.sandbox`; the dispatcher wires it into runners. The
 wrapper must bind the governed worktree, tooling root, runtime venv root, and
 `settings.workspace_root(tooling_root)`. The venv binding must include the
 interpreter's `pyvenv.cfg`, `bin`, and `lib` so the bridge can import its SDKs.
+Every runner child cwd is inside either the governed worktree or that settings
+workspace root; credential renewals use a private, per-refresh directory below
+the workspace root and remove it afterwards.
 Every `.git` path and every linked-worktree gitdir reachable through those
 bindings must remain read-only. Runners neither build bubblewrap argv nor decide
 which roots are writable. `worker_child_environment()` starts from the positive
