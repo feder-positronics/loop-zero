@@ -11,7 +11,7 @@ import pytest
 
 
 def _load_broker():
-    from loopzero.runners import cursor_credential
+    from loopzero.runners import cursor as cursor_credential
 
     return cursor_credential
 

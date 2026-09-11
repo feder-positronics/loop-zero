@@ -15,7 +15,7 @@ import pytest
 
 
 def _load_broker():
-    from loopzero.runners import codex_credential
+    from loopzero.runners import codex as codex_credential
 
     return codex_credential
 

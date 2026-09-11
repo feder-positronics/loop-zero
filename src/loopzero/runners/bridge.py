@@ -38,8 +38,8 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 def _load_adjacent_codex_isolation() -> ModuleType:
     """Import the package-owned helper without widening interpreter paths."""
-    from . import codex_isolation
-    return codex_isolation
+    from . import codex
+    return codex
 
 
 def _load_adjacent_contracts() -> ModuleType:

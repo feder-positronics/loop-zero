@@ -10,7 +10,8 @@ import sys
 import pytest
 
 from loopzero.config import Profile
-from loopzero.runners import bridge, claude, codex, claude_token, codex_credential, process
+from loopzero.runners import bridge, claude, codex, process
+from loopzero.runners import claude as claude_token, codex as codex_credential
 from loopzero.runners.contract import governed_result_schema
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
 from loopzero.runners.settings import DEFAULT_SETTINGS, PACKAGED_BRIDGE, RuntimeSettings, get_settings

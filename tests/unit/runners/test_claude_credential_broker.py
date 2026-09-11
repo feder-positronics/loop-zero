@@ -13,7 +13,7 @@ import pytest
 
 
 def _load_broker():
-    from loopzero.runners import claude_credential
+    from loopzero.runners import claude as claude_credential
 
     return claude_credential
 
@@ -613,7 +613,7 @@ def token_root():
 
 @pytest.fixture(autouse=True)
 def isolated_default_token(monkeypatch, token_root, request):
-    from loopzero.runners import claude_token
+    from loopzero.runners import claude as claude_token
 
     if request.node.name.startswith("test_default_path_"):
         return
@@ -626,7 +626,7 @@ def isolated_default_token(monkeypatch, token_root, request):
 
 @pytest.fixture
 def token_broker(monkeypatch):
-    from loopzero.runners import claude_token
+    from loopzero.runners import claude as claude_token
 
     monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
     monkeypatch.delenv("INTELFLO_CLAUDE_TOKEN_FILE", raising=False)
@@ -758,7 +758,7 @@ def token_count_response():
 def test_remote_token_validation_is_pinned_and_fail_closed(
     monkeypatch, token_count_response, status, payload, accepted
 ):
-    from loopzero.runners import claude_token
+    from loopzero.runners import claude as claude_token
 
     class Connection:
         closed = False

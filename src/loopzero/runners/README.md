@@ -2,8 +2,9 @@
 
 The Claude, Codex and Cursor transports retain intelflo's parsing, fallback,
 credential, process ownership and error behavior. SDK imports are lazy; the
-base package requires only the standard library. Credential helpers stay in
-separate sibling modules to preserve their existing call and monkeypatch seams.
+base package requires only the standard library. Credential and token helpers
+are merged into their vendor module; names and call signatures are unchanged,
+and importing callers use the new module path.
 `contract.py` includes the names formerly in `contracts.py` and
 `governed_result.py`; `_review_schema.py` holds their unchanged schema helpers.
 
