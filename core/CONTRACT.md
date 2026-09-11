@@ -31,7 +31,9 @@ Executable allowlisting establishes only `argv[0]`; operands and interpreted
 candidate scripts remain candidate-controlled because validation exists to run
 candidate tests. Trust in a successful result requires separate host-side
 verification of a coordinator-signed artifact bound to the exact task, base,
-head, and hook command.
+approved head, executed clean commit or intentional dirty-tree identity, and
+hook command. The parent recomputes that source identity after execution before
+accepting the result.
 A missing prerequisite or nonzero check is never a pass; apply the check classes
 below to distinguish merge blockers, health reports and infrastructure.
 

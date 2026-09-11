@@ -65,17 +65,24 @@ repository explicitly rather than deriving it from the package installation.
 Final-CI reproduction is no longer a job-runner special case. Invoke
 `job.sh consumer-hook` with explicit `--base`, `--head`, `--task-id`,
 `--result-artifact`, `--coordinator-public-key`, and `--hook` arguments. Base and
-head are full commit SHAs; neither is read from serialized settings. The kernel
-resolves the base with replacement objects and ambient Git configuration
-disabled, reads privileged hooks with `config.effective_hooks`, and launches
-them with `sandbox.run_validation_child` before acquiring job authority.
+head are full commit SHAs; neither is read from serialized settings. Before
+launch, the kernel proves that `HEAD` is the approved commit and that the index
+and worktree are clean. An intentional dirty-candidate run must additionally
+pass `--allow-dirty-tree`; it is identified with `git write-tree` through an
+isolated `GIT_INDEX_FILE`. The kernel resolves the base with replacement objects
+and ambient Git configuration disabled, reads privileged hooks with
+`config.effective_hooks`, and launches them with
+`sandbox.run_validation_child` before acquiring job authority.
 
 Executable selection uses the package-wide symlink-free allowlist. This trusts
 only `argv[0]`. Hook operands, interpreted scripts, and candidate test inputs are
 candidate-controlled by design. A zero child exit is therefore not acceptance:
 the parent snapshots the supplied coordinator public key before child launch and
-then verifies a coordinator-signed result bound to the task ID, base SHA, head
-SHA, hook name, and exact resolved command vectors. Unsigned, tampered, and
+then recomputes the executed-source identity and verifies a coordinator-signed
+result bound to the task ID, base SHA, approved head SHA, exact clean commit or
+dirty tree SHA, hook name, and exact resolved command vectors. Result files are
+opened nonblocking and without symlink following, must be bounded regular files,
+and are read under a deadline. Unsigned/malformed/unreadable, tampered, and
 misbound artifacts are distinct failures. Candidate code is never imported or
 executed by that verifier.
 

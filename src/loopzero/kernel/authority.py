@@ -67,7 +67,9 @@ def _openssl() -> Path:
     try:
         return system_executable("openssl")
     except TrustedExecutableError as exc:
-        raise TerminalAuthorityError("trusted Ed25519 provider is unavailable") from exc
+        raise TerminalAuthorityOperationalError(
+            "trusted Ed25519 provider is unavailable"
+        ) from exc
 
 
 def _run_openssl(

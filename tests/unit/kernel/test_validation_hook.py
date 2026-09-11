@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -71,10 +72,13 @@ def _actual(repo: Path, commands: tuple[str, ...], extra: tuple[str, ...] = ()) 
 
 
 def _artifact(path: Path, signer: authority.CoordinatorAuthority, *, task: str,
-              base: str, head: str, hook: str, commands: list[str], **changes) -> None:
+              base: str, head: str, hook: str, commands: list[str],
+              source_kind: str = "commit", source_sha: str | None = None,
+              **changes) -> None:
     row = {
         "schema_version": validation.RESULT_SCHEMA, "task_id": task,
         "base_sha": base, "head_sha": head, "hook": hook,
+        "source_kind": source_kind, "source_sha": source_sha or head,
         "hook_commands": commands, "status": "completed", "exit_code": 0,
     }
     row.update(changes)
@@ -82,18 +86,26 @@ def _artifact(path: Path, signer: authority.CoordinatorAuthority, *, task: str,
 
 
 def _environment(tmp_path: Path, timeout: float = 5) -> dict[str, str]:
+    uv = shutil.which("uv")
+    assert uv is not None
     settings = KernelSettings(env_prefix="INTELFLO", state_root=tmp_path / "state",
                               toolchain={"validation_timeout_s": timeout})
-    return package_environment({"PATH": "/usr/bin:/bin", **settings.child_environment()})
+    return package_environment({
+        "PATH": f"{Path(uv).parent}:/usr/bin:/bin",
+        **settings.child_environment(),
+    })
 
 
 def _run(repo: Path, base: str, artifact: Path, key: Path, *, task: str = "task-1",
          hook: str = "acceptance", extra: tuple[str, ...] = (), timeout: float = 10,
-         env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+         env: dict[str, str] | None = None,
+         allow_dirty_tree: bool = False) -> subprocess.CompletedProcess[str]:
+    dirty_arguments = ["--allow-dirty-tree"] if allow_dirty_tree else []
     return subprocess.run(
         [str(JOB_SH), "consumer-hook", "--base", base, "--head", base,
          "--task-id", task, "--result-artifact", str(artifact),
-         "--coordinator-public-key", str(key), "--hook", hook, "--", *extra],
+         "--coordinator-public-key", str(key), "--hook", hook,
+         *dirty_arguments, "--", *extra],
         cwd=repo, env=env, capture_output=True, text=True, timeout=timeout,
     )
 
@@ -134,11 +146,15 @@ def _direct_child(argv, *, worktree, timeout, **kwargs):
     )
 
 
+def _source(sha: str) -> validation.SourceIdentity:
+    return validation.SourceIdentity("commit", sha)
+
+
 def test_signed_result_accepts_real_coordinator_signature(tmp_path):
     repo, sha, signer, key, result = _signed_case(tmp_path)
     assert validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
         task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance",
-        hook_commands=_actual(repo, ("gnutrue",)))["status"] == "completed"
+        hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))["status"] == "completed"
 
 
 def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path):
@@ -146,7 +162,7 @@ def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path):
     result.write_text('{"status":"completed"}', encoding="utf-8")
     with pytest.raises(validation.UnsignedResultError):
         validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
 
 
 def test_signed_result_rejects_real_tampering(tmp_path):
@@ -155,7 +171,7 @@ def test_signed_result_rejects_real_tampering(tmp_path):
     result.write_text(json.dumps(row), encoding="utf-8")
     with pytest.raises(validation.TamperedResultError):
         validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
 
 
 @pytest.mark.parametrize("field,value", [("task_id", "other"), ("base_sha", "f" * 40),
@@ -166,7 +182,7 @@ def test_signed_result_rejects_unbound_fields(tmp_path, field, value):
               commands=_actual(repo, ("gnutrue",)), **{field: value})
     with pytest.raises(validation.UnboundResultError, match=field):
         validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
 
 
 def test_signed_final_ci_repro_rejects_authority_path_substitution(tmp_path):
@@ -176,13 +192,112 @@ def test_signed_final_ci_repro_rejects_authority_path_substitution(tmp_path):
     _artifact(result, attacker, task="task-1", base=sha, head=sha, hook="acceptance", commands=_actual(repo, ("gnutrue",)))
     with pytest.raises(validation.TamperedResultError):
         validation.verify_result_artifact(result, coordinator_public_key=pinned,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
+
+
+def test_verifier_provider_failure_is_retryable_not_tampering(
+    tmp_path, monkeypatch, capsys
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    monkeypatch.setattr(validation, "run_validation_child", _direct_child)
+
+    def unavailable(*args, **kwargs):
+        raise authority.TerminalAuthorityOperationalError("provider timed out")
+
+    monkeypatch.setattr(validation, "verify_terminal_authority", unavailable)
+    code = validation.main([
+        "--worktree", str(repo), "--base", sha, "--head", sha,
+        "--task-id", "task-1", "--result-artifact", str(artifact),
+        "--coordinator-public-key", str(key), "--hook", "acceptance",
+    ])
+
+    assert code == 2
+    assert "verifier is unavailable" in capsys.readouterr().err
 
 
 def test_explicit_base_ignores_ambient_serialized_redirect(tmp_path, monkeypatch):
     repo, sha, signer, key, result = _signed_case(tmp_path)
     monkeypatch.setenv("LOOPZERO_KERNEL_SETTINGS", json.dumps({"toolchain": {"approved_base": "refs/heads/attacker"}}))
     assert validation.resolve_base(repo, base=sha) == sha
+
+
+def test_validation_rejects_a_wrong_checkout_before_launch(tmp_path, monkeypatch):
+    repo, approved, signer, key, artifact = _signed_case(tmp_path)
+    _git(repo, "commit", "--allow-empty", "-qm", "other checkout")
+    launched = False
+
+    def child(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        return _direct_child(*args, **kwargs)
+
+    monkeypatch.setattr(validation, "run_validation_child", child)
+    with pytest.raises(validation.ValidationHookError, match="approved head"):
+        validation.run_hook(
+            worktree=repo, hook="acceptance", base_sha=approved,
+            head_sha=approved, task_id="task-1", result_artifact=artifact,
+            coordinator_public_key=signer.public_key, extra=[],
+        )
+    assert not launched
+
+
+def test_validation_rejects_head_movement_after_child_exit(tmp_path, monkeypatch):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+
+    def move_head(argv, **kwargs):
+        _git(repo, "commit", "--allow-empty", "-qm", "move during validation")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(validation, "run_validation_child", move_head)
+    with pytest.raises(validation.UnboundResultError, match="source changed"):
+        validation.run_hook(
+            worktree=repo, hook="acceptance", base_sha=sha, head_sha=sha,
+            task_id="task-1", result_artifact=artifact,
+            coordinator_public_key=signer.public_key, extra=[],
+        )
+
+
+def test_validation_rejects_an_unapproved_dirty_tree(tmp_path, monkeypatch):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    (repo / "candidate-change").write_text("dirty\n", encoding="utf-8")
+    launched = False
+
+    def child(*args, **kwargs):
+        nonlocal launched
+        launched = True
+        return _direct_child(*args, **kwargs)
+
+    monkeypatch.setattr(validation, "run_validation_child", child)
+    with pytest.raises(validation.ValidationHookError, match="allow-dirty-tree"):
+        validation.run_hook(
+            worktree=repo, hook="acceptance", base_sha=sha, head_sha=sha,
+            task_id="task-1", result_artifact=artifact,
+            coordinator_public_key=signer.public_key, extra=[],
+        )
+    assert not launched
+
+
+def test_validation_accepts_a_tree_hash_bound_dirty_candidate(tmp_path, monkeypatch):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    candidate = repo / "candidate-change"
+    candidate.write_text("dirty\n", encoding="utf-8")
+    source = validation.source_identity(
+        repo, approved_head=sha, allow_dirty_tree=True
+    )
+    assert source.kind == "tree"
+    _artifact(
+        artifact, signer, task="task-1", base=sha, head=sha,
+        hook="acceptance", commands=_actual(repo, ("gnutrue",)),
+        source_kind=source.kind, source_sha=source.sha,
+    )
+    monkeypatch.setattr(validation, "run_validation_child", _direct_child)
+
+    assert validation.run_hook(
+        worktree=repo, hook="acceptance", base_sha=sha, head_sha=sha,
+        task_id="task-1", result_artifact=artifact,
+        coordinator_public_key=signer.public_key, extra=[],
+        allow_dirty_tree=True,
+    ) == 0
 
 
 def test_final_ci_repro_task_refuses_noncanonical_command_authority(tmp_path):
@@ -196,6 +311,65 @@ def test_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespac
     repo, sha, signer, key, artifact = _signed_case(tmp_path)
     result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+@pytest.mark.parametrize(
+    ("failure", "expected_code", "diagnostic"),
+    [
+        ("unsigned", 125, "unsigned"),
+        ("malformed", 125, "unsigned"),
+        ("tampered", 126, "signature"),
+        ("unbound", 127, "binding"),
+    ],
+)
+def test_validation_result_rejection_taxonomy_through_job_main(
+    tmp_path, failure, expected_code, diagnostic
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    if failure == "unsigned":
+        artifact.write_text('{"status":"completed"}', encoding="utf-8")
+    elif failure == "malformed":
+        artifact.write_text("{", encoding="utf-8")
+    elif failure == "tampered":
+        row = json.loads(artifact.read_text(encoding="utf-8"))
+        row["status"] = "failed"
+        artifact.write_text(json.dumps(row), encoding="utf-8")
+    else:
+        _artifact(
+            artifact, signer, task="task-1", base=sha, head=sha,
+            hook="acceptance", commands=_actual(repo, ("gnutrue",)),
+            source_sha="f" * 40,
+        )
+
+    result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
+
+    assert result.returncode == expected_code, result.stdout + result.stderr
+    assert f"rejected ({diagnostic})" in result.stderr
+
+
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+@pytest.mark.parametrize("artifact_kind", ["missing", "fifo", "symlink"])
+def test_validation_unsafe_or_missing_result_is_bounded_unsigned_rejection(
+    tmp_path, artifact_kind
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    artifact.unlink()
+    if artifact_kind == "fifo":
+        os.mkfifo(artifact)
+    elif artifact_kind == "symlink":
+        target = tmp_path / "artifact-target"
+        target.write_text("{}", encoding="utf-8")
+        artifact.symlink_to(target)
+
+    started = time.monotonic()
+    result = _run(
+        repo, sha, artifact, key, env=_environment(tmp_path), timeout=8
+    )
+
+    assert time.monotonic() - started < 8
+    assert result.returncode == 125, result.stdout + result.stderr
+    assert "rejected (unsigned)" in result.stderr
 
 
 @pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)

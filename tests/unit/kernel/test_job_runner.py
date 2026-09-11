@@ -549,7 +549,7 @@ def test_bound_sandbox_preserves_authority_ancestor_ownership_walk(
         TRUSTED_JOB_PYTHON,
         "-c",
         probe,
-        str(script.parent),
+        str(SCRIPT.parent),
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
@@ -671,9 +671,24 @@ def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
 def test_bound_sandbox_arguments_deny_sibling_collection_writes(
     tmp_path: Path,
 ) -> None:
-    from loopzero.kernel import jobs as job_store
-
-    current = job_store.canonical_job_root(REPO_ROOT, configured=str(tmp_path / "jobs"))
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    state_root = script.resolve().parents[3] / "account-state"
+    environment = package_environment({
+        "PATH": "/usr/bin:/bin",
+        **KernelSettings(
+            env_prefix="INTELFLO", state_root=state_root
+        ).child_environment(),
+    })
+    current = Path(subprocess.check_output(
+        [
+            sys.executable, "-m", "loopzero.kernel.jobs", "--worktree",
+            str(repo), "--ensure-root",
+        ],
+        cwd=repo,
+        env=environment,
+        text=True,
+    ).strip())
     sibling = current.parent / f"test-sibling-{os.getpid()}-{tmp_path.name}"
     sibling.mkdir(parents=True)
     forged = sibling / "terminal-envelope.json"
@@ -685,8 +700,8 @@ def test_bound_sandbox_arguments_deny_sibling_collection_writes(
 
     job_name = f"bound-sibling-{os.getpid()}-{tmp_path.name}"
     try:
-        result = _job(
-            tmp_path,
+        result = _default_job(
+            script,
             "run",
             job_name,
             "--timeout",
@@ -709,7 +724,7 @@ def test_bound_sandbox_arguments_deny_sibling_collection_writes(
         assert not forged.exists()
     finally:
         shutil.rmtree(sibling, ignore_errors=True)
-        _job(tmp_path, "clean", job_name)
+        _default_job(script, "clean")
 
 
 def _window(arguments: list[str], expected: list[str]) -> list[str] | None:
