@@ -46,3 +46,14 @@ Run the portable suite with `python -m pytest -q`. SDK-dependent tests use
 integration assertions as well, install `claude-agent-sdk==0.2.152` and
 `openai-codex==0.147.0` into the test interpreter. The latter is the source
 bridge's pinned version, enforced without changing its compatibility check.
+
+`RUNTIME_REGISTRY` adds the deterministic `fake` runner; the legacy
+`NATIVE_RUNTIME_REGISTRY` still lists only Claude, Codex and Cursor. A fake
+`ScenarioSpec` accepts all seven cutover scenarios. A restart checkpoint moves
+into a newly constructed fake adapter and preserves progress sequence numbers.
+`LOOPZERO_CONFORMANCE_RUNNER=claude|codex|cursor` selects the native adapter
+**with replayed process responses**. These tests exercise normalized protocol
+faults without credentials or paid turns. Native cancellation remains a
+transport disconnect (Cursor reports a malformed incomplete stream), and the
+old request contract has no resume token: native restart is an explicit new
+invocation. Live SDK/session conformance is not claimed by this suite.

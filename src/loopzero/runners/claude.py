@@ -929,7 +929,7 @@ class ClaudeAdapter:
                     cwd=request.cwd,
                     input_text=_sdk_model_readiness_payload(request),
                     timeout_s=min(SDK_IMPORT_TIMEOUT_S, request.timeout_s),
-                    env=filtered_claude_environment(),
+                    env={**filtered_claude_environment(), **get_settings().child_environment()},
                 )
             except (OSError, subprocess.TimeoutExpired):
                 outcome = None
@@ -1204,7 +1204,7 @@ class ClaudeAdapter:
                 cwd=request.cwd,
                 input_text=payload,
                 timeout_s=request.timeout_s,
-                env=environment,
+                env={**environment, **get_settings().child_environment()},
                 on_progress=on_progress,
             )
         except subprocess.TimeoutExpired:

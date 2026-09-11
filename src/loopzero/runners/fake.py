@@ -32,6 +32,11 @@ class ScenarioSpec:
     scenario: Scenario = Scenario.SUCCESS
     output: str = "deterministic result"
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "scenario", Scenario(self.scenario))
+        if not isinstance(self.output, str):
+            raise ValueError("fake output must be a string")
+
     @classmethod
     def from_mapping(cls, spec: Mapping[str, object]) -> "ScenarioSpec":
         if set(spec) - {"scenario", "output"}:

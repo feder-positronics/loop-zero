@@ -1,13 +1,10 @@
 """Consumer-injected settings shared by every runner adapter.
 
-The adapters were moved from a product repository where the environment
-prefix, temporary-name prefix, state root, toolchain interpreter and bridge
-location were literals.  Each of those is now read from one
-:class:`RuntimeSettings` value.  Module-level constants in the adapters (the
-environment names a parent shares with its bridge child, for example) are
-bound once at import from :data:`DEFAULT_SETTINGS`; per-adapter values (the
-toolchain interpreter, the bridge path and the derived temp names) come from
-the settings object handed to the adapter.
+Environment names, temporary names, state paths and toolchain paths derive
+from one value. ``settings.use()`` scopes unchanged helper signatures;
+adapters retain their construction scope. Exported string constants describe
+``DEFAULT_SETTINGS`` only. The bridge receives injection across the process
+boundary through a consumed, non-secret bootstrap environment value.
 """
 
 from __future__ import annotations

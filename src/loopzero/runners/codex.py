@@ -1100,7 +1100,7 @@ class CodexAdapter:
                 cwd=request.cwd,
                 input_text=_sdk_readiness_payload(request),
                 timeout_s=min(CONFIG_BOOTSTRAP_TIMEOUT_S, request.timeout_s),
-                env=filtered_codex_environment(),
+                env={**filtered_codex_environment(), **get_settings().child_environment()},
             )
         except (OSError, subprocess.TimeoutExpired):
             outcome = None
@@ -1448,7 +1448,7 @@ class CodexAdapter:
                 cwd=request.cwd,
                 input_text=payload,
                 timeout_s=request.timeout_s,
-                env=runtime_environment,
+                env={**runtime_environment, **get_settings().child_environment()},
                 on_progress=on_progress,
             )
         except subprocess.TimeoutExpired:

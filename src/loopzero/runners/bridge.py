@@ -36,7 +36,19 @@ if not __package__:
 
 from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_adapter_settings
 
-from . import codex_isolation as _codex_isolation
+def _load_adjacent_codex_isolation() -> ModuleType:
+    """Import the package-owned helper without widening interpreter paths."""
+    from . import codex_isolation
+    return codex_isolation
+
+
+def _load_adjacent_contracts() -> ModuleType:
+    """Import shared byte limits through the package."""
+    from . import contract
+    return contract
+
+
+_codex_isolation = _load_adjacent_codex_isolation()
 from .contract import (
     MAX_PROTOCOL_LINE_BYTES,
     MAX_STRUCTURED_OUTPUT_BYTES,
@@ -2289,7 +2301,7 @@ async def main() -> int:
 
 
 def codex_refresh() -> int:
-    if len(sys.argv) not in (1, 2):
+    if sys.argv[1:] not in ([], ["--codex-refresh"]):
         return 2
     try:
         from openai_codex import Codex, CodexConfig
