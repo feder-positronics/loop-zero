@@ -905,12 +905,13 @@ try:
                 and provider_fd_valid
             )
 
-    bwrap = None
-    if (
+    requires_bound_sandbox = (
         binding is not None
         and not trusted_dispatcher
         and not trusted_continuation
-    ):
+    )
+    bwrap = None
+    if requires_bound_sandbox:
         try:
             bwrap = str(system_executable("bwrap"))
         except TrustedExecutableError as exc:
@@ -947,11 +948,7 @@ try:
     if trusted_continuation:
         child_env[TRUSTED_CONTINUATION_ENV] = "1"
     wrapped_command = command
-    if (
-        binding is not None
-        and not trusted_dispatcher
-        and not trusted_continuation
-    ):
+    if requires_bound_sandbox:
         assert bwrap is not None
         # The synthesized-root rationale and invariants live on
         # job_store.build_bound_sandbox_arguments. The parent keeps the only

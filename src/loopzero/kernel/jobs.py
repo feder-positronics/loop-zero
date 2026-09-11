@@ -447,7 +447,10 @@ def build_bound_sandbox_arguments(
     reconciliation forged files. The shared default jobs root is also bound
     read-only, closing writes into another worktree's authority collection.
     Additional trusted-input stores, including continuation candidates, are
-    overlaid read-only after the account-home bind.
+    overlaid read-only after the account-home bind. Their ancestor bind mounts
+    must precede the shared jobs-root overlay: a later bind of a common
+    ancestor (for example ``/tmp`` in an isolated installation) would otherwise
+    hide the read-only jobs mount and silently restore sibling writes.
     """
     if account_home is None:
         try:
@@ -554,8 +557,11 @@ def build_bound_sandbox_arguments(
         "/",
         *root_view,
         *authority_mounts,
-        *shared_root_mount,
         *protected_mounts,
+        # Keep this after every writable ancestor bind. Bubblewrap applies
+        # mounts in argument order, so this must be the last view of the
+        # shared collection before the current authority is sealed below.
+        *shared_root_mount,
         "--ro-bind",
         str(protected_authority_root),
         str(protected_authority_root),

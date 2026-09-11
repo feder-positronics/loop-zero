@@ -474,6 +474,83 @@ def test_bound_job_pins_bubblewrap_outside_inherited_path(tmp_path: Path) -> Non
     assert not marker.exists()
 
 
+def test_bound_job_fails_closed_when_capability_probe_fails(tmp_path: Path) -> None:
+    script = _instrumented_job_script(
+        tmp_path,
+        marker="        require_bwrap_capability(bwrap)\n",
+        replacement=(
+            "        raise RuntimeError(\n"
+            '            "bound job supervision capability probe rejected by test"\n'
+            "        )\n"
+        ),
+    )
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    command_marker = tmp_path / "command-ran"
+
+    result = _job(
+        tmp_path,
+        "run",
+        "failed-capability",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "touch",
+        str(command_marker),
+        script=script,
+    )
+
+    assert result.returncode != 0
+    assert "bound job supervision capability probe rejected by test" in result.stdout
+    assert not command_marker.exists()
+
+
+@requires_nested_user_namespace
+def test_bound_job_runs_inside_private_pid_namespace(tmp_path: Path) -> None:
+    artifact = tmp_path / "terminal.json"
+    artifact.write_text(
+        json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
+        encoding="utf-8",
+    )
+    observed_namespace = tmp_path / "bound-pid-namespace"
+    parent_namespace = os.readlink("/proc/self/ns/pid")
+
+    result = _job(
+        tmp_path,
+        "run",
+        "pid-namespace",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "sh",
+        "-c",
+        'readlink /proc/self/ns/pid > "$1" && test "$(cat "$1")" != "$2"',
+        "sh",
+        str(observed_namespace),
+        parent_namespace,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (
+        observed_namespace.read_text(encoding="ascii").strip() != parent_namespace
+    )
+
+
 @requires_nested_user_namespace
 def test_bound_wrapped_command_cannot_substitute_an_authority_ancestor(
     tmp_path: Path,
@@ -632,6 +709,21 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert _window(
         arguments,
         ["--ro-bind", str(candidate_store), str(candidate_store)],
+    )
+    shared_jobs_overlay = [
+        "--ro-bind",
+        "/var/home/user/.local/state/intelflo/jobs",
+        "/var/home/user/.local/state/intelflo/jobs",
+    ]
+    overlay_index = next(
+        index
+        for index in range(len(arguments) - len(shared_jobs_overlay) + 1)
+        if arguments[index : index + len(shared_jobs_overlay)] == shared_jobs_overlay
+    )
+    assert overlay_index > max(
+        index
+        for index, argument in enumerate(arguments)
+        if argument in {"--bind", "--symlink"}
     )
     # The read-only remount of the synthesized root is the final mount
     # operation, after --proc and --dev-bind create their mount points.
