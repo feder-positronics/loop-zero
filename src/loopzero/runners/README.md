@@ -47,7 +47,8 @@ nonempty reason and logs it. It is intended for tightly scoped process-mechanics
 tests, not validation children. The wrapper contract is ``argv -> argv`` and is
 owned by `loopzero.kernel.sandbox`; the dispatcher wires it into runners. The
 wrapper must bind the governed worktree, tooling root, runtime venv root, and
-`settings.workspace_root(tooling_root)`. The venv binding must include the
+`settings.workspace_root(tooling_root)`. It must also provide a private `/dev` and `/proc` to the child (Python
+refuses to start without `/dev/urandom`). The venv binding must include the
 interpreter's `pyvenv.cfg`, `bin`, and `lib` so the bridge can import its SDKs.
 Every runner child cwd is inside either the governed worktree or that settings
 workspace root; credential renewals use a private, per-refresh directory below

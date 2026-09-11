@@ -39,6 +39,12 @@ def _test_bwrap_argv(
         "--ro-bind",
         "/",
         "/",
+        # Python needs /dev/urandom for hash randomization and /proc for its
+        # own startup; a kernel wrapper must provide both to any child.
+        "--dev",
+        "/dev",
+        "--proc",
+        "/proc",
     ]
     for root in (tooling_root, venv_root, bridge_dir):
         argv.extend(("--ro-bind", str(root), str(root)))
