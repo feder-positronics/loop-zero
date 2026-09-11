@@ -13,6 +13,7 @@ import re
 import stat
 import subprocess
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from loopzero.trust import git_environment
@@ -424,28 +425,78 @@ def _canonical_candidate_protection_paths(tool_repository: Path | None = None) -
     return tuple(protected)
 
 
-def _protected_read_only_mounts(
-    paths: Sequence[Path], *, account_home: Path
-) -> list[str]:
-    mounts: list[str] = []
-    bound: set[Path] = set()
-    for protected in paths:
-        if not protected.is_absolute() or protected == Path("/"):
-            raise JobStoreError("protected read-only path is invalid")
-        _reject_kernel_filesystem_path(protected, label="protected read-only path")
-        for ancestor in reversed(protected.parents):
-            if (
-                ancestor == Path("/")
-                or ancestor in _KERNEL_FILESYSTEM_ROOTS
-                or ancestor == account_home
-                or ancestor in account_home.parents
-                or ancestor in bound
-            ):
-                continue
-            mounts.extend(("--bind", str(ancestor), str(ancestor)))
-            bound.add(ancestor)
-        mounts.extend(("--ro-bind", str(protected), str(protected)))
-    return mounts
+@dataclass(frozen=True)
+class _BoundMount:
+    mode: str
+    source: Path | None
+    destination: Path
+    kernel_owned_seal: bool = False
+
+
+def _validated_bound_destination(
+    path: Path,
+    *,
+    label: str,
+    emitted_mounts: Sequence[_BoundMount],
+    builder_emitted: bool,
+) -> Path:
+    """Walk a destination through the source trees of preceding bind mounts."""
+    lexical = Path(os.path.abspath(path))
+    if not builder_emitted and any(
+        mount.kernel_owned_seal
+        and lexical != mount.destination
+        and lexical.is_relative_to(mount.destination)
+        for mount in emitted_mounts
+    ):
+        raise JobStoreError(f"{label} lies beneath a read-only authority seal")
+
+    current = Path("/")
+    mounted_source: Path | None = None
+    mounted_destination: Path | None = None
+    mounted_index = -1
+    for index, part in enumerate(lexical.parts[1:]):
+        current /= part
+        matching = next(
+            (
+                (mount_index, mount)
+                for mount_index, mount in reversed(tuple(enumerate(emitted_mounts)))
+                if mount_index > mounted_index and mount.destination == current
+            ),
+            None,
+        )
+        if matching is not None:
+            mounted_index, mount = matching
+            if mount.source is None:
+                raise JobStoreError(f"{label} contains a symlinked component")
+            mounted_source = mount.source
+            mounted_destination = mount.destination
+            inspected = mounted_source
+        elif mounted_source is None or mounted_destination is None:
+            inspected = current
+        else:
+            try:
+                inspected = mounted_source / current.relative_to(mounted_destination)
+            except ValueError as exc:
+                raise JobStoreError(f"{label} escapes an earlier mount source") from exc
+        try:
+            state = os.lstat(inspected)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise JobStoreError(f"{label} is unavailable") from exc
+        if stat.S_ISLNK(state.st_mode):
+            raise JobStoreError(f"{label} contains a symlinked component")
+        if index < len(lexical.parts[1:]) - 1 and not stat.S_ISDIR(state.st_mode):
+            raise JobStoreError(f"{label} is unavailable")
+        if mounted_source is not None:
+            try:
+                resolved_source = mounted_source.resolve(strict=False)
+                resolved_inspected = inspected.resolve(strict=False)
+            except (OSError, RuntimeError) as exc:
+                raise JobStoreError(f"{label} is unavailable") from exc
+            if not resolved_inspected.is_relative_to(resolved_source):
+                raise JobStoreError(f"{label} escapes an earlier mount source")
+    return lexical
 
 
 def build_bound_sandbox_arguments(
@@ -524,11 +575,45 @@ def build_bound_sandbox_arguments(
         def read_symlink_target(path: Path) -> str | None:
             return os.readlink(path) if path.is_symlink() else None
 
+    emitted_mounts: list[_BoundMount] = []
+
+    def emit_mount(
+        mode: str,
+        source: Path,
+        destination: Path,
+        *,
+        label: str,
+        builder_emitted: bool = True,
+        kernel_owned_seal: bool = False,
+    ) -> list[str]:
+        validated_destination = _validated_bound_destination(
+            destination,
+            label=label,
+            emitted_mounts=emitted_mounts,
+            builder_emitted=builder_emitted,
+        )
+        emitted_mounts.append(
+            _BoundMount(
+                mode,
+                source,
+                validated_destination,
+                kernel_owned_seal=kernel_owned_seal,
+            )
+        )
+        return [mode, str(source), str(validated_destination)]
+
     def bind_entry(source: Path) -> list[str]:
         target = read_symlink_target(source)
         if target is not None:
+            destination = Path(os.path.abspath(source))
+            emitted_mounts.append(_BoundMount("--symlink", None, destination))
             return ["--symlink", target, str(source)]
-        return ["--bind", str(source), str(source)]
+        return emit_mount(
+            "--bind",
+            source,
+            source,
+            label="bound sandbox root destination",
+        )
 
     home_chain = [
         *(ancestor for ancestor in reversed(account_home.parents) if ancestor != Path("/")),
@@ -572,7 +657,22 @@ def build_bound_sandbox_arguments(
             if entry_path == next_component:
                 continue
             root_view.extend(bind_entry(entry_path))
-    root_view.extend(("--bind", str(account_home), str(account_home)))
+    root_view.extend(
+        emit_mount(
+            "--bind",
+            account_home,
+            account_home,
+            label="bound sandbox account-home destination",
+        )
+    )
+
+    # These broad mounts precede every authority mount in the emitted argv.
+    emitted_mounts.extend(
+        (
+            _BoundMount("--proc", Path("/proc"), Path("/proc")),
+            _BoundMount("--dev-bind", Path("/dev"), Path("/dev")),
+        )
+    )
 
     authority_mounts: list[str] = []
     for ancestor in reversed(protected_authority_root.parents):
@@ -585,15 +685,64 @@ def build_bound_sandbox_arguments(
             # Already unrenameable: the account home is a bind mount point and
             # its strict ancestors live in the read-only tmpfs root.
             continue
-        authority_mounts.extend(("--bind", str(ancestor), str(ancestor)))
+        authority_mounts.extend(
+            emit_mount(
+                "--bind",
+                ancestor,
+                ancestor,
+                label="bound sandbox authority destination",
+            )
+        )
     shared_root_mount: list[str] = []
+    protected_mounts: list[str] = []
+    protected_ancestors: set[Path] = set()
+    for protected in protected_read_only_paths:
+        if not protected.is_absolute() or protected == Path("/"):
+            raise JobStoreError("protected read-only path is invalid")
+        for ancestor in reversed(protected.parents):
+            if (
+                ancestor == Path("/")
+                or ancestor in _KERNEL_FILESYSTEM_ROOTS
+                or ancestor == account_home
+                or ancestor in account_home.parents
+                or ancestor in protected_ancestors
+            ):
+                continue
+            protected_mounts.extend(
+                emit_mount(
+                    "--bind",
+                    ancestor,
+                    ancestor,
+                    label="protected read-only ancestor destination",
+                )
+            )
+            protected_ancestors.add(ancestor)
+        protected_mounts.extend(
+            emit_mount(
+                "--ro-bind",
+                protected,
+                protected,
+                label="protected read-only destination",
+                builder_emitted=False,
+                kernel_owned_seal=True,
+            )
+        )
     if protected_authority_root.parent == shared_jobs_root:
         shared_root_mount.extend(
-            ("--ro-bind", str(shared_jobs_root), str(shared_jobs_root))
+            emit_mount(
+                "--ro-bind",
+                shared_jobs_root,
+                shared_jobs_root,
+                label="bound sandbox shared authority destination",
+                kernel_owned_seal=True,
+            )
         )
-    protected_mounts = _protected_read_only_mounts(
-        protected_read_only_paths,
-        account_home=account_home,
+    authority_seal = emit_mount(
+        "--ro-bind",
+        protected_authority_root,
+        protected_authority_root,
+        label="bound sandbox authority seal destination",
+        kernel_owned_seal=True,
     )
     return [
         bubblewrap,
@@ -619,9 +768,7 @@ def build_bound_sandbox_arguments(
         # mounts in argument order, so this must be the last view of the
         # shared collection before the current authority is sealed below.
         *shared_root_mount,
-        "--ro-bind",
-        str(protected_authority_root),
-        str(protected_authority_root),
+        *authority_seal,
         "--remount-ro",
         "/",
         "--chdir",

@@ -35,7 +35,10 @@ Use `sandbox.run_validation_child(argv, worktree=...)` for validation. It builds
 read-only mounts over the worktree Git metadata and the linked worktree common
 Git directory, filters the environment, and closes inherited descriptors. Every
 caller-selected mount destination is walked without following symlinks and is
-rejected if it aliases `/`, `/proc`, `/sys`, or `/dev`.
+rejected if it aliases `/`, `/proc`, `/sys`, or `/dev`. That walk follows the
+source-tree mapping of every earlier mount, so a symlink exposed by one mount
+cannot redirect a later destination. Caller mounts also cannot be placed below
+the builder's read-only Git or authority seals.
 Namespace failure is a failed prerequisite, not an unsandboxed fallback.
 `validation_command` builds the filesystem boundary for an existing process
 adapter; that adapter must also apply the environment and descriptor boundary.

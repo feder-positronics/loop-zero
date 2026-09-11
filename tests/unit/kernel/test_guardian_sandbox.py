@@ -114,6 +114,79 @@ def test_sandbox_builder_rejects_a_destination_symlinked_into_proc(
         )
 
 
+def test_sandbox_builder_rejects_a_destination_symlinked_by_an_earlier_mount(
+    tmp_path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    mounted_directory = tmp_path / "mounted-directory"
+    mounted_file = tmp_path / "mounted-file"
+    worktree.mkdir()
+    mounted_directory.mkdir()
+    mounted_file.write_text("candidate\n", encoding="utf-8")
+    (mounted_directory / "p").symlink_to("../proc", target_is_directory=True)
+    destination = Path("/") / f"loopzero-safe-{tmp_path.name}"
+    monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="symlinked component"):
+        module.command(
+            ["/usr/bin/true"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_mounts=((mounted_directory, destination),),
+            read_only_file_mounts=((mounted_file, destination / "p" / "version"),),
+            deny_network=True,
+        )
+
+
+def test_validation_builder_allows_the_git_directory_beneath_the_worktree(
+    tmp_path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    subprocess.run(["/usr/bin/git", "init", "-q", str(worktree)], check=True)
+    monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    arguments = module.validation_command(["/usr/bin/true"], worktree=worktree)
+
+    git_directory = str(worktree / ".git")
+    assert ["--ro-bind", git_directory, git_directory] == arguments[
+        arguments.index(git_directory) - 1 : arguments.index(git_directory) + 2
+    ]
+
+
+def test_sandbox_builder_rejects_a_caller_mount_beneath_a_read_only_seal(
+    tmp_path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    git_directory = worktree / ".git"
+    mounted_file = tmp_path / "mounted-file"
+    git_directory.mkdir(parents=True)
+    mounted_file.write_text("candidate\n", encoding="utf-8")
+    monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="read-only sandbox seal"):
+        module.command(
+            ["/usr/bin/true"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_roots=(git_directory,),
+            read_only_file_mounts=((mounted_file, git_directory / "config"),),
+            deny_network=True,
+        )
+
+
 def test_validation_child_overlays_config_and_forces_safe_git_settings(
     tmp_path, monkeypatch
 ) -> None:

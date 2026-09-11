@@ -17,6 +17,7 @@ import tempfile
 from collections import deque
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -189,29 +190,79 @@ def _reject_kernel_filesystem_path(path: Path, *, label: str) -> None:
         )
 
 
-def _validated_destination(path: Path, *, label: str) -> Path:
-    """Validate every existing component of a lexical mount destination."""
+@dataclass(frozen=True)
+class _EmittedMount:
+    mode: str
+    source: Path
+    destination: Path
+    kernel_owned_seal: bool = False
+
+
+def _validated_destination(
+    path: Path,
+    *,
+    label: str,
+    emitted_mounts: Sequence[_EmittedMount] = (),
+    builder_emitted: bool = False,
+) -> Path:
+    """Validate a destination against the namespace built by earlier mounts."""
     lexical = Path(os.path.abspath(path))
     _reject_kernel_filesystem_path(lexical, label=label)
+    if not builder_emitted and any(
+        mount.kernel_owned_seal
+        and lexical != mount.destination
+        and lexical.is_relative_to(mount.destination)
+        for mount in emitted_mounts
+    ):
+        raise SandboxError(f"{label} lies beneath a read-only sandbox seal")
+
     current = Path("/")
+    mounted_source: Path | None = None
+    mounted_destination: Path | None = None
+    mounted_index = -1
     parts = lexical.parts[1:]
     for index, part in enumerate(parts):
         current /= part
+        matching = next(
+            (
+                (mount_index, mount)
+                for mount_index, mount in reversed(tuple(enumerate(emitted_mounts)))
+                if mount_index > mounted_index and mount.destination == current
+            ),
+            None,
+        )
+        if matching is not None:
+            mounted_index, matching_mount = matching
+            mounted_source = matching_mount.source
+            mounted_destination = matching_mount.destination
+            inspected = mounted_source
+        elif mounted_source is None or mounted_destination is None:
+            inspected = current
+        else:
+            try:
+                remainder = current.relative_to(mounted_destination)
+            except ValueError as exc:
+                raise SandboxError(f"{label} escapes an earlier mount source") from exc
+            inspected = mounted_source / remainder
         try:
-            state = os.lstat(current)
+            state = os.lstat(inspected)
         except FileNotFoundError:
-            break
+            continue
         except OSError as exc:
             raise SandboxError(f"{label} is unavailable") from exc
         if stat.S_ISLNK(state.st_mode):
             raise SandboxError(f"{label} contains a symlinked component")
         if index < len(parts) - 1 and not stat.S_ISDIR(state.st_mode):
             raise SandboxError(f"{label} is unavailable")
-    try:
-        resolved = lexical.resolve(strict=False)
-    except (OSError, RuntimeError) as exc:
-        raise SandboxError(f"{label} is unavailable") from exc
-    _reject_kernel_filesystem_path(resolved, label=label)
+        try:
+            resolved = inspected.resolve(strict=False)
+            if mounted_source is not None and not resolved.is_relative_to(
+                mounted_source.resolve(strict=False)
+            ):
+                raise SandboxError(f"{label} escapes an earlier mount source")
+        except (OSError, RuntimeError) as exc:
+            raise SandboxError(f"{label} is unavailable") from exc
+        _reject_kernel_filesystem_path(resolved, label=label)
     return lexical
 
 
@@ -491,6 +542,7 @@ def command(
     read_only_files: Sequence[Path] = (),
     read_only_mounts: Sequence[tuple[Path, Path]] = (),
     read_only_file_mounts: Sequence[tuple[Path, Path]] = (),
+    _builder_read_only_file_mounts: Sequence[tuple[Path, Path]] = (),
     preserve_fds: Sequence[int] = (),
     deny_network: bool,
     include_model_runtime: bool = True,
@@ -504,88 +556,111 @@ def command(
     paths below ``/proc``, ``/sys``, or ``/dev`` are rejected before any
     argument list is built, so none can shadow the private kernel filesystems.
     """
-    validated_audit_destination = (
-        _validated_destination(
-            audit_destination, label="sandbox audit destination"
-        )
-        if audit_destination is not None
-        else None
-    )
-    validated_git_destination = (
-        _validated_destination(git_destination, label="sandbox Git destination")
-        if git_destination is not None
-        else None
-    )
     resolved_worktree = _validated(worktree, directory=True)
     worktree_destination = _validated_destination(
         worktree, label="sandbox worktree destination"
     )
-    mounts: list[tuple[str, Path, Path]] = [
-        (
-            "--bind" if writable_worktree else "--ro-bind",
+    worktree_mode = "--bind" if writable_worktree else "--ro-bind"
+    mounts: list[_EmittedMount] = [
+        _EmittedMount(
+            worktree_mode,
             resolved_worktree,
             worktree_destination,
+            kernel_owned_seal=worktree_mode == "--ro-bind",
         )
     ]
+
+    def add_mount(
+        mode: str,
+        source: Path,
+        destination: Path,
+        *,
+        label: str,
+        builder_emitted: bool,
+        kernel_owned_seal: bool,
+    ) -> None:
+        validated_destination = _validated_destination(
+            destination,
+            label=label,
+            emitted_mounts=mounts,
+            builder_emitted=builder_emitted,
+        )
+        mounts.append(
+            _EmittedMount(
+                mode,
+                source,
+                validated_destination,
+                kernel_owned_seal=kernel_owned_seal,
+            )
+        )
+
     if audit_source is not None:
         if audit_destination is None or not audit_destination.is_absolute():
             raise SandboxError("sandbox audit destination is invalid")
-        mounts.append(
-            (
-                "--bind",
-                _validated(audit_source, directory=True),
-                validated_audit_destination,
-            )
+        add_mount(
+            "--bind",
+            _validated(audit_source, directory=True),
+            audit_destination,
+            label="sandbox audit destination",
+            builder_emitted=True,
+            kernel_owned_seal=False,
         )
     if git_source is not None:
         if git_destination is None or not git_destination.is_absolute():
             raise SandboxError("sandbox Git destination is invalid")
-        mounts.append(
-            (
-                "--bind" if writable_git else "--ro-bind",
-                _validated(git_source, directory=True),
-                validated_git_destination,
-            )
+        git_mode = "--bind" if writable_git else "--ro-bind"
+        add_mount(
+            git_mode,
+            _validated(git_source, directory=True),
+            git_destination,
+            label="sandbox Git destination",
+            builder_emitted=True,
+            kernel_owned_seal=git_mode == "--ro-bind",
         )
     for path in read_only_roots:
-        mounts.append(
-            (
-                "--ro-bind",
-                _validated(path, directory=True),
-                _validated_destination(
-                    path, label="sandbox protected destination"
-                ),
-            )
+        add_mount(
+            "--ro-bind",
+            _validated(path, directory=True),
+            path,
+            label="sandbox protected destination",
+            builder_emitted=True,
+            kernel_owned_seal=True,
         )
     for path in read_only_files:
-        mounts.append(
-            (
-                "--ro-bind",
-                _validated(path, directory=False),
-                _validated_destination(
-                    path, label="sandbox protected destination"
-                ),
-            )
+        add_mount(
+            "--ro-bind",
+            _validated(path, directory=False),
+            path,
+            label="sandbox protected destination",
+            builder_emitted=True,
+            kernel_owned_seal=True,
         )
     for source, destination in read_only_mounts:
-        mounts.append(
-            (
-                "--ro-bind",
-                _validated(source, directory=True),
-                _validated_destination(
-                    destination, label="sandbox protected destination"
-                ),
-            )
+        add_mount(
+            "--ro-bind",
+            _validated(source, directory=True),
+            destination,
+            label="sandbox protected destination",
+            builder_emitted=False,
+            kernel_owned_seal=False,
         )
     for source, destination in read_only_file_mounts:
-        mounts.append(
-            (
-                "--ro-bind",
-                _validated(source, directory=False),
-                _validated_destination(
-                    destination, label="sandbox protected destination"
-                ),
-            )
+        add_mount(
+            "--ro-bind",
+            _validated(source, directory=False),
+            destination,
+            label="sandbox protected destination",
+            builder_emitted=False,
+            kernel_owned_seal=False,
+        )
+    for source, destination in _builder_read_only_file_mounts:
+        add_mount(
+            "--ro-bind",
+            _validated(source, directory=False),
+            destination,
+            label="sandbox protected destination",
+            builder_emitted=True,
+            kernel_owned_seal=True,
         )
     runtime_roots: set[tuple[Path, Path]] = set()
     for root in (
@@ -605,10 +680,7 @@ def command(
                 runtime_roots.add(
                     (
                         resolved_runtime,
-                        _validated_destination(
-                            resolved_runtime,
-                            label="sandbox interpreter destination",
-                        ),
+                        resolved_runtime,
                     )
                 )
                 if interpreter.is_symlink():
@@ -618,18 +690,20 @@ def command(
                         runtime_roots.add(
                             (
                                 resolved_runtime,
-                                _validated_destination(
-                                    destination,
-                                    label="sandbox interpreter destination",
-                                ),
+                                destination,
                             )
                         )
-    mounts.extend(
-        ("--ro-bind", source, destination)
-        for source, destination in sorted(runtime_roots)
-    )
+    for source, destination in sorted(runtime_roots):
+        add_mount(
+            "--ro-bind",
+            source,
+            destination,
+            label="sandbox interpreter destination",
+            builder_emitted=True,
+            kernel_owned_seal=True,
+        )
     writable_sources = tuple(
-        source for mode, source, _destination in mounts if mode == "--bind"
+        mount.source for mount in mounts if mount.mode == "--bind"
     )
     uv = _tool("uv", forbidden_roots=writable_sources)
     corepack_runtime = (
@@ -745,12 +819,12 @@ def command(
         Path("/run"),
         GUARDIAN_BIN_ROOT,
     }
-    for mode, source, destination in mounts:
-        for parent in _parents(destination):
+    for mount in mounts:
+        for parent in _parents(mount.destination):
             if parent not in created:
                 built.extend(["--dir", str(parent)])
                 created.add(parent)
-        built.extend([mode, str(source), str(destination)])
+        built.extend([mount.mode, str(mount.source), str(mount.destination)])
     env_bindings: list[str] = [
         "--chmod",
         "0555",
@@ -813,7 +887,7 @@ def validation_command(
         git_source=None, git_destination=None, writable_git=False,
         read_only_roots=roots,
         read_only_files=(git_entry,) if git_entry.is_file() else (),
-        read_only_file_mounts=read_only_file_mounts,
+        _builder_read_only_file_mounts=read_only_file_mounts,
         deny_network=deny_network, include_model_runtime=False,
     )
 

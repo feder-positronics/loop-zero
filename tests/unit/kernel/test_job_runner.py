@@ -804,6 +804,24 @@ def test_bound_sandbox_rejects_kernel_filesystem_protected_paths(
         )
 
 
+def test_bound_sandbox_rejects_a_destination_beneath_an_emitted_symlink() -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="symlinked component"):
+        job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            protected_authority_root=Path("/safe/p/version"),
+            working_directory=Path("/home/user/repo"),
+            command=["true"],
+            account_home=Path("/home/user"),
+            protected_read_only_paths=(),
+            **_fake_filesystem_views(
+                {"/": ["home", "safe"], "/home": ["user"]},
+                {"/safe": "../proc"},
+            ),
+        )
+
+
 def test_bound_sandbox_supports_dev_shm_authority_without_rebinding_dev() -> None:
     from loopzero.kernel import jobs as job_store
 
