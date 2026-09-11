@@ -167,6 +167,11 @@ def has_opaque_auto_effective_identity(record: Mapping[str, object]) -> bool:
     )
 
 
+def is_configured_alias(value: object) -> bool:
+    """Return whether a value names consumer routing data."""
+    return isinstance(value, str) and value in settings().aliases
+
+
 def supersession_reason_matches_terminal(
     supersession: Mapping[str, object], deposit: Mapping[str, object]
 ) -> bool:
@@ -186,7 +191,12 @@ def supersession_reason_matches_terminal(
         and has_opaque_auto_effective_identity(deposit)
         and supersession.get("superseding_source_identity") == deposit.get("source_identity")
         and isinstance(supersession.get("replacement_alias"), str)
-        and supersession.get("replacement_alias") not in {"", "auto"}
+        and is_configured_alias(supersession.get("replacement_alias"))
+        and not has_opaque_auto_effective_identity(
+            {"effective_alias": supersession.get("replacement_alias"),
+             "engine": settings().aliases[str(supersession.get("replacement_alias"))].runner,
+             "runtime_effective_model": settings().aliases[str(supersession.get("replacement_alias"))].model}
+        )
         and isinstance(supersession.get("replacement_effort"), str)
     )
 
