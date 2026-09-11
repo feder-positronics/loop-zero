@@ -836,9 +836,12 @@ def test_bound_sandbox_rejects_a_file_mount_beneath_a_root_symlink(
             command=["true"],
             account_home=Path("/home/user"),
             protected_read_only_paths=(root / "loopzero-version",),
+            # Simulate a non-usr-merged host: /bin and /lib64 are plain
+            # directories here, so only the namespace model of the emitted
+            # root symlinks can reject the destination.
             **_fake_filesystem_views(
-                {"/": ["bin", "home", "lib64"], "/home": ["user"]},
-                {"/bin": "usr/bin", "/lib64": "usr/lib64"},
+                {"/": ["bin", "home", "lib64"], "/home": ["user"], "/bin": [], "/lib64": []},
+                {},
             ),
         )
 
