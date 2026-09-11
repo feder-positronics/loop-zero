@@ -25,6 +25,7 @@ class RoutingSettings:
     engine_cooldown_s: int
     audit_root: Path
     env_prefix: str
+    verifier_models: Mapping[str, str]
 
     @classmethod
     def from_profile(cls, profile: Profile) -> "RoutingSettings":
@@ -39,6 +40,7 @@ class RoutingSettings:
             engine_cooldown_s=profile.engine_cooldown_s,
             audit_root=profile.audit_root,
             env_prefix=profile.env_prefix,
+            verifier_models=getattr(profile, "verifier_models", {}),
         )
 
 
@@ -123,47 +125,86 @@ def route(alias: str, effort: str) -> RoutingDecision:
     configured = settings().aliases
     if alias not in configured:
         raise DispatchError(f"unknown model alias {alias!r}; known: {', '.join(sorted(configured))}")
-    if effort not in EFFORTS:
-        raise DispatchError(f"unknown effort {effort!r}; known: {', '.join(EFFORTS)}")
     value = configured[alias]
+    known_efforts = tuple(dict.fromkeys(
+        effort_name
+        for configured_alias in configured.values()
+        for effort_name in getattr(
+            configured_alias,
+            "allowed_efforts",
+            ("low", "medium", "high", "xhigh", "max"),
+        )
+    ))
+    if effort not in known_efforts:
+        raise DispatchError(
+            f"unknown effort {effort!r}; known: {', '.join(known_efforts)}"
+        )
+    allowed_efforts = tuple(
+        getattr(value, "allowed_efforts", ("low", "medium", "high", "xhigh", "max"))
+    )
+    if effort not in allowed_efforts:
+        raise DispatchError(
+            f"effort {effort!r} is a banned grade for {alias} "
+            f"(cost-ineffective on the benchmark curve); allowed: "
+            f"{', '.join(allowed_efforts)}"
+        )
+    engines = tuple(getattr(value, "engines", ())) or (value.runner,)
+    primary = engines[0]
+    backup = engines[1] if len(engines) > 1 else None
     return RoutingDecision(
         alias=alias,
         effort=effort,
-        engine=value.runner,
+        engine=primary,
         model=value.model,
-        backup_engine=None,
-        rationale=f"configured alias {alias} uses runner {value.runner}",
+        backup_engine=backup,
+        rationale=f"{alias} is {getattr(value, 'family', value.runner)}-family: "
+        f"primary engine {primary}" + (
+            f", backup {backup} (model {getattr(value, 'backup_model', None)})"
+            if backup else ""
+        ),
     )
 
 
 def effective_attempt_alias(alias: str, engine: str) -> str:
-    decision = route(alias, resolve_alias_effort(alias))
-    if decision.engine != engine:
+    configured = settings().aliases
+    if alias not in configured:
+        raise DispatchError(
+            f"unknown model alias {alias!r}; known: {', '.join(sorted(configured))}"
+        )
+    value = configured[alias]
+    engines = tuple(getattr(value, "engines", ())) or (value.runner,)
+    if engine not in engines:
         raise DispatchError(f"runner {engine!r} is not configured for alias {alias!r}")
+    if engine == "cursor" and value.runner != "cursor":
+        return "auto"
     return alias
 
 
 def resolve_alias_effort(alias: str) -> str:
-    matches = [tier.effort for tier in settings().tiers.values() if tier.alias == alias]
-    return matches[0] if matches else "medium"
+    try:
+        return getattr(settings().aliases[alias], "default_effort", "medium")
+    except KeyError:
+        raise DispatchError(f"unknown model alias {alias!r}") from None
 
 
 def model_verifier_aliases() -> tuple[str, ...]:
-    return tuple(settings().aliases)
+    configured = settings()
+    return (*configured.aliases, *configured.verifier_models)
 
 
 def has_opaque_auto_effective_identity(record: Mapping[str, object]) -> bool:
-    alias = record.get("effective_alias")
-    try:
-        configured = settings().aliases[str(alias)]
-    except (KeyError, DispatchError):
-        return False
     runtime_model = record.get("runtime_effective_model")
+    normalized_runtime = (
+        "-".join(runtime_model.casefold().split())
+        if isinstance(runtime_model, str) and runtime_model.strip()
+        else None
+    )
     return bool(
-        configured.model == "auto"
-        and record.get("engine") == configured.runner
-        and isinstance(runtime_model, str)
-        and "auto" in runtime_model.casefold()
+        record.get("effective_alias") == "auto"
+        and record.get("engine") == "cursor"
+        and record.get("model") == "auto"
+        and record.get("worker_identity") == "cursor:auto"
+        and normalized_runtime in {"auto", "cursor-auto"}
     )
 
 
@@ -191,13 +232,9 @@ def supersession_reason_matches_terminal(
         and has_opaque_auto_effective_identity(deposit)
         and supersession.get("superseding_source_identity") == deposit.get("source_identity")
         and isinstance(supersession.get("replacement_alias"), str)
-        and is_configured_alias(supersession.get("replacement_alias"))
-        and not has_opaque_auto_effective_identity(
-            {"effective_alias": supersession.get("replacement_alias"),
-             "engine": settings().aliases[str(supersession.get("replacement_alias"))].runner,
-             "runtime_effective_model": settings().aliases[str(supersession.get("replacement_alias"))].model}
-        )
+        and supersession.get("replacement_alias") not in {"", "auto"}
         and isinstance(supersession.get("replacement_effort"), str)
+        and bool(supersession.get("replacement_effort"))
     )
 
 
@@ -209,15 +246,29 @@ def verifier_identity_is_independent(
         return False
     if verifier_identity == worker_identity or verifier_alias == worker_alias:
         return False
-    if verifier_alias == "human":
-        return True
-    if not isinstance(verifier_alias, str) or verifier_alias not in settings().aliases:
+    if verifier_alias in {"auto", "cursor-auto"}:
         return False
-    verifier_model = settings().aliases[verifier_alias].model
-    actual_worker_model = worker_model if isinstance(worker_model, str) else ""
+    actual_worker_model = worker_model if isinstance(worker_model, str) else None
     if not actual_worker_model and isinstance(worker_identity, str):
         actual_worker_model = worker_identity.partition(":")[2]
-    return bool(actual_worker_model and verifier_model.casefold() != actual_worker_model.casefold())
+    normalized_worker = "-".join((actual_worker_model or "").casefold().split())
+    if verifier_alias == "human":
+        return True
+    if normalized_worker in {"auto", "cursor-auto"}:
+        return False
+    configured = settings()
+    verifier_model = configured.verifier_models.get(str(verifier_alias))
+    verifier_route = configured.aliases.get(str(verifier_alias))
+    verifier_models = {
+        "-".join(str(value).casefold().split())
+        for value in (
+            verifier_model,
+            verifier_route.model if verifier_route else None,
+            verifier_route.backup_model if verifier_route else None,
+        )
+        if value
+    }
+    return bool(verifier_models) and normalized_worker not in verifier_models
 
 
 REVIEW_INTENTS = (
@@ -228,6 +279,89 @@ REVIEW_LENSES = ("code", "security")
 NON_MODEL_VERIFIER_ALIASES = ("human",)
 SKILL_RUN_ID_RE = re.compile(r"^sr_[0-9a-f]{32}$")
 RUNTIME_CONTRACT_VERSION = 4
+WORK_UNIT_HISTORY_DAYS = 3650
+DISPATCH_OUTCOME_TYPES = frozenset(
+    {"attempt-terminal", "attempt-recovery", "attempt-abort", "attempt-timeout"}
+)
+ATTEMPT_HISTORY_TYPES = frozenset(
+    {
+        "attempt-start",
+        "attempt-checkpoint",
+        "deposit-verification",
+        "review-recovery-verification",
+        "attempt-terminal",
+        "attempt-recovery",
+        "attempt-supersession",
+        "inline",
+        "attempt-abort",
+    }
+)
+ESCALATION_TARGETS: dict[str, frozenset[str]] = {
+    "luna": frozenset({"terra"}),
+    "auto": frozenset({"terra"}),
+    "terra": frozenset({"sol"}),
+    "fable": frozenset({"sol"}),
+    "fable-cursor": frozenset({"sol"}),
+    "grok-cursor": frozenset({"sol"}),
+    "opus": frozenset({"sol"}),
+}
+
+
+def validate_retry_policy(
+    records: list[dict[str, object]],
+    *,
+    task_id: str,
+    work_unit_id: str,
+    alias: str,
+    effort: str,
+    retry_args: object | None = None,
+) -> int:
+    """Enforce the routing-owned one-step escalation graph.
+
+    Cutover B owns the surrounding attempt-state admission.  This retained
+    mechanism deliberately projects only authenticated outcomes and route
+    succession, which is the portion formerly delegated to this routing table.
+    """
+    del retry_args
+    from ..kernel.authority_projection import current_telemetry, retained_task_ids
+    from .authority import authenticated_retry_outcomes
+
+    governed = current_telemetry(records)
+    if task_id in retained_task_ids(records) or any(
+        record.get("type") in ATTEMPT_HISTORY_TYPES
+        and record.get("task_id") == task_id
+        for record in governed
+    ):
+        raise DispatchError(f"task_id {task_id!r} already exists")
+    outcomes = authenticated_retry_outcomes(records)
+    attempts: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for record in reversed(outcomes):
+        if str(record.get("work_unit_id") or record.get("task_id")) != work_unit_id:
+            continue
+        prior_task_id = str(record.get("task_id"))
+        if prior_task_id in seen:
+            continue
+        seen.add(prior_task_id)
+        attempts.append(record)
+    attempts.reverse()
+    if attempts:
+        prior = attempts[-1]
+        prior_alias = str(prior.get("effective_alias") or prior.get("alias"))
+        allowed = ESCALATION_TARGETS.get(prior_alias, frozenset())
+        if alias not in allowed:
+            target_text = ", ".join(sorted(allowed)) or "none"
+            raise DispatchError(
+                f"work unit {work_unit_id!r} must escalate from {prior_alias} "
+                f"to one of: {target_text}; {alias} {effort} is not allowed"
+            )
+    numbers = [
+        value
+        for record in outcomes
+        if str(record.get("work_unit_id") or record.get("task_id")) == work_unit_id
+        and type(value := record.get("unit_attempt_number")) is int
+    ]
+    return max(numbers, default=0) + 1
 
 
 def __getattr__(name: str):
@@ -262,5 +396,5 @@ __all__ = [
     "CommandResult", "EnginePreflight", "RoutingDecision", "RoutingSettings",
     "configure", "effective_attempt_alias", "model_verifier_aliases", "route",
     "resolve_tier_default", "supersession_reason_matches_terminal",
-    "verifier_identity_is_independent",
+    "validate_retry_policy", "verifier_identity_is_independent",
 ]

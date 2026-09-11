@@ -67,6 +67,7 @@ ROUTING_KEYS = frozenset(
         "compatible_policy_versions",
         "default_timeout_s",
         "engine_cooldown_s",
+        "verifier_models",
     }
 )
 REVIEW_KEYS = frozenset(
@@ -76,6 +77,7 @@ REVIEW_KEYS = frozenset(
         "required_sections",
         "finding_severities",
         "security_patterns",
+        "cross_harness_routes",
     }
 )
 GITHUB_KEYS = frozenset(
@@ -106,6 +108,11 @@ class Alias:
     model: str
     write: bool = False
     agent: str | None = None
+    family: str = ""
+    engines: tuple[str, ...] = ()
+    backup_model: str | None = None
+    allowed_efforts: tuple[str, ...] = ("low", "medium", "high", "xhigh", "max")
+    default_effort: str = "medium"
 
 
 @dataclass(frozen=True)
@@ -125,6 +132,80 @@ class GithubConfig:
     gh_version_floor: tuple[int, int, int] = (2, 40, 0)
     retries: int = 2
     body_required_sections: tuple[str, ...] = ()
+
+
+DEFAULT_ROUTING_ALIASES: dict[str, dict[str, Any]] = {
+    "fable": {
+        "runner": "claude", "model": "claude-fable-5-1", "family": "claude",
+        "engines": ["claude", "cursor"], "backup_model": "auto",
+        "allowed_efforts": ["medium", "high"], "default_effort": "medium",
+    },
+    "fable-cursor": {
+        "runner": "cursor", "model": "claude-fable-5-medium", "family": "cursor",
+        "engines": ["cursor"], "allowed_efforts": ["medium"],
+        "default_effort": "medium",
+    },
+    "grok-cursor": {
+        "runner": "cursor", "model": "cursor-grok-4.6-high", "family": "cursor",
+        "engines": ["cursor"], "allowed_efforts": ["high"],
+        "default_effort": "high",
+    },
+    "opus": {
+        "runner": "claude", "model": "claude-opus-5", "family": "claude",
+        "engines": ["claude", "cursor"], "backup_model": "auto",
+        "allowed_efforts": ["medium", "high"], "default_effort": "high",
+    },
+    "sol": {
+        "runner": "codex", "model": "gpt-5.6-sol", "family": "gpt",
+        "engines": ["codex", "cursor"], "backup_model": "auto",
+        "allowed_efforts": ["medium", "high"], "default_effort": "medium",
+        "write": True,
+    },
+    "terra": {
+        "runner": "codex", "model": "gpt-5.6-terra", "family": "gpt",
+        "engines": ["codex", "cursor"], "backup_model": "auto",
+        "allowed_efforts": ["medium", "high"], "default_effort": "high",
+        "write": True,
+    },
+    "luna": {
+        "runner": "codex", "model": "gpt-5.6-luna", "family": "gpt",
+        "engines": ["codex", "cursor"], "backup_model": "auto",
+        "allowed_efforts": ["medium", "high", "xhigh"],
+        "default_effort": "high", "write": True,
+    },
+    "auto": {
+        "runner": "cursor", "model": "auto", "family": "cursor",
+        "engines": ["cursor"], "allowed_efforts": ["medium", "high", "xhigh"],
+        "default_effort": "medium", "write": True,
+    },
+}
+
+DEFAULT_ROUTING_TIERS: dict[str, dict[str, Any]] = {
+    "S": {"alias": "sol", "effort": "high"},
+    "S-deep": {"alias": "sol", "effort": "high"},
+    "S-cross-review": {"alias": "opus", "effort": "high", "read_only": True},
+    "A-architecture-review": {"alias": "opus", "effort": "high", "read_only": True},
+    "S-exceptional": {"alias": "fable", "effort": "medium"},
+    "S-exceptional-cursor": {"alias": "fable-cursor", "effort": "medium", "read_only": True},
+    "A": {"alias": "sol", "effort": "medium"},
+    "A-light": {"alias": "sol", "effort": "medium"},
+    "B": {"alias": "luna", "effort": "xhigh"},
+    "B-terra": {"alias": "terra", "effort": "high"},
+    "B-moderate": {"alias": "terra", "effort": "medium"},
+    "B-claude": {"alias": "opus", "effort": "high"},
+    "C": {"alias": "luna", "effort": "high"},
+    "C-hard": {"alias": "luna", "effort": "high"},
+    "C-mechanical": {"alias": "luna", "effort": "medium"},
+    "C-light": {"alias": "opus", "effort": "medium"},
+    "C-auto": {"alias": "auto", "effort": "medium"},
+    "C-ui": {"alias": "auto", "effort": "medium"},
+}
+
+DEFAULT_VERIFIER_MODELS = {
+    "astra": "gpt-6-astra",
+    "gpt-6-astra": "gpt-6-astra",
+    "grok-cursor": "cursor-grok-4.6-high",
+}
 
 
 @dataclass(frozen=True)
@@ -147,6 +228,7 @@ class Profile:
     toolchain: dict[str, Any] = field(default_factory=dict)
     aliases: dict[str, Alias] = field(default_factory=dict)
     tiers: dict[str, Tier] = field(default_factory=dict)
+    verifier_models: dict[str, str] = field(default_factory=dict)
     routing_budgets: dict[str, float] = field(default_factory=dict)
     routing_policy_version: str = "2026-08-17-v11"
     telemetry_schema_version: str = "dispatch-telemetry-v9"
@@ -155,11 +237,22 @@ class Profile:
     engine_cooldown_s: int = 600
     max_reviews_per_pr: int = 1
     max_delta_reviews: int = 1
-    required_sections: tuple[str, ...] = ()
+    required_sections: tuple[str, ...] = ("code", "security")
     finding_severities: tuple[str, ...] = ("critical", "important", "suggestion")
     security_patterns: tuple[str, ...] = ()
+    cross_harness_routes: dict[str, str] = field(
+        default_factory=lambda: {"codex": "opus", "claude": "sol"}
+    )
     github: GithubConfig = field(default_factory=GithubConfig)
     path_classes: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    path_class_parents: dict[str, str] = field(
+        default_factory=lambda: {
+            "backend-risk": "backend",
+            "frontend-e2e": "frontend",
+            "blueprints": "docs",
+            "governance": "docs",
+        }
+    )
     hooks: dict[str, tuple[str, ...]] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
@@ -405,7 +498,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         routing = {}
     else:
         _unknown_fields(routing, ROUTING_KEYS, "[routing]", problems)
-        aliases_table = routing.get("aliases", {})
+        using_default_aliases = "aliases" not in routing
+        aliases_table = routing.get("aliases", DEFAULT_ROUTING_ALIASES)
         if not isinstance(aliases_table, dict):
             problems.append("[routing.aliases]: must be a table")
             aliases_table = {}
@@ -416,13 +510,21 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             if not isinstance(spec, dict):
                 problems.append(f"{where}: must be a table")
                 continue
-            unknown = spec.keys() - {"runner", "model", "write", "agent"}
+            unknown = spec.keys() - {
+                "runner", "model", "write", "agent", "family", "engines",
+                "backup_model", "allowed_efforts", "default_effort",
+            }
             for field_name in sorted(unknown):
                 problems.append(f"{where}.{field_name}: unknown field")
             runner = spec.get("runner")
             model = spec.get("model")
             write = spec.get("write", False)
             agent = spec.get("agent")
+            family = spec.get("family", runner)
+            engines = spec.get("engines", [runner] if isinstance(runner, str) else [])
+            backup_model = spec.get("backup_model")
+            allowed_efforts = spec.get("allowed_efforts", ["medium", "high", "xhigh"])
+            default_effort = spec.get("default_effort", "medium")
             valid = True
             if runner not in RUNNERS:
                 problems.append(f"{where}: runner must be one of {', '.join(RUNNERS)}")
@@ -436,10 +538,56 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             if agent is not None and not isinstance(agent, str):
                 problems.append(f"{where}.agent: must be a string or absent")
                 valid = False
+            if not isinstance(family, str) or not family:
+                problems.append(f"{where}.family: must be a nonempty string")
+                valid = False
+            if (
+                not isinstance(engines, list)
+                or not engines
+                or any(engine not in RUNNERS for engine in engines)
+                or len(set(engines)) != len(engines)
+                or (isinstance(runner, str) and engines[0] != runner)
+            ):
+                problems.append(
+                    f"{where}.engines: must be a unique nonempty runner list beginning with runner"
+                )
+                valid = False
+            if backup_model is not None and (
+                not isinstance(backup_model, str) or not backup_model
+            ):
+                problems.append(f"{where}.backup_model: must be a nonempty string or absent")
+                valid = False
+            if (
+                not isinstance(allowed_efforts, list)
+                or not allowed_efforts
+                or any(item not in EFFORTS for item in allowed_efforts)
+                or len(set(allowed_efforts)) != len(allowed_efforts)
+            ):
+                problems.append(
+                    f"{where}.allowed_efforts: must be a unique nonempty effort list"
+                )
+                valid = False
+            if default_effort not in EFFORTS or (
+                isinstance(allowed_efforts, list) and default_effort not in allowed_efforts
+            ):
+                problems.append(f"{where}.default_effort: must be one of allowed_efforts")
+                valid = False
             if valid:
-                aliases[name] = Alias(runner=runner, model=model, write=write, agent=agent)
+                aliases[name] = Alias(
+                    runner=runner,
+                    model=model,
+                    write=write,
+                    agent=agent,
+                    family=family,
+                    engines=tuple(engines),
+                    backup_model=backup_model,
+                    allowed_efforts=tuple(allowed_efforts),
+                    default_effort=default_effort,
+                )
 
-        tiers_table = routing.get("tiers", {})
+        tiers_table = routing.get(
+            "tiers", DEFAULT_ROUTING_TIERS if using_default_aliases else {}
+        )
         if not isinstance(tiers_table, dict):
             problems.append("[routing.tiers]: must be a table")
             tiers_table = {}
@@ -467,7 +615,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             if valid:
                 tiers[name] = Tier(alias=alias, effort=effort, read_only=read_only)
 
-    budgets_table = routing.get("budgets", {})
+    budgets_table = routing.get("budgets", {"medium": 5.0, "high": 10.0})
     routing_budgets: dict[str, float] = {}
     if not isinstance(budgets_table, dict):
         problems.append("[routing.budgets]: must be a table")
@@ -487,7 +635,11 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         if not _VERSION_RE.fullmatch(value):
             problems.append(f"[routing].{label}: contains unsupported characters")
     compatible_versions = _strings(
-        routing, "compatible_policy_versions", (policy_version,), "[routing]", problems
+        routing,
+        "compatible_policy_versions",
+        ("2026-07-24-v9", "2026-08-06-v10", policy_version),
+        "[routing]",
+        problems,
     )
     if any(not _VERSION_RE.fullmatch(value) for value in compatible_versions):
         problems.append("[routing].compatible_policy_versions: contains an invalid version")
@@ -496,6 +648,21 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     for label, value in (("default_timeout_s", default_timeout_s), ("engine_cooldown_s", engine_cooldown_s)):
         if type(value) is not int or value < 1:
             problems.append(f"[routing].{label}: must be a positive integer")
+
+    verifier_table = routing.get("verifier_models", DEFAULT_VERIFIER_MODELS)
+    verifier_models: dict[str, str] = {}
+    if not isinstance(verifier_table, dict):
+        problems.append("[routing.verifier_models]: must be a table")
+    else:
+        for alias, model in verifier_table.items():
+            if not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias):
+                problems.append(
+                    f"[routing.verifier_models].{alias}: alias names match [a-z][a-z0-9-]*"
+                )
+            elif not isinstance(model, str) or not model:
+                problems.append(f"[routing.verifier_models].{alias}: must be a nonempty string")
+            else:
+                verifier_models[alias] = model
 
     review = data.get("review", {})
     if not isinstance(review, dict):
@@ -507,7 +674,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     for label, value in (("max_reviews_per_pr", max_reviews), ("max_delta_reviews", max_delta)):
         if type(value) is not int or value < 0:
             problems.append(f"[review].{label}: must be a non-negative integer")
-    sections = review.get("required_sections", [])
+    sections = review.get("required_sections", ["code", "security"])
     if not isinstance(sections, list) or any(not isinstance(s, str) for s in sections):
         problems.append("[review].required_sections: must be a list of strings")
         sections = []
@@ -525,6 +692,25 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             "[review].finding_severities: values must be critical, important, or suggestion"
         )
     security_patterns = _strings(review, "security_patterns", (), "[review]", problems)
+    cross_harness_table = review.get(
+        "cross_harness_routes",
+        {"codex": "opus", "claude": "sol"} if using_default_aliases else {},
+    )
+    cross_harness_routes: dict[str, str] = {}
+    if not isinstance(cross_harness_table, dict):
+        problems.append("[review].cross_harness_routes: must be a table")
+    else:
+        for harness_name, alias_name in cross_harness_table.items():
+            if harness_name not in {"claude", "codex"}:
+                problems.append(
+                    f"[review].cross_harness_routes.{harness_name}: unknown harness"
+                )
+            elif not isinstance(alias_name, str) or alias_name not in aliases:
+                problems.append(
+                    f"[review].cross_harness_routes.{harness_name}: must name a configured alias"
+                )
+            else:
+                cross_harness_routes[harness_name] = alias_name
 
     github = data.get("github", {})
     if not isinstance(github, dict):
@@ -596,6 +782,33 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             continue
         path_classes[str(name)] = tuple(globs)
 
+    parent_table = data.get(
+        "path_class_parents",
+        {
+            "backend-risk": "backend",
+            "frontend-e2e": "frontend",
+            "blueprints": "docs",
+            "governance": "docs",
+        }
+        if not path_classes
+        else {},
+    )
+    path_class_parents: dict[str, str] = {}
+    if not isinstance(parent_table, dict):
+        problems.append("[path_class_parents]: must be a table")
+    else:
+        for child, parent in parent_table.items():
+            if not isinstance(child, str) or not _ALIAS_RE.fullmatch(child):
+                problems.append(f"[path_class_parents].{child}: invalid child class")
+            elif not isinstance(parent, str) or not _ALIAS_RE.fullmatch(parent):
+                problems.append(f"[path_class_parents].{child}: invalid parent class")
+            elif path_classes and (child not in path_classes or parent not in path_classes):
+                problems.append(
+                    f"[path_class_parents].{child}: child and parent must name path classes"
+                )
+            else:
+                path_class_parents[child] = parent
+
     hooks = _hooks(data, "[hooks]", problems)
 
     if problems:
@@ -641,6 +854,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         },
         aliases=aliases,
         tiers=tiers,
+        verifier_models=verifier_models,
         routing_budgets=routing_budgets,
         routing_policy_version=policy_version,
         telemetry_schema_version=telemetry_version,
@@ -652,6 +866,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         required_sections=tuple(sections),
         finding_severities=finding_severities,
         security_patterns=security_patterns,
+        cross_harness_routes=cross_harness_routes,
         github=GithubConfig(
             native_protection=native_protection,
             workflow=github_workflow,
@@ -663,6 +878,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             body_required_sections=body_sections,
         ),
         path_classes=path_classes,
+        path_class_parents=path_class_parents,
         hooks=hooks,
         raw=data,
     )

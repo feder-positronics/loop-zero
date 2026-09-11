@@ -1,14 +1,13 @@
-#!/usr/bin/env python3
 """Canonical candidate-bound review-risk artifact and publication verifier."""
 
 from __future__ import annotations
 
 import argparse
-import fnmatch
 import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
@@ -16,24 +15,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from ..kernel.gitscope import DispatchError, trusted_git_command
-from ..kernel.sandbox import environment as sandbox_environment
-from ..config import load_profile
+from ..config import Profile
+from ._ci_path_classifier import classify_paths
 
 
 @dataclass(frozen=True)
 class RiskSettings:
     path_classes: Mapping[str, Sequence[str]]
-    security_patterns: Sequence[str]
-    required_sections: Sequence[str]
-
-    @classmethod
-    def from_profile(cls, profile):
-        return cls(
-            profile.path_classes,
-            profile.security_patterns,
-            profile.required_sections or ("code",),
-        )
+    security_patterns: tuple[str, ...]
+    required_sections: tuple[str, ...]
+    path_class_parents: Mapping[str, str]
 
 
 _SETTINGS: ContextVar[RiskSettings | None] = ContextVar(
@@ -41,26 +32,32 @@ _SETTINGS: ContextVar[RiskSettings | None] = ContextVar(
 )
 
 
-def configure(profile) -> None:
-    """Install one validated profile in this context."""
-    _SETTINGS.set(RiskSettings.from_profile(profile))
+def configure(profile: Profile) -> None:
+    """Install validated consumer path tables and review-section policy."""
+    from . import _ci_path_classifier, _security_scope
 
-
-def _configured(path_classes, security_patterns, required_sections):
-    settings = _SETTINGS.get()
-    if path_classes is None:
-        if settings is None:
-            raise ReviewRiskError("review risk requires configured path classes")
-        path_classes = settings.path_classes
-    if security_patterns is None:
-        security_patterns = settings.security_patterns if settings else ()
-    if required_sections is None:
-        required_sections = settings.required_sections if settings else ("code",)
-    return path_classes, security_patterns, required_sections
+    configured = RiskSettings(
+        path_classes=profile.path_classes,
+        security_patterns=tuple(profile.security_patterns),
+        required_sections=tuple(profile.required_sections),
+        path_class_parents=getattr(profile, "path_class_parents", {}),
+    )
+    _SETTINGS.set(configured)
+    _ci_path_classifier.configure(
+        configured.path_classes, configured.path_class_parents
+    )
+    _security_scope.configure(
+        security_patterns=configured.security_patterns,
+        required_sections=configured.required_sections,
+    )
+from ..kernel.gitscope import trusted_git_command
+from ..kernel.sandbox import environment as sandbox_environment
+from ._ci_path_classifier import classify_paths
 
 SCHEMA_VERSION = "delivery-review-risk-v1"
 TIER_RANK = {"T0": 0, "T1": 1, "T2": 2}
 _OID_RE = re.compile(r"[0-9a-f]{40,64}")
+_DOC_SUFFIXES = (".md", ".mdx", ".html")
 _ARTIFACT_KEYS = {
     "base_sha",
     "changed_paths",
@@ -90,9 +87,6 @@ class ReviewRiskError(RuntimeError):
     """The exact candidate cannot carry the claimed review-risk authority."""
 
 
-SecurityReviewScopeError = ReviewRiskError
-
-
 class CommandOutcome(Protocol):
     returncode: int
     stdout: str
@@ -115,76 +109,40 @@ def _runner(
     origin_url: str | None = None,
     git_config_sha256: str | None = None,
 ) -> CommandRunner:
-    del origin_url, git_config_sha256
-
     class GitRunner:
-        def run(self, args, *, check=True, preserve_output_bytes=False):
-            if not args or args[0] != "git":
-                raise ReviewRiskError("review-risk runner accepts only Git commands")
+        def __init__(self) -> None:
+            self.origin_url = origin_url
+            self.git_config_sha256 = git_config_sha256
+
+        def run(
+            self,
+            args: list[str],
+            *,
+            check: bool = True,
+            preserve_output_bytes: bool = False,
+        ):
+            command = args
+            if args and args[0] == "git":
+                command = trusted_git_command(repo, *args[1:])
             completed = subprocess.run(
-                trusted_git_command(repo, *args[1:]),
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="surrogateescape",
-                check=False,
+                command,
+                cwd=repo,
                 env=sandbox_environment(os.environ),
+                capture_output=True,
+                text=not preserve_output_bytes,
+                check=False,
             )
             if check and completed.returncode:
-                raise ReviewRiskError(completed.stderr.strip() or "Git command failed")
+                raise ReviewRiskError(
+                    (completed.stderr or completed.stdout or b"git failed").decode(
+                        errors="replace"
+                    )
+                    if preserve_output_bytes
+                    else str(completed.stderr or completed.stdout or "git failed")
+                )
             return completed
 
-    import subprocess
-
     return GitRunner()
-
-
-def _matches(path: str, patterns: Sequence[str]) -> bool:
-    included = False
-    for pattern in patterns:
-        excluded = pattern.startswith("!")
-        candidate = pattern[1:] if excluded else pattern
-        if fnmatch.fnmatchcase(path, candidate):
-            included = not excluded
-    return included
-
-
-def classify_paths(
-    paths: Sequence[str], path_classes: Mapping[str, Sequence[str]]
-) -> dict[str, bool]:
-    """Classify paths solely from the consumer's configured glob tables."""
-    return {
-        name: any(_matches(path, patterns) for path in paths)
-        for name, patterns in path_classes.items()
-    }
-
-
-def required_review_sections(
-    security_paths: Sequence[str], configured: Sequence[str]
-) -> tuple[str, ...]:
-    sections = tuple(dict.fromkeys(configured))
-    if security_paths and "security" not in sections:
-        sections += ("security",)
-    return sections
-
-
-def security_trigger_paths_between(
-    worktree: Path,
-    base_ref: str,
-    head_ref: str,
-    *,
-    runner: CommandRunner | None = None,
-    security_patterns: Sequence[str] | None = None,
-) -> tuple[str, ...]:
-    configured = _SETTINGS.get()
-    if security_patterns is None:
-        security_patterns = configured.security_patterns if configured else ()
-    runner = runner or _runner(worktree)
-    raw = _run(
-        runner,
-        ["git", "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", base_ref, head_ref, "--"],
-    ).stdout
-    return tuple(sorted(path for path in _nul_paths(raw) if _matches(path, security_patterns)))
 
 
 def _run(
@@ -249,8 +207,15 @@ def _tree_modes(
 
 def _classifier_version() -> str:
     digest = hashlib.sha256()
+    root = Path(__file__).resolve().parent
     digest.update(SCHEMA_VERSION.encode())
-    digest.update(Path(__file__).read_bytes())
+    for name in (
+        "_ci_path_classifier.py",
+        "risk.py",
+        "_security_scope.py",
+    ):
+        digest.update(name.encode())
+        digest.update((root / name).read_bytes())
     return digest.hexdigest()
 
 
@@ -296,13 +261,13 @@ def _artifact(
     head_ref: str,
     *,
     runner: CommandRunner | None = None,
-    path_classes: Mapping[str, Sequence[str]] | None = None,
-    security_patterns: Sequence[str] | None = None,
-    configured_sections: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    path_classes, security_patterns, configured_sections = _configured(
-        path_classes, security_patterns, configured_sections
+    from ._security_scope import (
+        SecurityReviewScopeError,
+        required_review_sections,
+        security_trigger_paths_between,
     )
+
     git = runner or _runner(repo)
     base_sha = _resolve_commit(git, base_ref)
     head_sha = _resolve_commit(git, head_ref)
@@ -346,20 +311,20 @@ def _artifact(
     ).stdout
     modes = _tree_modes(git, (base_sha, head_sha), changed_paths)
     special_mode = any(mode != "100644" or kind != "blob" for _, mode, kind in modes)
-    classified = classify_paths(changed_paths, path_classes)
+    path_classes = classify_paths(changed_paths)
     try:
         security_paths = security_trigger_paths_between(
-            repo, base_sha, head_sha, runner=git, security_patterns=security_patterns
+            repo, base_sha, head_sha, runner=git
         )
-    except (DispatchError, ReviewRiskError) as exc:
+    except SecurityReviewScopeError as exc:
         raise ReviewRiskError(f"security classification failed: {exc}") from exc
 
-    docs_patterns = path_classes.get("docs", ())
-    conventional_docs = bool(docs_patterns) and all(
-        _matches(path, docs_patterns) for path in changed_paths
+    conventional_docs = all(
+        path.startswith("docs/") and path.endswith(_DOC_SUFFIXES)
+        for path in changed_paths
     )
     complete_modes = {path for path, _, _ in modes} == set(changed_paths)
-    classifier_disagreement = conventional_docs and not classified.get("docs", False)
+    classifier_disagreement = conventional_docs and not path_classes["docs"]
     if security_paths:
         tier = "T2"
         reasons = ["security-review-required"]
@@ -378,10 +343,10 @@ def _artifact(
             reasons.append("special-git-mode")
         if classifier_disagreement:
             reasons.append("classifier-disagreement")
-        if not any(classified.values()):
+        if not any(path_classes.values()):
             reasons.append("unknown-path")
 
-    sections = [] if tier == "T0" else list(required_review_sections(security_paths, configured_sections))
+    sections = [] if tier == "T0" else list(required_review_sections(security_paths))
     return {
         "base_sha": base_sha,
         "changed_paths": list(changed_paths),
@@ -406,17 +371,8 @@ def compute_review_risk(
     head_ref: str,
     *,
     runner: CommandRunner | None = None,
-    path_classes: Mapping[str, Sequence[str]] | None = None,
-    security_patterns: Sequence[str] | None = None,
-    required_sections: Sequence[str] | None = None,
 ) -> dict[str, str]:
-    path_classes, security_patterns, required_sections = _configured(
-        path_classes, security_patterns, required_sections
-    )
-    artifact = _artifact(
-        repo, base_ref, head_ref, runner=runner, path_classes=path_classes,
-        security_patterns=security_patterns, configured_sections=required_sections,
-    )
+    artifact = _artifact(repo, base_ref, head_ref, runner=runner)
     payload = canonical_review_risk_json(artifact)
     return {
         "review_risk_json": payload,
@@ -430,13 +386,7 @@ def verify_review_risk(
     digest: str,
     *,
     runner: CommandRunner | None = None,
-    path_classes: Mapping[str, Sequence[str]] | None = None,
-    security_patterns: Sequence[str] | None = None,
-    required_sections: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    path_classes, security_patterns, required_sections = _configured(
-        path_classes, security_patterns, required_sections
-    )
     artifact = parse_review_risk(payload)
     actual_digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     if not re.fullmatch(r"[0-9a-f]{64}", digest) or digest != actual_digest:
@@ -457,9 +407,6 @@ def verify_review_risk(
         artifact_base,
         artifact_head,
         runner=runner,
-        path_classes=path_classes,
-        security_patterns=security_patterns,
-        configured_sections=required_sections,
     )
     if set(artifact) != _ARTIFACT_KEYS:
         raise ReviewRiskError("review-risk artifact has an invalid field set")
@@ -488,8 +435,8 @@ def verify_review_risk(
         raise ReviewRiskError("review-risk artifact security paths are not canonical")
     if not set(security_paths).issubset(set(changed_paths)):
         raise ReviewRiskError("review-risk artifact security paths escape its diff")
-    expected_sections = [] if tier == "T0" else list(
-        required_review_sections(security_paths, required_sections)
+    expected_sections = (
+        [] if tier == "T0" else ["code", "security"] if security_paths else ["code"]
     )
     expected_reason = (
         "docs-only"
@@ -628,10 +575,6 @@ def verify_publication_review_risk(
     expected_base: str | None = None,
     runner: CommandRunner | None = None,
     authority_repo: Path | None = None,
-    path_classes: Mapping[str, Sequence[str]] | None = None,
-    security_patterns: Sequence[str] | None = None,
-    required_sections: Sequence[str] | None = None,
-    authority_records: Sequence[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Verify publication evidence and rederive current exact-head risk.
 
@@ -644,15 +587,9 @@ def verify_publication_review_risk(
     from ..delivery.reentry import publication_generation
     from ..kernel.authority_store import load_authority_records
 
-    path_classes, security_patterns, required_sections = _configured(
-        path_classes, security_patterns, required_sections
+    generation = publication_generation(
+        load_authority_records(authority_repo or repo, 30), run_id
     )
-    records = (
-        list(authority_records)
-        if authority_records is not None
-        else load_authority_records(authority_repo or repo, 30)
-    )
-    generation = publication_generation(records, run_id)
     record = load_publication_review_risk(
         evidence_dir,
         pr=pr,
@@ -664,10 +601,7 @@ def verify_publication_review_risk(
     digest = record.get("review_risk_sha256")
     if not isinstance(payload, str) or not isinstance(digest, str):
         raise ReviewRiskError("published review-risk bytes or digest are missing")
-    verification = verify_review_risk(
-        repo, payload, digest, runner=runner, path_classes=path_classes,
-        security_patterns=security_patterns, required_sections=required_sections,
-    )
+    verification = verify_review_risk(repo, payload, digest, runner=runner)
     artifact = verification["artifact"]
     if artifact.get("head_sha") != expected_head:
         raise ReviewRiskError("published review-risk artifact names a different head")
@@ -729,7 +663,6 @@ def _main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--git-config-sha256")
     args = parser.parse_args(argv)
     try:
-        profile = load_profile(args.repo)
         if bool(args.origin_url) != bool(args.git_config_sha256):
             raise ReviewRiskError(
                 "--origin-url and --git-config-sha256 must be supplied together"
@@ -764,9 +697,6 @@ def _main(argv: Sequence[str] | None = None) -> int:
                         expected_base=args.expected_base,
                         runner=runner,
                         authority_repo=args.authority_repo or args.repo,
-                        path_classes=profile.path_classes,
-                        security_patterns=profile.security_patterns,
-                        required_sections=profile.required_sections or ("code",),
                     ),
                     sort_keys=True,
                 )
@@ -776,12 +706,7 @@ def _main(argv: Sequence[str] | None = None) -> int:
                 raise ReviewRiskError("risk computation requires --base and --head")
             print(
                 json.dumps(
-                    compute_review_risk(
-                        args.repo, args.base, args.head,
-                        path_classes=profile.path_classes,
-                        security_patterns=profile.security_patterns,
-                        required_sections=profile.required_sections or ("code",),
-                    ), sort_keys=True
+                    compute_review_risk(args.repo, args.base, args.head), sort_keys=True
                 )
             )
     except ReviewRiskError as exc:
@@ -792,3 +717,14 @@ def _main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_main())
+
+
+from ._ci_path_classifier import write_github_outputs  # noqa: E402,F401
+from ._security_scope import (  # noqa: E402,F401
+    DELTA_SECURITY_PATTERNS,
+    SecurityReviewScopeError,
+    required_review_sections,
+    security_trigger_paths,
+    security_trigger_paths_between,
+    untracked_security_trigger_paths,
+)
