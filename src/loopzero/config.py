@@ -45,6 +45,7 @@ TOOLCHAIN_KEYS = frozenset(
         "shared_artifacts",
         "dotenv",
         "db_url_vars",
+        "db_default_url",
         "db_lock",
         "db_targets",
         "dispatcher",
@@ -371,6 +372,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 "closeout_snapshot_path"):
         if key in toolchain:
             _relative_path(toolchain, key, "unused", "[toolchain]", problems)
+    if "db_default_url" in toolchain:
+        _string(toolchain, "db_default_url", "unused", "[toolchain]", problems)
     for key in ("shared_artifacts", "formatter_modules"):
         if key in toolchain:
             _strings(toolchain, key, (), "[toolchain]", problems, paths=True)
