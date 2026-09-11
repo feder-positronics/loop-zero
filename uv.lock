@@ -354,6 +354,7 @@ dev = [
     { name = "hatchling" },
     { name = "openai-codex" },
     { name = "pytest" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -371,6 +372,7 @@ dev = [
     { name = "hatchling", specifier = ">=1.25" },
     { name = "openai-codex", specifier = "==0.147.0" },
     { name = "pytest", specifier = ">=8" },
+    { name = "pyyaml", specifier = ">=6" },
 ]
 
 [[package]]
