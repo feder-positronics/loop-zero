@@ -82,6 +82,15 @@ class _GitConfigOverlay:
     payload: bytes
 
 
+@dataclass(frozen=True)
+class _FilesystemNode:
+    relative: Path
+    kind: bytes
+    mode: int
+    state: os.stat_result
+    symlink_target: bytes | None = None
+
+
 @contextmanager
 def _hard_monotonic_deadline(deadline: float):
     """Interrupt every syscall in a read transaction at one monotonic deadline."""
@@ -350,50 +359,9 @@ def _repository_layout(root: Path) -> _RepositoryLayout:
     return _RepositoryLayout(git_dir, common_dir, object_dir)
 
 
-def _config_quote(value: str) -> str:
-    escaped = (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\t", "\\t")
-        .replace("\b", "\\b")
-    )
-    return f'"{escaped}"'
-
-
-def _sanitized_config(entries: tuple[tuple[str, str | None], ...]) -> bytes:
-    """Retain only inert repository identity and tracking configuration."""
-    lines = ["[core]", "\trepositoryformatversion = 0", "\tbare = false"]
-    for key, value in entries:
-        if value is None:
-            continue
-        normalized = key.casefold()
-        pieces = key.split(".")
-        if (
-            len(pieces) >= 3
-            and normalized.startswith("remote.")
-            and pieces[-1].casefold() in {"url", "fetch"}
-        ):
-            subsection = ".".join(pieces[1:-1])
-            lines.extend(
-                (
-                    f'[remote {_config_quote(subsection)}]',
-                    f"\t{pieces[-1]} = {_config_quote(value)}",
-                )
-            )
-        elif (
-            len(pieces) >= 3
-            and normalized.startswith("branch.")
-            and pieces[-1].casefold() in {"merge", "remote"}
-        ):
-            subsection = ".".join(pieces[1:-1])
-            lines.extend(
-                (
-                    f'[branch {_config_quote(subsection)}]',
-                    f"\t{pieces[-1]} = {_config_quote(value)}",
-                )
-            )
-    return ("\n".join(lines) + "\n").encode("utf-8")
+def _sanitized_config(_entries: tuple[tuple[str, str | None], ...]) -> bytes:
+    """Expose only the fixed repository-format settings needed by child Git."""
+    return b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
 
 
 def _repository_config_overlays(
@@ -438,12 +406,13 @@ def _repository_config_overlays(
 def _source_filesystem_sha256(root: Path) -> str:
     """Digest every exposed node that Git's index cannot fully represent."""
     digest = hashlib.sha256()
+    nodes: list[_FilesystemNode] = []
 
     def add(value: bytes) -> None:
         digest.update(len(value).to_bytes(8, "big"))
         digest.update(value)
 
-    def walk(path: Path, relative: Path) -> None:
+    def collect(path: Path, relative: Path) -> None:
         try:
             state = path.lstat()
         except OSError as exc:
@@ -461,16 +430,16 @@ def _source_filesystem_sha256(root: Path) -> str:
             raise ValidationHookError(
                 "validation worktree contains an unsupported special node"
             )
-        add(os.fsencode(str(relative)))
-        add(kind)
-        add(f"{mode:o}".encode("ascii"))
+        target: bytes | None = None
         if kind == b"symlink":
             try:
-                add(os.fsencode(os.readlink(path)))
+                target = os.fsencode(os.readlink(path))
             except OSError as exc:
                 raise ValidationHookError(
                     "validation worktree filesystem identity is unavailable"
                 ) from exc
+        nodes.append(_FilesystemNode(relative, kind, mode, state, target))
+        if kind == b"symlink":
             return
         if kind != b"directory":
             return
@@ -486,9 +455,44 @@ def _source_filesystem_sha256(root: Path) -> str:
             child_relative = relative / child.name if relative != Path(".") else Path(child.name)
             if child_relative == Path(".git"):
                 continue
-            walk(child, child_relative)
+            collect(child, child_relative)
 
-    walk(root, Path("."))
+    collect(root, Path("."))
+
+    hardlink_members: dict[tuple[int, int], list[_FilesystemNode]] = {}
+    for node in nodes:
+        if node.kind == b"file":
+            hardlink_members.setdefault(
+                (node.state.st_dev, node.state.st_ino), []
+            ).append(node)
+
+    hardlink_classes: dict[tuple[int, int], bytes] = {}
+    for inode, members in hardlink_members.items():
+        member_count = len(members)
+        if any(member.state.st_nlink > member_count for member in members):
+            raise ValidationHookError(
+                "validation worktree regular file has hard links outside worktree"
+            )
+        if any(member.state.st_nlink != member_count for member in members):
+            raise ValidationHookError(
+                "validation worktree filesystem identity is unavailable"
+            )
+        hardlink_classes[inode] = min(
+            (os.fsencode(str(member.relative)) for member in members)
+        )
+
+    for node in nodes:
+        add(os.fsencode(str(node.relative)))
+        add(node.kind)
+        add(f"{node.mode:o}".encode("ascii"))
+        if node.kind == b"file":
+            inode = (node.state.st_dev, node.state.st_ino)
+            add(f"st_nlink={node.state.st_nlink}".encode("ascii"))
+            add(b"hardlink-class=" + hardlink_classes[inode])
+        elif node.kind == b"symlink":
+            assert node.symlink_target is not None
+            add(node.symlink_target)
+
     return digest.hexdigest()
 
 

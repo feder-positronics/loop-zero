@@ -179,7 +179,7 @@ _KERNEL_FILESYSTEM_ROOTS = (Path("/proc"), Path("/sys"), Path("/dev"))
 
 
 def _reject_kernel_filesystem_path(path: Path, *, label: str) -> None:
-    lexical = path.absolute()
+    lexical = Path(os.path.abspath(path))
     if lexical == Path("/") or any(
         lexical == root or lexical.is_relative_to(root)
         for root in _KERNEL_FILESYSTEM_ROOTS
@@ -187,6 +187,32 @@ def _reject_kernel_filesystem_path(path: Path, *, label: str) -> None:
         raise SandboxError(
             f"{label} cannot be located at / or under /proc, /sys, or /dev"
         )
+
+
+def _validated_destination(path: Path, *, label: str) -> Path:
+    """Validate every existing component of a lexical mount destination."""
+    lexical = Path(os.path.abspath(path))
+    _reject_kernel_filesystem_path(lexical, label=label)
+    current = Path("/")
+    parts = lexical.parts[1:]
+    for index, part in enumerate(parts):
+        current /= part
+        try:
+            state = os.lstat(current)
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise SandboxError(f"{label} is unavailable") from exc
+        if stat.S_ISLNK(state.st_mode):
+            raise SandboxError(f"{label} contains a symlinked component")
+        if index < len(parts) - 1 and not stat.S_ISDIR(state.st_mode):
+            raise SandboxError(f"{label} is unavailable")
+    try:
+        resolved = lexical.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise SandboxError(f"{label} is unavailable") from exc
+    _reject_kernel_filesystem_path(resolved, label=label)
+    return lexical
 
 
 def _validated(path: Path, *, directory: bool | None = None) -> Path:
@@ -478,36 +504,38 @@ def command(
     paths below ``/proc``, ``/sys``, or ``/dev`` are rejected before any
     argument list is built, so none can shadow the private kernel filesystems.
     """
-    _reject_kernel_filesystem_path(worktree, label="sandbox worktree")
-    for path in read_only_roots:
-        _reject_kernel_filesystem_path(path, label="sandbox protected path")
-    for path in read_only_files:
-        _reject_kernel_filesystem_path(path, label="sandbox protected path")
-    for source, destination in (*read_only_mounts, *read_only_file_mounts):
-        _reject_kernel_filesystem_path(source, label="sandbox protected source")
-        _reject_kernel_filesystem_path(destination, label="sandbox protected destination")
-    for source, destination, label in (
-        (audit_source, audit_destination, "sandbox audit path"),
-        (git_source, git_destination, "sandbox Git path"),
-    ):
-        if source is not None:
-            _reject_kernel_filesystem_path(source, label=label)
-        if destination is not None:
-            _reject_kernel_filesystem_path(destination, label=label)
-
+    validated_audit_destination = (
+        _validated_destination(
+            audit_destination, label="sandbox audit destination"
+        )
+        if audit_destination is not None
+        else None
+    )
+    validated_git_destination = (
+        _validated_destination(git_destination, label="sandbox Git destination")
+        if git_destination is not None
+        else None
+    )
     resolved_worktree = _validated(worktree, directory=True)
+    worktree_destination = _validated_destination(
+        worktree, label="sandbox worktree destination"
+    )
     mounts: list[tuple[str, Path, Path]] = [
         (
             "--bind" if writable_worktree else "--ro-bind",
             resolved_worktree,
-            worktree.absolute(),
+            worktree_destination,
         )
     ]
     if audit_source is not None:
         if audit_destination is None or not audit_destination.is_absolute():
             raise SandboxError("sandbox audit destination is invalid")
         mounts.append(
-            ("--bind", _validated(audit_source, directory=True), audit_destination)
+            (
+                "--bind",
+                _validated(audit_source, directory=True),
+                validated_audit_destination,
+            )
         )
     if git_source is not None:
         if git_destination is None or not git_destination.is_absolute():
@@ -516,25 +544,49 @@ def command(
             (
                 "--bind" if writable_git else "--ro-bind",
                 _validated(git_source, directory=True),
-                git_destination,
+                validated_git_destination,
             )
         )
-    mounts.extend(
-        ("--ro-bind", _validated(path, directory=True), path.absolute())
-        for path in read_only_roots
-    )
-    mounts.extend(
-        ("--ro-bind", _validated(path, directory=False), path.absolute())
-        for path in read_only_files
-    )
-    mounts.extend(
-        ("--ro-bind", _validated(source, directory=True), destination.absolute())
-        for source, destination in read_only_mounts
-    )
-    mounts.extend(
-        ("--ro-bind", _validated(source, directory=False), destination.absolute())
-        for source, destination in read_only_file_mounts
-    )
+    for path in read_only_roots:
+        mounts.append(
+            (
+                "--ro-bind",
+                _validated(path, directory=True),
+                _validated_destination(
+                    path, label="sandbox protected destination"
+                ),
+            )
+        )
+    for path in read_only_files:
+        mounts.append(
+            (
+                "--ro-bind",
+                _validated(path, directory=False),
+                _validated_destination(
+                    path, label="sandbox protected destination"
+                ),
+            )
+        )
+    for source, destination in read_only_mounts:
+        mounts.append(
+            (
+                "--ro-bind",
+                _validated(source, directory=True),
+                _validated_destination(
+                    destination, label="sandbox protected destination"
+                ),
+            )
+        )
+    for source, destination in read_only_file_mounts:
+        mounts.append(
+            (
+                "--ro-bind",
+                _validated(source, directory=False),
+                _validated_destination(
+                    destination, label="sandbox protected destination"
+                ),
+            )
+        )
     runtime_roots: set[tuple[Path, Path]] = set()
     for root in (
         *(_validated(path, directory=True) for path in read_only_roots),
@@ -550,18 +602,28 @@ def command(
             resolved_interpreter = interpreter.resolve()
             if not resolved_interpreter.is_relative_to(root):
                 resolved_runtime = resolved_interpreter.parent.parent
-                _reject_kernel_filesystem_path(
-                    resolved_runtime, label="sandbox interpreter runtime"
+                runtime_roots.add(
+                    (
+                        resolved_runtime,
+                        _validated_destination(
+                            resolved_runtime,
+                            label="sandbox interpreter destination",
+                        ),
+                    )
                 )
-                runtime_roots.add((resolved_runtime, resolved_runtime))
                 if interpreter.is_symlink():
                     lexical = Path(os.readlink(interpreter))
                     if lexical.is_absolute():
                         destination = lexical.parent.parent
-                        _reject_kernel_filesystem_path(
-                            destination, label="sandbox interpreter destination"
+                        runtime_roots.add(
+                            (
+                                resolved_runtime,
+                                _validated_destination(
+                                    destination,
+                                    label="sandbox interpreter destination",
+                                ),
+                            )
                         )
-                        runtime_roots.add((resolved_runtime, destination))
     mounts.extend(
         ("--ro-bind", source, destination)
         for source, destination in sorted(runtime_roots)

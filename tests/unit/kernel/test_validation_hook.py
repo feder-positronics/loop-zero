@@ -474,6 +474,83 @@ def test_source_identity_rejects_special_filesystem_nodes(tmp_path):
         validation.source_identity(repo, approved_head=sha, allow_dirty_tree=True)
 
 
+def test_source_identity_distinguishes_independent_files_from_hard_links(tmp_path):
+    repo, _ = _repo(tmp_path, ("gnutrue",))
+    first = repo / "first.txt"
+    second = repo / "second.txt"
+    first.write_text("same bytes\n", encoding="utf-8")
+    second.write_text("same bytes\n", encoding="utf-8")
+    _git(repo, "add", "first.txt", "second.txt")
+    _git(repo, "commit", "-qm", "add equal files")
+    sha = _git(repo, "rev-parse", "HEAD")
+
+    independent = validation.source_identity(
+        repo, approved_head=sha, allow_dirty_tree=False
+    )
+    second.unlink()
+    os.link(first, second)
+    hardlinked = validation.source_identity(
+        repo, approved_head=sha, allow_dirty_tree=False
+    )
+
+    assert independent.sha == hardlinked.sha == sha
+    assert independent.filesystem_sha256 != hardlinked.filesystem_sha256
+
+
+def test_source_identity_rejects_a_hard_link_outside_the_worktree(tmp_path):
+    repo, sha = _repo(tmp_path, ("gnutrue",))
+    os.link(repo / "workflow.toml", tmp_path / "outside-link")
+
+    with pytest.raises(validation.ValidationHookError, match="hard links outside"):
+        validation.source_identity(
+            repo, approved_head=sha, allow_dirty_tree=False
+        )
+
+
+def test_validation_detects_a_new_hard_link_after_child_exit(tmp_path, monkeypatch):
+    repo, _ = _repo(tmp_path, ("gnutrue",))
+    first = repo / "first.txt"
+    second = repo / "second.txt"
+    first.write_text("same bytes\n", encoding="utf-8")
+    second.write_text("same bytes\n", encoding="utf-8")
+    _git(repo, "add", "first.txt", "second.txt")
+    _git(repo, "commit", "-qm", "add equal files")
+    sha = _git(repo, "rev-parse", "HEAD")
+    signer = _signer()
+    source = validation.source_identity(
+        repo, approved_head=sha, allow_dirty_tree=False
+    )
+    artifact = tmp_path / "result.json"
+    _artifact(
+        artifact,
+        signer,
+        task="task-1",
+        base=sha,
+        head=sha,
+        hook="acceptance",
+        commands=_actual(repo, ("gnutrue",)),
+        source_filesystem_sha256=source.filesystem_sha256,
+    )
+
+    def replace_with_hard_link(argv, **kwargs):
+        second.unlink()
+        os.link(first, second)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(validation, "run_validation_child", replace_with_hard_link)
+    with pytest.raises(validation.UnboundResultError, match="source changed"):
+        validation.run_hook(
+            worktree=repo,
+            hook="acceptance",
+            base_sha=sha,
+            head_sha=sha,
+            task_id="task-1",
+            result_artifact=artifact,
+            coordinator_public_key=signer.public_key,
+            extra=[],
+        )
+
+
 def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
     repo, sha = _repo(tmp_path, ("gnutrue",))
     _git(repo, "config", "--local", "user.name", "Candidate")
@@ -490,10 +567,6 @@ def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
     assert entries == (
         ("core.repositoryformatversion", "0"),
         ("core.bare", "false"),
-        ("remote.backup.url", "file:///srv/repo"),
-        ("remote.backup.fetch", "+refs/*:refs/*"),
-        ("branch.main.remote", "backup"),
-        ("branch.main.merge", "refs/heads/main"),
     )
 
 

@@ -87,6 +87,33 @@ def test_sandbox_builder_rejects_kernel_filesystem_mounts(
         )
 
 
+def test_sandbox_builder_rejects_a_destination_symlinked_into_proc(
+    tmp_path, monkeypatch
+) -> None:
+    worktree = tmp_path / "worktree"
+    source = tmp_path / "source"
+    worktree.mkdir()
+    source.mkdir()
+    proc_alias = tmp_path / "proc-alias"
+    proc_alias.symlink_to("/proc", target_is_directory=True)
+    monkeypatch.setattr(module, "_tool", lambda name, **kwargs: Path(f"/usr/bin/{name}"))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    with pytest.raises(module.SandboxError, match="symlinked component"):
+        module.command(
+            ["/usr/bin/true"],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_mounts=((source, proc_alias / "loopzero"),),
+            deny_network=True,
+        )
+
+
 def test_validation_child_overlays_config_and_forces_safe_git_settings(
     tmp_path, monkeypatch
 ) -> None:

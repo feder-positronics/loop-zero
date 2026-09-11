@@ -33,7 +33,9 @@ Persisted legacy contract identifiers remain readable through `legacy_contract`.
 
 Use `sandbox.run_validation_child(argv, worktree=...)` for validation. It builds
 read-only mounts over the worktree Git metadata and the linked worktree common
-Git directory, filters the environment, and closes inherited descriptors.
+Git directory, filters the environment, and closes inherited descriptors. Every
+caller-selected mount destination is walked without following symlinks and is
+rejected if it aliases `/`, `/proc`, `/sys`, or `/dev`.
 Namespace failure is a failed prerequisite, not an unsandboxed fallback.
 `validation_command` builds the filesystem boundary for an existing process
 adapter; that adapter must also apply the environment and descriptor boundary.
@@ -67,19 +69,24 @@ Final-CI reproduction is no longer a job-runner special case. Invoke
 `--result-artifact`, `--coordinator-public-key`, and `--hook` arguments. Base and
 head are full commit SHAs; neither is read from serialized settings. Before
 launch, the kernel proves that `HEAD` is the approved commit and hashes the
-complete exposed worktree independently of its mutable index. An intentional
+complete exposed worktree independently of its mutable index. The filesystem
+digest records regular-file link counts and deterministic in-tree inode classes;
+a link whose other names are outside the worktree is rejected. An intentional
 dirty-candidate run must additionally pass `--allow-dirty-tree`; it is identified
 with `git write-tree` through an isolated Git directory and index. Ignored files
 are forced into that tree, while the root `.git` administrative entry is sealed
-read-only by the child sandbox. The isolated repository has no candidate config
-and a highest-precedence attributes file disables filters, working-tree encoding,
-ident and EOL conversion. Candidate `.gitattributes` content is itself hashed but
-cannot change how any bytes are hashed; nested Git worktrees are rejected because
-their checked-out contents cannot be represented by the outer tree. Every Git
-process also disables global/system config, replacement objects, prompts and
-optional locks and supplies explicit hooks, fsmonitor, worktree, symlink and
-attribute overrides. The kernel resolves the base, reads privileged hooks with
-`config.effective_hooks`, and launches them with
+read-only by the child sandbox. Candidate local Git config is screened before
+repository-directed Git runs, then replaced in the child with only fixed
+`core.repositoryformatversion=0` and `core.bare=false`; no `remote.*` or
+`branch.*` configuration is retained. The isolated repository has no candidate
+config and a highest-precedence attributes file disables filters, working-tree
+encoding, ident and EOL conversion. Candidate `.gitattributes` content is itself
+hashed but cannot change how any bytes are hashed; nested Git worktrees are
+rejected because their checked-out contents cannot be represented by the outer
+tree. Every Git process also disables global/system config, replacement objects,
+prompts and optional locks and supplies explicit hooks, fsmonitor, worktree,
+symlink and attribute overrides. The kernel resolves the base, reads privileged
+hooks with `config.effective_hooks`, and launches them with
 `sandbox.run_validation_child` before acquiring job authority.
 
 Executable selection uses the package-wide symlink-free allowlist. This trusts
