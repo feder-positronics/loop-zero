@@ -70,7 +70,7 @@ def test_privileged_hooks_come_from_base_not_candidate(consumer: Path):
     )
     profile = config.load_profile(consumer)
     assert profile.hooks["acceptance"] == ("true",)
-    base = config.resolve_base(consumer, base_ref="main")
+    base = config.resolve_base(consumer, base_ref="refs/heads/main")
     hooks = config.effective_hooks(profile, base)
     assert hooks["acceptance"] == ("make test",), "candidate must not change its own acceptance"
     assert "closeout" not in hooks, "privileged hook absent at base is absent, not adopted"
@@ -79,8 +79,27 @@ def test_privileged_hooks_come_from_base_not_candidate(consumer: Path):
 
 def test_unavailable_base_is_a_blocker_not_no_hooks(consumer: Path):
     with pytest.raises(config.ConfigError) as info:
-        config.resolve_base(consumer, base_ref="origin/does-not-exist")
+        config.resolve_base(consumer, base_ref="refs/remotes/origin/does-not-exist")
     assert "unavailable" in str(info.value)
+
+
+@pytest.mark.parametrize("base_ref", ["HEAD", "HEAD~1", "main"])
+def test_base_ref_rejects_revision_expressions_before_git(
+    consumer: Path, monkeypatch, base_ref: str
+):
+    def unexpected_git(*_args, **_kwargs):
+        raise AssertionError("invalid base refs must be rejected before invoking git")
+
+    monkeypatch.setattr(config, "_git", unexpected_git)
+    with pytest.raises(config.ConfigError, match="full named ref"):
+        config.resolve_base(consumer, base_ref=base_ref)
+
+
+def test_packed_full_base_ref_is_accepted(consumer: Path):
+    expected = git(consumer, "rev-parse", "refs/heads/main").strip()
+    git(consumer, "pack-refs", "--all", "--prune")
+    assert not (consumer / ".git/refs/heads/main").exists()
+    assert config.resolve_base(consumer, base_ref="refs/heads/main") == expected
 
 
 @pytest.mark.parametrize(

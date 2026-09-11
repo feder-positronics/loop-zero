@@ -69,21 +69,38 @@ check_integration = "not-applicable: fill in or state why there is no integratio
 """
 
 
-DEFAULT_EXECUTABLE_PATH = (Path("/usr/bin"), Path("/bin"))
+DEFAULT_EXECUTABLE_PATH = (Path("/usr/bin"),)
 SHELL_METACHARACTERS = re.compile(r"&&|\|\||[;&|<>`\r\n]|\$\(")
 
 
+def _no_symlink_components(path: Path) -> bool:
+    """Return true only for an absolute path with no symlink component."""
+    if not path.is_absolute() or ".." in path.parts:
+        return False
+    current = Path("/")
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def _allowed_path(entries: list[str]) -> tuple[Path, ...]:
-    allowed = list(DEFAULT_EXECUTABLE_PATH)
+    allowed: list[Path] = []
     problems: list[str] = []
-    for entry in entries:
+    for entry in (*map(str, DEFAULT_EXECUTABLE_PATH), *entries):
         path = Path(entry)
         if not path.is_absolute():
             problems.append(f"--path-entry {entry!r}: must be an absolute directory")
-        elif not path.is_dir():
+        elif not _no_symlink_components(path):
+            problems.append(f"--path-entry {entry!r}: symlink or unavailable path component")
+        elif not stat.S_ISDIR(os.lstat(path).st_mode):
             problems.append(f"--path-entry {entry!r}: directory is unavailable")
         else:
-            allowed.append(path)
+            allowed.append(path.resolve(strict=True))
     if problems:
         raise ConfigError(problems)
     return tuple(allowed)
@@ -91,7 +108,11 @@ def _allowed_path(entries: list[str]) -> tuple[Path, ...]:
 
 def _regular_executable(path: Path) -> bool:
     try:
-        return stat.S_ISREG(path.stat().st_mode) and os.access(path, os.X_OK)
+        return (
+            _no_symlink_components(path)
+            and stat.S_ISREG(os.lstat(path).st_mode)
+            and os.access(path, os.X_OK)
+        )
     except OSError:
         return False
 
@@ -99,18 +120,11 @@ def _regular_executable(path: Path) -> bool:
 def _repository_executable(root: Path, token: str) -> bool:
     candidate = root / token
     try:
+        if not _regular_executable(candidate):
+            return False
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(root.resolve(strict=True))
-        current = root.resolve(strict=True)
-        for part in Path(token).parts:
-            if part in ("", "."):
-                continue
-            if part == "..":
-                return False
-            current = current / part
-            if stat.S_ISLNK(os.lstat(current).st_mode):
-                return False
-        return stat.S_ISREG(os.lstat(candidate).st_mode) and os.access(candidate, os.X_OK)
+        return True
     except (OSError, ValueError):
         return False
 
@@ -120,17 +134,28 @@ def _resolve_executable(root: Path, token: str, allowed: tuple[Path, ...]) -> Pa
         path = Path(token)
         if not path.is_absolute():
             return (root / path).resolve() if _repository_executable(root, token) else None
-        try:
-            parent = path.parent.resolve(strict=True)
-        except OSError:
-            return None
-        if any(parent == entry.resolve() for entry in allowed) and _regular_executable(path):
-            return path.resolve()
+        for entry in allowed:
+            if not _regular_executable(path):
+                return None
+            try:
+                executable = path.resolve(strict=True)
+                directory = entry.resolve(strict=True)
+            except OSError:
+                continue
+            if executable.parent == directory:
+                return executable
         return None
     for directory in allowed:
         candidate = directory / token
-        if _regular_executable(candidate):
-            return candidate.resolve()
+        if not _regular_executable(candidate):
+            continue
+        try:
+            executable = candidate.resolve(strict=True)
+            allowed_real = directory.resolve(strict=True)
+        except OSError:
+            continue
+        if executable.parent == allowed_real:
+            return executable
     return None
 
 
@@ -329,7 +354,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("sync", help="render consumer wiring from workflow.toml")
-    p.add_argument("--check", action="store_true", help="report drift, write nothing; exit 1 on drift")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="report drift without changing generated targets; exit 1 on drift",
+    )
     p.set_defaults(func=cmd_sync)
 
     p = sub.add_parser("status", help="report version equality; --source performs a trusted pin check")
@@ -340,7 +369,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = policy.add_parser("lint", help="validate workflow.toml and its base-governed hooks")
     base = p.add_mutually_exclusive_group()
     base.add_argument("--base", help="trusted full 40-character base commit SHA")
-    base.add_argument("--base-ref", help="trusted base ref to resolve and print as a commit SHA")
+    base.add_argument(
+        "--base-ref",
+        help="full refs/heads/... or refs/remotes/... base ref to resolve and print",
+    )
     base.add_argument("--no-hooks", action="store_true", help="explicitly skip all hook checks")
     p.add_argument(
         "--path-entry",

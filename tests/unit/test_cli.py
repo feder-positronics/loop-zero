@@ -101,7 +101,9 @@ def test_policy_lint_reports_problems_and_base_hooks(consumer: Path, capsys):
         text=True,
     ).stdout.strip()
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 0
-    assert run("--root", str(consumer), "policy", "lint", "--base-ref", "main") == 0
+    assert run(
+        "--root", str(consumer), "policy", "lint", "--base-ref", "refs/heads/main"
+    ) == 0
     assert base in capsys.readouterr().out
     assert run("--root", str(consumer), "policy", "lint", "--base", "main") == 1
     (consumer / "workflow.toml").write_text("[core]\n", encoding="utf-8")
@@ -184,6 +186,53 @@ def test_hook_commands_reject_shell_syntax_and_inherited_path(consumer: Path, ca
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 1
     assert "allowed PATH" in capsys.readouterr().err
 
+
+def test_allowlist_rejects_symlinked_directory_and_executable(
+    consumer: Path, capsys, tmp_path: Path
+):
+    base = subprocess.run(
+        ["git", "-C", str(consumer), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    linked_directory = tmp_path / "linked-allowed"
+    linked_directory.symlink_to(allowed, target_is_directory=True)
+    assert run(
+        "--root",
+        str(consumer),
+        "policy",
+        "lint",
+        "--base",
+        base,
+        "--path-entry",
+        str(linked_directory),
+    ) == 1
+    assert "symlink" in capsys.readouterr().err
+
+    outside = tmp_path / "outside-tool"
+    outside.write_text("#!/bin/sh\nexit 0\n")
+    outside.chmod(outside.stat().st_mode | stat.S_IXUSR)
+    (allowed / "linked-tool").symlink_to(outside)
+    workflow = consumer / "workflow.toml"
+    workflow.write_text(
+        workflow.read_text().replace(
+            'worktree_setup = ["make setup"]', 'worktree_setup = ["linked-tool"]'
+        )
+    )
+    assert run(
+        "--root",
+        str(consumer),
+        "policy",
+        "lint",
+        "--base",
+        base,
+        "--path-entry",
+        str(allowed),
+    ) == 1
+    assert "allowed PATH" in capsys.readouterr().err
 
 def test_non_commit_base_and_symlinked_base_workflow_fail(consumer: Path, capsys):
     blob = subprocess.run(

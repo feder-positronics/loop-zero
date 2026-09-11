@@ -81,7 +81,14 @@ The base package has no third-party dependencies and requires Python 3.12 or
 later on Linux. `loopzero status` reports the installed package version and
 the vendored snapshot's `core/VERSION`; they must be equal. `loopzero sync`
 renders the consumer's runtime wiring from `workflow.toml` into checked-in
-files, and `loopzero sync --check` fails when those files drift. Run it in CI.
+files, and `loopzero sync --check` fails when those files drift. Sync operations
+serialize on an exclusive `.loopzero/sync.lock`. A replacement sequence creates
+`.loopzero/generated.json.partial`; if a process stops mid-sequence, the marker
+makes the next `sync --check` report the interruption explicitly, and a
+successful `sync` clears it. The lock and final re-read bound honest concurrent
+syncs, but a human edit made during the final multi-file replace loop can still
+race a replacement; stop editing generated targets while sync runs. Run the
+check in CI.
 
 ## Connect the existing runtime entry points
 
@@ -103,14 +110,18 @@ kernel implementation. Idempotence of the repository's setup command is the
 consumer's responsibility; rerun or inspect it before reporting success.
 
 Before reviewing hook-aware policy, provide an explicit trusted base. `--base`
-accepts only a full commit SHA; `--base-ref` resolves a caller-selected ref and
-prints the resulting SHA. Both modes reject replacement objects and non-blob
-base policy files. Hook executables resolve only in `/usr/bin:/bin` and any
-explicit `--path-entry` directories, never the caller's inherited `PATH`:
+is the trusted form and accepts only a full commit SHA. `--base-ref` establishes
+provenance only to a named local ref: it accepts full
+`refs/heads/<branch>` or `refs/remotes/<remote>/<branch>` names, verifies that
+the ref exists, resolves it, and prints the resulting SHA. It rejects short
+names and revision expressions. Both modes reject replacement objects and
+non-blob base policy files. Hook executables resolve only in `/usr/bin` and any
+explicit `--path-entry` directories, never the caller's inherited `PATH`; every
+component of an allowed directory and executable must be a non-symlink:
 
 ```sh
 loopzero policy lint --base "$TRUSTED_BASE_SHA"
-loopzero policy lint --base-ref origin/main
+loopzero policy lint --base-ref refs/remotes/origin/main
 ```
 
 Omitting the base is `UNVERIFIED` and exits nonzero. Use `--no-hooks` only when

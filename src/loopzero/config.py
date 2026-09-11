@@ -32,6 +32,10 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _HEX_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 _PREFIX_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ALIAS_RE = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_BASE_REF_RE = re.compile(
+    r"^refs/(?:heads/[A-Za-z0-9][A-Za-z0-9._/-]*|"
+    r"remotes/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+)
 
 
 class ConfigError(ValueError):
@@ -391,8 +395,27 @@ def resolve_base(root: Path, *, base: str | None = None, base_ref: str | None = 
         raise ConfigError(["select exactly one of --base or --base-ref"])
     if base is not None and not _HEX_SHA_RE.fullmatch(base):
         raise ConfigError(["--base must be a full 40-character hexadecimal commit SHA"])
+    if base_ref is not None and (
+        not _BASE_REF_RE.fullmatch(base_ref)
+        or ".." in base_ref
+        or "//" in base_ref
+        or base_ref.endswith(("/", "."))
+        or any(part.startswith(".") or part.endswith(".lock") for part in base_ref.split("/"))
+    ):
+        raise ConfigError(
+            [
+                "--base-ref must be a full named ref under refs/heads/<branch> "
+                "or refs/remotes/<remote>/<branch>"
+            ]
+        )
     requested = base if base is not None else base_ref
-    proc = _git(root.resolve(), "rev-parse", "--verify", f"{requested}^{{commit}}")
+    root = root.resolve()
+    if base_ref is not None:
+        ref_proc = _git(root, "show-ref", "--verify", base_ref)
+        if ref_proc.returncode != 0:
+            detail = ref_proc.stderr.strip() or "named ref is unavailable"
+            raise ConfigError([f"base {base_ref!r}: unavailable ({detail})"])
+    proc = _git(root, "rev-parse", "--verify", "--end-of-options", f"{requested}^{{commit}}")
     sha = proc.stdout.strip()
     if proc.returncode != 0 or not _SHA_RE.fullmatch(sha):
         detail = proc.stderr.strip() or "does not identify an available commit"

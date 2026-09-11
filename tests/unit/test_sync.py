@@ -1,8 +1,16 @@
+import fcntl
+import multiprocessing
 from pathlib import Path
 
 import pytest
 
 from loopzero import config, sync
+
+
+def _check_in_separate_process(root: str, started, finished) -> None:
+    started.set()
+    sync.check(config.load_profile(Path(root)))
+    finished.set()
 
 
 def test_check_reports_drift_then_write_then_clean(consumer: Path):
@@ -68,7 +76,7 @@ def test_symlinked_target_and_parent_are_refused(consumer: Path, tmp_path: Path)
     agents.write_text("owner\n")
     outside_dir = tmp_path / "outside-dir"
     outside_dir.mkdir()
-    (consumer / ".loopzero").symlink_to(outside_dir, target_is_directory=True)
+    (consumer / ".cursor").symlink_to(outside_dir, target_is_directory=True)
     with pytest.raises(config.ConfigError, match="symlink|outside"):
         sync.check(profile)
     assert list(outside_dir.iterdir()) == []
@@ -148,18 +156,108 @@ def test_concurrent_change_fails_before_replacing_any_target(
     consumer: Path, monkeypatch
 ):
     profile = config.load_profile(consumer)
-    original_read = sync._read_target
+    original_stage = sync._stage
     calls = 0
 
-    def concurrent_read(target: Path):
+    def concurrent_stage(item: sync.Prepared, parent: sync.DirectoryHandle):
         nonlocal calls
         calls += 1
-        if calls == 6:
+        temporary = original_stage(item, parent)
+        if calls == 1:
             (consumer / "AGENTS.md").write_text("concurrent owner edit\n")
-        return original_read(target)
+        return temporary
 
-    monkeypatch.setattr(sync, "_read_target", concurrent_read)
+    monkeypatch.setattr(sync, "_stage", concurrent_stage)
     with pytest.raises(config.ConfigError, match="changed concurrently"):
         sync.write(profile)
     assert (consumer / "AGENTS.md").read_text() == "concurrent owner edit\n"
     assert not (consumer / "CLAUDE.md").exists()
+
+
+def test_parent_exchange_after_validation_cannot_redirect_replacement(
+    consumer: Path, monkeypatch, tmp_path: Path
+):
+    profile = config.load_profile(consumer)
+    original_stage = sync._stage
+    exchanged = False
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    def exchange_parent(item: sync.Prepared, parent: sync.DirectoryHandle):
+        nonlocal exchanged
+        temporary = original_stage(item, parent)
+        if not exchanged:
+            exchanged = True
+            (consumer / ".cursor").rename(consumer / ".cursor-original")
+            (consumer / ".cursor").symlink_to(outside, target_is_directory=True)
+        return temporary
+
+    monkeypatch.setattr(sync, "_stage", exchange_parent)
+    with pytest.raises(config.ConfigError, match="symlink|changed concurrently"):
+        sync.write(profile)
+    assert list(outside.iterdir()) == []
+
+
+def test_check_and_write_take_the_exclusive_sync_lock(
+    consumer: Path, monkeypatch
+):
+    profile = config.load_profile(consumer)
+    operations: list[int] = []
+    real_flock = sync.fcntl.flock
+
+    def recording_flock(descriptor: int, operation: int):
+        operations.append(operation)
+        return real_flock(descriptor, operation)
+
+    monkeypatch.setattr(sync.fcntl, "flock", recording_flock)
+    sync.check(profile)
+    sync.write(profile)
+    assert operations == [fcntl.LOCK_EX, fcntl.LOCK_EX]
+    assert (consumer / sync.LOCK_PATH).is_file()
+
+
+def test_sync_lock_blocks_a_second_process(consumer: Path):
+    profile = config.load_profile(consumer)
+    context = multiprocessing.get_context("spawn")
+    started = context.Event()
+    finished = context.Event()
+    process = context.Process(
+        target=_check_in_separate_process,
+        args=(str(consumer), started, finished),
+    )
+    with sync._locked_root(profile.root):
+        process.start()
+        assert started.wait(5)
+        assert not finished.wait(0.25), "a second sync must wait for the repository lock"
+    assert finished.wait(5)
+    process.join(5)
+    assert process.exitcode == 0
+
+
+def test_interrupted_replace_leaves_partial_marker_until_recovery(
+    consumer: Path, monkeypatch
+):
+    profile = config.load_profile(consumer)
+    real_rename = sync.os.rename
+    calls = 0
+
+    def interrupted_rename(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise OSError("simulated interruption")
+        return real_rename(*args, **kwargs)
+
+    monkeypatch.setattr(sync.os, "rename", interrupted_rename)
+    with pytest.raises(config.ConfigError, match="simulated interruption"):
+        sync.write(profile)
+    marker = consumer / sync.PARTIAL_PATH
+    assert marker.is_file()
+    assert sync.BEGIN in (consumer / "AGENTS.md").read_text()
+    with pytest.raises(config.ConfigError, match="interrupted sync"):
+        sync.check(profile)
+
+    monkeypatch.setattr(sync.os, "rename", real_rename)
+    sync.write(profile)
+    assert not marker.exists()
+    assert sync.check(profile) == []

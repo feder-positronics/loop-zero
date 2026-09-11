@@ -29,7 +29,9 @@ def deploy(tmp_path: Path) -> Path:
 
 def test_example_consumer_end_to_end(tmp_path: Path, capsys):
     root = deploy(tmp_path)
-    assert cli.main(["--root", str(root), "policy", "lint", "--base-ref", "main"]) == 0
+    assert cli.main(
+        ["--root", str(root), "policy", "lint", "--base-ref", "refs/heads/main"]
+    ) == 0
     assert cli.main(["--root", str(root), "sync", "--check"]) == 1
     assert cli.main(["--root", str(root), "sync"]) == 0
     assert cli.main(["--root", str(root), "sync", "--check"]) == 0
