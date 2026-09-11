@@ -70,14 +70,71 @@ def test_privileged_hooks_come_from_base_not_candidate(consumer: Path):
     )
     profile = config.load_profile(consumer)
     assert profile.hooks["acceptance"] == ("true",)
-    hooks = config.effective_hooks(profile, base_ref="main")
+    base = config.resolve_base(consumer, base_ref="main")
+    hooks = config.effective_hooks(profile, base)
     assert hooks["acceptance"] == ("make test",), "candidate must not change its own acceptance"
     assert "closeout" not in hooks, "privileged hook absent at base is absent, not adopted"
     assert hooks["worktree_setup"] == ("make setup",)
 
 
 def test_unavailable_base_is_a_blocker_not_no_hooks(consumer: Path):
-    profile = config.load_profile(consumer)
     with pytest.raises(config.ConfigError) as info:
-        config.effective_hooks(profile, base_ref="origin/does-not-exist")
+        config.resolve_base(consumer, base_ref="origin/does-not-exist")
     assert "unavailable" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    ("workflow", "problem"),
+    [
+        (minimal_workflow() + "\n[routing]\naliases = []\n", "[routing.aliases]"),
+        (minimal_workflow() + "\n[routing]\ntiers = \"wrong\"\n", "[routing.tiers]"),
+        ("path_classes = []\n" + minimal_workflow(), "[path_classes]"),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nbad = { runner = "fake", model = "fake", write = "false" }\n',
+            ".write",
+        ),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nbad = { runner = "fake", model = "fake", agent = 1 }\n',
+            ".agent",
+        ),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nok = { runner = "fake", model = "fake" }\n'
+            + '[routing.tiers]\nC = { alias = "ok", read_only = "false" }\n',
+            ".read_only",
+        ),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nok = { runner = "fake", model = "fake" }\n'
+            + '[routing.tiers]\nC = { alias = "ok", effort = "ultra" }\n',
+            ".effort",
+        ),
+        (
+            "hooks = []\n"
+            + minimal_workflow().replace(
+                '[hooks]\nworktree_setup = ["make setup"]\nacceptance = ["make test"]\n',
+                "",
+            ),
+            "[hooks]",
+        ),
+    ],
+)
+def test_wrong_nested_toml_types_are_config_errors(tmp_path: Path, workflow: str, problem: str):
+    (tmp_path / "workflow.toml").write_text(workflow, encoding="utf-8")
+    with pytest.raises(config.ConfigError) as info:
+        config.load_profile(tmp_path)
+    assert problem in str(info.value)
+
+
+def test_core_path_rejects_traversal_dot_and_symlinks(tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    for path in (".", "../outside", "linked/core"):
+        with pytest.raises(config.ConfigError):
+            (tmp_path / "workflow.toml").write_text(
+                minimal_workflow().replace('path = "vendor/loop-zero"', f'path = "{path}"')
+            )
+            config.load_profile(tmp_path)
