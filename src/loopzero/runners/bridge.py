@@ -66,6 +66,10 @@ def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
     return _codex_isolation.codex_bootstrap_overrides(export_dir)
 
 
+def codex_runtime_overrides() -> tuple[str, ...]:
+    return _codex_isolation.codex_runtime_overrides()
+
+
 def codex_config_lock_override(path: Path) -> str:
     return _codex_isolation.codex_config_lock_override(path)
 
@@ -1782,7 +1786,7 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
 
 
 def _probe_codex_app_server(request: BridgeRequest) -> None:
-    """Exercise pinned SDK bootstrap and ChatGPT account boundaries without a turn."""
+    """Initialize the pinned app-server and read its account without a turn."""
     try:
         import openai_codex
 
@@ -1794,19 +1798,22 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
         from openai_codex import Codex, CodexConfig
 
         _strip_raw_api_from_process_env()
-        with (
-            _codex_effective_config_lock(request) as config_lock,
-            _codex_subscription_environment() as (auth_environment, auth_path),
-        ):
+        with _codex_subscription_environment() as (auth_environment, auth_path):
+            if auth_path is None:
+                raise RuntimeError("startup")
             codex_environment = _filtered_environment()
             codex_environment.update(auth_environment)
             config = CodexConfig(
                 **_codex_bin_kwargs(),
-                config_overrides=(
-                    codex_config_lock_override(config_lock),
-                    *_codex_budget_overrides(),
-                ),
-                cwd=request["cwd"],
+                # Codex 0.154 initializes directly from the highest-precedence
+                # overrides.  The 0.147-era config-lock export was triggered by
+                # thread/start, is no longer part of the app-server protocol,
+                # and made a readiness check create a thread unnecessarily.
+                config_overrides=codex_runtime_overrides(),
+                # Account readiness is independent of a project.  Keeping both
+                # process cwd and CODEX_HOME in the private credential home
+                # prevents repository configuration discovery during initialize.
+                cwd=str(auth_path.parent),
                 env=codex_environment,
             )
             with Codex(config) as codex:

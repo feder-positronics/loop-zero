@@ -3949,14 +3949,17 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
     credential.write_text(json.dumps(_protected_codex_auth()), encoding="utf-8")
     read_fd = os.open(credential, os.O_RDONLY)
     monkeypatch.setenv(sdk_bridge.CODEX_AUTH_FD_ENV, str(read_fd))
-    invoked: list[object] = []
     observed_homes: list[Path] = []
+    observed_cwds: list[Path] = []
+    observed_overrides: list[tuple[str, ...]] = []
     account_calls: list[None] = []
     thread_calls: list[None] = []
 
     class FakeConfig:
         def __init__(self, **kwargs) -> None:
             self.env = kwargs["env"]
+            observed_cwds.append(Path(kwargs["cwd"]))
+            observed_overrides.append(kwargs["config_overrides"])
 
     class FakeAccountResponse:
         def model_dump(self) -> dict[str, object]:
@@ -3989,14 +3992,8 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
             thread_calls.append(None)
             raise AssertionError("readiness probe must not start a model thread")
 
-    @contextmanager
-    def fake_config_lock(request):
-        invoked.append(request)
-        yield tmp_path / "runtime.config.lock.toml"
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(openai_codex, "CodexConfig", FakeConfig)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", fake_config_lock)
     request = {
         "vendor": "codex-probe",
         "prompt": "",
@@ -4012,13 +4009,14 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
 
     sdk_bridge._probe_codex_app_server(request)
 
-    assert invoked == [request]
     assert account_calls == [None]
     assert thread_calls == []
     assert sdk_bridge.CODEX_AUTH_FD_ENV not in os.environ
     with pytest.raises(OSError):
         os.fstat(read_fd)
     assert observed_homes and not observed_homes[0].exists()
+    assert observed_cwds == observed_homes
+    assert observed_overrides == [sdk_bridge.codex_runtime_overrides()]
     assert capsys.readouterr().out == '{"type":"readiness","status":"ready"}\n'
 
 
@@ -4065,13 +4063,8 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
         def thread_start(self, **_kwargs):
             thread_calls.append(None)
 
-    @contextmanager
-    def fake_config_lock(_request):
-        yield tmp_path / "runtime.config.lock.toml"
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(openai_codex, "CodexConfig", FakeConfig)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", fake_config_lock)
 
     sdk_bridge._probe_codex_app_server(
         {
@@ -4096,6 +4089,36 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
     output = capsys.readouterr().out
     assert output == ('{"type":"readiness","status":"failed","failure":"bootstrap"}\n')
     assert "private@example.invalid" not in output
+
+
+def test_codex_0_154_recorded_readiness_protocol_fixture() -> None:
+    """Keep the no-turn SDK exchange aligned with the pinned 0.154 app-server."""
+    from openai_codex._initialize_metadata import validate_initialize_metadata
+    from openai_codex.generated.v2_all import GetAccountResponse
+    from openai_codex.models import InitializeResponse
+
+    fixture = (
+        Path(__file__).with_name("fixtures") / "codex_app_server_0_154_0.jsonl"
+    )
+    frames = [json.loads(line) for line in fixture.read_text().splitlines()]
+
+    assert [
+        frame["message"].get("method")
+        for frame in frames
+        if frame["direction"] == "client"
+    ] == ["initialize", "initialized", "account/read"]
+    assert all(
+        frame["message"].get("method") not in {"thread/start", "turn/start"}
+        for frame in frames
+        if frame["direction"] == "client"
+    )
+    initialize = InitializeResponse.model_validate(frames[1]["message"]["result"])
+    normalized = validate_initialize_metadata(initialize)
+    assert normalized.serverInfo is not None
+    assert normalized.serverInfo.version.split()[0] == "0.154.0"
+    account = GetAccountResponse.model_validate(frames[4]["message"]["result"])
+    assert account.account is None
+    assert account.requires_openai_auth is True
 
 
 def _codex_auth_process_result() -> object:
