@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import html
 import re
-import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ..integrations.github import GitHub
+    from ..integrations.github import GitHub, SecureGitRunner
 
 ISSUE_REFERENCE_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|revert(?:s|ed|ing)?)"
@@ -374,27 +373,38 @@ def load_pr(
     )
 
 
-def _has_commit(oid: str) -> bool:
+def _has_commit(oid: str, *, runner: SecureGitRunner) -> bool:
+    from ..integrations.github import GateError
+
     try:
-        completed = subprocess.run(
-            ["git", "cat-file", "-e", f"{oid}^{{commit}}"],
+        completed = runner.run(
+            ("git", "cat-file", "-e", f"{oid}^{{commit}}"),
             check=False,
-            capture_output=True,
-            text=True,
         )
-    except OSError as exc:
+    except (GateError, OSError) as exc:
         raise ValueError("cannot inspect local PR commits") from exc
     return completed.returncode == 0
 
 
-def materialize_pr_commits(pr: str, base_oid: str, head_oid: str) -> None:
+def materialize_pr_commits(
+    pr: str,
+    base_oid: str,
+    head_oid: str,
+    *,
+    runner: SecureGitRunner | None = None,
+) -> None:
     """Fetch the live PR range when either exact commit is absent locally."""
-    if _has_commit(base_oid) and _has_commit(head_oid):
+    from ..integrations.github import GateError, SecureGitRunner
+
+    command_runner = runner or SecureGitRunner(Path.cwd())
+    if _has_commit(base_oid, runner=command_runner) and _has_commit(
+        head_oid, runner=command_runner
+    ):
         return
     number, _repository = _pr_target(pr)
     try:
-        subprocess.run(
-            [
+        command_runner.run(
+            (
                 "git",
                 "fetch",
                 "--no-tags",
@@ -402,14 +412,14 @@ def materialize_pr_commits(pr: str, base_oid: str, head_oid: str) -> None:
                 "origin",
                 base_oid,
                 f"refs/pull/{number}/head",
-            ],
+            ),
             check=True,
-            capture_output=True,
-            text=True,
         )
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (GateError, OSError) as exc:
         raise ValueError(f"cannot fetch live commits for PR {pr}") from exc
-    if not _has_commit(base_oid) or not _has_commit(head_oid):
+    if not _has_commit(base_oid, runner=command_runner) or not _has_commit(
+        head_oid, runner=command_runner
+    ):
         raise ValueError(f"live commits for PR {pr} are unavailable after fetch")
 
 

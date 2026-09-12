@@ -723,7 +723,7 @@ def test_pr_cli_checks_obligations_against_live_pr_oids(monkeypatch) -> None:
     assert calls == [(base_oid, head_oid, context_body())]
 
 
-def test_materialize_pr_commits_fetches_missing_live_objects(monkeypatch) -> None:
+def test_materialize_pr_commits_fetches_missing_live_objects() -> None:
     base_oid = "a" * 40
     head_oid = "b" * 40
     commands: list[list[str]] = []
@@ -732,29 +732,29 @@ def test_materialize_pr_commits_fetches_missing_live_objects(monkeypatch) -> Non
     class Completed:
         returncode = 0
 
-    def fake_run(command, **_kwargs):
-        commands.append(command)
-        if command[:3] == ["git", "cat-file", "-e"]:
-            oid = command[3].removesuffix("^{commit}")
-            result = Completed()
-            result.returncode = 0 if available[oid] else 1
-            return result
-        assert command == [
-            "git",
-            "fetch",
-            "--no-tags",
-            "--quiet",
-            "origin",
-            base_oid,
-            "refs/pull/123/head",
-        ]
-        available[base_oid] = True
-        available[head_oid] = True
-        return Completed()
+    class Runner:
+        def run(self, command, **_kwargs):
+            command = list(command)
+            commands.append(command)
+            if command[:3] == ["git", "cat-file", "-e"]:
+                oid = command[3].removesuffix("^{commit}")
+                result = Completed()
+                result.returncode = 0 if available[oid] else 1
+                return result
+            assert command == [
+                "git",
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                "origin",
+                base_oid,
+                "refs/pull/123/head",
+            ]
+            available[base_oid] = True
+            available[head_oid] = True
+            return Completed()
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-
-    module.materialize_pr_commits("123", base_oid, head_oid)
+    module.materialize_pr_commits("123", base_oid, head_oid, runner=Runner())
 
     assert commands[-1] == ["git", "cat-file", "-e", f"{head_oid}^{{commit}}"]
 
