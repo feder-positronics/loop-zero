@@ -1,4 +1,5 @@
 import ast
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -175,9 +176,12 @@ _SUBPROCESS_EXECUTION_NAMES = frozenset(
 )
 
 
-def _process_calls(
-    source: str, *, filename: str
-) -> tuple[ast.AST, list[tuple[ast.Call, str, str]]]:
+def _process_calls(source: str, *, filename: str) -> tuple[
+    ast.AST,
+    list[tuple[ast.Call, str, str]],
+    dict[str, str],
+    dict[str, tuple[str, str]],
+]:
     """Find process creation regardless of import aliases or argv construction."""
     tree = ast.parse(source, filename=filename)
     module_aliases: dict[str, str] = {}
@@ -224,16 +228,23 @@ def _process_calls(
                 target = module, node.func.attr
         if target is not None and is_execution(*target):
             calls.append((node, *target))
-    return tree, sorted(calls, key=lambda item: item[0].lineno)
+    return (
+        tree,
+        sorted(calls, key=lambda item: item[0].lineno),
+        module_aliases,
+        direct_calls,
+    )
 
 
 def _process_call_lines(source: str, *, filename: str) -> list[int]:
-    _tree, calls = _process_calls(source, filename=filename)
+    _tree, calls, _aliases, _direct = _process_calls(source, filename=filename)
     return [node.lineno for node, _module, _name in calls]
 
 
 def _gh_process_call_lines(source: str, *, filename: str) -> list[int]:
-    tree, calls = _process_calls(source, filename=filename)
+    tree, calls, module_aliases, direct_calls = _process_calls(
+        source, filename=filename
+    )
     assignments: dict[str, list[ast.AST]] = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
@@ -246,23 +257,101 @@ def _gh_process_call_lines(source: str, *, filename: str) -> list[int]:
                     if isinstance(child, ast.Name):
                         assignments.setdefault(child.id, []).append(value)
 
-    def literal_string(node: ast.AST) -> str | None:
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            return node.value
+    def literal_string(
+        node: ast.AST, resolving: frozenset[str] = frozenset()
+    ) -> str | None:
+        """Resolve str, bytes, concatenation and f-string literals statically."""
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, str):
+                return node.value
+            if isinstance(node.value, bytes):
+                return node.value.decode("latin-1")
+            return None
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            left = literal_string(node.left)
-            right = literal_string(node.right)
+            left = literal_string(node.left, resolving)
+            right = literal_string(node.right, resolving)
             if left is not None and right is not None:
                 return left + right
+            return None
+        if isinstance(node, ast.JoinedStr):
+            parts = [literal_string(value, resolving) for value in node.values]
+            return None if any(part is None for part in parts) else "".join(parts)
+        if isinstance(node, ast.FormattedValue):
+            return literal_string(node.value, resolving)
+        if isinstance(node, ast.Name) and node.id not in resolving:
+            values = assignments.get(node.id, [])
+            resolved = {
+                literal_string(value, resolving | {node.id}) for value in values
+            }
+            if len(resolved) == 1 and None not in resolved:
+                return resolved.pop()
         return None
+
+    def mentions_gh(text: str) -> bool:
+        words = text.lower().replace("/", " ").split()
+        return text.lower() == "gh" or "gh" in words
+
+    def environment_key_mentions_gh(text: str) -> bool:
+        return "gh" in re.split(r"[^a-z0-9]+", text.lower())
+
+    def is_environ_object(node: ast.AST) -> bool:
+        if isinstance(node, ast.Attribute) and node.attr == "environ":
+            return (
+                isinstance(node.value, ast.Name)
+                and module_aliases.get(node.value.id) == "os"
+            )
+        if isinstance(node, ast.Name):
+            return direct_calls.get(node.id) == ("os", "environ")
+        return False
+
+    def environment_lookup_key(node: ast.AST) -> tuple[bool, ast.AST | None]:
+        """Return (is_lookup, key) for os.environ[...]/.get(...)/os.getenv(...)."""
+        if isinstance(node, ast.Subscript) and is_environ_object(node.value):
+            return True, node.slice
+        if isinstance(node, ast.Call):
+            func = node.func
+            key = node.args[0] if node.args else None
+            if isinstance(func, ast.Attribute):
+                if func.attr == "get" and is_environ_object(func.value):
+                    return True, key
+                if (
+                    func.attr == "getenv"
+                    and isinstance(func.value, ast.Name)
+                    and module_aliases.get(func.value.id) == "os"
+                ):
+                    return True, key
+            if isinstance(func, ast.Name) and direct_calls.get(func.id) == (
+                "os",
+                "getenv",
+            ):
+                return True, key
+        return False, None
+
+    def contains_environment_lookup(node: ast.AST, env_tainted: frozenset[str]) -> bool:
+        for child in ast.walk(node):
+            if environment_lookup_key(child)[0]:
+                return True
+            if isinstance(child, ast.Name) and child.id in env_tainted:
+                return True
+        return False
 
     def references_gh(node: ast.AST, tainted_names: frozenset[str]) -> bool:
         literal = literal_string(node)
         if literal is not None:
-            words = literal.replace("/", " ").split()
-            return literal == "gh" or "gh" in words
+            return mentions_gh(literal)
+        is_lookup, key = environment_lookup_key(node)
+        if is_lookup:
+            # A gh-named or unauditable environment key is a hidden gh argv.
+            key_literal = None if key is None else literal_string(key)
+            return key_literal is None or environment_key_mentions_gh(key_literal)
         if isinstance(node, ast.Name):
             return node.id.lower() == "gh" or node.id in tainted_names
+        if isinstance(node, ast.JoinedStr):
+            return any(
+                references_gh(value, tainted_names) for value in node.values
+            ) or mentions_gh(
+                "".join(literal_string(value) or " " for value in node.values)
+            )
         return any(
             references_gh(child, tainted_names)
             for child in ast.iter_child_nodes(node)
@@ -280,6 +369,48 @@ def _gh_process_call_lines(source: str, *, filename: str) -> list[int]:
             break
         tainted.update(discovered)
 
+    environment_tainted: set[str] = set()
+    while True:
+        discovered = {
+            name
+            for name, values in assignments.items()
+            if name not in environment_tainted
+            and any(
+                contains_environment_lookup(value, frozenset(environment_tainted))
+                for value in values
+            )
+        }
+        if not discovered:
+            break
+        environment_tainted.update(discovered)
+
+    def executable_nodes(call: ast.Call) -> list[ast.AST]:
+        """Return the nodes that decide which program a process call launches."""
+        candidates: list[ast.AST] = []
+        positional = call.args[0] if call.args else None
+        for keyword in call.keywords:
+            if keyword.arg == "args" and positional is None:
+                positional = keyword.value
+            if keyword.arg == "executable":
+                candidates.append(keyword.value)
+        if positional is not None:
+            if isinstance(positional, (ast.List, ast.Tuple)) and positional.elts:
+                candidates.append(positional.elts[0])
+            else:
+                candidates.append(positional)
+        return candidates
+
+    def executable_from_environment(node: ast.AST) -> bool:
+        # The program itself resolved from the process environment cannot be
+        # audited statically, whatever the key is called.
+        if isinstance(node, ast.Starred):
+            return executable_from_environment(node.value)
+        if isinstance(node, ast.Subscript) and not environment_lookup_key(node)[0]:
+            return executable_from_environment(node.value)
+        if isinstance(node, ast.Name):
+            return node.id in environment_tainted
+        return contains_environment_lookup(node, frozenset(environment_tainted))
+
     violations: list[int] = []
     for node, _module, _name in calls:
         argv = list(node.args)
@@ -288,7 +419,9 @@ def _gh_process_call_lines(source: str, *, filename: str) -> list[int]:
             for keyword in node.keywords
             if keyword.arg in {"args", "executable"}
         )
-        if any(references_gh(value, frozenset(tainted)) for value in argv):
+        if any(references_gh(value, frozenset(tainted)) for value in argv) or any(
+            executable_from_environment(value) for value in executable_nodes(node)
+        ):
             violations.append(node.lineno)
     return violations
 
@@ -334,6 +467,29 @@ def test_github_integration_is_the_only_subprocess_gh_boundary() -> None:
             'subprocess.run([gh, "api"])\n',
             [3],
         ),
+        # f-string assembled across a formatted value and a literal tail.
+        (
+            'import subprocess\ntool = "g"\nsubprocess.run([f"{tool}h", "api"])\n',
+            [3],
+        ),
+        # bytes argv never reaches the str literal path.
+        ('import subprocess\nsubprocess.run([b"gh", b"api"])\n', [2]),
+        # executable resolved from the process environment.
+        (
+            'import os, subprocess\n'
+            'subprocess.run([os.environ["GH_BIN"], "api"])\n',
+            [2],
+        ),
+        (
+            'import os, subprocess\n'
+            'subprocess.run([os.getenv("LOOPZERO_GH"), "api"])\n',
+            [2],
+        ),
+        (
+            'from os import environ\nimport subprocess\n'
+            'subprocess.run([environ.get("TOOL"), "api"])\n',
+            [3],
+        ),
     ),
 )
 def test_process_boundary_scan_rejects_hidden_gh_argv(
@@ -355,6 +511,9 @@ def test_process_boundary_scan_rejects_hidden_gh_argv(
         'import os\nos.posix_spawn("gh", ["gh", "api"], {})\n',
         'import asyncio\nasyncio.create_subprocess_exec("gh", "api")\n',
         'import subprocess as sp\nsp.run(["gh", "api"])\n',
+        'import subprocess\ntool = "g"\nsubprocess.run([f"{tool}h", "api"])\n',
+        'import subprocess\nsubprocess.run([b"gh", b"api"])\n',
+        'import os, subprocess\nsubprocess.run([os.environ["GH_BIN"], "api"])\n',
     ),
 )
 def test_package_scan_rejects_process_counterexample_in_body_check(
