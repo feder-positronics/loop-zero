@@ -67,6 +67,29 @@ Missing applicable setup/check capability is a blocker, not not-applicable.
 Profiles are selected from `python`, `fastapi`, `nextjs`, `angular`; profile
 selection does not import commands. Keep local secrets outside this file.
 
+## Install the package
+
+The executable mechanisms live in the `loopzero` package. Install it from the
+same full commit SHA as the snapshot, as a Git dependency in the consumer's
+existing Python project, with only the extras the consumer's runtimes need:
+
+```sh
+uv add "loopzero[claude,codex] @ git+https://github.com/feder-positronics/loop-zero@$LOOP_ZERO_REVISION"
+```
+
+The base package has no third-party dependencies and requires Python 3.12 or
+later on Linux. `loopzero status` reports the installed package version and
+the vendored snapshot's `core/VERSION`; they must be equal. `loopzero sync`
+renders the consumer's runtime wiring from `workflow.toml` into checked-in
+files, and `loopzero sync --check` fails when those files drift. Sync operations
+serialize on an exclusive `.loopzero/sync.lock`. A replacement sequence creates
+`.loopzero/generated.json.partial`; if a process stops mid-sequence, the marker
+makes the next `sync --check` report the interruption explicitly, and a
+successful `sync` clears it. The lock and final re-read bound honest concurrent
+syncs, but a human edit made during the final multi-file replace loop can still
+race a replacement; stop editing generated targets while sync runs. Run the
+check in CI.
+
 ## Connect the existing runtime entry points
 
 Add one local instruction to the existing `AGENTS.md` directing Codex to read
@@ -80,19 +103,42 @@ is needed. A runtime with no repository-instruction loading must be given the
 adapter path explicitly. Record the actual runtime/version and loading evidence
 when exercising each adapter in a real delivery.
 
-Read the local contract and execute its reviewed setup command directly. The
-core never executes TOML values. Idempotence of the repository's setup command
-is the consumer's responsibility; rerun or inspect it before reporting success.
+Read the local contract and execute its reviewed setup command directly. This
+package skeleton never executes TOML hook values. Hook execution, including the
+validation-child environment allowlist and filesystem sandbox, belongs to the
+kernel implementation. Idempotence of the repository's setup command is the
+consumer's responsibility; rerun or inspect it before reporting success.
+
+Before reviewing hook-aware policy, provide an explicit trusted base. `--base`
+is the trusted form and accepts only a full commit SHA. `--base-ref` establishes
+provenance only to a named local ref: it accepts full
+`refs/heads/<branch>` or `refs/remotes/<remote>/<branch>` names, verifies that
+the ref exists, resolves it, and prints the resulting SHA. It rejects short
+names and revision expressions. Both modes reject replacement objects and
+non-blob base policy files. Hook executables resolve only in `/usr/bin` and any
+explicit `--path-entry` directories, never the caller's inherited `PATH`; every
+component of an allowed directory and executable must be a non-symlink:
+
+```sh
+loopzero policy lint --base "$TRUSTED_BASE_SHA"
+loopzero policy lint --base-ref refs/remotes/origin/main
+```
+
+Omitting the base is `UNVERIFIED` and exits nonzero. Use `--no-hooks` only when
+the requested lint deliberately excludes hooks; that mode reports validity but
+does not print a trust `pass`.
 
 ## Verify the pin
 
 Python 3.11+ and Git are needed only for this optional read-only integrity check:
 
 ```sh
-python3 vendor/loop-zero/tools/status.py --consumer . --source "$LOOP_ZERO_SOURCE"
+loopzero status --source "$LOOP_ZERO_SOURCE"
 ```
 
-Status checks every file's bytes, detects extra/missing files and rejects
+The installed command runs `core/tools/status.py` from the trusted source
+checkout, never from the vendored candidate snapshot. Status checks every
+file's bytes, detects extra/missing files and rejects
 symlinks. It requires the pinned commit in the local source checkout and exits
 nonzero when proof is unavailable or mismatched. It does not fetch, execute
 commands from TOML, validate the rest of the local contract or product setup, certify remote origin
@@ -137,11 +183,16 @@ shares refs and is not an isolation boundary. The pin check passes only a small
 OS environment allowlist to its read-only Git children, with global/system Git
 configuration disabled; it never launches consumer commands.
 
-Selected status checks print exactly `pass` or `fail` on stdout, with failure
+Pin-verified status checks print exactly `pass` or `fail` on stdout after the
+informational version line, with failure
 diagnostics on stderr and a nonzero failure exit. The 0.1.0 `VERIFIED` success
 message is replaced; update any consumer parsing it. No source checkout is
 required for the environment or known-gaps checks. Publication/review evidence
 belongs only in the current-head PR body, using `core/HANDOFF.md`.
+
+Without `--source`, `loopzero status` reports version equality as information,
+exits zero, and deliberately emits no `pass`; version strings alone do not
+authenticate snapshot bytes.
 
 ## Check policy and execution evidence
 
@@ -155,8 +206,8 @@ Configure the CI's infrastructure retry once and weekly override review per
 Create consumer-owned `CHECK-OVERRIDES.md` only when an override is actually used.
 
 ```sh
-python3 vendor/loop-zero/tools/checks.py checks --workflow workflow.toml
-python3 vendor/loop-zero/tools/checks.py checks --workflow workflow.toml --results check-results.json
+loopzero checks
+loopzero checks --results check-results.json
 ```
 
 The read-only command uses the TOML required-list route; it makes no network
