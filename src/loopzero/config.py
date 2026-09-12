@@ -78,6 +78,8 @@ REVIEW_KEYS = frozenset(
         "finding_severities",
         "security_patterns",
         "cross_harness_routes",
+        "review_snapshot_namespace",
+        "finding_snapshot_namespace",
     }
 )
 GITHUB_KEYS = frozenset(
@@ -252,6 +254,8 @@ class Profile:
     cross_harness_routes: dict[str, str] = field(
         default_factory=lambda: {"codex": "opus", "claude": "sol"}
     )
+    review_snapshot_namespace: str = "dispatch-snapshots"
+    finding_snapshot_namespace: str = "finding-snapshots"
     github: GithubConfig = field(default_factory=GithubConfig)
     path_classes: dict[str, tuple[str, ...]] = field(default_factory=dict)
     path_class_parents: dict[str, str] = field(
@@ -726,6 +730,26 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             else:
                 cross_harness_routes[harness_name] = alias_name
 
+    snapshot_namespaces: dict[str, str] = {}
+    for key, default in (
+        ("review_snapshot_namespace", "dispatch-snapshots"),
+        ("finding_snapshot_namespace", "finding-snapshots"),
+    ):
+        value = review.get(key, default)
+        if (
+            not isinstance(value, str)
+            or not value
+            or value.startswith("/")
+            or value.endswith("/")
+            or ".." in value.split("/")
+            or re.fullmatch(r"[A-Za-z0-9._/-]+", value) is None
+        ):
+            problems.append(f"[review].{key}: must be a normalized ref namespace")
+        else:
+            snapshot_namespaces[key] = value
+    if len(set(snapshot_namespaces.values())) != len(snapshot_namespaces):
+        problems.append("[review]: review and finding snapshot namespaces must differ")
+
     github = data.get("github", {})
     if not isinstance(github, dict):
         problems.append("[github]: must be a table")
@@ -897,6 +921,12 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         finding_severities=finding_severities,
         security_patterns=security_patterns,
         cross_harness_routes=cross_harness_routes,
+        review_snapshot_namespace=snapshot_namespaces.get(
+            "review_snapshot_namespace", "dispatch-snapshots"
+        ),
+        finding_snapshot_namespace=snapshot_namespaces.get(
+            "finding_snapshot_namespace", "finding-snapshots"
+        ),
         github=GithubConfig(
             native_protection=native_protection,
             workflow=github_workflow,

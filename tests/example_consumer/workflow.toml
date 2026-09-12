@@ -59,6 +59,8 @@ max_delta_reviews = 1
 required_sections = ["code", "security"]
 finding_severities = ["critical", "important", "suggestion"]
 security_patterns = ["*dependencies*.py", "*middleware*", "*/integrations/*", "*config.py", "*.env*"]
+review_snapshot_namespace = "dispatch-snapshots"
+finding_snapshot_namespace = "finding-snapshots"
 
 [github]
 native_protection = true

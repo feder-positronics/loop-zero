@@ -43,7 +43,17 @@ from ..kernel.patch_identity import (
     prove_patch_equivalence,
     validate_patch_carry,
 )
-from ._body_check import has_standalone_reason, validate_contract
+from ._body_check import (
+    contains_complete_phrase,
+    has_issue_reference,
+    has_standalone_reason,
+    has_visible_text,
+    validate,
+    validate_context_and_goal,
+    validate_contract,
+    validate_required_sections,
+    visible_contract_text,
+)
 from ..integrations.github import GateError, SecureGitRunner
 from ._publish_body import (
     EVIDENCE_END,

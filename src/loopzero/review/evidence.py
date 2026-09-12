@@ -56,15 +56,17 @@ def _audit_root(repo: Path) -> Path:
     profile = _PROFILE.get()
     if profile is None:
         raise DispatchError("review evidence requires a configured profile")
-    return profile.root / profile.audit_root
+    return repo.resolve() / profile.audit_root
 
 
 def _ref_namespaces() -> tuple[str, str]:
     profile = _PROFILE.get()
     if profile is None:
         raise DispatchError("review evidence requires a configured profile")
-    base = profile.github.ref_namespace.removeprefix("refs/").strip("/")
-    return (f"{base}/review-snapshots", f"{base}/finding-snapshots")
+    return (
+        getattr(profile, "review_snapshot_namespace", "dispatch-snapshots"),
+        getattr(profile, "finding_snapshot_namespace", "finding-snapshots"),
+    )
 
 PERSISTED_REVIEW_SEVERITIES = frozenset({"critical", "important"})
 # Every review intent deposits material findings except the trust-manifest

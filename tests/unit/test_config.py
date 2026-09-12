@@ -24,6 +24,8 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.toolchain["db_url_vars"] == ["TEST_DATABASE_URL", "DATABASE_URL"]
     assert profile.toolchain["db_lock"] == "/tmp/intelflo-testdb-5433.lock"
     assert profile.security_patterns
+    assert profile.review_snapshot_namespace == "dispatch-snapshots"
+    assert profile.finding_snapshot_namespace == "finding-snapshots"
     assert profile.path_classes["backend-risk"]
     assert profile.github.labels["standalone"] == "standalone"
     assert profile.github.body_required_sections == ("Context and goal", "Validation")
@@ -93,6 +95,27 @@ def test_mechanism_configuration_is_typed_and_retained():
     assert profile.required_sections == ("code", "security")
     assert profile.github.labels["standalone"] == "standalone"
     assert profile.github.gh_version_floor == (2, 40, 0)
+    assert profile.review_snapshot_namespace == "dispatch-snapshots"
+    assert profile.finding_snapshot_namespace == "finding-snapshots"
+
+
+@pytest.mark.parametrize(
+    "review_configuration",
+    (
+        'review_snapshot_namespace = "/absolute"',
+        'review_snapshot_namespace = "refs/../escape"',
+        'review_snapshot_namespace = "same"\nfinding_snapshot_namespace = "same"',
+    ),
+)
+def test_snapshot_namespaces_are_normalized_and_distinct(
+    tmp_path: Path, review_configuration: str
+):
+    (tmp_path / "workflow.toml").write_text(
+        minimal_workflow(extra=f"[review]\n{review_configuration}\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(config.ConfigError, match="snapshot namespace|ref namespace"):
+        config.load_profile(tmp_path)
 
 
 def test_mechanism_configuration_reports_all_invalid_keys(tmp_path: Path):

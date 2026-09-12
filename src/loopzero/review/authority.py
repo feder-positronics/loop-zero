@@ -245,6 +245,7 @@ def fold_in_governed_review_findings(
     ):
         raise DispatchError("governed capture receipt source identity is invalid")
     request = build_finding_capture_request(
+        pr=receipt.get("pr"),
         producer_kind="governed-review",
         producer_id=task_id,
         unit_attempt_number=unit_attempt_number,
@@ -258,6 +259,7 @@ def fold_in_governed_review_findings(
     if receipt.get("operation_request_digest") != canonical_record_digest(request):
         findings = persisted_review_findings(findings, review_intent=review_intent)
         request = build_finding_capture_request(
+            pr=receipt.get("pr"),
             producer_kind="governed-review",
             producer_id=task_id,
             unit_attempt_number=unit_attempt_number,
