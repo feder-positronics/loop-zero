@@ -1,6 +1,10 @@
+import base64
+import gzip
 import hashlib
+import io
 import json
 import subprocess
+import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -237,73 +241,80 @@ def test_diff_digest_preserves_non_utf8_git_bytes(risk_repo: Path) -> None:
     assert artifact["diff_sha256"] == hashlib.sha256(raw_diff).hexdigest()
 
 
-def require_historical_commits(root: Path, commit_shas: list[str]) -> None:
-    missing_shas = [
-        sha
-        for sha in commit_shas
-        if subprocess.run(
-            ["git", "rev-parse", "--verify", f"{sha}^{{commit}}"],
-            cwd=root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        ).returncode
-        != 0
-    ]
-    if not missing_shas:
-        return
-    shallow = subprocess.check_output(
-        ["git", "rev-parse", "--is-shallow-repository"],
-        cwd=root,
-        text=True,
-    ).strip()
-    if shallow == "true":
-        pytest.skip(
-            "historical replay corpus requires full Git history; missing commits: "
-            + ", ".join(missing_shas)
-        )
-    pytest.fail(
-        "historical replay corpus references missing commits in a full clone: "
-        + ", ".join(missing_shas)
+_HISTORICAL_RISK_CASES = {
+    "merged-docs-only-admission-amendment": {
+        "base": "8dccbc7c78061ddc24476b36cfc991b66f7186a7",
+        "head": "18c41b595520913f810ac3e2233a4c549de09c15",
+        "tier": "T0",
+        "security": [],
+        "fixture_sha256": (
+            "1a69a79271fcc80906c439a58d74a2747015179ac4f881544ab7edffd32004ae",
+            "0b6a848fa4796f614470f0e95c8b04b2cc0cd61e337d4ae1a59d521f78cc2a7d",
+        ),
+    },
+    "merged-authority-ledger-cleanup-fix": {
+        "base": "79738b944247e11688a01adb31c340e550f159c8",
+        "head": "7f2e0b7639829a01260593d61651350b24c50a18",
+        "tier": "T1",
+        "security": [],
+        "fixture_sha256": (
+            "b6b1d6c5ca502f49f5e1fdbe1dcdd00b4468328bfe212fe30c839b0f6443b074",
+            "abc48af5b6320147c53941d06abc1ff2879969360e848e8a1cf562b1e2126bad",
+        ),
+    },
+    "merged-finding-ownership-fix": {
+        "base": "546561379ff41ca1a1cc25b9432d9b57aa388e03",
+        "head": "79738b944247e11688a01adb31c340e550f159c8",
+        "tier": "T1",
+        "security": [],
+        "fixture_sha256": (
+            "729d09cb176c15296b012a73c675dd9427d326d73e481e4aeaffa9a4dcae1191",
+            "a59487f6f6fe09de008c1e26c44d7dacd1ff050dc0453d9854fab359b105edb3",
+        ),
+    },
+    "merged-content-classified-security-scope": {
+        "base": "3e4319b03b8d66c345f570ce778f171e50d80ddc",
+        "head": "c280941efc9c0e91b56c7ca5eddc74c88c3d57d7",
+        "tier": "T2",
+        "security": [
+            "scripts/util/dispatch_authority.py",
+            "scripts/util/dispatch_authority_projection.py",
+        ],
+        "fixture_sha256": (
+            "3203a610ce8db7de38412f8e21a5445a6699749ed3f9e0cc8d8fa4a9cb1a7d6f",
+            "f7996e5ac40caa90fa32fbdfbffefd00eb7704a1be6ba2b2591b15211c5e52f7",
+        ),
+    },
+    "merged-hook-only-tooling-change": {
+        "base": "d1c6d3b3757ecda814d46d13bcffa6b5422fb3d8",
+        "head": "a29d1d47fa89fdd024c6f3553eec6dff11d14fdc",
+        "tier": "T2",
+        "security": ["scripts/hooks/ci-mirror-check.sh"],
+        "fixture_sha256": (
+            "7e0db8a292b3b1ebc085e089886fa35f6de5e949737416e4bd4e74e5de172696",
+            "d8e99b191723d86022bdf5976348dc0c9030d593cb52423bfa2ccafb728c79f0",
+        ),
+    },
+}
+
+
+def _tree_rows(repo: Path, ref: str) -> list[dict[str, str]]:
+    output = subprocess.check_output(
+        ["git", "ls-tree", "-r", ref], cwd=repo, text=True
     )
+    rows = []
+    for line in output.splitlines():
+        metadata, path = line.split("\t", maxsplit=1)
+        mode, kind, oid = metadata.split()
+        rows.append({"path": path, "mode": mode, "type": kind, "oid": oid})
+    return rows
 
 
-def test_missing_historical_commit_skips_in_shallow_checkout(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1),
-    )
-    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **_kwargs: "true\n")
-
-    with pytest.raises(pytest.skip.Exception, match="requires full Git history"):
-        require_historical_commits(tmp_path, ["a" * 40])
-
-
-def test_missing_historical_commit_fails_in_full_clone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(
-        subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 1),
-    )
-    monkeypatch.setattr(subprocess, "check_output", lambda *_args, **_kwargs: "false\n")
-
-    with pytest.raises(pytest.fail.Exception, match="missing commits in a full clone"):
-        require_historical_commits(tmp_path, ["b" * 40])
-
-
-def test_historical_changed_path_replay_corpus_has_no_t2_escape(
-    tmp_path: Path,
-) -> None:
-    corpus_path = Path(__file__).parent / "fixtures" / "delivery_review_risk_replay_v1.json"
-    corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
-
-    repo = tmp_path / "historical-replay"
-    repo.mkdir()
+def _replay_historical_pair(repo: Path, fixture: Path) -> tuple[str, str]:
+    archive_text = (fixture / "base-tree.tar.gz.b64").read_bytes()
+    archive = gzip.decompress(base64.b64decode(archive_text))
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as tree:
+        tree.extractall(repo, filter="data")
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
     subprocess.run(
         ["git", "config", "user.email", "risk-replay@example.test"],
@@ -313,50 +324,57 @@ def test_historical_changed_path_replay_corpus_has_no_t2_escape(
     subprocess.run(
         ["git", "config", "user.name", "Risk Replay"], cwd=repo, check=True
     )
-    (repo / "README.md").write_text("historical replay\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "replay root"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "core.abbrev", "9"], cwd=repo, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "recorded base"], cwd=repo, check=True)
+    base = git(repo, "rev-parse", "HEAD")
+    subprocess.run(
+        ["git", "apply", "--index", "--binary", str(fixture / "diff.patch")],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(["git", "commit", "-qm", "recorded head"], cwd=repo, check=True)
+    return base, git(repo, "rev-parse", "HEAD")
 
-    for index, case in enumerate(corpus["cases"]):
-        for relative in case["changed_paths"]:
-            path = repo / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                f"# preserved historical baseline {index}\n",
-                encoding="utf-8",
-            )
-        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-qm", f"{case['name']} base"], cwd=repo, check=True
-        )
-        base_sha = git(repo, "rev-parse", "HEAD")
 
-        for relative in case["changed_paths"]:
-            path = repo / relative
-            historical_change = (
-                "def verify_authority():\n    raise RuntimeError('provider timeout')\n"
-                if relative
-                in {
-                    "scripts/util/dispatch_authority.py",
-                    "scripts/util/dispatch_authority_projection.py",
-                }
-                else f"# preserved historical change {index}\n"
-            )
-            path.write_text(historical_change, encoding="utf-8")
-        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-qm", f"{case['name']} head"], cwd=repo, check=True
+def test_historical_changed_path_replay_corpus_has_no_t2_escape(
+    tmp_path: Path,
+) -> None:
+    corpus = Path(__file__).resolve().parents[2] / "fixtures" / "risk-corpus"
+    for name, expected in _HISTORICAL_RISK_CASES.items():
+        fixture = corpus / name
+        archive_path = fixture / "base-tree.tar.gz.b64"
+        diff_path = fixture / "diff.patch"
+        assert (
+            hashlib.sha256(archive_path.read_bytes()).hexdigest(),
+            hashlib.sha256(diff_path.read_bytes()).hexdigest(),
+        ) == expected["fixture_sha256"], name
+        metadata = json.loads((fixture / "modes.json").read_text(encoding="utf-8"))
+        assert metadata["base_sha"] == expected["base"]
+        assert metadata["head_sha"] == expected["head"]
+
+        repo = tmp_path / name
+        repo.mkdir()
+        base_sha, head_sha = _replay_historical_pair(repo, fixture)
+        assert _tree_rows(repo, base_sha) == metadata["base_tree"]
+        assert _tree_rows(repo, head_sha) == metadata["head_tree"]
+        rename_input = subprocess.check_output(
+            ["git", "diff", "--name-status", "--find-renames", base_sha, head_sha],
+            cwd=repo,
+            text=True,
         )
-        head_sha = git(repo, "rev-parse", "HEAD")
+        assert rename_input == (fixture / "renames.txt").read_text(encoding="utf-8")
+        exact_diff = subprocess.check_output(
+            ["git", "diff", "--binary", base_sha, head_sha], cwd=repo
+        )
+        assert exact_diff == diff_path.read_bytes()
 
         envelope = module.compute_review_risk(repo, base_sha, head_sha)
         artifact = module.parse_review_risk(envelope["review_risk_json"])
-        assert artifact["changed_paths"] == sorted(case["changed_paths"]), case["name"]
-        assert artifact["tier"] == case["expected_tier"], case["name"]
-        assert artifact["security_trigger_paths"] == case["security_trigger_paths"]
-        assert not (
-            case["expected_tier"] == "T2" and artifact["tier"] == "T0"
-        )
+        assert artifact["changed_paths"] == metadata["changed_paths"], name
+        assert artifact["tier"] == expected["tier"], name
+        assert artifact["security_trigger_paths"] == expected["security"], name
+        assert not (expected["tier"] == "T2" and artifact["tier"] == "T0")
 
 
 def test_strictest_tier_is_monotonic() -> None:

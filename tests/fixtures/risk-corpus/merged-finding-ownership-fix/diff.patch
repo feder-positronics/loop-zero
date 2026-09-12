@@ -1,0 +1,194 @@
+diff --git a/fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py b/fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py
+index da277e005..c88b31560 100644
+--- a/fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py
++++ b/fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py
+@@ -2171,3 +2171,111 @@ def test_drain_facade_activates_reports_and_clears_exact_campaign(
+         ]
+     )
+     assert parsed.coordinator_id is None
++
++
++def test_run_owned_finding_leases_reject_cross_lease_duplicate_findings() -> None:
++    module = load_module()
++    run_id = "sr_" + "a" * 32
++    owner = {
++        "coordinator_id": "coordinator",
++        "run_id": run_id,
++        "worker_session_id": "worker",
++    }
++    records = [
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_one",
++            "finding_ids": ["f_shared", "f_only_one"],
++            "owner": owner,
++        },
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_two",
++            "finding_ids": ["f_shared"],
++            "owner": owner,
++        },
++    ]
++
++    with pytest.raises(module.PipelineError, match="owned by unsettled leases"):
++        module.run_owned_finding_leases(records, run_id=run_id)
++
++
++def test_run_owned_finding_leases_allow_release_then_reacquire() -> None:
++    module = load_module()
++    run_id = "sr_" + "a" * 32
++    owner = {
++        "coordinator_id": "coordinator",
++        "run_id": run_id,
++        "worker_session_id": "worker",
++    }
++    records = [
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_one",
++            "finding_ids": ["f_shared"],
++            "owner": owner,
++        },
++        {
++            "type": "finding-lease-released",
++            "lease_id": "fl_one",
++            "owner": owner,
++        },
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_two",
++            "finding_ids": ["f_shared"],
++            "owner": owner,
++        },
++    ]
++
++    leases = module.run_owned_finding_leases(records, run_id=run_id)
++
++    assert [record["lease_id"] for record in leases] == ["fl_one", "fl_two"]
++
++
++def test_run_owned_finding_leases_allow_ownerless_recovery_then_reacquire() -> None:
++    module = load_module()
++    run_id = "sr_" + "a" * 32
++    owner = {
++        "coordinator_id": "coordinator",
++        "run_id": run_id,
++        "worker_session_id": "worker",
++    }
++    records = [
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_one",
++            "finding_ids": ["f_shared"],
++            "owner": owner,
++        },
++        # Audited recovery and terminal handoff may be recorded without the
++        # owning run's identity; both must still free the lease.
++        {
++            "type": "finding-lease-recovered",
++            "settled_lease_ids": ["fl_one"],
++        },
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_two",
++            "finding_ids": ["f_shared"],
++            "owner": owner,
++        },
++        {
++            "type": "finding-lease-owner-terminal",
++            "lease_id": "fl_two",
++        },
++        {
++            "type": "finding-lease-acquired",
++            "lease_id": "fl_three",
++            "finding_ids": ["f_shared"],
++            "owner": owner,
++        },
++    ]
++
++    leases = module.run_owned_finding_leases(records, run_id=run_id)
++
++    assert [record["lease_id"] for record in leases] == [
++        "fl_one",
++        "fl_three",
++        "fl_two",
++    ]
+diff --git a/scripts/util/delivery_pipeline.py b/scripts/util/delivery_pipeline.py
+index 4ca790dca..2af926c59 100644
+--- a/scripts/util/delivery_pipeline.py
++++ b/scripts/util/delivery_pipeline.py
+@@ -16,7 +16,7 @@ import sys
+ from collections.abc import Callable, Mapping, Sequence
+ from contextlib import contextmanager
+ from pathlib import Path
+-from typing import Iterator
++from typing import Iterator, cast
+ 
+ # Sibling imports must survive PYTHONSAFEPATH=1 (job.sh) and python -I.
+ sys.path.insert(0, str(Path(__file__).resolve().parent))
+@@ -219,17 +219,59 @@ def build_settlement_plan(
+ def run_owned_finding_leases(
+     operation_records: Sequence[Mapping[str, object]], *, run_id: str
+ ) -> list[dict[str, object]]:
+-    """Return stable finding-lease acquisitions owned by one run."""
++    """Return stable finding-lease acquisitions owned by one run.
++
++    A finding ID may appear in at most one lease that the run still owes
++    settlement for. Released leases drop out first, so a legitimate
++    release-then-reacquire sequence under one run stays valid, while two
++    unreleased leases claiming the same finding fail closed before either
++    can mint its own settlement operation for that finding.
++    """
+     leases: dict[str, dict[str, object]] = {}
++    released: set[str] = set()
+     for record in operation_records:
+-        owner = record.get("owner")
+-        if not isinstance(owner, Mapping) or owner.get("run_id") != run_id:
+-            continue
+-        if record.get("type") == "finding-lease-acquired":
++        record_type = record.get("type")
++        if record_type == "finding-lease-acquired":
++            owner = record.get("owner")
++            if not isinstance(owner, Mapping) or owner.get("run_id") != run_id:
++                continue
+             lease_id = record.get("lease_id")
+             finding_ids = record.get("finding_ids")
+             if isinstance(lease_id, str) and isinstance(finding_ids, list):
+                 leases[lease_id] = dict(record)
++                released.discard(lease_id)
++            continue
++        # Any recorded settlement event frees its leases for this
++        # uniqueness check, regardless of which principal recorded it:
++        # explicit release, audited owner-gone recovery, and terminal
++        # handoff may all be written without the owning run's identity.
++        # Over-freeing only relaxes toward the pre-check behavior; it can
++        # never fail a legitimate flow closed.
++        if record_type in {
++            "finding-lease-released",
++            "finding-lease-recovered",
++            "finding-lease-owner-terminal",
++        }:
++            direct = record.get("lease_id")
++            if isinstance(direct, str):
++                released.add(direct)
++        settled = record.get("settled_lease_ids")
++        if isinstance(settled, list):
++            released.update(value for value in settled if isinstance(value, str))
++    unsettled = [leases[key] for key in sorted(leases) if key not in released]
++    membership: dict[str, str] = {}
++    for record in unsettled:
++        for finding_id in cast(list[object], record["finding_ids"]):
++            identity = str(finding_id)
++            previous = membership.get(identity)
++            if previous is not None:
++                raise PipelineError(
++                    "finding "
++                    f"{identity!r} is owned by unsettled leases {previous!r} "
++                    f"and {record['lease_id']!r}; settle or release one lease "
++                    "before building the run settlement plan"
++                )
++            membership[identity] = str(record["lease_id"])
+     return [leases[key] for key in sorted(leases)]
+ 
+ 
