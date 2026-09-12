@@ -1240,6 +1240,22 @@ def delivery_controller_records(
     ]
 
 
+def registered_dispatcher_delivery_controller_records(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project controller terminals proved by a registered dispatcher."""
+    authority_history = _authority_record_list(records)
+    registered_before_ids = _registered_authority_before_record_ids(authority_history)
+    return [
+        record
+        for record in delivery_controller_records(authority_history)
+        if record.get("type") == "attempt-terminal"
+        and id(record) in registered_before_ids
+        and isinstance((proof := record.get("terminal_authority_proof")), Mapping)
+        and proof.get("authority_kind") == "dispatcher"
+    ]
+
+
 def latest_accepted_review_terminal(
     records: Sequence[dict[str, object]],
     task_id: str,

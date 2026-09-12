@@ -101,6 +101,51 @@ def _install_authenticated_run(monkeypatch, *, run_id, pr, outcome):
     )
 
 
+def _install_unregistered_terminal(
+    monkeypatch, *, run_id, pr, authority_kind="coordinator"
+):
+    dispatcher = kernel_authority.TerminalAuthority.generate()
+    coordinator = kernel_authority.CoordinatorAuthority(
+        dispatcher.public_key, dispatcher._private_key
+    )
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    common = {
+        "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": policy.DISPATCH_POLICY_VERSION,
+    }
+    cutover = coordinator.seal(
+        {
+            **common,
+            "type": "coordinator-authority-cutover",
+            "status": "active",
+            "ledger_prefix": authority_projection.coordinator_ledger_prefix([]),
+        },
+        authority_kind="coordinator",
+    )
+    attempt = {
+        **common,
+        "task_id": f"delivery-{pr}",
+        "attempt_index": 0,
+        "run_id": run_id,
+        "work_unit_id": f"delivery-{pr}",
+        "worktree": "/repo",
+        "pr": pr,
+        "type": "attempt-terminal",
+        "outcome": "merged",
+    }
+    signer = coordinator if authority_kind == "coordinator" else dispatcher
+    terminal = signer.seal(attempt, authority_kind=authority_kind)
+    monkeypatch.setattr(
+        authority_store,
+        "load_authority_records",
+        lambda *_args: [cutover, terminal],
+    )
+
+
 def _request(pr, producer="review-1"):
     return findings.build_finding_capture_request(
         pr=pr,
@@ -184,6 +229,63 @@ def test_unsigned_merged_run_log_row_does_not_expire_findings(tmp_path, monkeypa
         category="code",
         delivery_run_id=run_id,
         pr=17,
+    )
+
+    assert findings.count_live_important(tmp_path, pr=17) == 1
+
+
+def test_unregistered_coordinator_terminal_does_not_expire_findings(
+    tmp_path, monkeypatch
+):
+    _configure(tmp_path)
+    run_id = "sr_" + "3" * 32
+    _write_run(tmp_path, run_id, pr=17)
+    _install_unregistered_terminal(
+        monkeypatch, run_id=run_id, pr=17, authority_kind="coordinator"
+    )
+
+    receipt = evidence.append_finding_records(
+        tmp_path,
+        task_id="review-coordinator-terminal",
+        result={"findings": _request(17)["findings"]},
+        snapshot=None,
+        worktree=tmp_path,
+        advisory=False,
+        source_head="d" * 40,
+        producer_skill="review",
+        category="code",
+        delivery_run_id=run_id,
+        pr=17,
+    )
+
+    assert receipt is not None
+    assert findings.count_live_important(tmp_path, pr=17) == 1
+
+
+def test_unregistered_dispatcher_terminal_does_not_expire_findings(
+    tmp_path, monkeypatch
+):
+    _configure(tmp_path)
+    run_id = "sr_" + "4" * 32
+    _write_run(tmp_path, run_id, pr=17)
+    _install_authenticated_run(
+        monkeypatch, run_id=run_id, pr=17, outcome="in_progress"
+    )
+    evidence.append_finding_records(
+        tmp_path,
+        task_id="review-unregistered-dispatcher",
+        result={"findings": _request(17)["findings"]},
+        snapshot=None,
+        worktree=tmp_path,
+        advisory=False,
+        source_head="e" * 40,
+        producer_skill="review",
+        category="code",
+        delivery_run_id=run_id,
+        pr=17,
+    )
+    _install_unregistered_terminal(
+        monkeypatch, run_id=run_id, pr=17, authority_kind="dispatcher"
     )
 
     assert findings.count_live_important(tmp_path, pr=17) == 1

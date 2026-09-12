@@ -4,6 +4,10 @@ Finding state is stored in ``.audit/findings``.  Coordination facts are stored
 in ``.audit/finding-operations``.  Both streams are serialized by the primary
 checkout's ``.audit/findings/.ledger.lock`` so linked worktrees cannot create a
 shadow authority.
+
+Merge expiry deliberately excludes coordinator-signed inline terminals.  They
+can authenticate controller lifecycle facts, but only a registered dispatcher
+attempt proves that the delivery bound to the finding's ``(run_id, PR)`` merged.
 """
 
 import fcntl
@@ -297,7 +301,7 @@ def load_finding_records(
         from ..kernel.run_log import load_entries
 
         run_entries = load_entries(_primary(repo) / ".audit/skill-runs")
-        authority = _authenticated_delivery_run_records(_primary(repo))
+        authority = _registered_dispatcher_delivery_terminals(_primary(repo))
     except (OSError, RuntimeError, ValueError):
         return records  # Missing or contradictory authority retains the debt.
     expired: set[tuple[object, object]] = set()
@@ -331,6 +335,18 @@ def _authenticated_delivery_run_records(repo: Path) -> list[dict[str, object]]:
     from .authority import delivery_controller_records
 
     return delivery_controller_records(load_authority_records(repo, 30))
+
+
+def _registered_dispatcher_delivery_terminals(
+    repo: Path,
+) -> list[dict[str, object]]:
+    """Load authenticated terminals from registered dispatcher attempts."""
+    from ..kernel.authority_store import load_authority_records
+    from .authority import registered_dispatcher_delivery_controller_records
+
+    return registered_dispatcher_delivery_controller_records(
+        load_authority_records(repo, 30)
+    )
 
 
 def authenticated_delivery_run_pr(repo: Path, run_id: str) -> int:
