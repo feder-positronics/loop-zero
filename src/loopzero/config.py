@@ -94,6 +94,8 @@ GITHUB_KEYS = frozenset(
         "gh_version_floor",
         "retries",
         "body_required_sections",
+        "host",
+        "token_environment",
     }
 )
 
@@ -142,6 +144,8 @@ class GithubConfig:
     gh_version_floor: tuple[int, int, int] = (2, 40, 0)
     retries: int = 2
     body_required_sections: tuple[str, ...] = ("Context and goal", "Validation")
+    host: str = "github.com"
+    token_environment: str = "GH_TOKEN"
 
 
 DEFAULT_ROUTING_ALIASES: dict[str, dict[str, Any]] = {
@@ -808,6 +812,22 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     )
     if len(body_sections) != len(set(body_sections)):
         problems.append("[github].body_required_sections: entries must be unique")
+    github_host = _string(github, "host", "github.com", "[github]", problems)
+    if (
+        github_host != github_host.lower()
+        or re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?", github_host
+        )
+        is None
+    ):
+        problems.append("[github].host: must be a normalized DNS host")
+    github_token_environment = _string(
+        github, "token_environment", "GH_TOKEN", "[github]", problems
+    )
+    if github_token_environment not in {"GH_TOKEN", "GITHUB_TOKEN"}:
+        problems.append(
+            "[github].token_environment: must be GH_TOKEN or GITHUB_TOKEN"
+        )
 
     path_classes: dict[str, tuple[str, ...]] = {}
     using_default_path_classes = "path_classes" not in data
@@ -941,6 +961,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             gh_version_floor=gh_version_floor,
             retries=github_retries,
             body_required_sections=body_sections,
+            host=github_host,
+            token_environment=github_token_environment,
         ),
         path_classes=path_classes,
         path_class_parents=path_class_parents,

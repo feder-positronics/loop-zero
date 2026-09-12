@@ -299,6 +299,8 @@ class Repository:
 @dataclass(frozen=True, slots=True)
 class GitHubSettings:
     labels: Mapping[str, str]
+    host: str = "github.com"
+    token_environment: str = "GH_TOKEN"
     ref_namespace: str = "refs/heads"
     version_floor: tuple[int, int, int] = (2, 40, 0)
     retries: int = 2
@@ -309,6 +311,10 @@ class GitHubSettings:
         trusted = Path(profile.toolchain.get("trusted_bin_dir", "/usr/bin"))
         return cls(
             labels=dict(profile.github.labels),
+            host=getattr(profile.github, "host", "github.com"),
+            token_environment=getattr(
+                profile.github, "token_environment", "GH_TOKEN"
+            ),
             ref_namespace=profile.github.ref_namespace,
             version_floor=profile.github.gh_version_floor,
             retries=profile.github.retries,
@@ -316,19 +322,45 @@ class GitHubSettings:
         )
 
 
-_ORIGIN_SCP_RE = re.compile(r"^(?:[^@/]+@)?[^:/]+:(?P<path>.+)$")
+_ORIGIN_SCP_RE = re.compile(
+    r"^(?:[^@/]+@)?(?P<host>[A-Za-z0-9.-]+):(?P<path>.+)$"
+)
 _VERSION_RE = re.compile(r"\bgh version (\d+)\.(\d+)\.(\d+)\b")
+_HOST_RE = re.compile(
+    r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?"
+)
+_GH_CHILD_ENVIRONMENT = frozenset(
+    {"LANG", "LANGUAGE", "NO_COLOR", "PATH", "TERM", "TZ"}
+)
 
 
-def repository_from_origin(origin: str) -> Repository:
+def repository_from_origin(
+    origin: str, *, github_host: str = "github.com"
+) -> Repository:
     """Parse an HTTPS, SSH URL or scp-like Git origin without contacting GitHub."""
     value = origin.strip()
+    configured_host = github_host.strip().lower()
+    if _HOST_RE.fullmatch(configured_host) is None:
+        raise GitHubError("configured GitHub host is invalid")
     match = _ORIGIN_SCP_RE.fullmatch(value)
     if match and "://" not in value:
+        origin_host = match.group("host").lower()
         path = match.group("path")
     else:
         parsed = urlparse(value)
+        if (
+            parsed.scheme not in {"https", "ssh"}
+            or parsed.hostname is None
+            or parsed.port is not None
+        ):
+            raise GitHubError("origin is not a supported GitHub URL")
+        origin_host = parsed.hostname.lower()
         path = parsed.path.lstrip("/")
+    if origin_host != configured_host:
+        raise GitHubError(
+            f"origin host {origin_host!r} does not match configured GitHub host "
+            f"{configured_host!r}"
+        )
     if path.endswith(".git"):
         path = path[:-4]
     parts = path.split("/")
@@ -348,6 +380,10 @@ class GitHub:
     ) -> None:
         self.root = root.resolve()
         self.settings = settings
+        if _HOST_RE.fullmatch(settings.host) is None or settings.host != settings.host.lower():
+            raise GitHubError("configured GitHub host is invalid")
+        if settings.token_environment not in {"GH_TOKEN", "GITHUB_TOKEN"}:
+            raise GitHubError("configured GitHub token environment is invalid")
         self._run = run
         self._sleep = sleep
         executable = resolve_executable(
@@ -359,6 +395,18 @@ class GitHub:
         self._checked_version = False
         self._repository: Repository | None = None
 
+    def _child_environment(self) -> dict[str, str]:
+        """Pass only non-authoritative process context and one selected token."""
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if name in _GH_CHILD_ENVIRONMENT or name.startswith("LC_")
+        }
+        token = os.environ.get(self.settings.token_environment)
+        if token:
+            environment[self.settings.token_environment] = token
+        return environment
+
     def _command(self, argv: Sequence[str], *, input: str | None = None) -> str:
         last = ""
         retryable = True
@@ -369,9 +417,14 @@ class GitHub:
                 method = "GET"
             retryable = method in {"GET", "HEAD"}
         attempts = self.settings.retries + 1 if retryable else 1
+        command = list(argv)
+        if command and command[0] == "api":
+            command[1:1] = ["--hostname", self.settings.host]
         for attempt in range(attempts):
             proc = self._run(
-                [str(self.executable), *argv], cwd=self.root, env=git_environment(),
+                [str(self.executable), *command],
+                cwd=self.root,
+                env=self._child_environment(),
                 input=input, text=True, capture_output=True,
             )
             if proc.returncode == 0:
@@ -401,7 +454,9 @@ class GitHub:
             )
             if proc.returncode:
                 raise GitHubError("origin remote is unavailable")
-            self._repository = repository_from_origin(proc.stdout)
+            self._repository = repository_from_origin(
+                proc.stdout, github_host=self.settings.host
+            )
         return self._repository
 
     def api(

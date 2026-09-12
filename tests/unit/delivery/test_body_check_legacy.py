@@ -586,7 +586,8 @@ def test_load_pr_reads_live_policy_fields_through_github_integration(tmp_path) -
     )
     assert captured[0][1:] == ["version"]
     assert captured[1][1:] == [
-        "api", "--method", "GET", "repos/example/project/pulls/123"
+        "api", "--hostname", "github.com", "--method", "GET",
+        "repos/example/project/pulls/123",
     ]
 
 
