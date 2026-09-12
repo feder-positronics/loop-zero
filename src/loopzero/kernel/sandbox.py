@@ -166,6 +166,11 @@ def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTEST_ADDOPTS": "-o cache_dir=/tmp/guardian-pytest-cache",
             "UV_CACHE_DIR": "/tmp/guardian-uv-cache",
+            # `uv run` must neither create `.venv` nor rewrite `uv.lock` in the
+            # exposed worktree; the project environment lives in the private
+            # tmpfs and locking/syncing is disabled.
+            "UV_PROJECT_ENVIRONMENT": "/tmp/guardian-uv-project-env",
+            "UV_NO_SYNC": "1",
             "npm_config_cache": "/tmp/guardian-npm-cache",
             "npm_config_store_dir": "/tmp/guardian-pnpm-store",
             "XDG_CACHE_HOME": "/tmp/guardian-xdg-cache",

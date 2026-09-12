@@ -121,7 +121,12 @@ only `argv[0]`. Hook operands, interpreted scripts, and candidate test inputs ar
 candidate-controlled by design. Hooks must be hermetic: they may write only to
 the private temporary and cache paths supplied in their environment, never to
 the exposed worktree. Python bytecode and pytest, uv, npm, pnpm, and XDG caches
-are redirected accordingly. A zero child exit is therefore not acceptance. The
+are redirected accordingly, the uv project environment is redirected into the
+private temporary directory (`UV_PROJECT_ENVIRONMENT`) and uv syncing is
+disabled (`UV_NO_SYNC=1`), so `uv run` neither creates `.venv` nor rewrites
+`uv.lock` in the worktree. Hooks that install into the worktree (for example
+`npm install` creating `node_modules`) still violate hermeticity and fail with
+the binding exit. A zero child exit is therefore not acceptance. The
 parent's evidence is the actual child exit code plus equality of the complete
 source identity before and after execution; only then does it verify a
 coordinator-authorized result artifact bound to the task ID, base SHA, approved

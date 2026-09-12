@@ -630,6 +630,9 @@ def test_hermetic_hook_can_write_private_cache_and_pass(tmp_path):
         'case "$PYTEST_ADDOPTS" in *cache_dir=/tmp/*) ;; *) exit 8 ;; esac\n'
         'case "$UV_CACHE_DIR" in /tmp/*) ;; *) exit 9 ;; esac\n'
         'case "$npm_config_cache" in /tmp/*) ;; *) exit 10 ;; esac\n'
+        'case "$UV_PROJECT_ENVIRONMENT" in /tmp/*) ;; *) exit 11 ;; esac\n'
+        'test "$UV_NO_SYNC" = 1 || exit 12\n'
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT" && test ! -e .venv || exit 13\n'
         'mkdir -p "$UV_CACHE_DIR" "$npm_config_cache"\n'
         'printf cache > "$UV_CACHE_DIR/hook-cache"\n'
         'printf cache > "$npm_config_cache/hook-cache"',
