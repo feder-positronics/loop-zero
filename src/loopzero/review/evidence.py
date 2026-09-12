@@ -40,6 +40,7 @@ from ..kernel.gitscope import (
 )
 from .findings import build_finding_capture_request
 from .findings import capture_finding_records as capture_finding_batch
+from .findings import LedgerConflict
 from .findings import replay_finding_capture
 from .routing import REVIEW_INTENTS
 from ..kernel.sandbox import environment as sandbox_environment
@@ -353,26 +354,40 @@ def append_finding_records(
         advisory=advisory,
         findings=validated,
     )
+    run_binding: dict[str, object] = {}
+    if delivery_run_id:
+        from ..kernel.run_log import load_entries
+        from ..kernel.run_identity import run_delivery_contract
+        from .findings import authenticated_delivery_run_pr
+
+        entries = load_entries(_audit_root(repo) / "skill-runs")
+        try:
+            contract = run_delivery_contract(entries, delivery_run_id)
+            bound_pr = authenticated_delivery_run_pr(repo, delivery_run_id)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise LedgerConflict(
+                "delivery run has no authenticated loop-zero PR binding"
+            ) from exc
+        if contract != "loop-zero-v1":
+            raise LedgerConflict("finding capture requires a loop-zero delivery run")
+        if bound_pr != pr:
+            raise LedgerConflict(
+                f"delivery run is authenticated for PR {bound_pr}, not PR {pr}"
+            )
+        run_binding["delivery_run_id"] = delivery_run_id
     replay = replay_finding_capture(repo, request=request)
     if replay is not None:
         return replay
     content_identity = (
         snapshot.tree_sha if snapshot is not None else (source_head or "")
     )
-    run_binding: dict[str, object] = {}
-    if delivery_run_id:
-        from ..kernel.run_log import load_entries
-        from ..kernel.run_identity import run_delivery_contract
-
-        entries = load_entries(_audit_root(repo) / "skill-runs")
-        if run_delivery_contract(entries, delivery_run_id) == "loop-zero-v1":
-            run_binding["delivery_run_id"] = delivery_run_id
     candidates: list[dict[str, object]] = []
     for finding in validated:
         claim = str(finding["claim"])
         candidates.append(
             {
                 **run_binding,
+                "pr": pr,
                 "finding_id": _finding_capture_id(content_identity, finding),
                 "review_task_id": task_id,
                 "producer_skill": resolved_skill,

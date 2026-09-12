@@ -1930,17 +1930,15 @@ def test_audit_launch_blocked_at_ceiling_names_count(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("contract", "outcome", "expired"),
+    ("contract", "outcome"),
     [
-        (None, "merged", False),
-        ("loop-zero-v1", "in_progress", False),
-        ("loop-zero-v1", "merged", True),
-        ("loop-zero-v1", "abandoned", False),
+        (None, "merged"),
+        ("loop-zero-v1", "in_progress"),
+        ("loop-zero-v1", "merged"),
+        ("loop-zero-v1", "abandoned"),
     ],
 )
-def test_only_verified_merged_new_run_findings_expire_from_debt(
-    repo, contract, outcome, expired
-):
+def test_unsigned_run_log_outcomes_never_expire_findings(repo, contract, outcome):
     run_id = "sr_" + "1" * 32
     record = {**finding(), "delivery_run_id": run_id}
     write_records(repo, record, finding("legacy"))
@@ -1953,7 +1951,7 @@ def test_only_verified_merged_new_run_findings_expire_from_debt(
         json.dumps(start) + "\n" + json.dumps({**start, "outcome": outcome}) + "\n"
     )
     original = (repo / ".audit/findings/2026-08-07.jsonl").read_bytes()
-    assert ledger.count_live_important(repo) == (1 if expired else 2)
+    assert ledger.count_live_important(repo) == 2
     assert ledger.load_finding_history(repo) == [record, finding("legacy")]
     assert (repo / ".audit/findings/2026-08-07.jsonl").read_bytes() == original
 

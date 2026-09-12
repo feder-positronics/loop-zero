@@ -1,18 +1,103 @@
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from loopzero.review import findings
+from loopzero.kernel import authority as kernel_authority
+from loopzero.kernel import authority_projection, authority_store, policy
+from loopzero.review import evidence, findings
 
 
 def _configure(tmp_path):
-    findings.configure(
-        SimpleNamespace(
-            root=tmp_path,
-            audit_root=tmp_path.relative_to(tmp_path),
-            finding_severities=("critical", "important", "suggestion"),
+    profile = SimpleNamespace(
+        root=tmp_path,
+        audit_root=Path(".audit"),
+        finding_severities=("critical", "important", "suggestion"),
+    )
+    findings.configure(profile)
+    evidence.configure(profile)
+
+
+def _write_run(tmp_path, run_id, *, pr, outcome="merged"):
+    runs = tmp_path / ".audit" / "skill-runs"
+    runs.mkdir(parents=True, exist_ok=True)
+    (runs / "2026-09-12.jsonl").write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {
+                    "run_id": run_id,
+                    "pr": pr,
+                    "delivery_contract": "loop-zero-v1",
+                    "outcome": "in_progress",
+                },
+                {
+                    "run_id": run_id,
+                    "pr": pr,
+                    "delivery_contract": "loop-zero-v1",
+                    "outcome": outcome,
+                },
+            )
         )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _install_authenticated_run(monkeypatch, *, run_id, pr, outcome):
+    dispatcher = kernel_authority.TerminalAuthority.generate()
+    coordinator = kernel_authority.CoordinatorAuthority(
+        dispatcher.public_key, dispatcher._private_key
+    )
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    common = {
+        "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": policy.DISPATCH_POLICY_VERSION,
+    }
+    cutover = coordinator.seal(
+        {
+            **common,
+            "type": "coordinator-authority-cutover",
+            "status": "active",
+            "ledger_prefix": authority_projection.coordinator_ledger_prefix([]),
+        },
+        authority_kind="coordinator",
+    )
+    attempt = {
+        **common,
+        "task_id": f"delivery-{pr}",
+        "attempt_index": 0,
+        "run_id": run_id,
+        "work_unit_id": f"delivery-{pr}",
+        "worktree": "/repo",
+        "pr": pr,
+    }
+    start = coordinator.seal(
+        {
+            **attempt,
+            "type": "attempt-start",
+            "registration_authority_version": 1,
+            "terminal_authority": dispatcher.registration(),
+        },
+        authority_kind="coordinator",
+    )
+    terminal = dispatcher.seal(
+        {
+            **attempt,
+            "type": "attempt-terminal",
+            "outcome": outcome,
+        },
+        authority_kind="dispatcher",
+    )
+    monkeypatch.setattr(
+        authority_store,
+        "load_authority_records",
+        lambda *_args: [cutover, start, terminal],
     )
 
 
@@ -41,51 +126,102 @@ def test_findings_are_pr_scoped_and_suggestions_are_not_persisted(tmp_path):
     assert findings.load_finding_records(tmp_path, pr=18)[0]["pr"] == 18
 
 
-def test_capture_replays_and_authenticated_merge_expires_the_pr(tmp_path):
+def test_capture_replays_and_authenticated_merge_expires_the_pr(
+    tmp_path, monkeypatch
+):
     _configure(tmp_path)
-    request = _request(17)
-    receipt = findings.capture_finding_records(tmp_path, request=request)
-    assert findings.capture_finding_records(tmp_path, request=request) == receipt
-    assert findings.replay_finding_capture(tmp_path, request=request) == receipt
-
     run_id = "sr_" + "1" * 32
-    current = findings.load_finding_records(tmp_path, pr=17)[0]
-    current["delivery_run_id"] = run_id
-    finding_log = tmp_path / "findings" / "2026-09-12.jsonl"
-    finding_log.write_text(
-        finding_log.read_text(encoding="utf-8") + json.dumps(current) + "\n",
-        encoding="utf-8",
+    _write_run(tmp_path, run_id, pr=17)
+    _install_authenticated_run(
+        monkeypatch, run_id=run_id, pr=17, outcome="merged"
     )
-    runs = tmp_path / ".audit" / "skill-runs"
-    runs.mkdir(parents=True)
-    (runs / "2026-09-12.jsonl").write_text(
-        "\n".join(
-            json.dumps(row)
-            for row in (
-                {
-                    "run_id": run_id,
-                    "pr": 17,
-                    "delivery_contract": "loop-zero-v1",
-                    "outcome": "in_progress",
-                },
-                {
-                    "run_id": run_id,
-                    "pr": 17,
-                    "delivery_contract": "loop-zero-v1",
-                    "outcome": "merged",
-                },
-            )
-        )
-        + "\n",
-        encoding="utf-8",
+    receipt = evidence.append_finding_records(
+        tmp_path,
+        task_id="review-1",
+        result={"findings": _request(17)["findings"]},
+        snapshot=None,
+        worktree=tmp_path,
+        advisory=False,
+        source_head="a" * 40,
+        producer_skill="review",
+        category="code",
+        delivery_run_id=run_id,
+        pr=17,
     )
+    assert receipt is not None
+    assert evidence.append_finding_records(
+        tmp_path,
+        task_id="review-1",
+        result={"findings": _request(17)["findings"]},
+        snapshot=None,
+        worktree=tmp_path,
+        advisory=False,
+        source_head="a" * 40,
+        producer_skill="review",
+        category="code",
+        delivery_run_id=run_id,
+        pr=17,
+    ) == receipt
     assert findings.load_finding_records(tmp_path, pr=17) == []
+
+
+def test_unsigned_merged_run_log_row_does_not_expire_findings(tmp_path, monkeypatch):
+    _configure(tmp_path)
+    run_id = "sr_" + "2" * 32
+    _write_run(tmp_path, run_id, pr=17)
+    _install_authenticated_run(
+        monkeypatch, run_id=run_id, pr=17, outcome="in_progress"
+    )
+    evidence.append_finding_records(
+        tmp_path,
+        task_id="review-unsigned-merge",
+        result={"findings": _request(17)["findings"]},
+        snapshot=None,
+        worktree=tmp_path,
+        advisory=False,
+        source_head="b" * 40,
+        producer_skill="review",
+        category="code",
+        delivery_run_id=run_id,
+        pr=17,
+    )
+
+    assert findings.count_live_important(tmp_path, pr=17) == 1
+
+
+def test_delivery_run_for_another_pr_is_rejected_and_keeps_finding_live(
+    tmp_path, monkeypatch
+):
+    _configure(tmp_path)
+    findings.capture_finding_records(tmp_path, request=_request(17))
+    run_id = "sr_" + "9" * 32
+    _write_run(tmp_path, run_id, pr=99)
+    _install_authenticated_run(
+        monkeypatch, run_id=run_id, pr=99, outcome="merged"
+    )
+
+    with pytest.raises(findings.LedgerConflict, match="PR 99, not PR 17"):
+        evidence.append_finding_records(
+            tmp_path,
+            task_id="review-cross-pr",
+            result={"findings": _request(17)["findings"]},
+            snapshot=None,
+            worktree=tmp_path,
+            advisory=False,
+            source_head="c" * 40,
+            producer_skill="review",
+            category="code",
+            delivery_run_id=run_id,
+            pr=17,
+        )
+
+    assert findings.count_live_important(tmp_path, pr=17) == 1
 
 
 def test_fake_merge_sha_has_no_expiry_api(tmp_path):
     _configure(tmp_path)
     findings.capture_finding_records(tmp_path, request=_request(17))
-    finding_log = tmp_path / "findings" / "2026-09-12.jsonl"
+    finding_log = tmp_path / ".audit" / "findings" / "2026-09-12.jsonl"
     finding_log.write_text(
         finding_log.read_text(encoding="utf-8")
         + json.dumps({"type": "pr-merged", "pr": 17, "merge_sha": "a" * 40})

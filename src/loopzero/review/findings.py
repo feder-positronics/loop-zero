@@ -283,30 +283,68 @@ def load_finding_records(
             latest[finding_id] = record
     records = list(latest.values())
     bound_runs = {
-        record["delivery_run_id"]
+        (record["delivery_run_id"], record.get("pr"))
         for record in records
         if isinstance(record.get("delivery_run_id"), str)
     }
     if not bound_runs:
         return records
-    # Expiry is a read projection of the existing verified terminal run, never
-    # a fabricated finding disposition or a rewrite of historical evidence.
-    from ..kernel.run_log import load_entries
-    from ..kernel.run_identity import run_delivery_contract
+    # Expiry is a read projection of the kernel-authenticated controller
+    # stream.  The local skill-run log remains useful lifecycle telemetry, but
+    # its unsigned rows cannot settle review debt.
+    try:
+        from ..kernel.run_identity import run_delivery_contract
+        from ..kernel.run_log import load_entries
 
-    entries = load_entries(_primary(repo) / ".audit/skill-runs")
-    expired = set()
-    for run_id in bound_runs:
-        rows = [row for row in entries if row.get("run_id") == run_id]
+        run_entries = load_entries(_primary(repo) / ".audit/skill-runs")
+        authority = _authenticated_delivery_run_records(_primary(repo))
+    except (OSError, RuntimeError, ValueError):
+        return records  # Missing or contradictory authority retains the debt.
+    expired: set[tuple[object, object]] = set()
+    for run_id, run_pr in bound_runs:
         try:
-            contract = run_delivery_contract(entries, run_id)
+            contract = run_delivery_contract(run_entries, run_id)
         except ValueError:
-            continue  # Missing or contradictory authority retains the debt.
-        if contract == "loop-zero-v1" and rows[-1].get("outcome") == "merged":
-            expired.add(run_id)
+            continue
+        if (
+            contract == "loop-zero-v1"
+            and type(run_pr) is int
+            and any(
+                row.get("run_id") == run_id
+                and row.get("pr") == run_pr
+                and row.get("outcome") == "merged"
+                and row.get("type") == "attempt-terminal"
+                for row in authority
+            )
+        ):
+            expired.add((run_id, run_pr))
     return [
-        record for record in records if record.get("delivery_run_id") not in expired
+        record
+        for record in records
+        if (record.get("delivery_run_id"), record.get("pr")) not in expired
     ]
+
+
+def _authenticated_delivery_run_records(repo: Path) -> list[dict[str, object]]:
+    """Load the delivery-controller projection from protected authority state."""
+    from ..kernel.authority_store import load_authority_records
+    from .authority import delivery_controller_records
+
+    return delivery_controller_records(load_authority_records(repo, 30))
+
+
+def authenticated_delivery_run_pr(repo: Path, run_id: str) -> int:
+    """Resolve one run's PR solely from authenticated controller records."""
+    prs = {
+        row["pr"]
+        for row in _authenticated_delivery_run_records(_primary(repo))
+        if row.get("run_id") == run_id
+        and type(row.get("pr")) is int
+        and int(row["pr"]) > 0
+    }
+    if len(prs) != 1:
+        raise LedgerConflict("delivery run has no unique authenticated PR binding")
+    return int(prs.pop())
 
 
 def load_operation_history(repo: Path | str) -> list[dict[str, object]]:
