@@ -723,9 +723,17 @@ def test_permission_denial_requires_an_explicit_denial_signal() -> None:
 
 
 def test_cursor_schema_scenarios_are_unsupported_not_free_text_passes() -> None:
-    assert live._cursor_unsupported_reason("cursor", "success") is not None
-    assert live._cursor_unsupported_reason("cursor", "restart-resume") is not None
-    assert live._cursor_unsupported_reason("cursor", "permission-denial") is None
+    assert live._unsupported_reason("cursor", "success") is not None
+    assert live._unsupported_reason("cursor", "restart-resume") is not None
+    assert live._unsupported_reason("cursor", "permission-denial") is None
+
+
+def test_codex_permission_denial_is_recorded_as_a_vendor_limitation() -> None:
+    reason = live._unsupported_reason("codex", "permission-denial")
+    assert reason is not None
+    assert "permission-denial" in reason
+    assert live._unsupported_reason("codex", "success") is None
+    assert live._unsupported_reason("claude", "permission-denial") is None
 
 
 def test_suite_stops_at_default_killed_run_limit() -> None:
@@ -774,3 +782,56 @@ def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> 
     assert validation_body.index("--diagnose") < validation_body.index(
         "--basetemp=/tmp/pytest tests/conformance/live/live_conformance.py"
     )
+
+
+def test_live_name_resolution_binds_resolver_symlinked_into_run(tmp_path: Path) -> None:
+    etc = tmp_path / "etc"
+    run = tmp_path / "run"
+    etc.mkdir()
+    (run / "systemd" / "resolve").mkdir(parents=True)
+    target = run / "systemd" / "resolve" / "stub-resolv.conf"
+    target.write_text("nameserver 127.0.0.53\n", encoding="utf-8")
+    (etc / "resolv.conf").symlink_to(target)
+
+    assert live._name_resolution_binds(etc, run) == (target,)
+
+    (etc / "resolv.conf").unlink()
+    (etc / "resolv.conf").write_text("nameserver 1.1.1.1\n", encoding="utf-8")
+    assert live._name_resolution_binds(etc, run) == ()
+
+    (etc / "resolv.conf").unlink()
+    (etc / "resolv.conf").symlink_to(tmp_path / "elsewhere.conf")
+    assert live._name_resolution_binds(etc, run) == ()
+
+
+def test_live_wrapper_binds_resolver_target_after_private_run_tmpfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = RuntimeSettings(
+        tooling_root=REPO,
+        state_root=str(tmp_path / "state"),
+    )
+    monkeypatch.setattr(live.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Probe", (), {"returncode": 0})(),
+    )
+    resolver = Path("/run/systemd/resolve/stub-resolv.conf")
+    monkeypatch.setattr(live, "_name_resolution_binds", lambda: (resolver,))
+    wrapper = live._sandbox_wrapper(settings)
+    private_tmpdir = tmp_path / "private-tmp"
+    private_tmpdir.mkdir()
+    argv = wrapper(live.LaunchSpec(
+        argv=("/usr/bin/true",),
+        cwd=tmp_path,
+        private_mounts=(),
+        private_tmpdir=private_tmpdir,
+    ))
+
+    tmpfs_run = argv.index("/run", argv.index("--tmpfs"))
+    bind = argv.index(str(resolver))
+    assert argv[bind - 1] == "--ro-bind"
+    assert argv[bind + 1] == str(resolver)
+    assert bind > tmpfs_run
+    assert "--unshare-net" not in argv

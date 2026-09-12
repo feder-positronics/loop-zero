@@ -103,6 +103,30 @@ def _interpreter_symlink_chain(interpreter: Path) -> tuple[tuple[Path, str], ...
     return tuple(links)
 
 
+def _name_resolution_binds(
+    etc: Path = Path("/etc"), run: Path = Path("/run")
+) -> tuple[Path, ...]:
+    """Return resolver files that live outside the read-only system roots.
+
+    Live provider calls keep the host network, but the bubble mounts a fresh
+    tmpfs over ``/run``.  systemd-resolved hosts symlink ``/etc/resolv.conf``
+    into ``/run``, so without binding the resolved target every provider
+    request fails name resolution and both CLIs retry until the timeout.
+    """
+    binds: list[Path] = []
+    for name in ("resolv.conf",):
+        link = etc / name
+        if not link.is_symlink():
+            continue
+        try:
+            target = link.resolve(strict=True)
+        except OSError:
+            continue
+        if target.is_file() and target.is_relative_to(run):
+            binds.append(target)
+    return tuple(binds)
+
+
 def _selected_runtimes() -> tuple[str, ...]:
     raw = os.environ.get("LOOPZERO_LIVE_RUNTIMES", "")
     selected = tuple(item.strip() for item in raw.split(",") if item.strip())
@@ -205,6 +229,7 @@ def _sandbox_wrapper(settings: RuntimeSettings):
             raise RuntimeError("live interpreter symlink escapes read-only roots")
     workspace_root = settings.workspace_root(tooling_root)
     workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name_resolution_binds = _name_resolution_binds()
     runtime_root_value = os.environ.get("LOOPZERO_LIVE_RUNTIME_ROOT")
     runtime_root = Path(runtime_root_value) if runtime_root_value else None
 
@@ -220,6 +245,8 @@ def _sandbox_wrapper(settings: RuntimeSettings):
                 command.extend(("--symlink", os.readlink(root), str(root)))
             elif root.exists():
                 command.extend(("--ro-bind", str(root), str(root)))
+        for target in name_resolution_binds:
+            command.extend(("--ro-bind", str(target), str(target)))
         for parent in sorted(spec.private_tmpdir.parents, key=lambda item: len(item.parts)):
             if parent != Path("/"):
                 command.extend(("--dir", str(parent)))
@@ -614,10 +641,22 @@ def _print_readiness(vendor: str, version: str, readiness) -> None:
     )
 
 
-def _cursor_unsupported_reason(vendor: str, scenario: str) -> str | None:
+def _unsupported_reason(vendor: str, scenario: str) -> str | None:
+    """Return the vendor limitation that makes a scenario unobservable."""
     if vendor == "cursor" and scenario in {"success", "restart-resume"}:
         return "pinned Cursor CLI cannot enforce output_schema"
+    if vendor == "codex" and scenario == "permission-denial":
+        # The read-only app-server sandbox enforces file access at the OS
+        # level: a denied read is an ordinary failed command, and the
+        # 0.154 protocol emits no permission-denial event or counter.
+        return (
+            "pinned Codex app-server enforces read-only file access in its "
+            "sandbox without a permission-denial protocol event"
+        )
     return None
+
+
+_cursor_unsupported_reason = _unsupported_reason
 
 
 def _suite_stop_reason(
@@ -678,11 +717,16 @@ def _assert_contract(scenario: str, result: RuntimeResult) -> None:
             TerminalReason.PROTOCOL_FAILURE,
         }
     elif scenario == "permission-denial":
-        assert result.status is RuntimeStatus.FAILED
-        assert result.terminal_reason in {
-            TerminalReason.PROCESS_EXIT,
-            TerminalReason.MODEL_RESULT,
-        }
+        # The governed denial is the contract.  A runtime may either fail the
+        # turn or, like Claude, report the denial and let the model finish.
+        assert result.status in {RuntimeStatus.FAILED, RuntimeStatus.COMPLETED}
+        if result.status is RuntimeStatus.FAILED:
+            assert result.terminal_reason in {
+                TerminalReason.PROCESS_EXIT,
+                TerminalReason.MODEL_RESULT,
+            }
+        else:
+            assert result.terminal_reason is TerminalReason.COMPLETED
         assert _permission_denial_evident(result)
     elif scenario == "cancellation":
         assert result.status is RuntimeStatus.CANCELLED
@@ -967,7 +1011,7 @@ def test_live_runtime_contract(
                     record["unaccounted_runs"] = unaccounted_runs
                 records.append(record)
                 break
-            unsupported_reason = _cursor_unsupported_reason(vendor, scenario)
+            unsupported_reason = _unsupported_reason(vendor, scenario)
             if unsupported_reason is not None:
                 records.append({
                     "scenario": scenario,
