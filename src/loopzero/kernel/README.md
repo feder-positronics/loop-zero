@@ -68,10 +68,23 @@ semantics. Its privileged dispatcher and continuation paths are supplied through
 `['continuation_runner']`. The existing command-shape, descriptor and signed-result
 checks still apply to those paths. Candidate protection receives the consumer
 repository explicitly rather than deriving it from the package installation.
-Bound ordinary jobs receive the filesystem sandbox described above. Unbound
-jobs are detached command-runner children, not validation children; callers
-must use `sandbox.run_validation_child` or `job.sh consumer-hook` when the
-validation environment, descriptor, network, and Git boundaries are required.
+Bound ordinary jobs receive the filesystem sandbox described above: the host
+view, the account home, and the job authority root are read-only, the job
+directory itself is sealed (reconcile, clean, and status trust its
+`reconciliation.json`, `pid`, and `pid-identity.json`), and the coordinator
+authority directory and `~/.ssh` are hidden behind empty overlays so their
+keys and ledgers are unreadable, not merely unwritable. Only the worktree and
+a private `TMPDIR` are writable. A terminal artifact that the bound command
+produces itself must therefore be named inside the worktree (for example
+under the audit root); that is the one launcher-nameable writable location.
+Bound jobs also lose environment-carried credentials. Unbound jobs are
+detached command-runner children, not validation children; they are stripped
+of only the worktree-lease family (`sandbox.strip_worktree_lease_environment`:
+descriptor, boundary, owner pid, nonce) so they cannot re-enter the launcher's
+lease, and they keep credentials such as `GITHUB_TOKEN` and `SSH_AUTH_SOCK`
+so agents can still run `gh` and `git push` through them. Callers must use
+`sandbox.run_validation_child` or `job.sh consumer-hook` when the validation
+environment, descriptor, network, and Git boundaries are required.
 
 Final-CI reproduction is no longer a job-runner special case. Invoke
 `job.sh consumer-hook` with explicit `--base`, `--head`, `--task-id`,

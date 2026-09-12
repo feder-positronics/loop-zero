@@ -27,10 +27,11 @@ def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
     tmp_path: Path,
 ) -> None:
     from loopzero.kernel import jobs as job_store
+    from loopzero.kernel.settings import settings
 
     home = tmp_path / "home"
-    authority = home / ".local/state/example/dispatch-authority"
-    job_root = home / ".local/state/example/jobs/repository"
+    authority = settings.account_state_root(home) / "dispatch-authority"
+    job_root = settings.account_state_root(home) / "jobs" / "repository"
     job_dir = job_root / "current"
     worktree = home / "worktree"
     private_temp = home / "tmp/current"
@@ -50,16 +51,25 @@ def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
     dot_gitconfig = home / ".gitconfig"
     config_git = global_git / "config"
     ssh_config = ssh / "config"
+    ssh_key = ssh / "id_ed25519"
     protected = {
         coordinator_key: "coordinator-key\n",
         host_ledger: "ledger-state\n",
         dot_gitconfig: "[user]\n\tname = Coordinator\n",
         config_git: "[core]\n\thooksPath = /dev/null\n",
         ssh_config: "Host *\n\tBatchMode yes\n",
+        ssh_key: "ssh-private-key\n",
     }
     for path, payload in protected.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(payload, encoding="utf-8")
+    for path in (coordinator_key, host_ledger, ssh_key):
+        path.chmod(0o600)
+    pid = job_dir / "pid"
+    pid.write_text("4242\n", encoding="ascii")
+    identity = job_dir / "pid-identity.json"
+    identity.write_text("{}", encoding="utf-8")
+    receipt = job_dir / "reconciliation.json"
 
     arguments = job_store.build_bound_sandbox_arguments(
         "/usr/bin/bwrap",
@@ -68,13 +78,26 @@ def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
         command=[
             "/bin/sh",
             "-c",
+            # Every protected file stays unwritable.
             'for target in "$@"; do ! printf attacker > "$target" || exit 9; done; '
-            'touch "$JOB_DIR/job-write" "$WORKTREE/worktree-write" "$PRIVATE_TEMP/temp-write"',
+            # Secrets are unreadable, not merely unwritable: the coordinator
+            # authority directory and ~/.ssh are empty overlays.
+            'for secret in "$KEY" "$LEDGER" "$SSH_KEY"; do '
+            '! cat "$secret" > /dev/null 2>&1 || exit 10; done; '
+            'test -z "$(ls -A "$AUTHORITY")" || exit 11; '
+            'test -z "$(ls -A "$SSH")" || exit 12; '
+            # The job directory is sealed: no planted receipt, no recreated
+            # pid or pid identity.
+            '! printf "{}" > "$RECEIPT" || exit 13; '
+            '! rm -f "$PID" 2>/dev/null || exit 14; '
+            '! rm -f "$IDENTITY" 2>/dev/null || exit 15; '
+            '! printf forged > "$JOB_DIR/pid.new" || exit 16; '
+            'touch "$WORKTREE/worktree-write" "$PRIVATE_TEMP/temp-write"',
             "sh",
             *map(str, protected),
         ],
         account_home=home,
-        writable_paths=(job_dir, worktree, private_temp),
+        writable_paths=(worktree, private_temp),
         protected_read_only_paths=(),
     )
     result = subprocess.run(
@@ -84,6 +107,14 @@ def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
             "JOB_DIR": str(job_dir),
             "WORKTREE": str(worktree),
             "PRIVATE_TEMP": str(private_temp),
+            "AUTHORITY": str(authority),
+            "SSH": str(ssh),
+            "KEY": str(coordinator_key),
+            "LEDGER": str(host_ledger),
+            "SSH_KEY": str(ssh_key),
+            "RECEIPT": str(receipt),
+            "PID": str(pid),
+            "IDENTITY": str(identity),
         },
         capture_output=True,
         text=True,
@@ -92,7 +123,10 @@ def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert {path: path.read_text(encoding="utf-8") for path in protected} == protected
-    assert (job_dir / "job-write").exists()
+    assert not receipt.exists()
+    assert pid.read_text(encoding="ascii") == "4242\n"
+    assert identity.read_text(encoding="utf-8") == "{}"
+    assert sorted(path.name for path in job_dir.iterdir()) == ["pid", "pid-identity.json"]
     assert (worktree / "worktree-write").exists()
     assert (private_temp / "temp-write").exists()
 

@@ -9,6 +9,10 @@
 #
 # Usage:
 #   scripts/util/job.sh start <name> [--run-id ID --task-id ID --terminal-artifact PATH] -- <command...>
+#       A bound (--run-id) ordinary command runs in a read-only sandbox where
+#       only the worktree and a private TMPDIR are writable; a terminal
+#       artifact the command itself produces must therefore live inside the
+#       worktree (for example under the audit root).
 #   scripts/util/job.sh wait  <name> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh run   <name> [--timeout SECONDS] [--tail LINES] -- <command...>
 #   scripts/util/job.sh wait-file <path> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
@@ -1047,7 +1051,12 @@ try:
                 protected_authority_root=job_dir.resolve().parent,
                 working_directory=Path(os.getcwd()),
                 command=list(command),
-                writable_paths=(job_dir.resolve(), repo_root, bound_temp),
+                # The job directory stays sealed: reconcile, clean, and status
+                # trust reconciliation.json, pid, and pid-identity.json in it.
+                # A bound child writes its terminal artifact inside the
+                # worktree (the launcher-nameable writable location) and
+                # scratch data under the private temporary directory.
+                writable_paths=(repo_root, bound_temp),
                 protected_read_only_paths=job_store._canonical_candidate_protection_paths(repo_root),
             )
         except job_store.JobStoreError as exc:
