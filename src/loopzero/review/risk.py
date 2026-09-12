@@ -30,10 +30,12 @@ class RiskSettings:
 _SETTINGS: ContextVar[RiskSettings | None] = ContextVar(
     "review_risk_settings", default=None
 )
+_DEFAULT_SETTINGS: RiskSettings | None = None
 
 
 def configure(profile: Profile) -> None:
     """Install validated consumer path tables and review-section policy."""
+    global _DEFAULT_SETTINGS
     from . import _ci_path_classifier, _security_scope
 
     configured = RiskSettings(
@@ -42,6 +44,7 @@ def configure(profile: Profile) -> None:
         required_sections=tuple(profile.required_sections),
         path_class_parents=getattr(profile, "path_class_parents", {}),
     )
+    _DEFAULT_SETTINGS = configured
     _SETTINGS.set(configured)
     _ci_path_classifier.configure(
         configured.path_classes, configured.path_class_parents

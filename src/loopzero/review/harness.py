@@ -62,23 +62,32 @@ DIFF_CONTEXT_LINES = 10
 LONG_DIFF_LINE_CHARS = 20_000
 
 _PROFILE: ContextVar[Profile | None] = ContextVar("cross_harness_profile", default=None)
+_DEFAULT_PROFILE: Profile | None = None
 _AUTHORITY_APPEND: ContextVar[Callable[..., None] | None] = ContextVar(
     "cross_harness_authority_append", default=None
 )
+_DEFAULT_AUTHORITY_APPEND: Callable[..., None] | None = None
 
 
 def configure(
     profile: Profile, *, append_authority: Callable[..., None] | None = None
 ) -> None:
+    global _DEFAULT_AUTHORITY_APPEND, _DEFAULT_PROFILE
+    _DEFAULT_PROFILE = profile
+    _DEFAULT_AUTHORITY_APPEND = append_authority
     _PROFILE.set(profile)
     _AUTHORITY_APPEND.set(append_authority)
 
 
 def append_authoritative_record(*args, **kwargs) -> None:
-    append = _AUTHORITY_APPEND.get()
+    append = _AUTHORITY_APPEND.get() or _DEFAULT_AUTHORITY_APPEND
     if append is None:
         raise CrossHarnessError("authoritative advisory deposition is not configured")
     append(*args, **kwargs)
+
+
+def _configured_profile() -> Profile | None:
+    return _PROFILE.get() or _DEFAULT_PROFILE
 
 
 class CrossHarnessError(RuntimeError):
@@ -685,7 +694,7 @@ def _run_review_flow(
             prompt_chars=prompt_chars,
             timeout_seconds=timeout_seconds,
         )
-    configured = profile or _PROFILE.get()
+    configured = profile or _configured_profile()
     if configured is None:
         raise CrossHarnessError("cross-harness review requires a configured Profile")
     alias = configured.cross_harness_routes.get(current_harness)
