@@ -942,6 +942,38 @@ def _authenticated_attempt_terminal_ids(
     _registered_before_record_ids: frozenset[int] | None = None,
 ) -> frozenset[int]:
     """Authenticate registered deposits while preserving proofless history."""
+    accepted, _registrations = _authenticated_attempt_terminal_projection(
+        records,
+        _open_before_record_ids=_open_before_record_ids,
+        _registered_before_record_ids=_registered_before_record_ids,
+    )
+    return accepted
+
+
+def _authenticated_attempt_terminal_registrations(
+    records: Sequence[dict[str, object]],
+) -> dict[int, dict[str, object]]:
+    """Map each registered, authenticated settlement to its registration.
+
+    The registration is the coordinator-signed (or legacy proofless) start of
+    the very attempt the settlement completes: the unique start sharing the
+    settlement's ``(task_id, attempt_index, run_id, work_unit_id, worktree)``
+    whose registered dispatcher key verified the settlement.  Consumers that
+    act on claims a dispatcher makes about its attempt (for example a delivery
+    PR number) must bind those claims to this registration rather than trust
+    the dispatcher's self-description.
+    """
+    _accepted, registrations = _authenticated_attempt_terminal_projection(records)
+    return registrations
+
+
+def _authenticated_attempt_terminal_projection(
+    records: Sequence[dict[str, object]],
+    *,
+    _open_before_record_ids: frozenset[int] | None = None,
+    _registered_before_record_ids: frozenset[int] | None = None,
+) -> tuple[frozenset[int], dict[int, dict[str, object]]]:
+    """Return accepted settlement ids and the registered settlement bindings."""
     authority_history = _authority_record_list(records)
     governed_records = current_telemetry(authority_history)
     open_before_record_ids = _open_before_record_ids
@@ -963,6 +995,7 @@ def _authenticated_attempt_terminal_ids(
     legacy_compatibility_ids = _legacy_compatibility_record_ids(authority_history)
     starts: dict[tuple[tuple[str, int], str, str, Path], list[dict[str, object]]] = {}
     accepted: set[int] = set()
+    registrations: dict[int, dict[str, object]] = {}
     for record in governed_records:
         key = _terminal_authority_attempt_key(record)
         if record.get("type") == "attempt-start":
@@ -1031,7 +1064,8 @@ def _authenticated_attempt_terminal_ids(
         except TerminalAuthorityError:
             continue
         accepted.add(id(record))
-    return frozenset(accepted)
+        registrations[id(record)] = candidates[0]
+    return frozenset(accepted), registrations
 
 
 _RECOVERY_DEPOSIT_IDENTITY_FIELDS = (

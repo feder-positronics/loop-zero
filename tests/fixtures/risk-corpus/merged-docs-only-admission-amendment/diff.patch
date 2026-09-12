@@ -1,0 +1,60 @@
+diff --git a/docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md b/docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md
+index e26ca1c52..5edca559d 100644
+--- a/docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md
++++ b/docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md
+@@ -38,9 +38,11 @@ estimates, rejected greenfield alternatives, and unsettled-session census.
+ This blueprint does not repeat that analysis. It locks the smallest executable
+ shape after local design review found four implementation constraints:
+ 
+-1. PR #4022 has merged, but issue #4016 still owns checkpoint-mode operation
+-   and the first fleet benchmark. This blueprint consumes that outcome rather
+-   than implementing a second compaction path.
++1. PR #4022 has merged and delivered the accepted control-cost baseline
++   (delivery-control status 208.7 s → 34.6 s). Issue #4016's checkpoint
++   cutover proceeds on its own track and is not a prerequisite of any phase
++   (owner decision 2026-09-02); this blueprint never implements a second
++   compaction path and merely benefits if the cutover lands first.
+ 2. The written Tiny policy permits docs-only and test-only review exemptions,
+    while publication currently recognizes docs-only only. T0 must start by
+    making rule and code share one classifier.
+@@ -91,7 +93,7 @@ Three concrete contract gaps prevent composition:
+ 
+ | Goal | Success evidence | Target |
+ | --- | --- | ---: |
+-| Bound routine control cost | checkpoint-backed `delivery-control status` benchmark | p90 ≤15 seconds after #4016 operation |
++| Bound routine control cost | `delivery-control status` benchmark | p90 ≤35 seconds on the accepted post-#4022 baseline; ≤15 seconds once the independent #4016 cutover lands |
+ | Remove deterministic review tax | replay and live T0 classification | zero T2/security escapes; docs-only executable end to end; executable test code remains reviewed until separately proven |
+ | Converge ordinary review | governed dispatch records | p50 ≤4 dispatches/merge initially; stretch ≤3 after context carry |
+ | Release foreground sessions | handoff and job timestamps | p90 ≤60 seconds from candidate freeze/continuation launch to executor exit |
+@@ -126,10 +128,10 @@ Implementation may start only when overlapping contracts are settled:
+ 
+ | Dependency | Required disposition | Why |
+ | --- | --- | --- |
+-| Issue #4016 | complete checkpoint cutover/operation and record the first status benchmark | owns the fleet-wide control-state lever |
++| Issue #4016 | **decoupled (owner decision 2026-09-02)**: the recorded post-#4022 benchmark (delivery-control status 208.7 s → 34.6 s, 6×) is the accepted baseline; the checkpoint cutover proceeds on its own track (retention caps raised per DR-ledger-retention-caps-2026-09-02) and no longer blocks Phase 1 | the fleet-wide control-state lever is already 6× faster; the remaining ~34 s → <15 s increment must not gate detached delivery |
+ | PR #4024 | merged 2026-09-02 at 16:27 UTC; consume | finalization recovery contract is now on `origin/main` |
+-| PR #3926 | merge or explicitly supersede | owns canonical PR body/run-marker publication shape |
+-| PR #4031 | merge, split, or explicitly supersede | currently conflicts and edits the same governance rules as Phase 1 |
++| PR #3926 | merged 2026-09-02 at 19:35 UTC; consume | canonical PR body/run-marker publication shape is now on `origin/main` |
++| PR #4031 | merged 2026-09-02; consume | governance-rule surface Phase 1 edits is now settled on `origin/main` |
+ | PR #4023 | merged 2026-09-02 at 15:48 UTC; consume | provider-login isolation prerequisite for concurrency proof |
+ | Owner decision NPD-02 | settle through `grill-me` before Phase 1 | atomic four-consumer authority cutover is the blueprint's highest-risk single step; include the compute-once/verify-everywhere refinement |
+ 
+@@ -654,7 +656,7 @@ overhead.
+ 
+ - [ ] Settle NPD-02 with the owner through `grill-me`; do not change enforcing
+   consumers while it is Deferred.
+-- [ ] Freeze the post-#4016/#4024/#3926/#4031 contract surface and record a
++- [ ] Freeze the post-#4024/#3926/#4031 contract surface (current `origin/main`) and record a
+   historical changed-path replay corpus with expected security/review outcomes.
+ - [ ] Implement one candidate-bound, digest-addressed risk artifact; shadow
+   verification may land before authority, but cut preflight, publication, merge
+@@ -879,7 +881,7 @@ the same projection.
+ 
+ ### Blockers
+ 
+-- Issue #4016 and PRs #3926 and #4031 require the dispositions in the admission
++- PRs #3926 and #4031 are merged and #4016 is decoupled per the admission
+   table before overlapping implementation. PRs #4023 and #4024 merged on
+   2026-09-02 and are consumed dependencies.
+ - NPD-02 requires an owner `grill-me` before Phase 1 changes any enforcing

@@ -1,11 +1,14 @@
 """pytest bootstrap: make ``src/`` importable without an install."""
 
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("LOOPZERO_ENV_PREFIX", "INTELFLO")
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[1]
@@ -53,6 +56,20 @@ def minimal_workflow(
         'acceptance = ["make test"]\n'
         + extra
     )
+
+
+@pytest.fixture(autouse=True)
+def private_gh_home_under_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the per-command private gh home out of the real account state root.
+
+    The CI sandbox binds the account home read-only, and unit tests must never
+    write under ``~/.local/state`` anyway.
+    """
+    state_root = tmp_path / "account-state"
+    monkeypatch.setattr(
+        "loopzero.integrations.github._account_state_root", lambda: state_root
+    )
+    return state_root
 
 
 @pytest.fixture

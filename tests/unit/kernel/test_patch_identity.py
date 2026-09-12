@@ -634,9 +634,8 @@ def test_python_format_carry_proves_syntax_and_comment_identity(
     assert not module.prove_format_only(patch_repo, before, mode_change)
 
 
-@pytest.mark.skip(reason='Review tree coverage is an A4 mechanism, outside the kernel import')
 def test_mechanical_carry_retains_original_run_contract(patch_repo):
-    import review_tree_coverage
+    from loopzero.review import _tree_coverage as review_tree_coverage
 
     path = patch_repo / "format.py"
     path.write_text("VALUE=1\n")

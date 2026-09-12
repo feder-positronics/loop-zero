@@ -1,0 +1,23 @@
+{
+  "base_sha": "8dccbc7c78061ddc24476b36cfc991b66f7186a7",
+  "head_sha": "18c41b595520913f810ac3e2233a4c549de09c15",
+  "changed_paths": [
+    "docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md"
+  ],
+  "base_tree": [
+    {
+      "path": "docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "e26ca1c52e586b9048eef5934ff50eda831ab8c3"
+    }
+  ],
+  "head_tree": [
+    {
+      "path": "docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "5edca559d9476d980fcda533d46cf9a0dc794d21"
+    }
+  ]
+}

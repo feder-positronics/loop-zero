@@ -1,0 +1,183 @@
+diff --git a/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py b/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
+index b6e8800ac..70886b38f 100644
+--- a/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
++++ b/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
+@@ -1533,6 +1533,153 @@ def test_retention_refuses_unknown_current_policy_family(
+         module.compact_authority_ledger(authority_repo)
+ 
+ 
++def test_retention_covers_representative_current_policy_record_families() -> None:
++    record_families = (
++        "alias-availability",
++        "attempt-abort",
++        "attempt-checkpoint",
++        "attempt-cleanup-failure",
++        "attempt-owner",
++        "attempt-patch-identity-carry",
++        "attempt-progress",
++        "attempt-recovery",
++        "attempt-start",
++        "attempt-supersession",
++        "attempt-terminal",
++        "coordinator-authority-cutover",
++        "delivery-control",
++        "deposit-verification",
++        "evidence-cleanup",
++        "evidence-cleanup-friction",
++        "inline",
++        "review-chain-advisory",
++        "review-recovery-verification",
++        "route",
++        "scratch-cleanup",
++        "verdict",
++    )
++    records = [current_record(record_family) for record_family in record_families]
++
++    assert module._COMPACTABLE_AUTHORITY_RECORD_TYPES == frozenset(record_families)
++    retained = module.retained_authority_projection(records)
++
++    assert {record["type"] for record in retained} == set(record_families) - {
++        "coordinator-authority-cutover"
++    }
++    assert module.authority_projection_bundle_v1(
++        records
++    ) == module.authority_projection_bundle_v1(
++        dispatch_authority_store._prospective_retained_view(retained)
++    )
++    assert module.retained_authority_projection(retained) == retained
++    with pytest.raises(module.DispatchError, match="future-authority-family"):
++        module.retained_authority_projection(
++            [*records, current_record("future-authority-family")]
++        )
++
++
++def test_retention_policy_covers_literal_authority_append_families() -> None:
++    append_functions = {
++        "append_admitted_record",
++        "append_authoritative_record",
++        "append_record",
++    }
++    scripts_dir = Path(module.__file__ or "").parent
++    source_trees = {
++        source_path: ast.parse(source_path.read_text(encoding="utf-8"))
++        for source_path in scripts_dir.glob("*.py")
++    }
++    writer_sources = {
++        source_path
++        for source_path, tree in source_trees.items()
++        if source_path.name == "dispatch_authority_runtime.py"
++        or any(
++            isinstance(node, ast.ImportFrom)
++            and any(alias.name in append_functions for alias in node.names)
++            for node in ast.walk(tree)
++        )
++    }
++    assert {
++        "agent_dispatch.py",
++        "cross_harness_review.py",
++        "dispatch_authority_runtime.py",
++    } <= {source_path.name for source_path in writer_sources}
++
++    class AuthorityFamilyVisitor(ast.NodeVisitor):
++        def __init__(self) -> None:
++            self.emitted_families: set[str] = set()
++            self.record_variables: list[dict[str, set[str]]] = [{}]
++
++        @staticmethod
++        def literal_family(expression: ast.expr) -> str | None:
++            if not isinstance(expression, ast.Dict):
++                return None
++            for key, value in zip(expression.keys, expression.values, strict=True):
++                if (
++                    isinstance(key, ast.Constant)
++                    and key.value == "type"
++                    and isinstance(value, ast.Constant)
++                    and isinstance(value.value, str)
++                ):
++                    return value.value
++            return None
++
++        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
++            self.record_variables.append({})
++            self.generic_visit(node)
++            self.record_variables.pop()
++
++        visit_AsyncFunctionDef = visit_FunctionDef
++
++        def visit_Assign(self, node: ast.Assign) -> None:
++            family = self.literal_family(node.value)
++            if family is not None:
++                for target in node.targets:
++                    if isinstance(target, ast.Name):
++                        self.record_variables[-1].setdefault(target.id, set()).add(
++                            family
++                        )
++            self.generic_visit(node)
++
++        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
++            family = self.literal_family(node.value) if node.value is not None else None
++            if family is not None and isinstance(node.target, ast.Name):
++                self.record_variables[-1].setdefault(node.target.id, set()).add(family)
++            self.generic_visit(node)
++
++        def visit_Call(self, node: ast.Call) -> None:
++            function_name = (
++                node.func.id
++                if isinstance(node.func, ast.Name)
++                else node.func.attr
++                if isinstance(node.func, ast.Attribute)
++                else None
++            )
++            if function_name in append_functions:
++                arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
++                for argument in arguments:
++                    family = self.literal_family(argument)
++                    if family is not None:
++                        self.emitted_families.add(family)
++                    if isinstance(argument, ast.Name):
++                        for scope in reversed(self.record_variables):
++                            if argument.id in scope:
++                                self.emitted_families.update(scope[argument.id])
++                                break
++            self.generic_visit(node)
++
++    visitor = AuthorityFamilyVisitor()
++    for source_path in writer_sources:
++        visitor.visit(source_trees[source_path])
++
++    assert {
++        "attempt-terminal",
++        "coordinator-authority-cutover",
++        "inline",
++    } <= visitor.emitted_families
++    assert visitor.emitted_families <= module._COMPACTABLE_AUTHORITY_RECORD_TYPES
++
++
+ def test_compaction_preserves_immutable_closed_work_unit_contract(
+     authority_repo: Path,
+ ) -> None:
+diff --git a/scripts/util/dispatch_authority_store.py b/scripts/util/dispatch_authority_store.py
+index 277b73717..9de1a7b52 100644
+--- a/scripts/util/dispatch_authority_store.py
++++ b/scripts/util/dispatch_authority_store.py
+@@ -993,6 +993,7 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
+         "alias-availability",
+         "attempt-abort",
+         "attempt-checkpoint",
++        "attempt-cleanup-failure",
+         "attempt-owner",
+         "attempt-patch-identity-carry",
+         "attempt-progress",
+@@ -1004,10 +1005,12 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
+         "delivery-control",
+         "deposit-verification",
+         "evidence-cleanup",
++        "evidence-cleanup-friction",
+         "inline",
+         "review-chain-advisory",
+         "review-recovery-verification",
+         "route",
++        "scratch-cleanup",
+         "verdict",
+     }
+ )

@@ -1,0 +1,101 @@
+{
+  "base_sha": "3e4319b03b8d66c345f570ce778f171e50d80ddc",
+  "head_sha": "c280941efc9c0e91b56c7ca5eddc74c88c3d57d7",
+  "changed_paths": [
+    ".agents/rules/review-gate.md",
+    ".cursor/rules/review-gate.mdc",
+    "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+    "fastapi_backend/tests/unit/scripts/test_security_review_scope.py",
+    "scripts/util/dispatch_authority.py",
+    "scripts/util/dispatch_authority_projection.py",
+    "scripts/util/security_review_scope.py"
+  ],
+  "base_tree": [
+    {
+      "path": ".agents/rules/review-gate.md",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "d43a76f00cb5eb58247f81ebb2b0a7a835d72b76"
+    },
+    {
+      "path": ".cursor/rules/review-gate.mdc",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "a939512d091f27a3f7786eeafec5f54cb6bad31e"
+    },
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "9ca42c538f61467363386d983b74448c84672b17"
+    },
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_security_review_scope.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "5d7e3a29b55fb58b14eac0d91e9934df64040cd7"
+    },
+    {
+      "path": "scripts/util/dispatch_authority.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "8362a5d5013c5d0672e2d8059a9498aeb82441b4"
+    },
+    {
+      "path": "scripts/util/dispatch_authority_projection.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "6707915d1662dd9b963a32b82dbb790f87c042ba"
+    },
+    {
+      "path": "scripts/util/security_review_scope.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "0009c2e2360f6246cb3c0a45b8847d7cecf7ab28"
+    }
+  ],
+  "head_tree": [
+    {
+      "path": ".agents/rules/review-gate.md",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "e18573510712c72b4fc01618902f9ae508dd793a"
+    },
+    {
+      "path": ".cursor/rules/review-gate.mdc",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "22c86b1873e865c01ccd2cd76fe6a6eff05d275d"
+    },
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "b6e8800acb3420936835a97a0a5aef8ff48bf496"
+    },
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_security_review_scope.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "6fc25c094c276ff5643b2bca408b60f36b8902a6"
+    },
+    {
+      "path": "scripts/util/dispatch_authority.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "838ea14131aab590030617c6c500bae1a26bdd99"
+    },
+    {
+      "path": "scripts/util/dispatch_authority_projection.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "6857c7578b884c054c741bc804fd50c2e28721a4"
+    },
+    {
+      "path": "scripts/util/security_review_scope.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "82040978b14cd5931de79f0c68550d896caff590"
+    }
+  ]
+}

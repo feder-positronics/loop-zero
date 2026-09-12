@@ -1,0 +1,23 @@
+{
+  "base_sha": "d1c6d3b3757ecda814d46d13bcffa6b5422fb3d8",
+  "head_sha": "a29d1d47fa89fdd024c6f3553eec6dff11d14fdc",
+  "changed_paths": [
+    "scripts/hooks/ci-mirror-check.sh"
+  ],
+  "base_tree": [
+    {
+      "path": "scripts/hooks/ci-mirror-check.sh",
+      "mode": "100755",
+      "type": "blob",
+      "oid": "ec9d2a3d5830881bca4e0c9fb003eadcb32b6cd9"
+    }
+  ],
+  "head_tree": [
+    {
+      "path": "scripts/hooks/ci-mirror-check.sh",
+      "mode": "100755",
+      "type": "blob",
+      "oid": "1983baac78a2dbf4e9ab92ca2f02e5c208f12c05"
+    }
+  ]
+}

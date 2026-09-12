@@ -219,7 +219,13 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
             problems.extend(exc.problems)
             hooks = {}
         problems.extend(_lint_hook_commands(profile, hooks, allowed))
+    routing_table = profile.raw.get("routing", {})
+    explicitly_configured_aliases = (
+        routing_table.get("aliases", {}) if isinstance(routing_table, dict) else {}
+    )
     for name, alias in profile.aliases.items():
+        if name not in explicitly_configured_aliases:
+            continue
         if alias.runner in ("claude", "codex", "cursor"):
             binary = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[alias.runner]
             if resolve_executable(profile.root, binary, allowed) is None:
