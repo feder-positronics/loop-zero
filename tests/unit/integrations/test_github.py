@@ -295,61 +295,139 @@ _SUBPROCESS_EXECUTION_NAMES = frozenset(
 )
 
 
+_EXECUTION_MODULES = frozenset({"subprocess", "os", "asyncio"})
+
+
+def _is_execution(module: str, name: str) -> bool:
+    return (
+        module == "subprocess" and name in _SUBPROCESS_EXECUTION_NAMES
+    ) or (
+        module == "os"
+        and (
+            name in {"system", "popen"}
+            or name.startswith(("exec", "spawn", "posix_spawn"))
+        )
+    ) or (module == "asyncio" and name.startswith("create_subprocess"))
+
+
 def _process_calls(source: str, *, filename: str) -> tuple[
     ast.AST,
-    list[tuple[ast.Call, str, str]],
+    list[tuple[ast.AST, str, str]],
     dict[str, str],
     dict[str, tuple[str, str]],
 ]:
-    """Find process creation regardless of import aliases or argv construction."""
+    """Find process creation regardless of aliasing, indirection or argv shape.
+
+    Module aliases come from imports and from plain assignments (``sp =
+    subprocess``); function aliases come from ``from`` imports, attribute
+    assignments (``launch = subprocess.run``) and ``getattr`` with a literal
+    name.  Every *reference* to an execution function counts, not only direct
+    calls: a function passed as a value (``functools.partial``, ``map``,
+    callbacks) launches processes just as well.  The returned node is the
+    direct call, or for a reference the enclosing call that receives it (so
+    its argv can still be inspected), or the bare reference itself.
+    """
     tree = ast.parse(source, filename=filename)
     module_aliases: dict[str, str] = {}
     direct_calls: dict[str, tuple[str, str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for imported in node.names:
-                if imported.name in {"subprocess", "os", "asyncio"}:
+                if imported.name in _EXECUTION_MODULES:
                     module_aliases[imported.asname or imported.name] = imported.name
-        elif isinstance(node, ast.ImportFrom) and node.module in {
-            "subprocess",
-            "os",
-            "asyncio",
-        }:
+        elif isinstance(node, ast.ImportFrom) and node.module in _EXECUTION_MODULES:
             for imported in node.names:
                 direct_calls[imported.asname or imported.name] = (
                     node.module,
                     imported.name,
                 )
 
-    def is_execution(module: str, name: str) -> bool:
-        return (
-            module == "subprocess" and name in _SUBPROCESS_EXECUTION_NAMES
-        ) or (
-            module == "os"
-            and (
-                name == "system"
-                or name.startswith(("exec", "spawn", "posix_spawn"))
-            )
-        ) or (module == "asyncio" and name.startswith("create_subprocess"))
-
-    calls: list[tuple[ast.Call, str, str]] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        target: tuple[str, str] | None = None
-        if isinstance(node.func, ast.Name):
-            target = direct_calls.get(node.func.id)
-        elif isinstance(node.func, ast.Attribute) and isinstance(
-            node.func.value, ast.Name
+    def attribute_target(node: ast.AST) -> tuple[str, str] | None:
+        """Resolve ``module.name``, a ``from`` alias or ``getattr(module, "name")``."""
+        if isinstance(node, ast.Name):
+            return direct_calls.get(node.id)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            module = module_aliases.get(node.value.id)
+            return None if module is None else (module, node.attr)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
         ):
-            module = module_aliases.get(node.func.value.id)
-            if module is not None:
-                target = module, node.func.attr
-        if target is not None and is_execution(*target):
-            calls.append((node, *target))
+            module = module_aliases.get(node.args[0].id)
+            return None if module is None else (module, node.args[1].value)
+        return None
+
+    # Aliases introduced by assignment, to a fixed point so chains resolve.
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                continue
+            value = node.value
+            if not isinstance(value, ast.AST):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names = [target.id for target in targets if isinstance(target, ast.Name)]
+            if not names:
+                continue
+            if isinstance(value, ast.Name) and value.id in module_aliases:
+                module = module_aliases[value.id]
+                for name in names:
+                    if module_aliases.get(name) != module:
+                        module_aliases[name] = module
+                        changed = True
+                continue
+            target = attribute_target(value)
+            if target is None:
+                continue
+            for name in names:
+                if direct_calls.get(name) != target:
+                    direct_calls[name] = target
+                    changed = True
+
+    def execution_target(node: ast.AST) -> tuple[str, str] | None:
+        target = attribute_target(node)
+        return target if target is not None and _is_execution(*target) else None
+
+    parents: dict[int, ast.AST] = {}
+    call_functions: set[int] = set()
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+        if isinstance(parent, ast.Call):
+            call_functions.add(id(parent.func))
+
+    found: list[tuple[ast.AST, str, str]] = []
+    seen: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            target = execution_target(node.func)
+            if target is not None:
+                if id(node) not in seen:
+                    seen.add(id(node))
+                    found.append((node, *target))
+                continue
+        if id(node) in call_functions or (
+            isinstance(node, ast.Name) and not isinstance(node.ctx, ast.Load)
+        ):
+            continue
+        target = execution_target(node)
+        if target is None:
+            continue
+        parent = parents.get(id(node))
+        reported = parent if isinstance(parent, ast.Call) else node
+        if id(reported) not in seen:
+            seen.add(id(reported))
+            found.append((reported, *target))
     return (
         tree,
-        sorted(calls, key=lambda item: item[0].lineno),
+        sorted(found, key=lambda item: item[0].lineno),
         module_aliases,
         direct_calls,
     )
@@ -532,6 +610,10 @@ def _gh_process_call_lines(source: str, *, filename: str) -> list[int]:
 
     violations: list[int] = []
     for node, _module, _name in calls:
+        if not isinstance(node, ast.Call):
+            # A bare reference (``launch = subprocess.run``) carries no argv;
+            # its later call sites are resolved through the alias maps.
+            continue
         argv = list(node.args)
         argv.extend(
             keyword.value
@@ -572,6 +654,30 @@ def _process_boundary_violations(package: Path) -> list[str]:
     return violations
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    (
+        ('import os\nos.popen("ls")\n', [2]),
+        ('from os import popen\npopen("ls")\n', [2]),
+        ('import subprocess\ngetattr(subprocess, "run")(["ls"])\n', [2]),
+        ('import subprocess\nsp = subprocess\nsp.run(["ls"])\n', [3]),
+        ('import subprocess as s0\ns1 = s0\ns2 = s1\ns2.check_output(["ls"])\n', [4]),
+        ('import functools, subprocess\nfunctools.partial(subprocess.run)\n', [2]),
+        ('import subprocess\nlaunch = subprocess.run\nlaunch(["ls"])\n', [2, 3]),
+        ('import subprocess\nrun = getattr(subprocess, "run")\nrun(["ls"])\n', [2, 3]),
+        ('import subprocess\nlist(map(subprocess.run, []))\n', [2]),
+        ('import subprocess\ncallbacks = {"launch": subprocess.Popen}\n', [2]),
+        # Non-execution references never count.
+        ('import subprocess\nx = subprocess.PIPE\n', []),
+        ('import os\ngetattr(os, "getcwd")()\n', []),
+    ),
+)
+def test_process_boundary_scan_classifies_indirect_process_creation(
+    source: str, expected: list[int]
+) -> None:
+    assert _process_call_lines(source, filename="future.py") == expected
+
+
 def test_github_integration_is_the_only_subprocess_gh_boundary() -> None:
     package = Path(__file__).resolve().parents[3] / "src" / "loopzero"
     assert _process_boundary_violations(package) == []
@@ -609,6 +715,21 @@ def test_github_integration_is_the_only_subprocess_gh_boundary() -> None:
             'subprocess.run([environ.get("TOOL"), "api"])\n',
             [3],
         ),
+        # os.popen is an ordinary stdlib process launch.
+        ('import os\nos.popen("gh api")\n', [2]),
+        # getattr indirection with a literal execution-function name.
+        (
+            'import subprocess\ngetattr(subprocess, "run")(["gh", "api"])\n',
+            [2],
+        ),
+        # module alias introduced by assignment rather than import.
+        ('import subprocess\nsp = subprocess\nsp.run(["gh", "api"])\n', [3]),
+        # execution function passed as a value instead of being called.
+        (
+            'import functools, subprocess\n'
+            'launch = functools.partial(subprocess.run, ["gh", "api"])\n',
+            [2],
+        ),
     ),
 )
 def test_process_boundary_scan_rejects_hidden_gh_argv(
@@ -633,6 +754,10 @@ def test_process_boundary_scan_rejects_hidden_gh_argv(
         'import subprocess\ntool = "g"\nsubprocess.run([f"{tool}h", "api"])\n',
         'import subprocess\nsubprocess.run([b"gh", b"api"])\n',
         'import os, subprocess\nsubprocess.run([os.environ["GH_BIN"], "api"])\n',
+        'import os\nos.popen("gh api")\n',
+        'import subprocess\ngetattr(subprocess, "run")(["gh", "api"])\n',
+        'import subprocess\nsp = subprocess\nsp.run(["gh", "api"])\n',
+        'import functools, subprocess\nlaunch = functools.partial(subprocess.run)\n',
     ),
 )
 def test_package_scan_rejects_process_counterexample_in_body_check(
