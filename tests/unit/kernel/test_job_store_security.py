@@ -131,6 +131,98 @@ def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
     assert (private_temp / "temp-write").exists()
 
 
+@requires_nested_user_namespace
+@pytest.mark.parametrize(
+    "layout", ["job root is the state root", "authority root contains the home"]
+)
+def test_bound_sandbox_hides_secrets_under_overlapping_authority_layouts(
+    tmp_path: Path, layout: str
+) -> None:
+    """A later parent bind must not shadow the hidden-secret overlays.
+
+    Bubblewrap applies mounts in argument order, so an authority seal or a
+    writable carve-out whose destination contains ``dispatch-authority`` or
+    ``~/.ssh`` would restore the host directory beneath an overlay emitted
+    earlier. Both accepted overlapping layouts must leave the secrets empty
+    and unreadable; a state root inside a writable worktree is rejected
+    outright (see test_job_runner).
+    """
+    from loopzero.kernel import jobs as job_store
+    from loopzero.kernel.settings import settings
+
+    if layout == "job root is the state root":
+        home = tmp_path / "home"
+        authority_root = settings.account_state_root(home)
+        worktree = home / "worktree"
+        private_temp = home / "tmp/current"
+    else:
+        authority_root = tmp_path / "authority"
+        home = authority_root / "home"
+        worktree = tmp_path / "work"
+        private_temp = tmp_path / "tmp/current"
+    authority = settings.account_state_root(home) / "dispatch-authority"
+    ssh = home / ".ssh"
+    job_dir = authority_root / "current"
+    for directory in (authority, ssh, job_dir, worktree, private_temp):
+        directory.mkdir(parents=True, exist_ok=True)
+    coordinator_key = authority / "coordinator-ed25519.pem"
+    host_ledger = authority / "ledgers" / ("a" * 64 + ".json")
+    ssh_key = ssh / "id_ed25519"
+    secrets = {
+        coordinator_key: "coordinator-key\n",
+        host_ledger: "ledger-state\n",
+        ssh_key: "ssh-private-key\n",
+    }
+    for path, payload in secrets.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+        path.chmod(0o600)
+
+    arguments = job_store.build_bound_sandbox_arguments(
+        "/usr/bin/bwrap",
+        protected_authority_root=authority_root,
+        working_directory=worktree,
+        command=[
+            "/bin/sh",
+            "-c",
+            'for secret in "$KEY" "$LEDGER" "$SSH_KEY"; do '
+            '! cat "$secret" > /dev/null 2>&1 || exit 10; done; '
+            'test -z "$(ls -A "$AUTHORITY")" || exit 11; '
+            'test -z "$(ls -A "$SSH")" || exit 12; '
+            '! printf forged > "$AUTHORITY/coordinator-ed25519.pem" 2>/dev/null || exit 13; '
+            'test -d "$JOB_DIR" || exit 14; '
+            'touch "$WORKTREE/worktree-write"',
+        ],
+        account_home=home,
+        writable_paths=(worktree, private_temp),
+        protected_read_only_paths=(),
+    )
+    result = subprocess.run(
+        arguments,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "JOB_DIR": str(job_dir),
+            "WORKTREE": str(worktree),
+            "AUTHORITY": str(authority),
+            "SSH": str(ssh),
+            "KEY": str(coordinator_key),
+            "LEDGER": str(host_ledger),
+            "SSH_KEY": str(ssh_key),
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {path: path.read_text(encoding="utf-8") for path in secrets} == secrets
+    assert sorted(path.name for path in authority.iterdir()) == [
+        "coordinator-ed25519.pem",
+        "ledgers",
+    ]
+    assert (worktree / "worktree-write").exists()
+
+
 def _isolated_job_script(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     script = repo / "scripts" / "util" / "job.sh"

@@ -537,11 +537,12 @@ def build_bound_sandbox_arguments(
     from it. This closes writes to coordinator keys, host ledger state, global
     Git configuration, SSH state, sibling jobs, and unrelated caches. The
     coordinator authority directory and ``~/.ssh`` are additionally hidden
-    behind empty tmpfs overlays, so the same-uid child cannot read the
-    coordinator private key, host ledgers, or SSH keys either. A writable
-    carve-out that contains, equals, or lies below the authority root or the
-    account home is rejected, so no carve-out can mask a seal emitted before
-    it. Additional trusted-input stores, including continuation candidates,
+    behind empty tmpfs overlays emitted after every other bind, so the
+    same-uid child cannot read the coordinator private key, host ledgers, or
+    SSH keys even when the authority root, state root, or a writable ancestor
+    contains them. A writable carve-out that contains, equals, or lies below
+    the authority root, the account home, or a hidden secret root is
+    rejected, so no carve-out can mask a seal emitted before it. Additional trusted-input stores, including continuation candidates,
     are overlaid read-only after the writable worktree carve-out, and every
     ancestor of such a store inside a writable carve-out is pinned as a mount
     point so the child cannot rename it away and recreate the canonical path.
@@ -576,6 +577,17 @@ def build_bound_sandbox_arguments(
         ("authority root", Path(os.path.abspath(protected_authority_root))),
         ("account home", Path(os.path.abspath(account_home))),
     )
+    # Secrets the same-uid child must not read: the coordinator private key
+    # and host ledgers, and the account's SSH keys (the bound sandbox keeps
+    # the network). Each is replaced by an empty tmpfs after every other
+    # bind, so no writable carve-out may equal, contain, or lie inside one.
+    hidden_roots = tuple(
+        Path(os.path.abspath(hidden))
+        for hidden in (
+            settings.account_state_root(account_home) / "dispatch-authority",
+            account_home / ".ssh",
+        )
+    )
     for writable in writable_paths:
         if not writable.is_absolute() or writable == Path("/"):
             raise JobStoreError("bound sandbox writable path is invalid")
@@ -590,6 +602,15 @@ def build_bound_sandbox_arguments(
             raise JobStoreError(
                 f"bound sandbox writable path lies inside the authority root: {writable}"
             )
+        for hidden in hidden_roots:
+            if hidden == lexical_writable or hidden.is_relative_to(lexical_writable):
+                raise JobStoreError(
+                    f"bound sandbox writable path contains a hidden secret root: {writable}"
+                )
+            if lexical_writable.is_relative_to(hidden):
+                raise JobStoreError(
+                    f"bound sandbox writable path lies inside a hidden secret root: {writable}"
+                )
 
     if list_directory is None:
 
@@ -714,28 +735,6 @@ def build_bound_sandbox_arguments(
         kernel_owned_seal=True,
     )
 
-    # Secrets the same-uid child must not read: the coordinator private key
-    # and host ledgers, and the account's SSH keys (the bound sandbox keeps
-    # the network). A read-only bind still exposes their bytes, so each
-    # existing directory is replaced by an empty 0555 tmpfs.
-    hidden_mounts: list[str] = []
-    for hidden in (
-        settings.account_state_root(account_home) / "dispatch-authority",
-        account_home / ".ssh",
-    ):
-        if not directory_exists(hidden):
-            continue
-        validated_hidden = _validated_bound_destination(
-            hidden,
-            label="bound sandbox hidden secret destination",
-            emitted_mounts=emitted_mounts,
-            builder_emitted=True,
-        )
-        emitted_mounts.append(
-            _BoundMount("--tmpfs", None, validated_hidden, kernel_owned_seal=True)
-        )
-        hidden_mounts.extend(("--perms", "0555", "--tmpfs", str(validated_hidden)))
-
     authority_seal = emit_mount(
         "--ro-bind",
         protected_authority_root,
@@ -793,6 +792,27 @@ def build_bound_sandbox_arguments(
                 kernel_owned_seal=True,
             )
         )
+    # A read-only bind still exposes secret bytes, so each existing hidden
+    # directory is replaced by an empty 0555 tmpfs. Bubblewrap applies mounts
+    # in argument order and a later mount over an ancestor restores the host
+    # directory beneath it, so these overlays follow the authority seal, the
+    # writable carve-outs, and the protected pins: the authority root may be
+    # the state root itself, the state root may sit inside a writable worktree,
+    # and the authority root may contain the account home.
+    hidden_mounts: list[str] = []
+    for hidden in hidden_roots:
+        if not directory_exists(hidden):
+            continue
+        validated_hidden = _validated_bound_destination(
+            hidden,
+            label="bound sandbox hidden secret destination",
+            emitted_mounts=emitted_mounts,
+            builder_emitted=True,
+        )
+        emitted_mounts.append(
+            _BoundMount("--tmpfs", None, validated_hidden, kernel_owned_seal=True)
+        )
+        hidden_mounts.extend(("--perms", "0555", "--tmpfs", str(validated_hidden)))
     return [
         bubblewrap,
         "--die-with-parent",
@@ -812,15 +832,16 @@ def build_bound_sandbox_arguments(
         "/dev",
         "/dev",
         *home_seal,
-        *hidden_mounts,
         *authority_seal,
         *writable_mounts,
         *protected_mounts,
+        *hidden_mounts,
         # Bubblewrap applies mounts in argument order: broad read-only views
-        # precede narrow writable carve-outs, and protected child seals follow
-        # the writable worktree that contains them. No carve-out contains the
-        # home or the authority root (rejected above), so nothing masks the
-        # seals or the hidden-secret overlays emitted before it.
+        # precede narrow writable carve-outs, protected child seals follow the
+        # writable worktree that contains them, and the hidden-secret overlays
+        # are the last mounts before the root remount. No carve-out contains
+        # the home, the authority root, or a hidden root (rejected above), so
+        # nothing masks the seals, and no later mount shadows an overlay.
         "--remount-ro",
         "/",
         "--chdir",

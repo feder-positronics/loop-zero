@@ -988,7 +988,7 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert not _window(arguments, bind("/var/home/user/project/.audit", writable=True))
     assert _window(arguments, bind("/var/home/user/repo/.git"))
     # Coordinator authority and ~/.ssh are hidden behind empty tmpfs overlays
-    # placed after the home seal and before the authority seal.
+    # placed after every bind so no later parent mount can shadow them.
     for hidden in (
         "/var/home/user/.local/state/intelflo/dispatch-authority",
         "/var/home/user/.ssh",
@@ -999,9 +999,14 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     authority_seal = arguments.index(protected, home_seal + 1)
     first_writable = arguments.index("--bind")
     protected_seal = arguments.index(str(candidate_store), authority_seal + 1)
-    assert arguments.index("--proc") < home_seal < ssh_overlay < authority_seal
+    last_bind = max(
+        index for index, token in enumerate(arguments) if token in {"--bind", "--ro-bind"}
+    )
+    assert arguments.index("--proc") < home_seal < authority_seal
     assert authority_seal < first_writable
     assert first_writable < protected_seal
+    assert last_bind < ssh_overlay < arguments.index("--remount-ro")
+    _assert_no_mount_shadows_a_hidden_root(arguments)
     assert arguments.index("--dev-bind") < home_seal
     # The read-only remount of the synthesized root is the final mount.
     tail = arguments[arguments.index("--remount-ro") :]
@@ -1046,6 +1051,127 @@ def test_bound_sandbox_pins_protected_ancestors_inside_the_writable_worktree() -
     assert not _window(arguments, ["--tmpfs", "/home/user/.ssh"])
 
 
+def _emitted_mounts(arguments: list[str]) -> list[tuple[str, str]]:
+    """Return every (mode, destination) mount in emitted argv order."""
+    mounts: list[tuple[str, str]] = []
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token in {"--bind", "--ro-bind", "--dev-bind", "--symlink"}:
+            mounts.append((token, arguments[index + 2]))
+            index += 3
+        elif token in {"--tmpfs", "--dir", "--proc"}:
+            mounts.append((token, arguments[index + 1]))
+            index += 2
+        elif token == "--remount-ro":
+            mounts.append((token, arguments[index + 1]))
+            break
+        else:
+            index += 1
+    return mounts
+
+
+def _assert_no_mount_shadows_a_hidden_root(arguments: list[str]) -> None:
+    mounts = _emitted_mounts(arguments)
+    hidden = [
+        (position, destination)
+        for position, (mode, destination) in enumerate(mounts)
+        if mode == "--tmpfs" and destination != "/"
+    ]
+    assert hidden, "no hidden secret overlay was emitted"
+    for position, destination in hidden:
+        shadowing = [
+            (mode, later)
+            for mode, later in mounts[position + 1 :]
+            if mode != "--remount-ro" and Path(destination).is_relative_to(later)
+        ]
+        assert shadowing == [], f"{destination} is shadowed by {shadowing}"
+    for mode, destination in mounts:
+        if mode == "--bind":
+            for _position, hidden_root in hidden:
+                assert not Path(hidden_root).is_relative_to(destination)
+                assert not Path(destination).is_relative_to(hidden_root)
+
+
+def _overlapping_layout_arguments(
+    layout: str, *, state_root: Path | None = None
+) -> list[str]:
+    from loopzero.kernel import jobs as job_store
+    from loopzero.kernel.settings import KernelSettings
+
+    views = _fake_filesystem_views(
+        {"/": ["dev", "home", "proc", "srv", "tmp", "usr"], "/home": ["user"]}, {}
+    )
+    settings = KernelSettings(env_prefix="INTELFLO", state_root=state_root)
+    if layout == "job root is the state root":
+        arguments = dict(
+            protected_authority_root=Path("/home/user/.local/state/intelflo"),
+            working_directory=Path("/home/user/repo"),
+            writable_paths=(Path("/home/user/repo"), Path("/tmp/current")),
+            protected_read_only_paths=(Path("/home/user/repo/.git"),),
+        )
+    elif layout == "state root inside the writable worktree":
+        arguments = dict(
+            protected_authority_root=Path("/tmp/jobs"),
+            working_directory=Path("/srv/project"),
+            writable_paths=(Path("/srv/project"), Path("/tmp/current")),
+            protected_read_only_paths=(Path("/srv/project/.git"),),
+        )
+    elif layout == "authority root contains the home":
+        arguments = dict(
+            protected_authority_root=Path("/home"),
+            working_directory=Path("/srv/work"),
+            writable_paths=(Path("/srv/work"), Path("/tmp/current")),
+            protected_read_only_paths=(Path("/srv/work/.git"),),
+        )
+    else:
+        raise AssertionError(layout)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(job_store, "settings", settings)
+        return job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            command=["true"],
+            account_home=Path("/home/user"),
+            directory_exists=lambda path: True,
+            **arguments,
+            **views,
+        )
+
+
+def test_bound_sandbox_hidden_overlays_survive_a_job_root_at_the_state_root() -> None:
+    arguments = _overlapping_layout_arguments("job root is the state root")
+
+    authority = "/home/user/.local/state/intelflo/dispatch-authority"
+    assert _window(arguments, ["--ro-bind", "/home/user/.local/state/intelflo",
+                               "/home/user/.local/state/intelflo"])
+    assert _window(arguments, ["--perms", "0555", "--tmpfs", authority])
+    assert _window(arguments, ["--perms", "0555", "--tmpfs", "/home/user/.ssh"])
+    assert arguments.index(authority) > arguments.index("/home/user/.local/state/intelflo")
+    _assert_no_mount_shadows_a_hidden_root(arguments)
+
+
+def test_bound_sandbox_rejects_a_state_root_inside_the_writable_worktree() -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="contains a hidden secret root"):
+        _overlapping_layout_arguments(
+            "state root inside the writable worktree",
+            state_root=Path("/srv/project/.state"),
+        )
+
+
+def test_bound_sandbox_hidden_overlays_survive_an_authority_root_over_the_home() -> None:
+    arguments = _overlapping_layout_arguments("authority root contains the home")
+
+    assert _window(arguments, ["--ro-bind", "/home", "/home"])
+    assert _window(arguments, ["--perms", "0555", "--tmpfs", "/home/user/.ssh"])
+    assert arguments.index("/home/user/.ssh") > arguments.index(
+        "/home", arguments.index("--ro-bind", arguments.index("--proc"))
+    )
+    assert arguments.index("/home/user/.ssh") > arguments.index("/srv/work", arguments.index("--bind"))
+    _assert_no_mount_shadows_a_hidden_root(arguments)
+
+
 @pytest.mark.parametrize(
     "writable",
     [
@@ -1075,6 +1201,47 @@ def test_bound_sandbox_rejects_writable_paths_that_mask_or_open_a_seal(
             ),
             directory_exists=lambda path: False,
         )
+
+
+@pytest.mark.parametrize(
+    "writable",
+    [
+        Path("/srv/project"),  # contains the dispatch-authority root
+        Path("/srv/project/.state"),  # the state root itself
+        Path("/srv/project/.state/dispatch-authority"),  # the hidden root
+        Path("/srv/project/.state/dispatch-authority/ledgers"),  # below it
+        Path("/home/user/.ssh"),  # the hidden SSH root
+        Path("/home/user/.ssh/keys"),  # below it
+    ],
+)
+def test_bound_sandbox_rejects_writable_paths_that_touch_a_hidden_root(
+    writable: Path,
+) -> None:
+    from loopzero.kernel import jobs as job_store
+    from loopzero.kernel.settings import KernelSettings
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            job_store,
+            "settings",
+            KernelSettings(env_prefix="INTELFLO", state_root=Path("/srv/project/.state")),
+        )
+        with pytest.raises(job_store.JobStoreError, match="hidden secret root"):
+            job_store.build_bound_sandbox_arguments(
+                "/usr/bin/bwrap",
+                protected_authority_root=Path("/tmp/jobs"),
+                working_directory=Path("/srv/work"),
+                command=["true"],
+                account_home=Path("/home/user"),
+                writable_paths=(writable, Path("/srv/work")),
+                protected_read_only_paths=(),
+                **_fake_filesystem_views(
+                    {"/": ["dev", "home", "proc", "srv", "tmp", "usr"], "/home": ["user"]},
+                    {},
+                ),
+                # Rejection must not depend on whether the secrets exist yet.
+                directory_exists=lambda path: False,
+            )
 
 
 @pytest.mark.parametrize("root", [Path("/proc/jobs"), Path("/sys/jobs"), Path("/dev/jobs")])
