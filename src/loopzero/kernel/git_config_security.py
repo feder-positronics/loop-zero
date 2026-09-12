@@ -78,7 +78,6 @@ _INERT_REMOTE_KEYS = frozenset(
 # Everything else, including any `::`, is rejected.
 _BUILTIN_URL_SCHEMES = ("https://", "ssh://", "git://")
 _PLAIN_HTTP_SCHEME = "http://"
-_URL_SCHEME_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
 _SCP_STYLE_REMOTE = re.compile(r"(?:[A-Za-z0-9._\-]+@)?[A-Za-z0-9._\-]+:[^:]*")
 # Plain paths never carry a colon: Git would read `./a:b` as a path, but a
 # colon-free rule keeps the local and scp-style forms unambiguous.
@@ -95,8 +94,12 @@ def remote_url_is_screened(value: str, *, allow_http: bool = False) -> bool:
         return allow_http
     if value.startswith("file://"):
         return True
-    if _URL_SCHEME_PREFIX.match(value) is not None:
-        return False  # any other `<scheme>://` executes git-remote-<scheme>
+    if "://" in value:
+        # Any other `<transport>://` executes git-remote-<transport>. Git's
+        # transport grammar is wider than a letter-led scheme (a digit-led
+        # name such as `1madeup://` dispatches too), so nothing containing
+        # `://` past the explicit prefixes above is accepted.
+        return False
     if _LOCAL_PATH_REMOTE.fullmatch(value) is not None:
         return True
     return _SCP_STYLE_REMOTE.fullmatch(value) is not None

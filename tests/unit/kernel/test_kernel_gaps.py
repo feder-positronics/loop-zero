@@ -139,6 +139,10 @@ def test_git_configuration_digest_ignores_branch_metadata():
         b'[remote "origin"]\nurl = madeup://example.invalid/repo\n',
         b'[remote "backup"]\nurl = ext://sh -c owned\n',
         b'[remote "backup"]\npushurl = fd://3\n',
+        # Git also dispatches digit-led transports (`git-remote-1madeup`).
+        b'[remote "origin"]\nurl = 1madeup://example.invalid/repo\n',
+        b'[remote "backup"]\nurl = 9ext://payload\n',
+        b'[remote "origin"]\npushurl = 0://x\n',
         b'[remote "origin"]\nurl = HTTPS://example.invalid/repo\n',
         b'[remote "origin"]\nurl = http://example.invalid/repo\n',
         b'[remote "origin"]\nurl = helper::https://example.invalid/repo\n',
