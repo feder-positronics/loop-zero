@@ -34,7 +34,12 @@ packages = ["src/loopzero"]
 include = ["src/loopzero", "core/VERSION", "README.md", "pyproject.toml"]
 
 [dependency-groups]
-dev = ["hatchling>=1.25", "pytest>=8"]
+dev = [
+    "claude-agent-sdk==0.2.152",
+    "hatchling>=1.25",
+    "openai-codex==0.147.0",
+    "pytest>=8",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
