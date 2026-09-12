@@ -6,6 +6,7 @@ default ``test_*.py`` collection pattern.
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 import errno
@@ -79,6 +80,27 @@ HOST_SEAL_TIMEOUT_S = 60
 # overestimates the normal tokenizer ratio for killed Codex requests.
 CODEX_ESTIMATED_INPUT_TOKENS_PER_BYTE = 1.0
 KILLED_SCENARIOS = frozenset({"cancellation", "disconnect", "expiry-timeout"})
+
+
+def _interpreter_symlink_chain(interpreter: Path) -> tuple[tuple[Path, str], ...]:
+    """Return every lexical symlink traversed while resolving an interpreter."""
+    remaining = deque(Path(os.path.abspath(interpreter)).parts[1:])
+    current = Path("/")
+    links: list[tuple[Path, str]] = []
+    while remaining:
+        part = remaining.popleft()
+        current = current.parent if part == ".." else current / part
+        if not current.is_symlink():
+            continue
+        if len(links) >= 40:
+            raise RuntimeError("live interpreter has too many symlink hops")
+        target = os.readlink(current)
+        links.append((current, target))
+        target_path = Path(target)
+        current = Path("/") if target_path.is_absolute() else current.parent
+        parts = target_path.parts[1:] if target_path.is_absolute() else target_path.parts
+        remaining.extendleft(reversed(parts))
+    return tuple(links)
 
 
 def _selected_runtimes() -> tuple[str, ...]:
@@ -157,6 +179,30 @@ def _sandbox_wrapper(settings: RuntimeSettings):
     venv_root = interpreter.parent.parent
     resolved_interpreter = Path(os.path.realpath(interpreter))
     interpreter_root = resolved_interpreter.parent.parent
+    interpreter_links = _interpreter_symlink_chain(interpreter)
+    bound_interpreter_roots = (*roots, tooling_root, venv_root, interpreter_root)
+    modeled_links = tuple(
+        (link, target)
+        for link, target in interpreter_links
+        if not any(
+            link == root or link.is_relative_to(root)
+            for root in bound_interpreter_roots
+        )
+    )
+    for link, target in modeled_links:
+        target_path = Path(target)
+        lexical_target = (
+            target_path if target_path.is_absolute() else link.parent / target_path
+        )
+        try:
+            resolved_target = lexical_target.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("live interpreter symlink target is unavailable") from exc
+        if not any(
+            resolved_target == root or resolved_target.is_relative_to(root)
+            for root in bound_interpreter_roots
+        ):
+            raise RuntimeError("live interpreter symlink escapes read-only roots")
     workspace_root = settings.workspace_root(tooling_root)
     workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runtime_root_value = os.environ.get("LOOPZERO_LIVE_RUNTIME_ROOT")
@@ -181,8 +227,17 @@ def _sandbox_wrapper(settings: RuntimeSettings):
         if venv_root != tooling_root:
             command.extend(("--ro-bind", str(venv_root), str(venv_root)))
         if not resolved_interpreter.is_relative_to(venv_root):
-            for parent in reversed(interpreter_root.parents[:-1]):
+            layout_paths = (interpreter_root, *(link for link, _target in modeled_links))
+            layout_parents = {
+                parent
+                for path in layout_paths
+                for parent in path.parents
+                if parent != Path("/")
+            }
+            for parent in sorted(layout_parents, key=lambda item: len(item.parts)):
                 command.extend(("--dir", str(parent)))
+            for link, target in modeled_links:
+                command.extend(("--symlink", target, str(link)))
             command.extend(("--ro-bind", str(interpreter_root), str(interpreter_root)))
         if runtime_root is not None:
             command.extend(("--ro-bind", str(runtime_root), str(runtime_root)))

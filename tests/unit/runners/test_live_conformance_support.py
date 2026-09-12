@@ -116,18 +116,21 @@ def test_live_wrapper_argv_for_scenarios_does_not_unshare_network(
     assert "--cap-drop" in argv
 
 
-def test_live_wrapper_binds_every_venv_interpreter_symlink_target(
+def test_live_wrapper_models_uv_alias_and_binds_resolved_interpreter_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     checkout = tmp_path / "checkout"
     venv_bin = checkout / ".venv" / "bin"
-    install_root = tmp_path / "uv" / "cpython-3.13.14-linux-x86_64-gnu"
+    uv_root = tmp_path / "uv"
+    alias_root = uv_root / "cpython-3.13-linux-x86_64-gnu"
+    install_root = uv_root / "cpython-3.13.14-linux-x86_64-gnu"
     install_bin = install_root / "bin"
     venv_bin.mkdir(parents=True)
     install_bin.mkdir(parents=True)
     resolved_python = install_bin / "python3.13"
     resolved_python.write_bytes(b"python")
-    (venv_bin / "python").symlink_to(resolved_python)
+    alias_root.symlink_to(install_root.name, target_is_directory=True)
+    (venv_bin / "python").symlink_to(alias_root / "bin" / "python3.13")
     (venv_bin / "python3").symlink_to("python")
     settings = RuntimeSettings(
         tooling_root=checkout,
@@ -151,17 +154,97 @@ def test_live_wrapper_binds_every_venv_interpreter_symlink_target(
         private_tmpdir=private_tmpdir,
     ))
     bound_roots = {
-        Path(argv[index + 1]).resolve()
+        Path(argv[index + 2])
         for index, value in enumerate(argv[:-2])
         if value == "--ro-bind"
     }
+    modeled_links = {
+        Path(argv[index + 2]): argv[index + 1]
+        for index, value in enumerate(argv[:-2])
+        if value == "--symlink"
+    }
 
-    assert (checkout / ".venv").resolve() in bound_roots
-    assert install_root.resolve() in bound_roots
-    for interpreter in venv_bin.glob("python*"):
-        if interpreter.is_symlink():
-            target = Path(os.path.realpath(interpreter))
-            assert any(target.is_relative_to(root) for root in bound_roots)
+    assert (checkout / ".venv") in bound_roots
+    assert install_root in bound_roots
+    assert modeled_links[alias_root] == install_root.name
+    assert argv.index(str(alias_root)) < argv.index(str(install_root))
+
+    # Walk the namespace described by argv: links beneath a bind come from the
+    # host tree, while every link crossed outside a bind must be explicit.
+    remaining = list((venv_bin / "python").parts[1:])
+    current = Path("/")
+    while remaining:
+        current /= remaining.pop(0)
+        containing_root = next(
+            (
+                root
+                for root in bound_roots
+                if current == root or current.is_relative_to(root)
+            ),
+            None,
+        )
+        target = (
+            os.readlink(current)
+            if containing_root is not None and current.is_symlink()
+            else modeled_links.get(current)
+        )
+        if target is None:
+            continue
+        target_path = Path(target)
+        current = Path("/") if target_path.is_absolute() else current.parent
+        target_parts = (
+            target_path.parts[1:] if target_path.is_absolute() else target_path.parts
+        )
+        remaining[0:0] = target_parts
+    assert current == resolved_python
+
+
+def test_live_wrapper_rejects_modeled_interpreter_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    venv_bin = checkout / ".venv" / "bin"
+    uv_root = tmp_path / "uv"
+    alias_root = uv_root / "cpython-3.13-linux-x86_64-gnu"
+    install_root = uv_root / "cpython-3.13.14-linux-x86_64-gnu"
+    install_bin = install_root / "bin"
+    outside = tmp_path / "outside"
+    venv_bin.mkdir(parents=True)
+    install_bin.mkdir(parents=True)
+    outside.mkdir()
+    resolved_python = install_bin / "python3.13"
+    resolved_python.write_bytes(b"python")
+    alias_root.symlink_to(install_root.name, target_is_directory=True)
+    (venv_bin / "python").symlink_to(alias_root / "bin" / "python3.13")
+    settings = RuntimeSettings(
+        tooling_root=checkout,
+        toolchain_interpreter=venv_bin / "python",
+        state_root=str(tmp_path / "state"),
+    )
+    monkeypatch.setattr(live.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Probe", (), {"returncode": 0})(),
+    )
+    real_readlink = live.os.readlink
+    alias_reads = 0
+
+    def retarget_alias_after_resolution(path: os.PathLike[str] | str) -> str:
+        nonlocal alias_reads
+        if Path(path) != alias_root:
+            return real_readlink(path)
+        alias_reads += 1
+        return real_readlink(path) if alias_reads == 1 else str(outside)
+
+    monkeypatch.setattr(
+        live.os,
+        "readlink",
+        retarget_alias_after_resolution,
+    )
+
+    with pytest.raises(RuntimeError, match="escapes read-only roots"):
+        live._sandbox_wrapper(settings)
 
 
 @pytest.mark.parametrize(
