@@ -39,6 +39,7 @@ dev = [
     "hatchling>=1.25",
     "openai-codex==0.147.0",
     "pytest>=8",
+    "PyYAML>=6",
 ]
 
 [tool.pytest.ini_options]

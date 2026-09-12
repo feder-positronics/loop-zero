@@ -1,0 +1,7 @@
+M	.agents/rules/review-gate.md
+M	.cursor/rules/review-gate.mdc
+M	fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
+M	fastapi_backend/tests/unit/scripts/test_security_review_scope.py
+M	scripts/util/dispatch_authority.py
+M	scripts/util/dispatch_authority_projection.py
+M	scripts/util/security_review_scope.py

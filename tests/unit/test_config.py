@@ -12,8 +12,28 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.core_revision == REVISION
     assert profile.checks == {"required": ("tests",), "advisory": (), "scheduled": ("health",)}
     assert profile.hooks == {"worktree_setup": ("make setup",), "acceptance": ("make test",)}
-    assert profile.env_prefix == "LOOPZERO"
+    assert profile.env_prefix == "INTELFLO"
     assert profile.state_root_explicit is False
+    assert profile.toolchain["dotenv"] == "fastapi_backend/.env"
+    assert profile.toolchain["db_targets"][0] == "test"
+    assert profile.state_root == "~/.local/state/intelflo"
+    assert profile.routing_budgets == {"medium": 5.0, "high": 10.0}
+    assert profile.compatible_policy_versions == (
+        "2026-07-24-v9", "2026-08-06-v10", "2026-08-17-v11"
+    )
+    assert {"fable", "opus", "sol", "terra", "luna"} <= profile.aliases.keys()
+    assert profile.toolchain["db_url_vars"] == ["TEST_DATABASE_URL", "DATABASE_URL"]
+    assert profile.toolchain["db_lock"] == "/tmp/intelflo-testdb-5433.lock"
+    assert profile.toolchain["closeout_launcher_path"] == "scripts/util/pr_closeout.py"
+    assert profile.toolchain["closeout_trust_floor_path"] == (
+        "scripts/util/pr_closeout_trust_floor.json"
+    )
+    assert profile.security_patterns
+    assert profile.review_snapshot_namespace == "dispatch-snapshots"
+    assert profile.finding_snapshot_namespace == "finding-snapshots"
+    assert profile.path_classes["backend-risk"]
+    assert profile.github.labels["standalone"] == "standalone"
+    assert profile.github.body_required_sections == ("Context and goal", "Validation")
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
 
 
@@ -68,6 +88,93 @@ def test_routing_tiers_must_reference_aliases(tmp_path: Path):
     with pytest.raises(config.ConfigError) as info:
         config.load_profile(tmp_path)
     assert "[routing.tiers].B" in str(info.value)
+
+
+def test_mechanism_configuration_is_typed_and_retained(tmp_path: Path):
+    from test_example_consumer import deploy
+
+    profile = config.load_profile(deploy(tmp_path))
+    assert profile.toolchain["db_targets"] == ["test-integration"]
+    assert profile.toolchain["closeout_launcher_path"] == "scripts/util/pr_closeout.py"
+    assert profile.toolchain["closeout_trust_floor_path"] == (
+        "scripts/util/pr_closeout_trust_floor.json"
+    )
+    assert profile.routing_budgets == {"medium": 5.0, "high": 10.0}
+    assert profile.routing_policy_version == "2026-08-17-v11"
+    assert profile.required_sections == ("code", "security")
+    assert profile.github.labels["standalone"] == "standalone"
+    assert profile.github.gh_version_floor == (2, 40, 0)
+    assert profile.review_snapshot_namespace == "dispatch-snapshots"
+    assert profile.finding_snapshot_namespace == "finding-snapshots"
+
+
+@pytest.mark.parametrize(
+    "review_configuration",
+    (
+        'review_snapshot_namespace = "/absolute"',
+        'review_snapshot_namespace = "refs/../escape"',
+        'review_snapshot_namespace = "same"\nfinding_snapshot_namespace = "same"',
+    ),
+)
+def test_snapshot_namespaces_are_normalized_and_distinct(
+    tmp_path: Path, review_configuration: str
+):
+    (tmp_path / "workflow.toml").write_text(
+        minimal_workflow(extra=f"[review]\n{review_configuration}\n"),
+        encoding="utf-8",
+    )
+    with pytest.raises(config.ConfigError, match="snapshot namespace|ref namespace"):
+        config.load_profile(tmp_path)
+
+
+def test_mechanism_configuration_reports_all_invalid_keys(tmp_path: Path):
+    (tmp_path / "workflow.toml").write_text(
+        minimal_workflow(
+            extra="""
+[toolchain]
+unknown = true
+db_lock = "relative.lock"
+db_url_vars = ["bad-name"]
+[routing]
+unknown = true
+default_timeout_s = 0
+[routing.budgets]
+high = -1
+[review]
+unknown = true
+required_sections = ["", "code", "code"]
+finding_severities = ["critical", "unknown"]
+[github]
+unknown = true
+gh_version_floor = "new"
+retries = 11
+body_required_sections = ["Summary", "Summary"]
+[path_classes]
+Bad = ["/absolute"]
+"""
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(config.ConfigError) as info:
+        config.load_profile(tmp_path)
+    text = str(info.value)
+    for expected in (
+        "[toolchain].unknown",
+        "[toolchain].db_lock",
+        "[toolchain].db_url_vars",
+        "[routing].unknown",
+        "[routing].default_timeout_s",
+        "[routing.budgets].high",
+        "[review].unknown",
+        "required_sections",
+        "finding_severities",
+        "[github].unknown",
+        "gh_version_floor",
+        "[github].retries",
+        "body_required_sections",
+        "[path_classes].Bad",
+    ):
+        assert expected in text
 
 
 def test_missing_file_is_a_config_error(tmp_path: Path):

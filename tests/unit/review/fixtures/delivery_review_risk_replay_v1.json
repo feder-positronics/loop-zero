@@ -1,0 +1,70 @@
+{
+  "schema_version": "delivery-review-risk-replay-v1",
+  "frozen_origin_main": "18c41b595520913f810ac3e2233a4c549de09c15",
+  "recorded_at": "2026-09-02T19:50:00Z",
+  "cases": [
+    {
+      "name": "merged-docs-only-admission-amendment",
+      "base_sha": "8dccbc7c78061ddc24476b36cfc991b66f7186a7",
+      "head_sha": "18c41b595520913f810ac3e2233a4c549de09c15",
+      "changed_paths": [
+        "docs/design/blueprints/planned/2026-09-02-nonblocking-parallel-delivery.md"
+      ],
+      "expected_tier": "T0",
+      "security_trigger_paths": []
+    },
+    {
+      "name": "merged-authority-ledger-cleanup-fix",
+      "base_sha": "79738b944247e11688a01adb31c340e550f159c8",
+      "head_sha": "7f2e0b7639829a01260593d61651350b24c50a18",
+      "changed_paths": [
+        "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+        "scripts/util/dispatch_authority_store.py"
+      ],
+      "expected_tier": "T1",
+      "security_trigger_paths": []
+    },
+    {
+      "name": "merged-finding-ownership-fix",
+      "base_sha": "546561379ff41ca1a1cc25b9432d9b57aa388e03",
+      "head_sha": "79738b944247e11688a01adb31c340e550f159c8",
+      "changed_paths": [
+        "fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py",
+        "scripts/util/delivery_pipeline.py"
+      ],
+      "expected_tier": "T1",
+      "security_trigger_paths": []
+    },
+    {
+      "name": "merged-content-classified-security-scope",
+      "base_sha": "3e4319b03b8d66c345f570ce778f171e50d80ddc",
+      "head_sha": "c280941efc9c0e91b56c7ca5eddc74c88c3d57d7",
+      "changed_paths": [
+        ".agents/rules/review-gate.md",
+        ".cursor/rules/review-gate.mdc",
+        "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+        "fastapi_backend/tests/unit/scripts/test_security_review_scope.py",
+        "scripts/util/dispatch_authority.py",
+        "scripts/util/dispatch_authority_projection.py",
+        "scripts/util/security_review_scope.py"
+      ],
+      "expected_tier": "T2",
+      "security_trigger_paths": [
+        "scripts/util/dispatch_authority.py",
+        "scripts/util/dispatch_authority_projection.py"
+      ]
+    },
+    {
+      "name": "merged-hook-only-tooling-change",
+      "base_sha": "d1c6d3b3757ecda814d46d13bcffa6b5422fb3d8",
+      "head_sha": "a29d1d47fa89fdd024c6f3553eec6dff11d14fdc",
+      "changed_paths": [
+        "scripts/hooks/ci-mirror-check.sh"
+      ],
+      "expected_tier": "T2",
+      "security_trigger_paths": [
+        "scripts/hooks/ci-mirror-check.sh"
+      ]
+    }
+  ]
+}
