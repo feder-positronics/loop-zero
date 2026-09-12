@@ -309,6 +309,28 @@ class ProcessResult:
     progress_diagnostic: bool = False
 
 
+_BRIDGE_START_ERROR_MARKERS = (
+    "execvp",
+    "enoent",
+    "eacces",
+    "no such file or directory",
+    "permission denied",
+    "operation not permitted",
+)
+
+
+def bridge_process_could_not_start(outcome: ProcessResult) -> bool:
+    """Recognize a wrapper/exec failure before a bridge can emit a frame."""
+    return (
+        outcome.returncode != 0
+        and not outcome.stdout.strip()
+        and any(
+            marker in outcome.stderr.lower()
+            for marker in _BRIDGE_START_ERROR_MARKERS
+        )
+    )
+
+
 def _launch_identity_prerequisites() -> tuple[str, int]:
     """Sample immutable boot identity and a pre-launch kernel-tick bound."""
     try:

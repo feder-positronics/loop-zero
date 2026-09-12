@@ -47,6 +47,7 @@ class ReadinessFailure(StrEnum):
     SDK_VERSION_MISMATCH = "sdk-version-mismatch"
     MODEL_UNSUPPORTED = "model-unsupported"
     CONFIG_BOOTSTRAP = "config-bootstrap"
+    CONTAINMENT_FAILURE = "containment-failure"
 
 
 class RuntimeStatus(StrEnum):

@@ -2196,6 +2196,118 @@ def test_selected_claude_sdk_bundle_supports_fable_5_1_without_model_launch(
     assert result.stderr == ""
 
 
+def test_selected_explicit_claude_cli_supports_fable_5_1_without_model_launch(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    explicit_cli = tmp_path / "runtime" / "bin" / "claude"
+    explicit_cli.parent.mkdir(parents=True)
+    explicit_cli.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    explicit_cli.chmod(0o755)
+    runtime_request = replace(
+        claude_request(tmp_path),
+        requested_model="claude-fable-5-1",
+        tooling_root=repo_root,
+    )
+
+    with RuntimeSettings(
+        env_prefix="INTELFLO",
+        toolchain_interpreter=Path(sys.executable),
+        claude_cli_path=explicit_cli,
+    ).use():
+        result = run_cli_unsandboxed(
+            claude.build_sdk_bridge_command(repo_root),
+            cwd=tmp_path,
+            input_text=claude._sdk_model_readiness_payload(runtime_request),
+            timeout_s=5,
+            env=claude.filtered_claude_environment(),
+        )
+
+    assert result.returncode == 0
+    assert result.stdout == '{"type":"readiness","status":"ready"}\n'
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_sdk_readiness_classifies_bridge_exec_failure_as_containment(
+    tmp_path: Path, vendor: str
+) -> None:
+    bridge_failure = process.ProcessResult(
+        returncode=127,
+        stdout="",
+        stderr="bwrap: execvp /checkout/.venv/bin/python: No such file or directory",
+        duration_s=0.01,
+        timed_out=False,
+    )
+    if vendor == "claude":
+        runtime_request = replace(
+            claude_request(tmp_path), requested_model="claude-fable-5-1"
+        )
+        adapter = claude.ClaudeAdapter(
+            run_probe=lambda *_args, **_kwargs: bridge_failure,
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/claude",
+        )
+    else:
+        runtime_request = codex_request(tmp_path)
+        adapter = codex.CodexAdapter(
+            run_probe=lambda command, **_kwargs: (
+                bridge_failure
+                if str(command[0]).endswith("python")
+                else _codex_auth_process_result()
+            ),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/codex",
+        )
+
+    readiness = adapter.probe_sdk(runtime_request)
+
+    assert readiness.ready is False
+    assert readiness.failure is contracts.ReadinessFailure.CONTAINMENT_FAILURE
+    assert readiness.repair == (
+        f"repair runtime containment so the {vendor.title()} SDK bridge can start"
+    )
+    assert "execvp" not in repr(readiness)
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_sdk_readiness_keeps_malformed_frame_as_protocol_failure(
+    tmp_path: Path, vendor: str
+) -> None:
+    malformed_frame = process.ProcessResult(
+        returncode=127,
+        stdout="not a readiness frame",
+        stderr="bwrap: execvp private target: Permission denied",
+        duration_s=0.01,
+        timed_out=False,
+    )
+    if vendor == "claude":
+        runtime_request = replace(
+            claude_request(tmp_path), requested_model="claude-fable-5-1"
+        )
+        adapter = claude.ClaudeAdapter(
+            run_probe=lambda *_args, **_kwargs: malformed_frame,
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/claude",
+        )
+    else:
+        runtime_request = codex_request(tmp_path)
+        adapter = codex.CodexAdapter(
+            run_probe=lambda command, **_kwargs: (
+                malformed_frame
+                if str(command[0]).endswith("python")
+                else _codex_auth_process_result()
+            ),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/codex",
+        )
+
+    readiness = adapter.probe_sdk(runtime_request)
+
+    assert readiness.failure is contracts.ReadinessFailure.PROTOCOL_INCOMPATIBLE
+    assert readiness.repair.startswith("repair the")
+
+
 def test_fable_5_1_sdk_probe_failure_never_selects_system_cli(
     tmp_path: Path,
 ) -> None:

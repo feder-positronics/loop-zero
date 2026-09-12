@@ -40,6 +40,7 @@ from .process import (
     ProcessHandle,
     ProcessResult,
     SandboxWrapper,
+    bridge_process_could_not_start,
     cancel_cli,
     filtered_child_environment,
     isolated_python_import_available,
@@ -1025,6 +1026,16 @@ class ClaudeAdapter:
                     eligibility=SubscriptionEligibility.UNAVAILABLE,
                     failure=ReadinessFailure.PROTOCOL_INCOMPATIBLE,
                     repair="repair the governed Claude SDK compatibility probe",
+                    transport=CLAUDE_SDK_TRANSPORT,
+                )
+            if bridge_process_could_not_start(outcome):
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.CONTAINMENT_FAILURE,
+                    repair=(
+                        "repair runtime containment so the Claude SDK bridge can start"
+                    ),
                     transport=CLAUDE_SDK_TRANSPORT,
                 )
             try:

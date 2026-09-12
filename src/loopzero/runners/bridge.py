@@ -1754,7 +1754,13 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
             cli_path=get_settings().claude_cli_path,
         )
         transport = SubprocessCLITransport(prompt="", options=options)
-        selected = Path(transport._find_cli()).resolve(strict=True)
+        # connect() uses an explicit option verbatim and consults _find_cli()
+        # only when no path was configured.  Mirror that selection without
+        # spawning the CLI or starting a model thread.
+        selected_cli = transport._cli_path
+        if selected_cli is None:
+            selected_cli = transport._find_cli()
+        selected = Path(selected_cli).resolve(strict=True)
         bundled = (
             Path(__import__("claude_agent_sdk").__file__).resolve().parent
             / "_bundled"
