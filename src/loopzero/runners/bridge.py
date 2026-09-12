@@ -1068,11 +1068,7 @@ def _claude_api_retry_detail(data: Mapping[str, object]) -> str | None:
             break
     error = data.get("error")
     if isinstance(error, str) and error.strip():
-        parts.append(
-            _SECRET_PATTERN.sub("<redacted>", " ".join(error.split()))[
-                :MAX_FAILURE_MESSAGE_CHARS
-            ]
-        )
+        parts.append(_sanitized_bridge_message(error))
     return ": ".join(parts) if parts else None
 
 
@@ -2079,9 +2075,7 @@ def _run_codex(
                                 request_id=_metadata(payload.turn_id) or request_id,
                                 effective_model=effective_model,
                                 semantic=False,
-                                detail=_SECRET_PATTERN.sub("<redacted>", error_text)[
-                                    :MAX_FAILURE_MESSAGE_CHARS
-                                ],
+                                detail=_sanitized_bridge_message(error_text),
                             )
                             continue
                         raise RuntimeError("protocol") from CodexTurnErrorNotification(
@@ -2099,17 +2093,17 @@ def _run_codex(
                         turn_failed = turn_status in {"failed", "interrupted"}
                         if turn_failed:
                             turn_error = getattr(payload.turn, "error", None)
+                            turn_failure_message = _sanitized_bridge_message(
+                                f"{turn_status}: "
+                                + (
+                                    _codex_turn_error_text(turn_error)
+                                    if turn_error is not None
+                                    else "no error detail"
+                                )
+                            )
                             turn_failure = {
                                 "exception": "CodexTurnFailed",
-                                "message": _SECRET_PATTERN.sub(
-                                    "<redacted>",
-                                    f"{turn_status}: "
-                                    + (
-                                        _codex_turn_error_text(turn_error)
-                                        if turn_error is not None
-                                        else "no error detail"
-                                    ),
-                                )[:MAX_FAILURE_MESSAGE_CHARS],
+                                "message": turn_failure_message,
                             }
                         break
             finally:
@@ -2464,14 +2458,28 @@ _SECRET_PATTERN = re.compile(
     r"|[A-Za-z0-9_-]{40,}"
     r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
 )
+_FILESYSTEM_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9:/])(?:~|\.{1,2})?"
+    r"/(?:[^\s/]+/)*[^\s/]+"
+    r"|(?<![A-Za-z0-9])(?:[A-Za-z]:\\|\\\\)[^\s]+"
+)
+
+
+def _sanitized_bridge_message(message: str) -> str:
+    """Redact and bound an explicitly trusted bridge-owned message."""
+    sanitized = " ".join(message.split())
+    sanitized = _SECRET_PATTERN.sub("<redacted>", sanitized)
+    sanitized = _FILESYSTEM_PATH_PATTERN.sub("<redacted>", sanitized)
+    return sanitized[:MAX_FAILURE_MESSAGE_CHARS]
 
 
 def _sanitized_failure(exc: BaseException) -> dict[str, str]:
     """Describe a startup failure without credential or account material.
 
     Internal ``RuntimeError("startup")`` sentinels carry no detail of their
-    own, so the nearest chained cause is described instead.  The message is
-    secret-redacted, whitespace-collapsed, and bounded.
+    own, so the nearest chained cause is described instead. Messages are
+    retained only for explicitly enumerated bridge-owned exception classes;
+    vendor exceptions can embed raw stdout or stderr and expose only a class.
     """
     cause: BaseException = exc
     seen: set[int] = set()
@@ -2487,13 +2495,14 @@ def _sanitized_failure(exc: BaseException) -> dict[str, str]:
             break
         cause = nested
     failure = {"exception": type(cause).__name__}
+    if not isinstance(cause, (BridgeInputError, CodexTurnErrorNotification)):
+        return failure
     try:
-        message = " ".join(str(cause).split())
+        message = _sanitized_bridge_message(str(cause))
     except Exception:  # pragma: no cover - defensive against exotic __str__
         message = ""
-    message = _SECRET_PATTERN.sub("<redacted>", message)
     if message:
-        failure["message"] = message[:MAX_FAILURE_MESSAGE_CHARS]
+        failure["message"] = message
     return failure
 
 

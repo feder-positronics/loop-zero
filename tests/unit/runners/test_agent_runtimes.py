@@ -185,6 +185,14 @@ def codex_request(tmp_path: Path, *, read_only: bool = True) -> object:
     )
 
 
+def _fake_brokered_codex_auth(tmp_path: Path):
+    home = tmp_path / "private-codex-home"
+    home.mkdir(exist_ok=True)
+    auth_path = home / "auth.json"
+    auth_path.write_text("{}", encoding="utf-8")
+    return None, {"CODEX_HOME": str(home)}, auth_path
+
+
 def test_contracts_are_immutable_and_exclude_prompt_from_repr(tmp_path: Path) -> None:
     runtime_request = request(tmp_path)
 
@@ -3927,6 +3935,11 @@ def test_codex_sdk_progress_maps_fake_stream_without_retaining_sensitive_content
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda _codex: None)
+    monkeypatch.setattr(
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
+    )
     reporter = _ProgressRecorder()
 
     sdk_bridge._run_codex(
@@ -7219,7 +7232,9 @@ def command_completion_stream(monkeypatch, tmp_path):
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *args: None)
     monkeypatch.setattr(
-        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
     )
 
     def replay(status="completed", exit_code=0, output="żółć", *, completed=True):
@@ -7728,7 +7743,7 @@ def test_sanitized_bridge_failure_redacts_secrets_and_rejects_hostile_shapes() -
     assert contracts.sanitized_bridge_text("line\x00break") is None
 
 
-def test_bridge_error_frame_describes_the_chained_cause_without_secrets(
+def test_bridge_error_frame_rejects_unowned_chained_cause_messages(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     try:
@@ -7741,8 +7756,7 @@ def test_bridge_error_frame_describes_the_chained_cause_without_secrets(
     frame = json.loads(capsys.readouterr().out.strip())
 
     assert frame["reason"] == "startup"
-    assert frame["diagnostics"]["exception"] == "FileNotFoundError"
-    assert frame["diagnostics"]["message"] == "auth.json for <redacted> is missing"
+    assert frame["diagnostics"] == {"exception": "FileNotFoundError"}
     sdk_bridge._error_frame("protocol")
     assert "diagnostics" not in json.loads(capsys.readouterr().out.strip())
 
@@ -7750,7 +7764,73 @@ def test_bridge_error_frame_describes_the_chained_cause_without_secrets(
 def test_bridge_sanitized_failure_keeps_bare_sentinel_when_no_cause_exists() -> None:
     failure = sdk_bridge._sanitized_failure(RuntimeError("startup"))
 
-    assert failure == {"exception": "RuntimeError", "message": "startup"}
+    assert failure == {"exception": "RuntimeError"}
+
+
+def test_bridge_owned_failure_messages_redact_paths_and_remain_bounded() -> None:
+    failure = sdk_bridge._sanitized_failure(
+        sdk_bridge.BridgeInputError(
+            "invalid file /home/operator/private/project/config.toml "
+            + "bounded detail " * 40
+        )
+    )
+
+    assert failure["exception"] == "BridgeInputError"
+    assert failure["message"].startswith("invalid file <redacted> ")
+    assert "/home/operator" not in failure["message"]
+    assert len(failure["message"]) == sdk_bridge.MAX_FAILURE_MESSAGE_CHARS
+
+
+@pytest.mark.parametrize(
+    ("exception_name", "parser_name"),
+    [
+        ("CodexError", "codex"),
+        ("TransportClosedError", "codex"),
+        ("CLIJSONDecodeError", "claude"),
+        ("ProcessError", "claude"),
+    ],
+)
+def test_vendor_sdk_exception_messages_never_reach_frames_or_diagnostics(
+    exception_name: str,
+    parser_name: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from claude_agent_sdk import CLIJSONDecodeError, ProcessError
+    from openai_codex import CodexError, TransportClosedError
+
+    private = "PRIVATE_STREAM_CONTENT /home/operator/secret/project.json"
+    exceptions = {
+        "CodexError": CodexError(f"Invalid JSON-RPC line: {private}"),
+        "TransportClosedError": TransportClosedError(
+            f"transport closed; stderr tail: {private}" + "z" * 2_000
+        ),
+        "CLIJSONDecodeError": CLIJSONDecodeError(
+            private, json.JSONDecodeError("private decode", private, 0)
+        ),
+        "ProcessError": ProcessError(
+            "Claude CLI failed", exit_code=1, stderr=private
+        ),
+    }
+    try:
+        raise exceptions[exception_name]
+    except Exception as cause:
+        sentinel = RuntimeError("startup")
+        sentinel.__cause__ = cause
+        sdk_bridge._error_frame("startup", sentinel)
+    output = capsys.readouterr().out
+    frame = json.loads(output)
+
+    assert frame["diagnostics"] == {"exception": exception_name}
+    assert private not in output
+    assert "/home/operator" not in output
+    parser = (
+        codex.parse_codex_stream
+        if parser_name == "codex"
+        else claude.parse_claude_stream
+    )
+    parsed = parser(output)
+    assert private not in repr(parsed.diagnostics)
+    assert "/home/operator" not in repr(parsed.diagnostics)
 
 
 @pytest.mark.parametrize(
@@ -8084,7 +8164,9 @@ def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
     monkeypatch.setattr(
-        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
     )
     request = {
         "vendor": "codex",
@@ -8132,13 +8214,18 @@ def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
     assert frames[-1]["status"] == "completed"
     assert frames[-1]["structured_output"] == {"ok": True}
 
-    events[:] = [error("Your access token could not be refreshed", will_retry=False)]
+    events[:] = [
+        error(
+            "Your access token could not be refreshed at /home/operator/.codex/auth.json",
+            will_retry=False,
+        )
+    ]
     with pytest.raises(RuntimeError, match="protocol") as failure:
         sdk_bridge._run_codex(request)
     assert isinstance(failure.value.__cause__, sdk_bridge.CodexTurnErrorNotification)
     assert sdk_bridge._sanitized_failure(failure.value) == {
         "exception": "CodexTurnErrorNotification",
-        "message": "Your access token could not be refreshed",
+        "message": "Your access token could not be refreshed at <redacted>",
     }
 
     events[:] = [
@@ -8150,7 +8237,12 @@ def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
                     id="private-turn",
                     items=[],
                     status="failed",
-                    error=TurnError(message="rate limited for owner@example.invalid"),
+                    error=TurnError(
+                        message=(
+                            "rate limited for owner@example.invalid at "
+                            "/home/operator/project/output.json"
+                        )
+                    ),
                 ),
             ),
         ),
@@ -8160,15 +8252,52 @@ def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
     assert frames[-1]["status"] == "failed"
     assert frames[-1]["diagnostics"] == {
         "exception": "CodexTurnFailed",
-        "message": "failed: rate limited for <redacted>",
+        "message": "failed: rate limited for <redacted> at <redacted>",
     }
     parsed = codex.parse_codex_stream(json.dumps(frames[-1]))
-    assert "Codex SDK failure: CodexTurnFailed: failed: rate limited for <redacted>" in (
-        parsed.diagnostics
+    assert (
+        "Codex SDK failure: CodexTurnFailed: failed: rate limited for <redacted> at "
+        "<redacted>"
+    ) in parsed.diagnostics
+    assert "/home/operator" not in repr(parsed.diagnostics)
+
+
+def test_unbrokered_codex_sdk_turn_fails_before_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import openai_codex
+
+    launches: list[None] = []
+
+    class FakeCodex:
+        def __init__(self, _config) -> None:
+            launches.append(None)
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(
+        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
     )
 
+    with pytest.raises(RuntimeError, match="startup"):
+        sdk_bridge._run_codex(
+            {
+                "vendor": "codex",
+                "prompt": "private prompt",
+                "cwd": str(tmp_path),
+                "requested_model": "gpt-5.6-sol",
+                "effort": "high",
+                "read_only": True,
+                "budget_usd": None,
+                "commercial_mode": "subscription-only",
+                "output_schema": {"type": "object"},
+                "read_roots": [str(tmp_path.resolve())],
+            }
+        )
 
-def test_codex_bridge_run_applies_runtime_overrides_without_a_config_lock(
+    assert launches == []
+
+
+def test_brokered_codex_turn_uses_private_home_and_runtime_overrides(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     import openai_codex
@@ -8218,8 +8347,14 @@ def test_codex_bridge_run_applies_runtime_overrides_without_a_config_lock(
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    operator_codex_home = str(tmp_path / "operator-codex-home")
+    operator_home = str(tmp_path / "operator-home")
+    monkeypatch.setenv("CODEX_HOME", operator_codex_home)
+    monkeypatch.setenv("HOME", operator_home)
     monkeypatch.setattr(
-        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
     )
     sdk_bridge._run_codex(
         {
@@ -8238,6 +8373,11 @@ def test_codex_bridge_run_applies_runtime_overrides_without_a_config_lock(
     capsys.readouterr()
 
     assert len(observed) == 1
+    private_home = str(tmp_path / "private-codex-home")
+    assert observed[0].env["CODEX_HOME"] == private_home
+    assert observed[0].env["HOME"] == private_home
+    assert operator_codex_home not in observed[0].env.values()
+    assert operator_home not in observed[0].env.values()
     overrides = tuple(observed[0].config_overrides)
     assert overrides == sdk_bridge.codex_runtime_overrides()
     assert not any("config_lockfile" in item for item in overrides)
