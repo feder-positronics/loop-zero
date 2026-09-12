@@ -98,6 +98,7 @@ def _runtime_snapshot(payload: dict) -> dict:
             "refresh_token": tokens["access_token"],
             "account_id": tokens["account_id"],
         },
+        "last_refresh": payload["last_refresh"],
     }
 
 
@@ -565,3 +566,20 @@ def test_codex_refresh_wrapper_binds_sdk_venv_bridge_and_workspace(
         for index in range(len(actual_argv) - 2)
     ]
     assert not actual_spec.private_tmpdir.exists()
+
+
+def test_codex_snapshot_carries_last_refresh_so_app_server_uses_the_access_token() -> None:
+    payload = _credential(expires_at_s=3_000)
+    validated = codex_credential._validate_payload(json.dumps(payload).encode())
+
+    snapshot = json.loads(codex_credential._sandbox_snapshot_payload(validated))
+
+    assert snapshot["last_refresh"] == "2026-08-31T00:00:00Z"
+    assert snapshot["tokens"]["refresh_token"] == snapshot["tokens"]["access_token"]
+
+    del payload["last_refresh"]
+    validated = codex_credential._validate_payload(json.dumps(payload).encode())
+    stamped = json.loads(codex_credential._sandbox_snapshot_payload(validated))
+    assert isinstance(stamped["last_refresh"], str)
+    assert stamped["last_refresh"].endswith("Z")
+    assert set(stamped) == {"auth_mode", "OPENAI_API_KEY", "tokens", "last_refresh"}

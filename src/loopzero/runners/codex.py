@@ -2016,6 +2016,13 @@ def _sandbox_snapshot_payload(credential: _ValidatedCredential) -> bytes:
     assert isinstance(tokens, dict)
     access_token = tokens["access_token"]
     assert isinstance(access_token, str)
+    # Codex 0.154 treats a missing last_refresh as stale and refreshes before
+    # its first backend call; with the refresh capability removed that refresh
+    # can only fail.  Carry the validated source's timestamp (or the seal
+    # time) so the access token is used for its remaining lifetime instead.
+    last_refresh = decoded.get("last_refresh")
+    if not isinstance(last_refresh, str) or not last_refresh:
+        last_refresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     snapshot = {
         "auth_mode": "chatgpt",
         "OPENAI_API_KEY": None,
@@ -2025,6 +2032,7 @@ def _sandbox_snapshot_payload(credential: _ValidatedCredential) -> bytes:
             "refresh_token": access_token,
             "account_id": tokens["account_id"],
         },
+        "last_refresh": last_refresh,
     }
     return json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
 

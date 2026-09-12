@@ -36,6 +36,7 @@ def _payload(vendor: str, secret: str) -> dict[str, object]:
                 "refresh_token": secret,
                 "account_id": "account",
             },
+            "last_refresh": "2026-09-09T17:58:29Z",
         }
     return {"accessToken": secret, "refreshToken": secret}
 

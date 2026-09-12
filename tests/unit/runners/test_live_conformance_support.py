@@ -37,6 +37,7 @@ def _codex_access_only() -> bytes:
             "refresh_token": "access-only",
             "account_id": "account",
         },
+        "last_refresh": "2026-09-09T17:58:29Z",
     }).encode()
 
 

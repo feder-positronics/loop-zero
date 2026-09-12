@@ -207,7 +207,11 @@ def _validate_access_only(vendor: str, payload: bytes) -> None:
         valid = (
             decoded.get("auth_mode") == "chatgpt"
             and decoded.get("OPENAI_API_KEY") in (None, "")
-            and set(decoded) == {"auth_mode", "OPENAI_API_KEY", "tokens"}
+            and set(decoded) == {
+                "auth_mode", "OPENAI_API_KEY", "tokens", "last_refresh"
+            }
+            and isinstance(decoded.get("last_refresh"), str)
+            and bool(decoded.get("last_refresh"))
             and isinstance(tokens, dict)
             and set(tokens) == {
                 "access_token", "id_token", "refresh_token", "account_id"
