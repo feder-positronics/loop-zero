@@ -49,6 +49,20 @@ def minimal_workflow(revision: str = REVISION, extra: str = "") -> str:
     )
 
 
+@pytest.fixture(autouse=True)
+def private_gh_home_under_tmp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Keep the per-command private gh home out of the real account state root.
+
+    The CI sandbox binds the account home read-only, and unit tests must never
+    write under ``~/.local/state`` anyway.
+    """
+    state_root = tmp_path / "account-state"
+    monkeypatch.setattr(
+        "loopzero.integrations.github._account_state_root", lambda: state_root
+    )
+    return state_root
+
+
 @pytest.fixture
 def consumer(tmp_path: Path) -> Path:
     """A consumer repository with a deposited snapshot and a committed workflow.toml."""

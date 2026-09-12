@@ -1,17 +1,23 @@
 import ast
+import os
 import re
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from loopzero.integrations import github as github_module
 from loopzero.integrations.github import (
     GitHub,
     GitHubError,
     GitHubSettings,
+    private_gh_home,
     repository_from_origin,
 )
+
+REAL_GH = Path("/usr/bin/gh")
 
 
 @pytest.mark.parametrize(
@@ -82,7 +88,9 @@ def test_non_idempotent_api_mutation_is_never_retried(tmp_path: Path):
 
 
 def test_gh_child_environment_is_allowlisted_and_host_is_argv_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    private_gh_home_under_tmp: Path,
 ) -> None:
     captured = {}
     for name, value in {
@@ -92,6 +100,8 @@ def test_gh_child_environment_is_allowlisted_and_host_is_argv_bound(
         "GH_REPO": "attacker/project",
         "GH_ENTERPRISE_TOKEN": "enterprise-token",
         "GH_CONFIG_DIR": "/tmp/attacker-gh",
+        "HOME": "/tmp/attacker-home",
+        "XDG_CONFIG_HOME": "/tmp/attacker-xdg",
         "GH_FUTURE_OVERRIDE": "future-redirect",
         "GITHUB_FUTURE_OVERRIDE": "future-redirect",
         "UNRELATED_SECRET": "not-for-gh",
@@ -101,6 +111,10 @@ def test_gh_child_environment_is_allowlisted_and_host_is_argv_bound(
     def run(argv, **kwargs):
         captured["argv"] = argv
         captured["env"] = kwargs["env"]
+        home = Path(kwargs["env"]["HOME"])
+        captured["home_mode"] = stat.S_IMODE(home.lstat().st_mode)
+        captured["home_owner"] = home.lstat().st_uid
+        captured["home_entries"] = sorted(os.listdir(home))
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
     client = GitHub(
@@ -122,9 +136,114 @@ def test_gh_child_environment_is_allowlisted_and_host_is_argv_bound(
     assert not {
         name
         for name in captured["env"]
-        if name.startswith(("GH_", "GITHUB_")) and name != "GH_TOKEN"
+        if name.startswith(("GH_", "GITHUB_"))
+        and name not in {"GH_TOKEN", "GH_CONFIG_DIR"}
     }
     assert "UNRELATED_SECRET" not in captured["env"]
+    assert "XDG_CONFIG_HOME" not in captured["env"]
+    # gh config, state and data lookups all land in one private, empty,
+    # mode-0700 directory under the account state root that lives only for
+    # the duration of the command.
+    home = Path(captured["env"]["HOME"])
+    assert captured["env"]["GH_CONFIG_DIR"] == str(home)
+    assert home.is_absolute()
+    assert home.parent == private_gh_home_under_tmp / "gh-home"
+    assert home != Path("/tmp/attacker-home")
+    assert captured["home_mode"] == 0o700
+    assert captured["home_owner"] == os.getuid()
+    assert captured["home_entries"] == []
+    assert not home.exists()
+    assert stat.S_IMODE(home.parent.lstat().st_mode) == 0o700
+
+
+def test_child_environment_requires_an_absolute_private_home(tmp_path: Path) -> None:
+    client = GitHub(tmp_path, GitHubSettings(labels={}, retries=0))
+    with pytest.raises(GitHubError, match="absolute"):
+        client._child_environment(Path("relative"))
+
+
+def test_private_gh_home_rejects_a_shared_parent(
+    private_gh_home_under_tmp: Path,
+) -> None:
+    parent = private_gh_home_under_tmp / "gh-home"
+    parent.mkdir(parents=True)
+    parent.chmod(0o750)
+    with pytest.raises(GitHubError, match="unsafe"):
+        with private_gh_home():
+            pass
+
+
+def test_planted_repository_gh_config_is_invisible_to_the_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A candidate checkout cannot become gh's configuration directory.
+
+    With HOME unset gh falls back to the cwd-relative ``.config/gh``; the
+    child cwd is the repository root, so repository content would select the
+    transport (``http_unix_socket``) and identity (``hosts.yml``).
+    """
+    for name in ("HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR", "GH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    planted = repository / ".config" / "gh"
+    planted.mkdir(parents=True)
+    (planted / "config.yml").write_text(
+        "http_unix_socket: /tmp/attacker.sock\n", encoding="utf-8"
+    )
+    (planted / "hosts.yml").write_text(
+        "github.com:\n    oauth_token: attacker-token\n    user: attacker\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def run(argv, **kwargs):
+        env = kwargs["env"]
+        captured["argv"] = argv
+        captured["cwd"] = Path(kwargs["cwd"])
+        captured["env"] = dict(env)
+        if REAL_GH.exists() and os.access(REAL_GH, os.X_OK):
+            probe = ["config", "get", "http_unix_socket"]
+            secured = subprocess.run(
+                [str(REAL_GH), *probe], cwd=kwargs["cwd"], env=env,
+                text=True, capture_output=True,
+            )
+            captured["secured"] = (secured.returncode, secured.stdout)
+            fallback_env = {
+                name: value
+                for name, value in env.items()
+                if name not in {"HOME", "GH_CONFIG_DIR"}
+            }
+            fallback = subprocess.run(
+                [str(REAL_GH), *probe], cwd=kwargs["cwd"], env=fallback_env,
+                text=True, capture_output=True,
+            )
+            captured["fallback"] = (fallback.returncode, fallback.stdout)
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    client = GitHub(repository, GitHubSettings(labels={}, retries=0), run=run)
+    client._checked_version = True
+    assert client.api("repos/acme/widget/pulls/1") == {}
+
+    env = captured["env"]
+    assert captured["cwd"] == repository.resolve()
+    assert "HOME" in env and "GH_CONFIG_DIR" in env
+    assert "XDG_CONFIG_HOME" not in env
+    home = Path(env["HOME"])
+    assert home == Path(env["GH_CONFIG_DIR"])
+    assert home.is_absolute()
+    assert not home.is_relative_to(repository.resolve())
+    assert not any(str(planted) in value for value in env.values())
+    assert not any(".config" in part for part in captured["argv"])
+    if "secured" in captured:
+        # Under the produced environment gh sees no socket redirect at all,
+        # while the same child without HOME/GH_CONFIG_DIR reads the planted one.
+        assert captured["secured"] == (0, "")
+        assert captured["fallback"][1].strip() == "/tmp/attacker.sock"
+    # The private home is torn down after the command; nothing was left behind
+    # inside the repository either.
+    assert not home.exists()
+    assert sorted(path.name for path in repository.iterdir()) == [".config"]
 
 
 _PROCESS_CALL_ALLOWLIST = {

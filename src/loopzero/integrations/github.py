@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
+import shutil
+import stat
 import subprocess
+import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
 from ..config import Profile
+from ..kernel import settings as kernel_settings
 from ..kernel.git_config_security import (
     origin_url as git_config_origin_url,
     security_projection_sha256,
@@ -332,6 +338,57 @@ _HOST_RE = re.compile(
 _GH_CHILD_ENVIRONMENT = frozenset(
     {"LANG", "LANGUAGE", "NO_COLOR", "PATH", "TERM", "TZ"}
 )
+_GH_HOME_DIRECTORY = "gh-home"
+
+
+def _account_state_root() -> Path:
+    """Resolve the OS account state root from passwd, never from ``$HOME``."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError) as exc:
+        raise GitHubError("OS account home is unavailable") from exc
+    if not home.is_absolute() or home == Path("/"):
+        raise GitHubError("OS account home is unsafe")
+    return kernel_settings.settings.account_state_root(home)
+
+
+def _private_directory(path: Path) -> Path:
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = path.lstat()
+    except OSError as exc:
+        raise GitHubError("private gh home is unavailable") from exc
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_mode & 0o077
+    ):
+        raise GitHubError("private gh home is unsafe")
+    return path
+
+
+@contextmanager
+def private_gh_home() -> Iterator[Path]:
+    """Yield a fresh, empty, mode-0700 directory that lives for one gh command.
+
+    gh resolves its configuration directory through ``GH_CONFIG_DIR``,
+    ``XDG_CONFIG_HOME`` and then ``$HOME/.config/gh``.  With ``HOME`` unset
+    that last fallback becomes the *relative* path ``.config/gh`` under the
+    child's cwd, which is the candidate checkout.  Repository content could
+    then plant ``config.yml`` (``http_unix_socket`` transport redirects) or
+    ``hosts.yml`` (an attacker-chosen ``oauth_token``).  Pointing both
+    ``GH_CONFIG_DIR`` and ``HOME`` at a private empty directory under the OS
+    account state root closes every gh config, state and data lookup at once.
+    """
+    parent = _private_directory(_account_state_root() / _GH_HOME_DIRECTORY)
+    try:
+        home = Path(tempfile.mkdtemp(prefix="gh-", dir=parent))
+    except OSError as exc:
+        raise GitHubError("private gh home is unavailable") from exc
+    try:
+        yield home
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
 
 
 def repository_from_origin(
@@ -395,13 +452,22 @@ class GitHub:
         self._checked_version = False
         self._repository: Repository | None = None
 
-    def _child_environment(self) -> dict[str, str]:
-        """Pass only non-authoritative process context and one selected token."""
+    def _child_environment(self, home: Path) -> dict[str, str]:
+        """Pass only non-authoritative process context and one selected token.
+
+        ``home`` must come from :func:`private_gh_home`; it is exported as both
+        ``HOME`` and ``GH_CONFIG_DIR`` so gh never consults a cwd-relative or
+        caller-selected configuration directory.
+        """
+        if not home.is_absolute():
+            raise GitHubError("private gh home must be absolute")
         environment = {
             name: value
             for name, value in os.environ.items()
             if name in _GH_CHILD_ENVIRONMENT or name.startswith("LC_")
         }
+        environment["HOME"] = str(home)
+        environment["GH_CONFIG_DIR"] = str(home)
         token = os.environ.get(self.settings.token_environment)
         if token:
             environment[self.settings.token_environment] = token
@@ -421,12 +487,13 @@ class GitHub:
         if command and command[0] == "api":
             command[1:1] = ["--hostname", self.settings.host]
         for attempt in range(attempts):
-            proc = self._run(
-                [str(self.executable), *command],
-                cwd=self.root,
-                env=self._child_environment(),
-                input=input, text=True, capture_output=True,
-            )
+            with private_gh_home() as home:
+                proc = self._run(
+                    [str(self.executable), *command],
+                    cwd=self.root,
+                    env=self._child_environment(home),
+                    input=input, text=True, capture_output=True,
+                )
             if proc.returncode == 0:
                 return proc.stdout
             last = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
@@ -490,5 +557,10 @@ class GitHub:
 
 
 __all__ = [
-    "GitHub", "GitHubError", "GitHubSettings", "Repository", "repository_from_origin"
+    "GitHub",
+    "GitHubError",
+    "GitHubSettings",
+    "Repository",
+    "private_gh_home",
+    "repository_from_origin",
 ]
