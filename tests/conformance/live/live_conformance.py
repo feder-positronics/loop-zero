@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import asdict, replace
+import errno
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,7 @@ from loopzero.runners import RuntimeBudget, RuntimeSettings
 from loopzero.runners import claude, codex, cursor
 from loopzero.runners.contract import (
     RuntimeCapabilityProfile,
+    RuntimeAdapter,
     RuntimeRequest,
     RuntimeResult,
     RuntimeStatus,
@@ -124,7 +126,7 @@ def _sandbox_wrapper(settings: RuntimeSettings):
             "--unshare-user",
             "--unshare-pid",
             "--die-with-parent",
-            "--ro-bind", "/usr", "/usr",
+            "--ro-bind", "/", "/",
             "--proc", "/proc",
             "--dev", "/dev",
             "--", "/usr/bin/true",
@@ -133,7 +135,11 @@ def _sandbox_wrapper(settings: RuntimeSettings):
         timeout=10,
     )
     if probe.returncode != 0:
-        pytest.skip("live containment unavailable: unprivileged user namespaces are disabled")
+        detail = probe.stderr.decode("utf-8", "replace").strip().splitlines()
+        pytest.skip(
+            "live containment unavailable: bubblewrap user-namespace probe failed: "
+            + (detail[-1] if detail else f"exit {probe.returncode}")
+        )
 
     roots = [Path("/usr"), Path("/etc"), Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin")]
     tooling_root = (settings.tooling_root or Path.cwd()).resolve()
@@ -304,6 +310,38 @@ def _credential(vendor: str, timeout_s: float, settings: RuntimeSettings, wrappe
             kwargs["sandbox_wrapper"] = wrapper
         with brokers[vendor](**kwargs) as descriptor:
             yield descriptor
+
+
+def _run_with_credential(
+    vendor: str,
+    adapter: RuntimeAdapter,
+    request: RuntimeRequest,
+    *,
+    timeout_s: float,
+    settings: RuntimeSettings,
+    wrapper,
+) -> RuntimeResult:
+    """Run through the adapter while preserving the broker-owned descriptor."""
+    descriptor_name = settings.env_name(f"{vendor.upper()}_AUTH_FD")
+    previous = os.environ.get(descriptor_name)
+    with _credential(vendor, timeout_s, settings, wrapper) as snapshot:
+        # The process launch path consumes and closes credential descriptors.
+        # Transfer a duplicate so the broker retains its own snapshot until its
+        # context exits, including when adapter.run raises after launch.
+        child_descriptor = os.dup(snapshot)
+        os.environ[descriptor_name] = str(child_descriptor)
+        try:
+            return adapter.run(request)
+        finally:
+            if previous is None:
+                os.environ.pop(descriptor_name, None)
+            else:
+                os.environ[descriptor_name] = previous
+            try:
+                os.close(child_descriptor)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
 
 
 def _scenario_prompt(vendor: str, scenario: str) -> str:
@@ -552,7 +590,7 @@ def _remaining_budget(
 
 
 @pytest.mark.parametrize("vendor", _selected_runtimes())
-def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
     executable_value = os.environ.get("LOOPZERO_LIVE_CLI_PATH")
     executable = Path(executable_value) if executable_value else Path(shutil.which(EXECUTABLE_NAMES[vendor]) or "")
     assert executable.is_file(), f"pinned {vendor} executable is unavailable"
@@ -649,10 +687,15 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
             observed_cost: float | None = None
             invocation_costs: list[float | None] = []
             try:
-                with _credential(vendor, scenario_timeout + 10, scenario_settings, wrapper) as descriptor:
-                    monkeypatch.setenv(scenario_settings.env_name(f"{vendor.upper()}_AUTH_FD"), str(descriptor))
-                    invocation_costs.append(None)
-                    result = adapter.run(_request(vendor, scenario, tmp_path, timeout))
+                invocation_costs.append(None)
+                result = _run_with_credential(
+                    vendor,
+                    adapter,
+                    _request(vendor, scenario, tmp_path, timeout),
+                    timeout_s=scenario_timeout + 10,
+                    settings=scenario_settings,
+                    wrapper=wrapper,
+                )
                 observed_cost = (
                     result.cost_usd
                     if result.cost_usd is not None
@@ -664,12 +707,21 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
                         vendor, settings=scenario_settings, run_cli=runner, run_probe=runner,
                         **({"sdk_available": lambda *_: True} if vendor in {"claude", "codex"} else {}),
                     )
-                    with _credential(vendor, scenario_timeout + 10, scenario_settings, wrapper) as descriptor:
-                        monkeypatch.setenv(scenario_settings.env_name(f"{vendor.upper()}_AUTH_FD"), str(descriptor))
-                        invocation_costs.append(None)
-                        resumed = resumed_adapter.run(
-                            _request(vendor, scenario, tmp_path, timeout, result.session_id)
-                        )
+                    invocation_costs.append(None)
+                    resumed = _run_with_credential(
+                        vendor,
+                        resumed_adapter,
+                        _request(
+                            vendor,
+                            scenario,
+                            tmp_path,
+                            timeout,
+                            result.session_id,
+                        ),
+                        timeout_s=scenario_timeout + 10,
+                        settings=scenario_settings,
+                        wrapper=wrapper,
+                    )
                     resumed_cost = resumed.cost_usd if resumed.cost_usd is not None else runner.metered_cost
                     invocation_costs[-1] = resumed_cost
                     original_session_id = result.session_id

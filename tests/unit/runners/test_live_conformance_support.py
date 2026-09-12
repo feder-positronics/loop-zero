@@ -5,12 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 import os
 from pathlib import Path
+import sys
 
 import pytest
 
 from conftest import REPO
 from loopzero.runners.settings import RuntimeBudget, RuntimeSettings
 from loopzero.runners.contract import (
+    RuntimeCapabilityProfile,
     RuntimeCostStatus,
     RuntimeEvent,
     RuntimeResult,
@@ -18,6 +20,8 @@ from loopzero.runners.contract import (
     SubscriptionEligibility,
     TerminalReason,
 )
+from loopzero.runners.fake import Scenario
+from loopzero.runners.registry import RUNTIME_REGISTRY
 from tests.conformance.live import live_conformance as live
 
 
@@ -42,6 +46,31 @@ def test_live_workspace_is_writable_beside_a_read_only_checkout(
 
     assert not workspace_root.is_relative_to(checkout)
     assert probe.read_text(encoding="utf-8") == "ok"
+
+
+def test_live_sandbox_probe_reports_bubblewraps_last_error_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = RuntimeSettings(state_root=str(tmp_path / "state"))
+    monkeypatch.setattr(live.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type(
+            "Probe",
+            (),
+            {
+                "returncode": 1,
+                "stderr": b"first diagnostic\nactual namespace failure\n",
+            },
+        )(),
+    )
+
+    with pytest.raises(
+        pytest.skip.Exception,
+        match="bubblewrap user-namespace probe failed: actual namespace failure",
+    ):
+        live._sandbox_wrapper(settings)
 
 
 @pytest.mark.parametrize(
@@ -168,6 +197,140 @@ def test_live_local_run_uses_normal_host_credential_discovery(
         pass
 
     assert "credential_path" not in observed
+
+
+def test_live_adapter_run_transfers_a_duplicate_not_the_broker_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential = tmp_path / "credential.json"
+    credential.write_text("{}x", encoding="utf-8")
+    settings = RuntimeSettings(state_root=str(tmp_path / "state"))
+    broker_descriptor: int | None = None
+
+    @contextmanager
+    def broker(**_kwargs):
+        nonlocal broker_descriptor
+        broker_descriptor = os.open(credential, os.O_RDONLY)
+        try:
+            yield broker_descriptor
+        finally:
+            os.close(broker_descriptor)
+
+    class ConsumingAdapter:
+        def run(self, request):
+            assert broker_descriptor is not None
+            child_descriptor = int(
+                os.environ[settings.env_name("CODEX_AUTH_FD")]
+            )
+            assert child_descriptor != broker_descriptor
+            os.fstat(broker_descriptor)
+            return live.run_cli(
+                [sys.executable, "-c", "pass"],
+                cwd=request.cwd,
+                input_text="",
+                timeout_s=2,
+                env={
+                    "PATH": os.environ["PATH"],
+                    settings.env_name("CODEX_AUTH_FD"): str(child_descriptor),
+                },
+                pass_fds=(child_descriptor,),
+                sandbox_wrapper=lambda spec: spec.argv,
+            )
+
+    monkeypatch.setattr(live.codex, "codex_subscription_credential", broker)
+
+    # Lending the broker's descriptor itself reproduces the original cleanup
+    # failure after a launch path consumes it.
+    with settings.use(), pytest.raises(OSError, match="Bad file descriptor"):
+        with broker() as descriptor:
+            live.run_cli(
+                [sys.executable, "-c", "pass"],
+                cwd=tmp_path,
+                input_text="",
+                timeout_s=2,
+                env={
+                    "PATH": os.environ["PATH"],
+                    settings.env_name("CODEX_AUTH_FD"): str(descriptor),
+                },
+                pass_fds=(descriptor,),
+                sandbox_wrapper=lambda spec: spec.argv,
+            )
+
+    request = live.RuntimeRequest(
+        vendor="fake",
+        transport=RUNTIME_REGISTRY.registration("fake").preferred_transport,
+        requested_model="test-model",
+        effort="low",
+        prompt="test",
+        cwd=tmp_path,
+        timeout_s=1,
+        read_only=True,
+        attempt_id="fd-ownership",
+        eligibility=SubscriptionEligibility.APPROVED,
+        output_schema={"type": "object"},
+        capability_profile=RuntimeCapabilityProfile(read_roots=(tmp_path,)),
+    )
+
+    result = live._run_with_credential(
+        "codex",
+        ConsumingAdapter(),  # type: ignore[arg-type]
+        request,
+        timeout_s=5,
+        settings=settings,
+        wrapper=lambda spec: spec.argv,
+    )
+
+    assert result.returncode == 0
+    assert broker_descriptor is not None
+    with pytest.raises(OSError):
+        os.fstat(broker_descriptor)
+    assert settings.env_name("CODEX_AUTH_FD") not in os.environ
+
+
+@pytest.mark.parametrize("scenario", tuple(Scenario))
+def test_live_credential_launch_path_runs_all_registry_fake_scenarios(
+    scenario: Scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential = tmp_path / "credential.json"
+    credential.write_text("{}x", encoding="utf-8")
+    settings = RuntimeSettings(state_root=str(tmp_path / "state"))
+
+    @contextmanager
+    def broker(**_kwargs):
+        descriptor = os.open(credential, os.O_RDONLY)
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    monkeypatch.setattr(live.codex, "codex_subscription_credential", broker)
+    adapter = RUNTIME_REGISTRY.create("fake", scenario=scenario)
+    request = live.RuntimeRequest(
+        vendor="fake",
+        transport=RUNTIME_REGISTRY.registration("fake").preferred_transport,
+        requested_model="test-model",
+        effort="low",
+        prompt="test",
+        cwd=tmp_path,
+        timeout_s=1,
+        read_only=True,
+        attempt_id=f"fake-{scenario.value}",
+        eligibility=SubscriptionEligibility.APPROVED,
+        output_schema={"type": "object"},
+        capability_profile=RuntimeCapabilityProfile(read_roots=(tmp_path,)),
+    )
+
+    result = live._run_with_credential(
+        "codex",
+        adapter,
+        request,
+        timeout_s=5,
+        settings=settings,
+        wrapper=lambda spec: spec.argv,
+    )
+
+    assert result.status is not None
+    assert settings.env_name("CODEX_AUTH_FD") not in os.environ
 
 
 def _permission_result(*, events=(), diagnostics=()) -> RuntimeResult:
