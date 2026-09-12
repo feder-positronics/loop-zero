@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Operational Slate — explain HTML render template</title>
+<style>
+:root {
+  /* Operational-slate palette — SSoT for `explain` briefing mode, `grill-me` questionnaire,
+     `resolve-findings` shortlist. */
+  --ink: #0f172a;
+  --ink2: #334155;
+  --muted: #64748b;
+  --line: #e2e8f0;
+  --card: #ffffff;
+  --bg: #f1f5f9;
+  --bg2: #f8fafc;
+  --accent: #2563eb;
+
+  /* Layer tags */
+  --substrate: #0d9488;
+  --agent: #7c3aed;
+  --ui: #d97706;
+
+  /* Status */
+  --ok: #16a34a;
+  --warn: #d97706;
+  --bad: #dc2626;
+  --gate: #6b7280;
+  --pulse: #22c55e;
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .livebar .dot { animation: none !important; }
+}
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.5;
+  font-size: 15px;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.skip-link { position: absolute; left: -9999px; }
+.skip-link:focus { left: 1rem; top: 1rem; background: var(--accent); color: #fff; padding: 0.5rem 1rem; z-index: 10; border-radius: 4px; }
+
+a { color: var(--accent); }
+a:hover { text-decoration: underline; }
+a:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* === Sticky live bar === */
+.livebar {
+  background: var(--ink);
+  color: #e2e8f0;
+  padding: 10px 24px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  border-bottom: 3px solid var(--pulse);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.livebar-inner { max-width: 1180px; margin: 0 auto; display: flex; flex-wrap: wrap; gap: 20px; align-items: center; }
+.livebar .dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--pulse); margin-right: 6px; vertical-align: middle;
+  box-shadow: 0 0 0 0 rgba(34,197,94, 0.6); animation: pulse 2s infinite;
+}
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(34,197,94, 0.7); }
+  70% { box-shadow: 0 0 0 8px rgba(34,197,94, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94, 0); }
+}
+.livebar .sep { color: #475569; }
+.livebar code { background: #1e293b; color: #e2e8f0; padding: 1px 6px; border-radius: 4px; font-size: 12px; font-family: var(--mono); }
+.livebar a { color: #93c5fd; text-decoration: none; }
+.livebar a:hover { text-decoration: underline; }
+
+/* === Page wrapper === */
+.wrap { max-width: 1180px; margin: 0 auto; padding: 0 24px 80px; }
+
+/* === Hero === */
+.hero {
+  background: linear-gradient(180deg, var(--card) 0%, var(--bg2) 100%);
+  padding: 30px 24px 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 24px;
+}
+.hero-inner { max-width: 1180px; margin: 0 auto; }
+.hero .breadcrumb { font-size: 12px; color: var(--muted); margin-bottom: 14px; font-family: var(--mono); }
+.hero h1 { font-size: 32px; margin: 0 0 6px; letter-spacing: -0.02em; line-height: 1.15; }
+.hero .sub { color: var(--muted); font-size: 15px; max-width: 760px; margin: 0; }
+
+/* === Stat cards (4-up, color-bordered top) === */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 20px 0; }
+@media (max-width: 800px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+.stat { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+.stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+.stat .value { font-size: 30px; font-weight: 700; line-height: 1.1; margin: 4px 0; font-variant-numeric: tabular-nums; }
+.stat .delta { font-size: 12px; color: var(--muted); }
+.stat .delta.up { color: var(--ok); }
+.stat .delta.warn { color: var(--warn); }
+.stat.green  { border-top: 3px solid var(--ok); }
+.stat.amber  { border-top: 3px solid var(--warn); }
+.stat.blue   { border-top: 3px solid var(--accent); }
+.stat.purple { border-top: 3px solid var(--agent); }
+
+/* === Section headings + sticky TOC === */
+nav.toc {
+  position: sticky;
+  top: 56px;
+  background: var(--bg);
+  padding: 8px 0;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+  font-family: var(--mono);
+  z-index: 4;
+}
+nav.toc ol { list-style: none; padding: 0; margin: 0; display: flex; flex-wrap: wrap; gap: 14px; }
+nav.toc a { color: var(--ink2); text-decoration: none; padding: 2px 0; border-bottom: 2px solid transparent; }
+nav.toc a:hover { color: var(--accent); }
+nav.toc li.active a { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+section { scroll-margin-top: 100px; margin: 0 0 32px; }
+h2 {
+  font-size: 22px; margin: 48px 0 14px; letter-spacing: -0.01em;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px;
+}
+h2 .em { color: var(--muted); font-weight: 400; font-size: 14.5px; }
+h3 { font-size: 17px; margin: 22px 0 8px; }
+h4 { font-size: 11px; margin: 14px 0 6px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); font-weight: 700; }
+p { margin: 6px 0 10px; max-width: 72ch; }
+
+/* === Cards === */
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; margin: 12px 0; }
+.grid { display: grid; gap: 14px; }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-2 { grid-template-columns: 2fr 1fr; }
+.grid-2-eq { grid-template-columns: 1fr 1fr; }
+@media (max-width: 900px) { .grid-3, .grid-2, .grid-2-eq { grid-template-columns: 1fr; } }
+
+/* === Layer tags === */
+.tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; margin-right: 4px; color: #fff; vertical-align: middle; font-family: var(--mono); }
+.tag-substrate { background: var(--substrate); }
+.tag-agent     { background: var(--agent); }
+.tag-ui        { background: var(--ui); }
+.tag-active    { background: var(--ok); }
+.tag-planned   { background: var(--accent); }
+.tag-gated     { background: var(--gate); }
+.tag-warn      { background: var(--warn); }
+.tag-bad       { background: var(--bad); }
+.tag-ghost     { background: #f1f5f9; color: var(--ink); border: 1px solid var(--line); }
+.pill { display: inline-block; padding: 1px 6px; border-radius: 6px; font-size: 11px; background: #f1f5f9; color: var(--ink); margin-right: 4px; font-weight: 600; font-family: var(--mono); }
+
+/* === RAG dots === */
+.rag { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.rag.g { background: var(--ok); }
+.rag.a { background: var(--warn); }
+.rag.r { background: var(--bad); }
+.rag.b { background: var(--gate); }
+
+/* === Tables === */
+table { width: 100%; border-collapse: collapse; margin: 6px 0 14px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 14px; }
+th { background: var(--bg2); font-weight: 600; font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+tr:last-child td { border-bottom: none; }
+td.muted, .muted { color: var(--muted); }
+
+code, kbd { background: #f1f5f9; padding: 1px 5px; border-radius: 4px; font-size: 12.5px; font-family: var(--mono); }
+
+/* === Progress bars === */
+.bar { height: 8px; background: #f1f5f9; border-radius: 6px; overflow: hidden; margin: 4px 0; position: relative; }
+.bar > span { display: block; height: 100%; background: var(--accent); }
+.bar.green > span { background: var(--ok); }
+.bar.amber > span { background: var(--warn); }
+.bar.gate  > span { background: var(--gate); background-image: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(255,255,255,0.3) 4px, rgba(255,255,255,0.3) 8px); }
+
+/* === Callouts === */
+.callout { border-left: 4px solid var(--warn); background: #fffbeb; padding: 12px 16px; border-radius: 6px; line-height: 1.55; margin: 12px 0; }
+.callout.ok   { border-color: var(--ok);     background: #f0fdf4; }
+.callout.bad  { border-color: var(--bad);    background: #fef2f2; }
+.callout.info { border-color: var(--accent); background: #eff6ff; }
+.callout em { font-style: italic; color: var(--ink2); }
+
+/* === Jargon underline hint === */
+abbr[title], .j {
+  text-decoration: underline dotted 1px var(--muted);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  cursor: help;
+}
+
+/* === Glossary === */
+.glossary { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; margin: 12px 0; }
+.glossary dl { margin: 0; display: grid; grid-template-columns: 180px 1fr; gap: 6px 18px; }
+@media (max-width: 700px) { .glossary dl { grid-template-columns: 1fr; gap: 2px 0; } }
+.glossary dt { font-weight: 600; font-size: 13.5px; color: var(--ink); padding-top: 4px; font-family: var(--mono); }
+.glossary dd { margin: 0; font-size: 13px; color: var(--ink2); padding-bottom: 8px; border-bottom: 1px solid #f1f5f9; }
+.glossary dd:last-of-type, .glossary dt:last-of-type { border-bottom: none; }
+
+/* === Takeaway === */
+.takeaway {
+  background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  border-radius: 8px; padding: 18px 22px; margin: 28px 0 0;
+  position: relative;
+}
+.takeaway::before {
+  content: "Takeaway";
+  position: absolute; top: -10px; left: 18px;
+  background: var(--bg); padding: 0 8px;
+  font-family: var(--mono); font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--accent); font-weight: 700;
+}
+.takeaway p { margin: 0; font-size: 15px; line-height: 1.55; max-width: none; }
+.takeaway em { color: var(--accent); font-style: normal; font-weight: 600; }
+
+/* === SVG figures === */
+figure { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px; margin: 16px 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 10px; }
+figcaption::before { content: "fig — "; color: var(--accent); font-weight: 600; }
+
+/* === Misc === */
+hr.spacer { border: none; border-top: 1px solid var(--line); margin: 32px 0; }
+ul.compact { margin: 4px 0 10px; padding-left: 22px; }
+ul.compact li { margin: 3px 0; }
+
+/* === Footer === */
+footer.meta { margin-top: 48px; padding: 20px 0; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); font-family: var(--mono); display: flex; flex-wrap: wrap; gap: 16px; }
+
+/* === Print === */
+@media print {
+  body { background: #fff; }
+  .livebar, nav.toc { display: none; }
+  .hero, .card, table, figure, .callout, .takeaway, .glossary { box-shadow: none; border-color: #888; break-inside: avoid; }
+  a { color: var(--ink); text-decoration: underline; }
+  a[href]::after { content: " (" attr(href) ")"; font-size: 10px; color: #555; }
+}
+@page { margin: 18mm; }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<!-- Sticky operational live bar -->
+<div class="livebar" role="status" aria-label="Live operational state">
+  <div class="livebar-inner">
+    <span><span class="dot" aria-hidden="true"></span><strong>YYYY-MM-DD</strong></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span>branch <code>example-branch</code></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span>HEAD <code>abc1234</code></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span>open PRs: <strong>0</strong></span>
+    <span class="sep" aria-hidden="true">·</span>
+    <span>merges today: <strong>0</strong></span>
+  </div>
+</div>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="breadcrumb">intelflo / explain briefing mode · operational-slate template</div>
+    <h1>Operational Slate — Template</h1>
+    <p class="sub">Reference template demonstrating the operational-slate vocabulary: dark sticky bar with pulsing dot, hero stat-cards, RAG dots, layer tags, progress bars, jargon hints, glossary, and takeaway. Producers (`explain` briefing mode, `grill-me` questionnaire, `resolve-findings` shortlist) substitute their content into this shell.</p>
+    <div class="stats" role="group" aria-label="Operational snapshot">
+      <div class="stat green">
+        <div class="label">Stat A (green)</div>
+        <div class="value">0</div>
+        <div class="delta up">delta line</div>
+      </div>
+      <div class="stat amber">
+        <div class="label">Stat B (amber)</div>
+        <div class="value">0</div>
+        <div class="delta warn">delta line</div>
+      </div>
+      <div class="stat blue">
+        <div class="label">Stat C (blue)</div>
+        <div class="value">0</div>
+        <div class="delta">delta line</div>
+      </div>
+      <div class="stat purple">
+        <div class="label">Stat D (purple)</div>
+        <div class="value">0</div>
+        <div class="delta">delta line</div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <nav class="toc" aria-label="On this page">
+    <ol>
+      <li><a href="#sec-overview">Overview</a></li>
+      <li><a href="#sec-vocabulary">Vocabulary</a></li>
+      <li><a href="#sec-figure">Figure pattern</a></li>
+      <li><a href="#sec-findings">Findings</a></li>
+      <li><a href="#sec-glossary">Glossary</a></li>
+    </ol>
+  </nav>
+
+  <main id="main">
+
+    <section id="sec-overview">
+      <h2>Overview <span class="em">— what this template demonstrates</span></h2>
+      <p>This file is a <em>reference template</em>, not a real briefing. Producers in the operational-slate register substitute their content into this shell; the CSS tokens, sticky bar, hero band, stat-card grid, and other affordances below are the SSoT vocabulary.</p>
+      <div class="callout info">
+        <strong>Producers</strong>: <code>briefing</code> (snapshot variants A–E) · <code>grill-me</code> (questionnaire mode) · <code>resolve-findings</code> (shortlist mode). All inherit the operational-slate palette from this template; no bespoke per-artifact palettes are permitted.
+      </div>
+    </section>
+
+    <section id="sec-vocabulary">
+      <h2>Vocabulary <span class="em">— affordances by name</span></h2>
+
+      <h3>RAG dots</h3>
+      <p>
+        <span class="rag g" aria-label="green"></span> green ·
+        <span class="rag a" aria-label="amber"></span> amber ·
+        <span class="rag r" aria-label="red"></span> red ·
+        <span class="rag b" aria-label="grey"></span> grey
+      </p>
+
+      <h3>Layer tags</h3>
+      <p>
+        <span class="tag tag-substrate">substrate</span>
+        <span class="tag tag-agent">agent</span>
+        <span class="tag tag-ui">ui</span>
+        <span class="tag tag-active">active</span>
+        <span class="tag tag-planned">planned</span>
+        <span class="tag tag-gated">gated</span>
+        <span class="tag tag-warn">warn</span>
+        <span class="tag tag-bad">bad</span>
+        <span class="tag tag-ghost">ghost</span>
+      </p>
+
+      <h3>Progress bars</h3>
+      <div><div class="bar"><span style="width: 35%"></span></div><span class="muted">accent · 35%</span></div>
+      <div><div class="bar green"><span style="width: 70%"></span></div><span class="muted">green · 70%</span></div>
+      <div><div class="bar amber"><span style="width: 50%"></span></div><span class="muted">amber · 50%</span></div>
+      <div><div class="bar gate"><span style="width: 25%"></span></div><span class="muted">gated · 25%</span></div>
+
+      <h3>Jargon hint</h3>
+      <p>Hover a <span class="j" title="Definition surfaces in the glossary below.">jargon term</span> for an inline definition; the same term is also defined in the glossary section.</p>
+
+      <h3>Callouts</h3>
+      <div class="callout">Warn — default callout. Use for caveats and pending items.</div>
+      <div class="callout ok">OK — success or confirmed state.</div>
+      <div class="callout bad">Bad — blocking or broken.</div>
+      <div class="callout info">Info — neutral context or pointers.</div>
+
+      <h3>Table</h3>
+      <table>
+        <thead><tr><th>Column A</th><th>Column B</th><th>Column C</th></tr></thead>
+        <tbody>
+          <tr><td>row 1 · cell</td><td><span class="rag g"></span> green status</td><td><span class="tag tag-substrate">substrate</span></td></tr>
+          <tr><td>row 2 · cell</td><td><span class="rag a"></span> amber status</td><td><span class="tag tag-agent">agent</span></td></tr>
+          <tr><td>row 3 · cell</td><td><span class="rag r"></span> red status</td><td><span class="tag tag-ui">ui</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="sec-figure">
+      <h2>Figure pattern <span class="em">— inline accessible SVG</span></h2>
+      <figure>
+        <svg role="img" aria-labelledby="fig-demo-t fig-demo-d" viewBox="0 0 600 180">
+          <title id="fig-demo-t">Demo three-layer flow</title>
+          <desc id="fig-demo-d">A three-tile horizontal flow showing substrate (teal) feeding agent (purple) feeding UI (amber), with labelled arrows between tiles.</desc>
+          <defs>
+            <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+              <path d="M0,0 L0,9 L8,4.5 z" fill="#334155"/>
+            </marker>
+          </defs>
+          <rect x="20"  y="60" width="140" height="60" rx="8" fill="#ccfbf1" stroke="#0d9488" stroke-width="1.5"/>
+          <rect x="230" y="60" width="140" height="60" rx="8" fill="#ede9fe" stroke="#7c3aed" stroke-width="1.5"/>
+          <rect x="440" y="60" width="140" height="60" rx="8" fill="#fef3c7" stroke="#d97706" stroke-width="1.5"/>
+          <g font-family="ui-monospace, monospace" font-size="13" font-weight="600" text-anchor="middle" fill="#0f172a">
+            <text x="90"  y="95">substrate</text>
+            <text x="300" y="95">agent</text>
+            <text x="510" y="95">ui</text>
+          </g>
+          <g stroke="#334155" stroke-width="1.5" fill="none">
+            <path d="M160 90 L226 90" marker-end="url(#ar)"/>
+            <path d="M370 90 L436 90" marker-end="url(#ar)"/>
+          </g>
+        </svg>
+        <figcaption>Demonstrates the inline-SVG figure pattern: <code>role="img"</code>, paired <code>&lt;title&gt;</code> and <code>&lt;desc&gt;</code>, visible <code>&lt;figcaption&gt;</code>. Replace the geometry with your producer's diagram.</figcaption>
+      </figure>
+    </section>
+
+    <section id="sec-findings">
+      <h2>Findings <span class="em">— template uncertainty ladder</span></h2>
+      <div class="grid grid-2-eq">
+        <div class="card">
+          <h4>Known</h4>
+          <ul class="compact">
+            <li>Established by direct evidence — cite the source.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Likely</h4>
+          <ul class="compact">
+            <li>Strong indirect evidence; small reasoning gap.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Uncertain</h4>
+          <ul class="compact">
+            <li>Open question; meaningful disagreement or missing data.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h4>Speculative</h4>
+          <ul class="compact">
+            <li>Reasoning beyond available evidence; flag explicitly.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="sec-glossary">
+      <h2>Glossary <span class="em">— plain definitions</span></h2>
+      <div class="glossary">
+        <dl>
+          <dt>jargon term</dt>
+          <dd>Definition lives here in plain language. Inline hint above resolves to this entry.</dd>
+          <dt>RAG dot</dt>
+          <dd>Red / Amber / Green status marker; grey = gated.</dd>
+          <dt>layer tag</dt>
+          <dd>Color-coded chip identifying which architectural layer a row applies to (substrate · agent · UI).</dd>
+        </dl>
+      </div>
+    </section>
+
+    <div class="takeaway" role="note">
+      <p>This is the operational-slate template — substitute your producer's content into the structure above. The <em>vocabulary</em> (sticky bar, stat cards, RAG dots, layer tags, progress bars, jargon hints, glossary, takeaway) is the SSoT; <em>content</em> is per-producer.</p>
+    </div>
+
+  </main>
+
+  <footer class="meta">
+    <span>operational-slate template</span>
+    <span aria-hidden="true">·</span>
+    <span>explain html-render catalog</span>
+    <span aria-hidden="true">·</span>
+    <span>see <code>.cursor/skills/explain/reference.md#visual-styles</code></span>
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  var sections = document.querySelectorAll('main section[id]');
+  var links = document.querySelectorAll('nav.toc a[href^="#"]');
+  if (!sections.length || !links.length) return;
+  function setActive() {
+    var fromTop = window.scrollY + 120;
+    var current = null;
+    sections.forEach(function (s) { if (s.offsetTop <= fromTop) current = s.id; });
+    links.forEach(function (a) {
+      var match = current && a.getAttribute('href') === '#' + current;
+      a.parentElement.classList.toggle('active', !!match);
+    });
+  }
+  window.addEventListener('scroll', setActive, { passive: true });
+  setActive();
+})();
+</script>
+
+</body>
+</html>

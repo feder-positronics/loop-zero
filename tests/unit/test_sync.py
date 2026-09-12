@@ -105,7 +105,7 @@ def test_render_asserts_that_generated_content_cannot_add_markers(
         "_cursor_rule",
         lambda _profile: f"unmanaged\n{sync.END}\n",
     )
-    with pytest.raises(AssertionError, match="unexpected managed marker"):
+    with pytest.raises(config.ConfigError, match="unexpected managed marker"):
         sync.render(profile)
 
 
@@ -271,7 +271,7 @@ def test_interrupted_replace_leaves_partial_marker_until_recovery(
     def interrupted_rename(*args, **kwargs):
         nonlocal calls
         calls += 1
-        if calls == 3:
+        if calls == 10:
             raise OSError("simulated interruption")
         return real_rename(*args, **kwargs)
 
@@ -288,3 +288,18 @@ def test_interrupted_replace_leaves_partial_marker_until_recovery(
     sync.write(profile)
     assert not marker.exists()
     assert sync.check(profile) == []
+
+
+def test_aborted_staging_removes_new_empty_mirror_directories(
+    consumer: Path, monkeypatch
+) -> None:
+    profile = config.load_profile(consumer)
+
+    def abort_stage(_item, _parent):
+        raise RuntimeError("abort before staging")
+
+    monkeypatch.setattr(sync, "_stage", abort_stage)
+    with pytest.raises(RuntimeError, match="abort before staging"):
+        sync.write(profile)
+    for mirror in profile.skill_mirrors:
+        assert not (consumer / mirror).exists()

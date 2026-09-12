@@ -3,7 +3,7 @@ name: implement
 description: Deliver an understood bounded change with its owning behavior proof and repository-required checks.
 ---
 
-Read [the shared contract](../../CONTRACT.md), local acceptance and relevant
+Read [the shared contract]({{package.core_contract}}), local acceptance and relevant
 selected profiles. Make the smallest complete change under the repository's
 testing contract. Run the owning checks and record actual commands/results;
 broaden validation when the changed behavior or local policy warrants it.
@@ -19,7 +19,7 @@ unchanged behavior need no re-review. Substantive repairs use at most one bounde
 delta review. Return to editing without a phase lock and preserve an adoptable
 diff on timeout. Update the one PR evidence block for the exact publication head.
 Consciously curate known gaps at closeout without copying suggestions or a
-finding backlog. Finish with the [handoff](../../HANDOFF.md), then stop at READY
+finding backlog. Finish with the [handoff]({{package.core_handoff}}), then stop at READY
 unless separately authorized to merge.
 
 Apply the contract's CHECK CLASSES: only required diff-scoped deterministic

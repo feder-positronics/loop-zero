@@ -14,6 +14,31 @@ state_root = "~/.local/state/intelflo"
 contract = "loop-zero-v1"
 epoch = 1
 sandbox = "bwrap"
+skills_dir = ".cursor/skills"
+skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]
+product_name = "Example"
+commit_identity = "Example repository identity"
+
+[toolchain]
+backend_dir = "src"
+frontend_dir = "web"
+scripts_dir = "scripts"
+
+interpreter = ".venv/bin/python"
+shared_artifacts = [".venv"]
+dotenv = ".env"
+db_url_vars = ["TEST_DATABASE_URL", "DATABASE_URL"]
+db_default_url = "postgresql://localhost:5433/test_db"
+db_lock = "/tmp/intelflo-testdb-5433.lock"
+db_targets = ["test-integration"]
+trusted_bin_dir = "/usr/bin"
+closeout_launcher_path = "scripts/util/pr_closeout.py"
+closeout_snapshot_path = "vendor/loop-zero"
+closeout_temp_prefix = "example-closeout-"
+closeout_trust_floor_path = "scripts/util/pr_closeout_trust_floor.json"
+[toolchain.commands]
+worktree_setup = "python3 -m venv .venv"
+test_backend_unit = "python3 -m unittest discover -s tests"
 
 [checks]
 required = ["unit"]
@@ -29,20 +54,6 @@ constraints = "AGENTS.md"
 setup = ["python3 -m venv .venv"]
 check_fast = ["python3 -m unittest discover -s tests"]
 check_integration = "not-applicable: fixture repository, no integration behavior"
-
-[toolchain]
-interpreter = ".venv/bin/python"
-shared_artifacts = [".venv"]
-dotenv = ".env"
-db_url_vars = ["TEST_DATABASE_URL", "DATABASE_URL"]
-db_default_url = "postgresql://localhost:5433/test_db"
-db_lock = "/tmp/intelflo-testdb-5433.lock"
-db_targets = ["test-integration"]
-trusted_bin_dir = "/usr/bin"
-closeout_launcher_path = "scripts/util/pr_closeout.py"
-closeout_snapshot_path = "vendor/loop-zero"
-closeout_temp_prefix = "example-closeout-"
-closeout_trust_floor_path = "scripts/util/pr_closeout_trust_floor.json"
 
 [routing]
 policy_version = "2026-08-17-v11"

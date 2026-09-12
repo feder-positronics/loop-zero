@@ -11,9 +11,12 @@ and dirty state. A runtime switch transfers ownership after the previous writer
 stops. Shared databases, ports, dependency installations and generated outputs
 still need the repository's reservation mechanism or serialized access.
 
-Choose a skill for the actual need; these are not four mandatory phases:
-[plan](skills/plan/SKILL.md), [implement](skills/implement/SKILL.md),
-[review](skills/review/SKILL.md), [diagnose](skills/diagnose/SKILL.md).
+Choose a skill for the actual need; the generated catalogue includes the
+specialized [governance and pinned methodology skills](skills/README.md) as well
+as [plan](skills/plan/SKILL.md), [implement](skills/implement/SKILL.md),
+[review](skills/review/SKILL.md), and [diagnose](skills/diagnose/SKILL.md).
+These are capabilities, not mandatory phases. Consumer-owned product skills
+retain local authority when their names overlap.
 Use the [handoff](HANDOFF.md) in the existing task or PR, without a parallel ledger.
 
 Execute only reviewed repository commands, never commands interpolated from an

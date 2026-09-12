@@ -31,14 +31,23 @@ def git(root: Path, *args: str) -> str:
     return proc.stdout
 
 
-def minimal_workflow(revision: str = REVISION, extra: str = "") -> str:
+def minimal_workflow(
+    revision: str = REVISION, extra: str = "", *, include_identity: bool = True
+) -> str:
+    identity = (
+        '[package]\nproduct_name = "Test Consumer"\n'
+        'commit_identity = "test-only commit identity"\n\n'
+        if include_identity
+        else ""
+    )
     return (
         'profiles = ["python"]\n\n'
         "[core]\n"
         'repository = "https://github.com/feder-positronics/loop-zero"\n'
         f'revision = "{revision}"\n'
         'path = "vendor/loop-zero"\n\n'
-        "[checks]\n"
+        + identity
+        + "[checks]\n"
         'required = ["tests"]\n'
         'advisory = []\n'
         'scheduled = ["health"]\n\n'
