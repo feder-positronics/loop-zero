@@ -23,6 +23,10 @@ def test_minimal_profile_loads(consumer: Path):
     assert {"fable", "opus", "sol", "terra", "luna"} <= profile.aliases.keys()
     assert profile.toolchain["db_url_vars"] == ["TEST_DATABASE_URL", "DATABASE_URL"]
     assert profile.toolchain["db_lock"] == "/tmp/intelflo-testdb-5433.lock"
+    assert profile.toolchain["closeout_launcher_path"] == "scripts/util/pr_closeout.py"
+    assert profile.toolchain["closeout_trust_floor_path"] == (
+        "scripts/util/pr_closeout_trust_floor.json"
+    )
     assert profile.security_patterns
     assert profile.review_snapshot_namespace == "dispatch-snapshots"
     assert profile.finding_snapshot_namespace == "finding-snapshots"
@@ -90,6 +94,10 @@ def test_mechanism_configuration_is_typed_and_retained():
         Path(__file__).resolve().parents[1] / "example_consumer"
     )
     assert profile.toolchain["db_targets"] == ["test-integration"]
+    assert profile.toolchain["closeout_launcher_path"] == "scripts/util/pr_closeout.py"
+    assert profile.toolchain["closeout_trust_floor_path"] == (
+        "scripts/util/pr_closeout_trust_floor.json"
+    )
     assert profile.routing_budgets == {"medium": 5.0, "high": 10.0}
     assert profile.routing_policy_version == "2026-08-17-v11"
     assert profile.required_sections == ("code", "security")

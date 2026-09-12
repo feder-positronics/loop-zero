@@ -1,5 +1,12 @@
 #!/usr/bin/python3 -I
-"""Launch privileged closeout from a pinned, reviewed-main toolchain snapshot."""
+"""Launch privileged closeout from a pinned, reviewed-main toolchain snapshot.
+
+An IntelFlo consumer keeps a tiny ``scripts/util/pr_closeout.py`` launcher. It
+loads its :class:`~loopzero.config.Profile` and calls ``main(profile=profile,
+launcher_path=Path(__file__))``. The configured ``closeout_launcher_path`` and
+``closeout_trust_floor_path`` preserve the original locations by default while
+allowing another consumer to bind its own canonical-primary adapter paths.
+"""
 
 from __future__ import annotations
 
@@ -66,6 +73,8 @@ class CloseoutSettings:
     temp_prefix: str
     trusted_bin_dir: Path
     env_prefix: str
+    launcher_path: Path
+    trust_floor_path: PurePosixPath
 
     @classmethod
     def from_profile(cls, profile: Any) -> "CloseoutSettings":
@@ -78,6 +87,16 @@ class CloseoutSettings:
             str(profile.toolchain["closeout_temp_prefix"]),
             Path(profile.toolchain["trusted_bin_dir"]),
             str(profile.env_prefix),
+            Path(
+                profile.toolchain.get(
+                    "closeout_launcher_path", "scripts/util/pr_closeout.py"
+                )
+            ),
+            PurePosixPath(
+                profile.toolchain.get(
+                    "closeout_trust_floor_path", TRUST_FLOOR_FILE
+                )
+            ),
         )
 
     def env(self, suffix: str) -> str:
@@ -231,17 +250,31 @@ def _run_git(
     return completed
 
 
-def _canonical_primary(launcher: Path) -> Path:
+def _canonical_primary(
+    launcher: Path,
+    expected_launcher_path: Path = Path("scripts/util/pr_closeout.py"),
+) -> Path:
+    expected_relative = PurePosixPath(expected_launcher_path.as_posix())
+    if (
+        expected_relative.is_absolute()
+        or not expected_relative.parts
+        or ".." in expected_relative.parts
+    ):
+        raise BootstrapError("configured closeout launcher path is unsafe")
     if launcher.is_symlink() or not launcher.is_file():
         raise BootstrapError("trusted launcher must be one regular file")
     resolved = launcher.resolve()
     try:
-        primary = resolved.parents[2]
+        primary = resolved.parents[len(expected_relative.parts) - 1]
     except IndexError as exc:
-        raise BootstrapError("trusted launcher path is outside scripts/util") from exc
-    expected = primary / "scripts/util/pr_closeout.py"
+        raise BootstrapError(
+            "trusted launcher path is outside scripts/util or its configured root"
+        ) from exc
+    expected = primary.joinpath(*expected_relative.parts)
     if resolved != expected:
-        raise BootstrapError("trusted launcher path is outside scripts/util")
+        raise BootstrapError(
+            "trusted launcher path is outside scripts/util or its configured root"
+        )
     git_dir = primary / ".git"
     if git_dir.is_symlink() or not git_dir.is_dir():
         raise BootstrapError(
@@ -535,9 +568,16 @@ def remote_default_oid(
     return remote_default_identity(primary, binding, environment)[1]
 
 
-def _read_floor(primary: Path, revision: str) -> int:
+def _read_floor(
+    primary: Path,
+    revision: str,
+    trust_floor_path: str | PurePosixPath = TRUST_FLOOR_FILE,
+) -> int:
+    floor_path = PurePosixPath(str(trust_floor_path))
+    if floor_path.is_absolute() or not floor_path.parts or ".." in floor_path.parts:
+        raise BootstrapError("configured closeout trust-floor path is unsafe")
     try:
-        result = _run_git(primary, "show", f"{revision}:{TRUST_FLOOR_FILE}")
+        result = _run_git(primary, "show", f"{revision}:{floor_path.as_posix()}")
     except BootstrapError as exc:
         raise BootstrapError("trusted revision has no valid trust floor") from exc
     try:
@@ -556,6 +596,7 @@ def validate_rollback(
     remote_revision: str,
     *,
     rollback_reason: str,
+    trust_floor_path: str | PurePosixPath = TRUST_FLOOR_FILE,
 ) -> None:
     if not rollback_reason.strip():
         raise BootstrapError("an explicit rollback reason is required")
@@ -578,7 +619,7 @@ def validate_rollback(
         raise BootstrapError(
             "rollback revision is not on reviewed main first-parent history"
         )
-    if _read_floor(primary, revision) < TRUST_FLOOR_EPOCH:
+    if _read_floor(primary, revision, trust_floor_path) < TRUST_FLOOR_EPOCH:
         raise BootstrapError("rollback revision is below the supported trust floor")
 
 
@@ -681,6 +722,8 @@ def repair_primary(
     remote_default_ref: str,
     remote_revision: str,
     environment: dict[str, str],
+    *,
+    trust_floor_path: str | PurePosixPath = TRUST_FLOOR_FILE,
 ) -> None:
     """Re-park a clean reviewed primary through the current remote toolchain."""
 
@@ -708,6 +751,7 @@ def repair_primary(
         primary_head,
         remote_revision,
         rollback_reason="repair clean canonical primary",
+        trust_floor_path=trust_floor_path,
     )
     with tempfile.TemporaryDirectory(
         prefix="intelflo-primary-repair-", dir="/tmp", ignore_cleanup_errors=True
@@ -845,9 +889,21 @@ def inherited_lease_handoff(
     return lease.pass_fds, lease.child_env()
 
 
-def _bootstrap(argv: list[str]) -> int:
+def _bootstrap(
+    argv: list[str],
+    *,
+    launcher_path: Path = Path(__file__),
+    expected_launcher_path: Path = Path("scripts/util/pr_closeout.py"),
+    trust_floor_path: str | PurePosixPath = TRUST_FLOOR_FILE,
+    temp_prefix: str = "intelflo-closeout-",
+) -> int:
     options, forwarded = parse_launcher_arguments(argv)
-    primary = _canonical_primary(Path(__file__))
+    default_launcher = Path("scripts/util/pr_closeout.py")
+    primary = (
+        _canonical_primary(launcher_path)
+        if expected_launcher_path == default_launcher
+        else _canonical_primary(launcher_path, expected_launcher_path)
+    )
     delivery = Path.cwd().resolve()
     if not (delivery / ".git").is_file():
         raise BootstrapError(
@@ -879,6 +935,7 @@ def _bootstrap(argv: list[str]) -> int:
                 remote_default_ref,
                 remote_revision,
                 environment,
+                trust_floor_path=trust_floor_path,
             )
             print(
                 f"pr_closeout: canonical primary repaired at {remote_revision}; rerun closeout",
@@ -904,12 +961,13 @@ def _bootstrap(argv: list[str]) -> int:
             revision,
             remote_revision,
             rollback_reason=options.rollback_reason or "",
+            trust_floor_path=trust_floor_path,
         )
-    elif _read_floor(primary, revision) < TRUST_FLOOR_EPOCH:
+    elif _read_floor(primary, revision, trust_floor_path) < TRUST_FLOOR_EPOCH:
         raise BootstrapError("remote main is below the supported trust floor")
 
     with tempfile.TemporaryDirectory(
-        prefix="intelflo-closeout-", dir="/tmp", ignore_cleanup_errors=True
+        prefix=temp_prefix, dir="/tmp", ignore_cleanup_errors=True
     ) as temporary:
         temporary_root = Path(temporary)
         temporary_root.chmod(0o700)
@@ -950,7 +1008,13 @@ def _bootstrap(argv: list[str]) -> int:
         return completed.returncode
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(
+    argv: list[str] | None = None,
+    *,
+    profile: Any | None = None,
+    launcher_path: Path | None = None,
+    trust_floor_path: str | PurePosixPath | None = None,
+) -> int:
     if not sys.flags.isolated:
         print(
             "pr_closeout: invoke with `/usr/bin/python3 -I "
@@ -959,7 +1023,29 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
-        return _bootstrap(list(sys.argv[1:] if argv is None else argv))
+        settings = CloseoutSettings.from_profile(profile) if profile is not None else None
+        expected_launcher = (
+            settings.launcher_path
+            if settings is not None
+            else Path("scripts/util/pr_closeout.py")
+        )
+        actual_launcher = launcher_path or (
+            Path(profile.root).resolve() / expected_launcher
+            if profile is not None
+            else Path(__file__)
+        )
+        configured_floor = trust_floor_path or (
+            settings.trust_floor_path if settings is not None else TRUST_FLOOR_FILE
+        )
+        return _bootstrap(
+            list(sys.argv[1:] if argv is None else argv),
+            launcher_path=Path(actual_launcher),
+            expected_launcher_path=expected_launcher,
+            trust_floor_path=configured_floor,
+            temp_prefix=(
+                settings.temp_prefix if settings is not None else "intelflo-closeout-"
+            ),
+        )
     except (BootstrapError, OSError, subprocess.SubprocessError) as exc:
         print(f"pr_closeout: {exc}", file=sys.stderr)
         return 2

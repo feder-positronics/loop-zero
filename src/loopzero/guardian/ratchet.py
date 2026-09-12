@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import subprocess
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -18,6 +20,39 @@ class ClaimChecker(Protocol):
 
 
 STATUSES = ("VERIFIED", "KNOWN-GAP", "VIOLATED", "FIXED?!", "UNSUPPORTED")
+
+
+@dataclass(frozen=True)
+class RatchetComposition:
+    """Consumer-bound dependencies for the IntelFlo-compatible wrapper."""
+
+    root: Path
+    checker: ClaimChecker
+    run: Callable[..., object]
+    claim_group: str = "quality"
+
+
+_COMPOSITION: ContextVar[RatchetComposition | None] = ContextVar(
+    "guardian_ratchet_composition", default=None
+)
+
+
+def configure(
+    profile: Any,
+    *,
+    checker: ClaimChecker,
+    run: Callable[..., object],
+    claim_group: str = "quality",
+) -> None:
+    """Bind the consumer profile and its sandboxed metric runner."""
+    root = Path(profile.root).resolve()
+    if Path(checker.root).resolve() != root:
+        raise ValueError("Guardian checker root must match the configured profile")
+    if not callable(run):
+        raise TypeError("Guardian metric runner must be callable")
+    if not isinstance(claim_group, str) or not claim_group.strip():
+        raise ValueError("Guardian claim group must be non-empty")
+    _COMPOSITION.set(RatchetComposition(root, checker, run, claim_group.strip()))
 
 
 def _policy_error(claim: Mapping[str, Any]) -> str | None:
@@ -85,7 +120,7 @@ def _metric_status(
     return "VIOLATED", f"metric {value:.3f} exceeds threshold {threshold:.3f}", value
 
 
-def evaluate(
+def evaluate_claims(
     manifest_path: Path,
     *,
     claim_group: str,
@@ -149,10 +184,31 @@ def evaluate(
     return grouped
 
 
+def evaluate(manifest_path: Path) -> dict[str, list[dict[str, Any]]]:
+    """Evaluate IntelFlo's quality group through configured trusted seams."""
+    composition = _COMPOSITION.get()
+    if composition is None:
+        raise RuntimeError("Guardian ratchet is not configured")
+    return evaluate_claims(
+        manifest_path,
+        claim_group=composition.claim_group,
+        checker=composition.checker,
+        run=composition.run,
+    )
+
+
 def select_ticket(grouped: Mapping[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
     """Return the first violated claim, preserving manifest priority."""
     violated = grouped.get("VIOLATED", [])
     return min(violated, key=lambda item: int(item["priority"])) if violated else None
 
 
-__all__ = ["ClaimChecker", "STATUSES", "evaluate", "select_ticket"]
+__all__ = [
+    "ClaimChecker",
+    "RatchetComposition",
+    "STATUSES",
+    "configure",
+    "evaluate",
+    "evaluate_claims",
+    "select_ticket",
+]

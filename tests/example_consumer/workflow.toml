@@ -39,8 +39,10 @@ db_default_url = "postgresql://localhost:5433/test_db"
 db_lock = "/tmp/intelflo-testdb-5433.lock"
 db_targets = ["test-integration"]
 trusted_bin_dir = "/usr/bin"
+closeout_launcher_path = "scripts/util/pr_closeout.py"
 closeout_snapshot_path = "vendor/loop-zero"
 closeout_temp_prefix = "example-closeout-"
+closeout_trust_floor_path = "scripts/util/pr_closeout_trust_floor.json"
 
 [routing]
 policy_version = "2026-08-17-v11"

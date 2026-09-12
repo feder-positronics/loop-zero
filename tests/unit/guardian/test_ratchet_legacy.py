@@ -35,7 +35,9 @@ VALID = """
 
 
 def evaluate(path: Path, run=None):
-    return ratchet.evaluate(path, claim_group="quality", checker=Checker(), run=run)
+    return ratchet.evaluate_claims(
+        path, claim_group="quality", checker=Checker(), run=run
+    )
 
 
 def test_missing_repair_authority_is_broken_before_measurement(tmp_path: Path):

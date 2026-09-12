@@ -53,8 +53,10 @@ TOOLCHAIN_KEYS = frozenset(
         "continuation_runner",
         "formatter_modules",
         "trusted_bin_dir",
+        "closeout_launcher_path",
         "closeout_snapshot_path",
         "closeout_temp_prefix",
+        "closeout_trust_floor_path",
     }
 )
 ROUTING_KEYS = frozenset(
@@ -475,7 +477,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         toolchain = {}
     _unknown_fields(toolchain, TOOLCHAIN_KEYS, "[toolchain]", problems)
     for key in ("interpreter", "dotenv", "dispatcher", "host_dispatcher", "continuation_runner",
-                "closeout_snapshot_path"):
+                "closeout_launcher_path", "closeout_snapshot_path",
+                "closeout_trust_floor_path"):
         if key in toolchain:
             _relative_path(toolchain, key, "unused", "[toolchain]", problems)
     if "db_default_url" in toolchain:
@@ -902,8 +905,10 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             "continuation_runner": "scripts/util/delivery_continuation_worker.py",
             "formatter_modules": ["nextjs-frontend/node_modules"],
             "trusted_bin_dir": "/usr/bin",
+            "closeout_launcher_path": "scripts/util/pr_closeout.py",
             "closeout_snapshot_path": "scripts/util",
             "closeout_temp_prefix": "intelflo-closeout-",
+            "closeout_trust_floor_path": "scripts/util/pr_closeout_trust_floor.json",
             **toolchain,
         },
         aliases=aliases,
