@@ -3,7 +3,10 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
+import subprocess
 import sys
+import textwrap
 from pathlib import Path
 from types import ModuleType
 
@@ -496,3 +499,172 @@ def require_visible_root_ownership(request):
     }
     if request.node.originalname in archive_tests and Path("/tmp").stat().st_uid not in {0, os.getuid()}:
         pytest.skip("archive ownership checks require visible root UID; sandbox maps /tmp owner to nobody")
+
+
+# Anchored archive directory trust ---------------------------------------------
+
+
+def _open_and_close(path: Path) -> None:
+    descriptor = module._open_anchored_directory(path)
+    os.close(descriptor)
+
+
+def _fake_owner(monkeypatch, target: Path, owner: int) -> None:
+    """Report ``owner`` for ``target`` from ``os.fstat`` without chown rights."""
+    real_fstat = os.fstat
+    identity = (target.stat().st_dev, target.stat().st_ino)
+
+    def fstat(descriptor):
+        result = real_fstat(descriptor)
+        if (result.st_dev, result.st_ino) != identity:
+            return result
+        values = list(result)
+        values[stat.ST_UID] = owner
+        return os.stat_result(values)
+
+    monkeypatch.setattr(module.os, "fstat", fstat)
+
+
+def test_anchored_directory_documents_the_accepted_owner_set() -> None:
+    """Directory owners accepted on the walk from ``/`` to the archive.
+
+    ``0`` covers system-owned ancestors (``/home``, ``/srv``), the process uid
+    covers caller-owned state, and the owner of ``/`` covers rootless user
+    namespaces (``bwrap --unshare-user``), where an unmapped system owner is
+    rendered as the overflow uid on ``/`` and on every system-owned ancestor
+    alike.  Nothing else is trusted, and the segment file itself must still
+    belong to the process uid.
+    """
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    assert 'opened.st_uid not in {0, os.getuid(), os.stat("/").st_uid}' in source
+    assert "opened.st_uid != os.getuid()" in source  # archive segment owner
+
+
+@pytest.mark.parametrize("trusted_owner", ("root", "process", "mount-root"))
+def test_anchored_directory_accepts_each_trusted_owner(
+    tmp_path: Path, monkeypatch, trusted_owner: str
+) -> None:
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    segments.chmod(0o755)  # host umask must not add group write
+    owner = {
+        "root": 0,
+        "process": os.getuid(),
+        "mount-root": os.stat("/").st_uid,
+    }[trusted_owner]
+    _fake_owner(monkeypatch, segments, owner)
+    _open_and_close(segments)
+
+
+def test_anchored_directory_rejects_foreign_owned_descendant(
+    tmp_path: Path, monkeypatch
+) -> None:
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    segments.chmod(0o755)
+    foreign = max(os.getuid(), os.stat("/").st_uid) + 4242
+    assert foreign not in {0, os.getuid(), os.stat("/").st_uid}
+    _fake_owner(monkeypatch, segments, foreign)
+    with pytest.raises(module.DispatchLedgerError, match="archive directory is unsafe"):
+        _open_and_close(segments)
+
+
+def test_anchored_directory_rejects_world_writable_descendant(tmp_path: Path) -> None:
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    nested = segments / "nested"
+    nested.mkdir()
+    segments.chmod(0o777)
+    try:
+        with pytest.raises(module.DispatchLedgerError, match="archive directory is unsafe"):
+            _open_and_close(nested)
+        # Sticky world-writable directories (``/tmp`` shape) remain acceptable.
+        segments.chmod(0o1777)
+        _open_and_close(nested)
+    finally:
+        segments.chmod(0o700)
+
+
+def test_anchored_directory_rejects_group_writable_foreign_descendant(
+    tmp_path: Path, monkeypatch
+) -> None:
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    segments.chmod(0o770)
+    try:
+        # Group write is tolerated only on a caller-owned directory.
+        _open_and_close(segments)
+        _fake_owner(monkeypatch, segments, 0)
+        with pytest.raises(module.DispatchLedgerError, match="archive directory is unsafe"):
+            _open_and_close(segments)
+    finally:
+        segments.chmod(0o700)
+
+
+def _bwrap_userns_available() -> bool:
+    if shutil.which("bwrap") is None:
+        return False
+    probe = subprocess.run(
+        ["bwrap", "--unshare-user", "--ro-bind", "/", "/", "--dev", "/dev",
+         "--proc", "/proc", "--", "/bin/true"],
+        capture_output=True,
+    )
+    return probe.returncode == 0
+
+
+def test_anchored_directory_opens_inside_rootless_user_namespace(tmp_path: Path) -> None:
+    """The mount-root owner is what makes archives reachable under ``--unshare-user``.
+
+    Inside the namespace ``/`` and every system-owned ancestor of the archive
+    report the overflow uid rather than ``0``; the widened owner set accepts
+    them while the caller-owned tail still has to belong to the process uid.
+    """
+    if not _bwrap_userns_available():
+        pytest.skip("bubblewrap user namespaces are unavailable here")
+    segments = tmp_path / "segments"
+    segments.mkdir()
+    script = textwrap.dedent(
+        """
+        import json, os, sys
+        from pathlib import Path
+        from loopzero.kernel import ledger
+        target = Path(sys.argv[1])
+        ancestors = [Path(*target.parts[: index + 1]) for index in range(1, len(target.parts))]
+        report = {
+            "uid": os.getuid(),
+            "root_owner": os.stat("/").st_uid,
+            "ancestor_owners": [path.stat().st_uid for path in ancestors],
+        }
+        try:
+            os.close(ledger._open_anchored_directory(target))
+            report["opened"] = True
+        except ledger.DispatchLedgerError as exc:
+            report["opened"] = False
+            report["error"] = str(exc)
+        print(json.dumps(report))
+        """
+    )
+    source_root = Path(module.__file__).resolve().parents[2]
+    proc = subprocess.run(
+        [
+            "bwrap", "--unshare-user", "--ro-bind", "/", "/",
+            "--bind", str(tmp_path), str(tmp_path),
+            "--dev", "/dev", "--proc", "/proc", "--clearenv",
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "--setenv", "PYTHONPATH", str(source_root),
+            "--setenv", "PYTHONDONTWRITEBYTECODE", "1",
+            "--setenv", "LOOPZERO_ENV_PREFIX", os.environ.get("LOOPZERO_ENV_PREFIX", "LOOPZERO"),
+            "--chdir", str(tmp_path),
+            "--", sys.executable, "-c", script, str(segments),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    report = json.loads(proc.stdout)
+    assert report["uid"] == os.getuid()
+    if report["root_owner"] == os.getuid() or report["root_owner"] not in report["ancestor_owners"]:
+        pytest.skip("no ancestor is rendered with the mount-root owner in this namespace")
+    assert report["root_owner"] != 0
+    assert report["ancestor_owners"][-1] == os.getuid()
+    assert report["opened"] is True, report
