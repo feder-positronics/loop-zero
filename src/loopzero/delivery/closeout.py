@@ -84,13 +84,6 @@ class CloseoutSettings:
         return f"{self.env_prefix}_{suffix}"
 
 
-@dataclass(frozen=True)
-class CloseoutSnapshot:
-    checkout: Path
-    toolchain: Path
-    revision: str
-
-
 def isolated_environment(
     source: dict[str, str] | Any,
     profile_source: dict[str, str] | None = None,
@@ -680,50 +673,6 @@ def materialize_toolchain(primary: Path, revision: str, destination: Path) -> st
         shutil.rmtree(destination, ignore_errors=True)
         raise
     return tree_oid
-
-
-def materialize_snapshot(profile: Any, *, revision: str) -> CloseoutSnapshot:
-    """Compatibility entry point backed by the configured reviewed checkout."""
-
-    if OID_RE.fullmatch(revision) is None:
-        raise BootstrapError("trusted revision must be 40 lowercase hex")
-    settings = CloseoutSettings.from_profile(profile)
-    checkout = Path(tempfile.mkdtemp(prefix=settings.temp_prefix))
-    completed = subprocess.run(
-        [TRUSTED_GIT, "-C", str(Path(profile.root).resolve()), "worktree", "add", "--detach", str(checkout), revision],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=isolated_environment(dict(os.environ)),
-    )
-    if completed.returncode:
-        shutil.rmtree(checkout, ignore_errors=True)
-        raise BootstrapError("trusted closeout snapshot could not be materialized")
-    toolchain = checkout / settings.snapshot_path
-    if toolchain.is_symlink() or not toolchain.is_dir():
-        snapshot = CloseoutSnapshot(checkout, toolchain, revision)
-        cleanup_snapshot(profile, snapshot)
-        raise BootstrapError("configured closeout snapshot path is unavailable")
-    return CloseoutSnapshot(checkout, toolchain, revision)
-
-
-def cleanup_snapshot(profile: Any, snapshot: CloseoutSnapshot) -> None:
-    subprocess.run(
-        [
-            TRUSTED_GIT,
-            "-C",
-            str(Path(profile.root).resolve()),
-            "worktree",
-            "remove",
-            "--force",
-            str(snapshot.checkout),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=isolated_environment(dict(os.environ)),
-    )
-    shutil.rmtree(snapshot.checkout, ignore_errors=True)
 
 
 def repair_primary(

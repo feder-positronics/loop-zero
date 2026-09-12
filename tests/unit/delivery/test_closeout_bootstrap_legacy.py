@@ -379,6 +379,16 @@ def test_repository_binding_rejects_configured_url_rewrite(tmp_path: Path) -> No
         module.read_repository_binding(primary, module.isolated_environment(os.environ))
 
 
+def test_repository_binding_rejects_hostile_checkout_filter(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    _init_repo(primary)
+    _git(primary, "remote", "add", "origin", "https://github.com/example/repo.git")
+    _git(primary, "config", "filter.hostile.smudge", "/tmp/hostile-checkout-filter")
+
+    with pytest.raises(module.BootstrapError, match="execution or redirection"):
+        module.read_repository_binding(primary, module.isolated_environment(os.environ))
+
+
 def test_repository_binding_rejects_core_worktree_redirection(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     redirected = tmp_path / "redirected"
@@ -624,6 +634,28 @@ def test_rollback_rejects_second_parent_commit_not_on_reviewed_main_history(
             candidate_revision,
             remote_revision,
             rollback_reason="test rollback",
+        )
+
+
+def test_rollback_rejects_unreviewed_local_commit(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    _init_repo(primary)
+    util = primary / "scripts/util"
+    util.mkdir(parents=True)
+    (util / "pr_closeout_impl.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    (util / "pr_closeout_trust_floor.json").write_text(
+        json.dumps({"epoch": 1}) + "\n", encoding="utf-8"
+    )
+    remote_revision = _commit_all(primary, "reviewed remote main")
+    (primary / "local-only.txt").write_text("unreviewed\n", encoding="utf-8")
+    local_revision = _commit_all(primary, "unreviewed local commit")
+
+    with pytest.raises(module.BootstrapError, match="not an ancestor"):
+        module.validate_rollback(
+            primary,
+            local_revision,
+            remote_revision,
+            rollback_reason="attempt local closeout",
         )
 
 
