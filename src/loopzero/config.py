@@ -40,6 +40,76 @@ _BASE_REF_RE = re.compile(
     r"^refs/(?:heads/[A-Za-z0-9][A-Za-z0-9._/-]*|"
     r"remotes/[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._/-]*)$"
 )
+_SKILL_ROUTE_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+SKILL_ROUTE_KEYS = {
+    "audit_surface",
+    "design_handoff",
+    "design_mockup",
+    "execute_blueprint",
+    "fix_ui_bug",
+    "fortify_roadmap",
+    "frontier_roadmap",
+    "generate_parser_rules",
+    "implement_backend",
+    "implement_frontend",
+}
+SKILL_TOKEN_KEYS = {
+    "base_branch",
+    "coherence_owner",
+    "commit_backend_hook_behavior",
+    "commit_dependency_preflight",
+    "commit_hook_chain",
+    "commit_mirror_paths",
+    "debug_environment",
+    "doctrine_d2",
+    "doctrine_d14",
+    "doctrine_d16",
+    "doctrine_d18",
+    "doctrine_d21",
+    "legacy_delivery_contract",
+}
+SKILL_COMMAND_KEYS = {
+    "audit_graph",
+    "audit_graph_backend",
+    "audit_graph_frontend",
+    "audit_python_coverage",
+    "audit_python_dead_code",
+    "backlog",
+    "backlog_delegation",
+    "check_skills",
+    "ci_mirror_check",
+    "claims_check",
+    "db_test_start",
+    "delivery_status",
+    "docs_archive_candidates",
+    "docs_audit",
+    "docs_verify",
+    "gates_verify",
+    "health",
+    "health_backend",
+    "health_frontend",
+    "infra_start",
+    "learnings_status",
+    "metabolism_status",
+    "meters_snapshot",
+    "openapi_export",
+    "openapi_generate",
+    "orient",
+    "phase_stats",
+    "product_pulse",
+    "reentry",
+    "reentry_coverage",
+    "reflection_digest",
+    "skill_stats",
+    "test_agent_tooling",
+    "test_backend",
+    "test_backend_precommit",
+    "test_backend_slow",
+    "test_backend_unit",
+    "weekly_issue",
+    "worktree_claims",
+    "worktree_setup",
+}
 
 
 class ConfigError(ValueError):
@@ -154,6 +224,26 @@ def _reject_unsafe_rendered_string(value: Any, where: str, problems: list[str]) 
     return valid
 
 
+def _reject_unsafe_skill_token(value: Any, where: str, problems: list[str]) -> bool:
+    """Validate explicit prose tokens while permitting intentional newlines."""
+    if not isinstance(value, str):
+        return False
+    valid = True
+    if any(
+        unicodedata.category(character) == "Cc" and character != "\n"
+        for character in value
+    ):
+        problems.append(f"{where}: control characters other than newline are forbidden")
+        valid = False
+    if any(marker in value for marker in MANAGED_MARKER_TOKENS):
+        problems.append(f"{where}: managed-block marker text is forbidden")
+        valid = False
+    if "{{" in value or "}}" in value:
+        problems.append(f"{where}: nested skill template tokens are forbidden")
+        valid = False
+    return valid
+
+
 def _repository_relative_path(
     value: Any, where: str, problems: list[str]
 ) -> Path | None:
@@ -263,9 +353,9 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     env_prefix = package.get("env_prefix", "LOOPZERO")
     if not isinstance(env_prefix, str) or not _PREFIX_RE.match(env_prefix):
         problems.append("[package].env_prefix: must match [A-Z][A-Z0-9_]*")
-    audit_root = package.get("audit_root", ".audit")
-    if not isinstance(audit_root, str) or Path(audit_root).is_absolute():
-        problems.append("[package].audit_root: must be a relative path")
+    audit_root = _repository_relative_path(
+        package.get("audit_root", ".audit"), "[package].audit_root", problems
+    )
     state_root_explicit = "state_root" in package
     state_root = package.get("state_root", "~/.local/state/loopzero")
     if not isinstance(state_root, str) or not state_root:
@@ -325,6 +415,32 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             else:
                 _reject_unsafe_rendered_string(value, f"[package].{key}", problems)
 
+    skill_tokens = data.get("skill_tokens", {})
+    if not isinstance(skill_tokens, dict):
+        problems.append("[skill_tokens]: must be a table")
+        skill_tokens = {}
+    else:
+        for name, value in skill_tokens.items():
+            where = f"[skill_tokens].{name}"
+            if name not in SKILL_TOKEN_KEYS:
+                problems.append(f"{where}: unknown token")
+            if not isinstance(value, str) or not value:
+                problems.append(f"{where}: must be a nonempty string")
+            else:
+                _reject_unsafe_skill_token(value, where, problems)
+
+    skill_routes = data.get("skill_routes", {})
+    if not isinstance(skill_routes, dict):
+        problems.append("[skill_routes]: must be a table")
+        skill_routes = {}
+    else:
+        for name, value in skill_routes.items():
+            where = f"[skill_routes].{name}"
+            if name not in SKILL_ROUTE_KEYS:
+                problems.append(f"{where}: unknown product-skill route")
+            if not isinstance(value, str) or not _SKILL_ROUTE_RE.fullmatch(value):
+                problems.append(f"{where}: must be a canonical skill directory name")
+
     toolchain = data.get("toolchain", {})
     if not isinstance(toolchain, dict):
         problems.append("[toolchain]: must be a table")
@@ -359,6 +475,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 problems.append(f"{where}: must be a nonempty string")
             else:
                 _reject_unsafe_rendered_string(value, where, problems)
+            if name not in SKILL_COMMAND_KEYS:
+                problems.append(f"{where}: unknown skill command token")
 
     routing = data.get("routing", {})
     aliases: dict[str, Alias] = {}
@@ -474,7 +592,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         profiles=tuple(profiles),
         checks=checks,
         env_prefix=env_prefix,
-        audit_root=Path(audit_root),
+        audit_root=audit_root or Path(".audit"),
         state_root=state_root,
         state_root_explicit=state_root_explicit,
         contract=contract,

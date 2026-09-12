@@ -37,8 +37,8 @@ stale selection, overlapping delivery, or excess owner-attention debt.
   [model-routing rule]({{package.rules_root}}/model-routing.mdc), review, PR, merge,
   closeout, run log, and re-entry capsule.
 - Apply [owner doctrine]({{package.docs_root}}/design/owner-doctrine.md): evidence
-  precedes cuts (D-2), at most about five owner decisions may wait (D-14), and
-  bounded reversible decisions use earned D-18 authority. Never implement a
+  precedes cuts ({{skill_tokens.doctrine_d2}}), at most about five owner decisions may wait ({{skill_tokens.doctrine_d14}}), and
+  bounded reversible decisions use earned {{skill_tokens.doctrine_d18}} authority. Never implement a
   cut or Reserved choice autonomously.
 
 Invoking the default campaign authorizes delivery and creation of a concrete,
@@ -70,7 +70,7 @@ generated work:
    [`coherence-audit`](../coherence-audit/SKILL.md) wire-list, never its cut-list;
 6. rotated [`audit-health`](../audit-health/SKILL.md) or
    [`code-quality-drift`](../code-quality-drift/SKILL.md) evidence;
-7. one bounded coherence discovery refill only when 1–6 are empty and D-14 has
+7. one bounded coherence discovery refill only when 1–6 are empty and {{skill_tokens.doctrine_d14}} has
    capacity, then restart at 1.
 
 Select by user value, dependency order, readiness, risk, and the smallest

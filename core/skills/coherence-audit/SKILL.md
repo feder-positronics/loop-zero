@@ -5,7 +5,7 @@ description: >-
   value-to-weight, completeness, and API-contract coherence. Produce a ranked
   wire-list and evidence-backed cut-list. Use dossier mode to assess one named
   capability in plain language for a non-technical reader. For a committable
-  hardening roadmap use `fortify-roadmap`.
+  hardening roadmap use `{{skill_routes.fortify_roadmap.name}}`.
 ---
 
 # Coherence Audit
@@ -22,7 +22,7 @@ runs inherit the orchestrator worktree under the [parallel-agent rule]. Use the
 Run `{{toolchain.commands.orient}}`; read [Vision], [atlas], [users/jobs], [owner doctrine],
 [graveyard], [open questions], [owner inbox], [claims], [scenarios], and the
 [component catalog]. Run `{{toolchain.commands.product_pulse}}` for usage evidence.
-Respect D-14 in [owner doctrine] before producing owner decisions. Inspect
+Respect {{skill_tokens.doctrine_d14}} in [owner doctrine] before producing owner decisions. Inspect
 actual UI/API/runtime paths when a claim depends on them.
 
 ## Lenses
@@ -63,14 +63,14 @@ Produce:
 4. a separate **cut-list** with usage/scenario evidence and uncertainty;
 5. open questions with deciding triggers and evidence.
 
-Wire-list items can become issues autonomously inside D-18 authority. Cut-list
-items are proposals only: D-2 reserves final user-facing cuts for Marcin. High-
+Wire-list items can become issues autonomously inside {{skill_tokens.doctrine_d18}} authority. Cut-list
+items are proposals only: {{skill_tokens.doctrine_d2}} reserves final user-facing cuts for {{skill_tokens.coherence_owner}}. High-
 weight structural calls use propose-and-challenge and route through
 [resolve-findings].
 
 Persist the report and all questions/decisions; nothing strategic remains only
 in chat. Follow the [producer boundary] and route campaign-relevant lenses to
-the owning tracker for evaluation inside its `audit-surface` pass. Do not
+the owning tracker for evaluation inside its `{{skill_routes.audit_surface.name}}` pass. Do not
 implement proposals inside the audit.
 
 [parallel-agent rule]: {{package.rules_root}}/parallel-agents.mdc
@@ -97,7 +97,7 @@ implement proposals inside the audit.
 - [ ] Producer→consumer, missed-composition, pattern/nav/grammar, placeholder,
   orphan, and half-wired evidence was considered where relevant.
 - [ ] Every recommendation traces to a user job, evidence, and inspected path.
-- [ ] Wire/cut lists are separately ranked, persisted, and routed under D-2.
+- [ ] Wire/cut lists are separately ranked, persisted, and routed under {{skill_tokens.doctrine_d2}}.
 - [ ] No speculative frontier generation or implementation was mixed in.
 - [ ] When dossier mode applies, it states mechanism, evidence tier, scale, and
   verdict in language its non-technical reader can act on.

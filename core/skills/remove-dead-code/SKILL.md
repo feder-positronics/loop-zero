@@ -43,7 +43,7 @@ The order is load-bearing:
 
 ## Evidence and Authority
 
-- Cite the inspected `origin/main` SHA and evidence for every removal; local
+- Cite the inspected `{{skill_tokens.base_branch}}` SHA and evidence for every removal; local
   uncommitted work is context, not proof of merged-state reachability.
 - Record confirmed removals, rollbacks, preserved candidates, validation, and
   remaining limits in the report.

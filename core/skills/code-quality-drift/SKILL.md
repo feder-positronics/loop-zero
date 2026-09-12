@@ -48,7 +48,7 @@ file/symbol evidence and concrete impact.
 
 Follow the [producer boundary]. When a drift lens belongs in a recursive
 campaign, route the lens and its evidence to that campaign tracker; the owning
-`audit-surface` pass evaluates it as a section of its single inspection pass.
+`{{skill_routes.audit_surface.name}}` pass evaluates it as a section of its single inspection pass.
 
 ## Output
 

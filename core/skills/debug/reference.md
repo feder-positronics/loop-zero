@@ -26,19 +26,7 @@ persisting or quoting evidence.
 
 ## Backend and Frontend Paths
 
-- Backend API, SQLAlchemy, and error handling:
-  [backend patterns]({{package.docs_root}}/guides/backend/backend-patterns.md).
-- Backend tests and the port-5433 recovery:
-  [backend testing]({{package.docs_root}}/guides/backend/backend-testing.md).
-- UI state/network triage and isolated-stack evidence:
-  [UI debugging]({{package.docs_root}}/guides/frontend/bug-hunting-debug.md).
-- Collaborative T3 inspection and bounded recovery:
-  [T3 preview readiness and browser authority]({{package.docs_root}}/guides/frontend/frontend-testing-e2e.md#preview-readiness-and-bounded-recovery).
-- Frontend tests:
-  [frontend testing]({{package.docs_root}}/guides/frontend/frontend-testing.md).
-- Production frontend and Vercel inspection:
-  [production frontend]({{package.docs_root}}/ops/runbooks/production-frontend-debugging.md)
-  and [Vercel CLI]({{package.docs_root}}/ops/runbooks/vercel-cli-guide.md).
+{{skill_tokens.debug_environment}}
 
 Do not suppress async teardown warnings. Verify cleanup order across sessions,
 connections, engines, clients, and transports; classify the actual owner before

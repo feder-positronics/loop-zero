@@ -59,7 +59,7 @@ never the acceptance oracle.
 
 ## Triggered Delivery Retrospective
 
-Use this mode to learn across completed `work-issue` and `execute-blueprint`
+Use this mode to learn across completed `work-issue` and `{{skill_routes.execute_blueprint.name}}`
 runs without adding work to PR closeout; closeout's existing run row, phase
 events, CI/review evidence, and re-entry capsule are the evidence packet.
 

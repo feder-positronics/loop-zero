@@ -67,6 +67,6 @@ cognitive load and keeping claims traceable to evidence.
 ## Routes
 
 - Use [`review`](../review/SKILL.md) for critique, [`backlog`](../backlog/SKILL.md)
-  for a live backlog view, [`design-mockup`](../design-mockup/SKILL.md) for UI
+  for a live backlog view, {{skill_routes.design_mockup.link}} for UI
   exploration, and [`write-design-doc`](../write-design-doc/SKILL.md) when the
   explanation becomes a durable design contract.

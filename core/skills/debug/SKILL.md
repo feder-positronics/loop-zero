@@ -42,11 +42,11 @@ fix contract. Keep diagnosis separate from implementation.
   learnings without the authority required for that action. Prefer synthetic or
   local evidence; a production-derived experiment must be explicitly in scope
   and use its named cleanup/recovery contract.
-- Route a proven UI defect to [`fix-ui-bug`](../fix-ui-bug/SKILL.md), a failure
+- Route a proven UI defect to {{skill_routes.fix_ui_bug.link}}, a failure
   whose remaining work is test repair to
   [`fix-failing-tests`](../fix-failing-tests/SKILL.md), backend/frontend changes
-  to [`implement-backend`](../implement-backend/SKILL.md) or
-  [`implement-frontend`](../implement-frontend/SKILL.md), competing responses to
+  to {{skill_routes.implement_backend.link}} or
+  {{skill_routes.implement_frontend.link}}, competing responses to
   [`resolve-findings`](../resolve-findings/SKILL.md), and diff assessment to
   [`code-review`](../code-review/SKILL.md).
 

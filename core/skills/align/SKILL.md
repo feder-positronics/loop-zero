@@ -28,7 +28,7 @@ Before asking:
    Weekly Issue direction item (`{{toolchain.commands.weekly_issue}}`), never as a mid-task
    blocking question: take the safest dossier-consistent assumption, log it,
    and proceed. Doctrine reserves are unchanged and still escalate.
-4. Apply D-18: if the choice is reversible and inside earned category
+4. Apply {{skill_tokens.doctrine_d18}}: if the choice is reversible and inside earned category
    authority, decide it and state the assumption. When material, pass the
    Assumed decision to the executing or record-producing skill for the
    [canonical Decision Record]({{package.docs_root}}/guides/reference/reference-review-findings-format.md#decision-record-schema).

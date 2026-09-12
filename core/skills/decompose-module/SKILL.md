@@ -21,7 +21,7 @@ keeps public behavior, transactions, and imports stable. Size is only a lead.
   and the standalone/nested [Review Gate]({{package.rules_root}}/review-gate.mdc).
 - Route dead candidates to [`remove-dead-code`](../remove-dead-code/SKILL.md),
   behavior-neutral local cleanup to [`refine-code`](../refine-code/SKILL.md),
-  and feature behavior to [`implement-backend`](../implement-backend/SKILL.md).
+  and feature behavior to {{skill_routes.implement_backend.link}}.
 
 ## Evidence and Method
 
@@ -40,7 +40,7 @@ keeps public behavior, transactions, and imports stable. Size is only a lead.
   the old path immediately. Do not add indefinite shims, a new class hierarchy,
   behavior change, or opportunistic cleanup to make the split appear successful.
 - Record reversible boundary choices under
-  [D-18]({{package.docs_root}}/design/owner-doctrine.md).
+  [{{skill_tokens.doctrine_d18}}]({{package.docs_root}}/design/owner-doctrine.md).
   Stop for owner direction before a Reserved architecture or public-contract
   change.
 

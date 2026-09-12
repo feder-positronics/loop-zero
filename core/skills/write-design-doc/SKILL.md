@@ -71,7 +71,7 @@ the bounded [Executable Spike Track].
 Use the
 [canonical Decision Record contract]({{package.docs_root}}/guides/reference/reference-review-findings-format.md#decision-record-schema).
 It owns Locked / Assumed / Deferred, stable `id` values,
-`<!-- decision id=... status=... -->` anchors, D-18 calibration, scheduled
+`<!-- decision id=... status=... -->` anchors, {{skill_tokens.doctrine_d18}} calibration, scheduled
 reviews, durable routing, and telemetry. Emit `agent_event.py decision` for each
 new material call; an un-routed Decision Record is lost. High-weight,
 low-confidence, doctrine-conflicted, or plausible-alternative autonomous calls
@@ -106,7 +106,7 @@ subjects are part of the guide.
 
 ## Related
 
-- `grill-me` · `review-design-doc` · `refine-design-doc` · `design-handoff`
+- `grill-me` · `review-design-doc` · `refine-design-doc` · `{{skill_routes.design_handoff.name}}`
 
 [Vision glossary]: {{package.docs_root}}/design/vision.md#glossary
 [Executable Spike Track]: {{package.docs_root}}/guides/reference/design-doc-reference.md#executable-spike-track

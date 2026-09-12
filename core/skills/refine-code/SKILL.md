@@ -23,9 +23,9 @@ preserving its observable contract.
   [`remove-dead-code`](../remove-dead-code/SKILL.md), a stable module split to
   [`decompose-module`](../decompose-module/SKILL.md), a broad structural redesign
   to [`write-design-doc`](../write-design-doc/SKILL.md), and new behavior or a
-  known-cause backend defect to [`implement-backend`](../implement-backend/SKILL.md) or
-  [`implement-frontend`](../implement-frontend/SKILL.md), a concrete UI defect to
-  [`fix-ui-bug`](../fix-ui-bug/SKILL.md), an unclear failure to
+  known-cause backend defect to {{skill_routes.implement_backend.link}} or
+  {{skill_routes.implement_frontend.link}}, a concrete UI defect to
+  {{skill_routes.fix_ui_bug.link}}, an unclear failure to
   [`debug`](../debug/SKILL.md), and review-only work to
   [`code-review`](../code-review/SKILL.md).
 

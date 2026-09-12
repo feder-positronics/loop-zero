@@ -59,7 +59,7 @@ weak signals into unsupported work.
   freshness, infrastructure, limits, blockers first, and a PR-sized queue with
   severity, evidence, confidence, affected behavior, and owner skill.
 - Follow the [producer boundary]. Campaign-relevant health lenses route to the
-  owning tracker for the single `audit-surface` pass.
+  owning tracker for the single `{{skill_routes.audit_surface.name}}` pass.
 
 ## Done When
 

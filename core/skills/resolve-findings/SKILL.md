@@ -9,7 +9,7 @@ description: >-
 # Resolve Findings
 
 Resolve each finding at the lowest interruption cost consistent with sound
-judgment and D-18 authority.
+judgment and {{skill_tokens.doctrine_d18}} authority.
 
 ## Inputs And Grounding
 
@@ -17,7 +17,7 @@ Read the source finding, affected artifact/code, acceptance intent,
 [owner doctrine]({{package.docs_root}}/design/owner-doctrine.md), and matching
 [open-question]({{package.docs_root}}/design/open-questions.md) entries. Apply
 [staleness re-verification](reference.md) to saved audit or moved-diff findings.
-Respect D-14’s owner-attention budget. A doctrine-answered case is decided, not
+Respect {{skill_tokens.doctrine_d14}}’s owner-attention budget. A doctrine-answered case is decided, not
 escalated; Reserved matters remain owner calls under
 [design.mdc]({{package.rules_root}}/design.mdc), without a local variant.
 
@@ -42,7 +42,7 @@ For each finding, state the decision and acceptance condition, then supply its
 category, weight, reversibility, confidence, doctrine/evidence, strongest
 rejected alternative, and expected outcome. Apply category authority:
 
-- non-reserved findings default to D-18 agent-decided: decide now, record the
+- non-reserved findings default to {{skill_tokens.doctrine_d18}} agent-decided: decide now, record the
   Decision Record, and proceed;
 - Reserved/irreversible/outward/costly/scope-expanding → escalate to `grill-me`.
 
@@ -96,7 +96,7 @@ check uses `review=scheduled deadline=YYYY-MM-DD`; an un-routed record is lost.
 
 ## Routing
 
-- backend/frontend behavior → `implement-backend` / `implement-frontend`
-- UI defect → `fix-ui-bug`; tests → `write-tests` / `fix-failing-tests`
+- backend/frontend behavior → `{{skill_routes.implement_backend.name}}` / `{{skill_routes.implement_frontend.name}}`
+- UI defect → `{{skill_routes.fix_ui_bug.name}}`; tests → `write-tests` / `fix-failing-tests`
 - no-behavior cleanup → `refine-code`; structural split → `decompose-module`
 - design artifact → `write-design-doc` / `refine-design-doc`

@@ -34,7 +34,7 @@ a catalog primitive is a consolidation proposal, not an auto-fix.
 ## Value-vs-weight scoring
 
 Weight = LOC owned + models + routes + scheduled tasks (rough counts are fine).
-Apply [D-21 prototype evidence]({{package.rules_root}}/design.mdc#north-star): during
+Apply [{{skill_tokens.doctrine_d21}} prototype evidence]({{package.rules_root}}/design.mdc#north-star): during
 the prototype phase, execute the named user scenario and judge its result;
 usage counts, adoption rates, and zero-use readings cannot settle value or
 justify a cut. Replace usage-triggered open questions with executable scenarios.

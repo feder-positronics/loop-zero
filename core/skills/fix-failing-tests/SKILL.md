@@ -57,7 +57,7 @@ first unresolved failure and command evidence if the suite cannot become green.
   setup contract from the command reference.
 - Standalone broad or behavior-changing fixes receive
   [`code-review`](../code-review/SKILL.md). Documentation settlement belongs to
-  the outer workflow or [`design-handoff`](../design-handoff/SKILL.md) only when
+  the outer workflow or {{skill_routes.design_handoff.link}} only when
   its trigger applies.
 
 ## Done When

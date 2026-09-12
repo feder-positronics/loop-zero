@@ -35,7 +35,7 @@ apply to those severities in this workflow.
 Repeat only while material findings remain:
 
 1. run `review-design-doc` on the current artifact;
-2. resolve competing responses through [resolve-findings] and [D-18 authority];
+2. resolve competing responses through [resolve-findings] and [{{skill_tokens.doctrine_d18}} authority];
 3. apply focused edits that address accepted findings;
 4. verify the finding, not merely the wording, is resolved.
 
@@ -47,7 +47,7 @@ requested with a nonempty reason under the [cross-harness rule]. If the same
 important finding survives twice, revisit the chosen approach; after five non-converging cycles, stop and escalate.
 
 [resolve-findings]: ../resolve-findings/SKILL.md
-[D-18 authority]: {{package.docs_root}}/design/owner-doctrine.md
+[{{skill_tokens.doctrine_d18}} authority]: {{package.docs_root}}/design/owner-doctrine.md
 [cross-harness rule]: {{package.rules_root}}/cross-harness-review.mdc
 
 ## Exit Criteria

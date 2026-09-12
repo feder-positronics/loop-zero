@@ -17,6 +17,7 @@ sandbox = "bwrap"
 skills_dir = ".cursor/skills"
 skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]
 product_name = "Example"
+commit_identity = "Example repository identity"
 
 [toolchain]
 backend_dir = "src"

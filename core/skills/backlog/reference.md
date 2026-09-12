@@ -32,8 +32,8 @@ decision; do not demote an umbrella from checklist wording alone.
 | --- | --- |
 | missing and design expected | `write-design-doc` |
 | `draft` exploration/blueprint | `refine-design-doc` |
-| `ready` planned blueprint | `execute-blueprint` or `work-issue` by scope |
-| missing small established bug/debt | `work-issue` / `fix-ui-bug` when no spec is needed |
+| `ready` planned blueprint | `{{skill_routes.execute_blueprint.name}}` or `work-issue` by scope |
+| missing small established bug/debt | `work-issue` / `{{skill_routes.fix_ui_bug.name}}` when no spec is needed |
 | `active` / `gated` | already in lifecycle; report, do not pick up again |
 
 Re-check complexity after design converges because settled decisions may reduce

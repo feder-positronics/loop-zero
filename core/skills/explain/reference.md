@@ -73,4 +73,4 @@ never auto-move docs, labels, issues, or PR state from this skill.
 
 `onboarding` remains the durable
 [onboarding brief]({{package.docs_root}}/guides/dev-workflow/onboarding-brief.md), owned
-by `design-handoff`, not a generated briefing variant.
+by `{{skill_routes.design_handoff.name}}`, not a generated briefing variant.

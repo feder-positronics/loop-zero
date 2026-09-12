@@ -3,17 +3,13 @@ name: work-issue
 description: >-
   Deliver a GitHub issue or ticket end to end, from intake through verified
   merge and closeout. Use for any implementation or repair work anchored to a
-  live issue. For full blueprint lifecycle execution use `execute-blueprint`;
+  live issue. For full blueprint lifecycle execution use `{{skill_routes.execute_blueprint.name}}`;
   for a read-only backlog status view use `backlog`.
 ---
 
 # Work Issue
 
-For a new task, use [loop-zero delivery]({{package.delivery_guide}})
-under `AGENTS.md`'s Primary Delivery Contract. Retain issue acceptance and, when
-applicable, blueprint lifecycle commands. The legacy procedure below applies
-only to runs whose original record selects `intelflo-v1`; never migrate an
-existing run, reset its history, or apply its phase choreography to a new task.
+{{skill_tokens.legacy_delivery_contract}}
 
 
 Take one live issue from intake to verified merge and closeout. The
@@ -44,7 +40,7 @@ continuation whose live state names this action, as defined in Closeout below:
 - Use for implementation or repair explicitly anchored to a GitHub issue or
   ticket. A read-only status request routes to `backlog`; a direct prompt with
   no issue routes to the narrowest leaf skill; a full accepted blueprint
-  lifecycle routes to `execute-blueprint`. A bounded issue nested under one
+  lifecycle routes to `{{skill_routes.execute_blueprint.name}}`. A bounded issue nested under one
   leaves blueprint transitions to that outer owner.
 - As outer owner, `work-issue` owns acceptance, routing, the full-diff Review
   Gate, docs decision, commit/PR, CI/review convergence, merge, issue closure,
@@ -103,10 +99,10 @@ continuation whose live state names this action, as defined in Closeout below:
   its step 6d fit-check for dossier-driven slices. Immediately before freezing
   that gate, run the shared method's base/visual preflight against the
   prospective final PR body.
-  Then run `design-handoff` when the
-  [docs-impact triggers]({{package.docs_root}}/guides/reference/design-handoff-reference.md)
+  Then run `{{skill_routes.design_handoff.name}}` when the
+  {{skill_routes.design_handoff.reference}}
   apply; otherwise record the skip rationale.
-- Issue-local reversible decisions proceed under D-18 and appear in the PR.
+- Issue-local reversible decisions proceed under {{skill_tokens.doctrine_d18}} and appear in the PR.
   Reserved, outward, costly, irreversible, or scope-expanding calls stop for
   owner direction.
 - Commit only through `commit-autofix`. The PR body opens with the shared
@@ -121,7 +117,7 @@ continuation whose live state names this action, as defined in Closeout below:
   ready PR with direct `gh pr create`.
 - Before publication, detect whether this exact issue owns a lifecycle
   blueprint through its frontmatter. If it does, route the full lifecycle to
-  `execute-blueprint` and include completion in the closing PR. A scoped child
+  `{{skill_routes.execute_blueprint.name}}` and include completion in the closing PR. A scoped child
   issue whose number differs from the blueprint tracker does not own or block
   that lifecycle. Closeout verifies this exact ownership and never completes a
   blueprint after merge.

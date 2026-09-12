@@ -26,7 +26,12 @@ def test_minimal_profile_loads(consumer: Path):
 def test_profile_records_explicit_state_root(consumer: Path):
     (consumer / "workflow.toml").write_text(
         minimal_workflow(
-            extra='[package]\nenv_prefix = "INTELFLO"\nstate_root = "/var/lib/intelflo"\n'
+            extra=(
+                '[package]\nproduct_name = "Test Consumer"\n'
+                'commit_identity = "test-only commit identity"\n'
+                'env_prefix = "INTELFLO"\nstate_root = "/var/lib/intelflo"\n'
+            ),
+            include_identity=False,
         ),
         encoding="utf-8",
     )
@@ -41,9 +46,11 @@ def test_profile_loads_custom_skill_layout(consumer: Path):
             extra=(
                 '[package]\nskills_dir = ".codex/skills"\n'
                 'skill_mirrors = [".claude/skills"]\nproduct_name = "Consumer"\n'
+                'commit_identity = "Consumer identity"\n'
                 '[toolchain]\nbackend_dir = "server"\n'
                 '[toolchain.commands]\ndocs_verify = "just docs"\n'
-            )
+            ),
+            include_identity=False,
         ),
         encoding="utf-8",
     )
@@ -56,7 +63,14 @@ def test_profile_loads_custom_skill_layout(consumer: Path):
 @pytest.mark.parametrize("value", ["../skills", "/tmp/skills", "."])
 def test_skill_layout_rejects_unsafe_canonical_paths(consumer: Path, value: str):
     (consumer / "workflow.toml").write_text(
-        minimal_workflow(extra=f'[package]\nskills_dir = "{value}"\n'),
+        minimal_workflow(
+            extra=(
+                '[package]\nproduct_name = "Test Consumer"\n'
+                'commit_identity = "test-only commit identity"\n'
+                f'skills_dir = "{value}"\n'
+            ),
+            include_identity=False,
+        ),
         encoding="utf-8",
     )
     with pytest.raises(config.ConfigError, match="skills_dir"):
@@ -250,6 +264,19 @@ def test_rendered_core_fields_reject_controls_and_managed_markers(tmp_path: Path
     data = tomllib.loads(minimal_workflow())
     data["core"]["path"] = f"vendor/{config.MANAGED_BLOCK_END}"
     with pytest.raises(config.ConfigError, match=r"\[core\]\.path: managed-block marker"):
+        config.validate(data, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["safe\nINJECTED_HEADING", f"safe/{config.MANAGED_BLOCK_END}"],
+)
+def test_audit_root_rejects_rendered_injection_as_config_error(
+    tmp_path: Path, value: str
+) -> None:
+    data = tomllib.loads(minimal_workflow())
+    data["package"] = {"audit_root": value}
+    with pytest.raises(config.ConfigError, match=r"\[package\]\.audit_root"):
         config.validate(data, tmp_path)
 
 

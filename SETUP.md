@@ -45,6 +45,7 @@ audit_root = ".audit"
 skills_dir = ".cursor/skills"
 skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]
 product_name = "My Product"
+commit_identity = "My repository's configured author/committer identity"
 
 [toolchain]
 backend_dir = "src"
@@ -83,11 +84,11 @@ as `not-applicable: documentation-only repository, no integration behavior`.
 Missing applicable setup/check capability is a blocker, not not-applicable.
 Profiles are selected from `python`, `fastapi`, `nextjs`, `angular`; profile
 selection does not import commands. Keep local secrets outside this file.
-The full set of supported skill substitution keys and compatibility defaults is
+The full set of supported skill substitution keys and portable defaults is
 documented in [`core/skills/README.md`](core/skills/README.md). Declare the
-commands a selected governance skill names; defaults exist to preserve the
-initial IntelFlo cutover byte for byte, not as a promise that another consumer
-has those targets.
+commands a selected governance skill names. Omitted product routes render
+explicitly unavailable. IntelFlo's byte-compatible values live only in the
+documented PR A profile block, not in package defaults.
 
 ## Install the package
 
@@ -116,8 +117,9 @@ The sync also materializes governance and vendored methodology skills in the
 configured canonical directory, defaults to `.cursor/skills`, and maintains
 relative symlink mirrors in `.agents/skills`, `.agent/skills`, and
 `.claude/skills`. Consumer-owned skills remain untouched. Managed ownership is
-recorded in `.loopzero/skills-manifest.json`; an unmanifested skill directory is
-never overwritten. `loopzero sync --dry-run` reports the same drift without
+recorded with exact directories, entry types, paths, link targets, and file
+digests in `.loopzero/skills-manifest.json`; unmanifested entries are never
+overwritten or deleted. `loopzero sync --dry-run` reports the same drift without
 writing and, unlike `--check`, does not use drift as a failing exit status.
 
 ## Connect the existing runtime entry points

@@ -31,7 +31,7 @@ Select only those material to the artifact:
 
 - [ ] Crystallized need-now evidence, actors/jobs, outcome, non-goals, and the
   rejected simpler shape (fields-on-existing before new entities/endpoints);
-- [ ] For Vision edits, its [Generality contract in owner doctrine D-16]: each
+- [ ] For Vision edits, its [Generality contract in owner doctrine {{skill_tokens.doctrine_d16}}]: each
   principle must survive an implementation replacement and name no current
   feature, schedule, or component; route mechanism prose to a guide or ADR as an
   `important` finding;
@@ -48,7 +48,7 @@ Select only those material to the artifact:
 - [ ] Acceptance criteria, validation, file/test touchpoints, and implementation
   freedom versus unnecessary prescription.
 
-[Generality contract in owner doctrine D-16]: {{package.docs_root}}/design/owner-doctrine.md
+[Generality contract in owner doctrine {{skill_tokens.doctrine_d16}}]: {{package.docs_root}}/design/owner-doctrine.md
 [VIS-5]: {{package.docs_root}}/design/vision.md
 [write-design-doc authoring contract]: ../write-design-doc/SKILL.md#design-contract
 
