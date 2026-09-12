@@ -29,8 +29,10 @@ jobs:
         run: |
           uv python install "${{ matrix.python }}"
           UV_BIN=$(readlink -f "$(command -v uv)")
-          PYTHON_INSTALL_ROOT=$(uv python dir)
-          PYTHON_BIN=$(uv python find "${{ matrix.python }}")
+          PYTHON_INSTALL_ROOT=$(readlink -f "$(uv python dir)")
+          # uv exposes a minor-version directory that is a symlink to the versioned
+          # install; resolve it so the path stays valid under /opt/uv-python.
+          PYTHON_BIN=$(readlink -f "$(uv python find "${{ matrix.python }}")")
           PYTHON_RELATIVE=${PYTHON_BIN#"$PYTHON_INSTALL_ROOT"/}
           test "$PYTHON_RELATIVE" != "$PYTHON_BIN"
           VENV_ROOT="$RUNNER_TEMP/loopzero-python-${{ matrix.python }}/.venv"
