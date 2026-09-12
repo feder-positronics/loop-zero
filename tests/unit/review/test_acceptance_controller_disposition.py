@@ -141,4 +141,3 @@ def test_extracted_modules_stay_in_guardian_tamper_manifests() -> None:
             "scripts/util/dispatch_routing.py",
         ):
             assert f'"{pinned}",' in src, f"{rel} must pin {pinned}"
-
