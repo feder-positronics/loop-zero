@@ -8,6 +8,16 @@ shadow authority.
 Merge expiry deliberately excludes coordinator-signed inline terminals.  They
 can authenticate controller lifecycle facts, but only a registered dispatcher
 attempt proves that the delivery bound to the finding's ``(run_id, PR)`` merged.
+
+That guarantee is only as strong as the kernel's registration projection.  For
+legacy compatibility the kernel admits *proofless* attempt-start records as
+registrations when they sit in the pre-cutover ledger prefix (every record
+before the first ``coordinator-authority-cutover`` attempt).  In a ledger that
+has no cutover record at all, that prefix is the whole ledger, so an unsigned
+start could register an arbitrary dispatcher key.  Consumers must therefore
+have completed the coordinator cutover before relying on merge expiry; after
+the cutover record only coordinator-authenticated registrations count, and a
+proofless start no longer expires anything.
 """
 
 import fcntl

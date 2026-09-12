@@ -357,7 +357,13 @@ def test_pr_number_is_mandatory(tmp_path):
 
 
 def _install_registration_probe(
-    monkeypatch, *, run_id, registration_pr, terminal_pr, terminal_task_id=None
+    monkeypatch,
+    *,
+    run_id,
+    registration_pr,
+    terminal_pr,
+    terminal_task_id=None,
+    proofless_registration=False,
 ):
     """Port of the a4v5 review probe: registration and terminal may disagree."""
     dispatcher = kernel_authority.TerminalAuthority.generate()
@@ -410,16 +416,18 @@ def _install_registration_probe(
     }
 
     def register_and_settle():
-        start = coordinator.seal(
-            {
-                **base,
-                "pr": registration_pr,
-                "type": "attempt-start",
-                "registration_authority_version": 1,
-                "terminal_authority": dispatcher.registration(),
-            },
-            authority_kind="coordinator",
-        )
+        registration = {
+            **base,
+            "pr": registration_pr,
+            "type": "attempt-start",
+            "registration_authority_version": 1,
+            "terminal_authority": dispatcher.registration(),
+        }
+        if proofless_registration:
+            # Legacy shape: no terminal_authority_proof at all.
+            start = dict(registration)
+        else:
+            start = coordinator.seal(registration, authority_kind="coordinator")
         terminal_identity = dict(base)
         if terminal_task_id is not None:
             terminal_identity["task_id"] = terminal_task_id
@@ -517,4 +525,41 @@ def test_registered_dispatcher_terminal_for_another_attempt_in_same_run_is_ignor
     assert start["run_id"] == terminal["run_id"]
     assert start["task_id"] != terminal["task_id"]
     assert findings._registered_dispatcher_delivery_terminals(tmp_path) == []
+    assert findings.count_live_important(tmp_path, pr=17) == 1
+
+
+def test_proofless_registration_after_cutover_does_not_expire_findings(
+    tmp_path, monkeypatch
+):
+    """Kernel legacy compatibility stops at the cutover record.
+
+    A proofless attempt-start is accepted as a registration only inside the
+    pre-cutover ledger prefix.  Placed after the cutover record it registers
+    nothing, so the dispatcher-signed merged terminal it would vouch for
+    cannot expire the finding.
+    """
+    _configure(tmp_path)
+    run_id = "sr_" + "c" * 32
+    _write_run(tmp_path, run_id, pr=17, outcome="in_progress")
+    register_and_settle = _install_registration_probe(
+        monkeypatch,
+        run_id=run_id,
+        registration_pr=17,
+        terminal_pr=17,
+        proofless_registration=True,
+    )
+    _probe_finding(tmp_path, run_id=run_id)
+    start, terminal = register_and_settle()
+
+    assert "terminal_authority_proof" not in start
+    assert terminal["terminal_authority_proof"]["authority_kind"] == "dispatcher"
+    records = authority_store.load_authority_records(tmp_path)
+    cutover_index = next(
+        index
+        for index, record in enumerate(records)
+        if record.get("type") == "coordinator-authority-cutover"
+    )
+    assert records.index(start) > cutover_index
+    assert findings._registered_dispatcher_delivery_terminals(tmp_path) == []
+    assert len(findings.load_finding_history(tmp_path, pr=17)) == 2
     assert findings.count_live_important(tmp_path, pr=17) == 1
