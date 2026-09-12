@@ -16,6 +16,7 @@
 #   scripts/util/job.sh wait  <name> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh run   <name> [--timeout SECONDS] [--tail LINES] -- <command...>
 #   scripts/util/job.sh wait-file <path> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
+#   scripts/util/job.sh stop <name>  # terminate, reap, and seal supervision timeout (124)
 #   scripts/util/job.sh status <name>
 #   scripts/util/job.sh log   <name> [--tail LINES] [--follow]
 #   scripts/util/job.sh list
@@ -25,8 +26,12 @@
 #   scripts/util/job.sh clean [--all]
 #
 # `wait` exits with the job's own exit code, 124 on timeout, 2 on usage error.
-# A bound final-CI reproduction `run` treats 124 as terminal: it stops and reaps
-# the secure executor before releasing its held job-directory authority.
+# A `run` wait deadline and `stop` terminate the authenticated supervisor's
+# owned process group (TERM, then KILL within a 2s grace) and reap it before
+# sealing exit 124 and a job-supervision-timeout-v1 reconciliation receipt.
+# `run` also waits for its executor before releasing job-directory authority.
+# Cancellation failure returns 125; missing protected boundaries run nothing
+# and return 125 without manufacturing a sealed exit code.
 # `wait-file` blocks until <path> exists (a dispatched worker's terminal
 # artifact is the wait event — #3418 P1); exit 0 on appearance, 124 on the
 # deadman timeout, which means "worker presumed dead: run the orphan/lease
@@ -183,6 +188,7 @@ DEFAULT_TAIL=40
 RUN_AUTHORITY_FD=""
 RUN_EXECUTOR_PID=""
 RUN_INTERNAL_WAIT=0
+RUN_WAIT_DEADLINE=0
 
 usage() {
 	sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -316,6 +322,18 @@ finally:
 PY
 }
 
+valid_timeout_receipt() {
+	"$PYTHON_BIN" - "$1" "${2:-}" <<'PY_TIMEOUT'
+import sys
+from pathlib import Path
+from loopzero.kernel.job_control import timeout_receipt
+try:
+    timeout_receipt(Path(sys.argv[1]), expected_binding_sha256=sys.argv[2])
+except (OSError, ValueError, TypeError):
+    raise SystemExit(1)
+PY_TIMEOUT
+}
+
 job_reaped() {
 	local dir="$1" expected_schema="${2:-}"
 	if [ -f "$dir/binding.json" ] && [ ! -L "$dir/binding.json" ]; then
@@ -342,6 +360,13 @@ schema = receipt.get("schema_version")
 if sys.argv[3] and schema != sys.argv[3]:
     raise SystemExit(1)
 if schema in {"job-reconciliation-v1", "job-reconciliation-v2"}:
+    raise SystemExit(0)
+if schema == "job-supervision-timeout-v1":
+    from loopzero.kernel.job_control import timeout_receipt
+    try:
+        timeout_receipt(binding_path.parent)
+    except (OSError, ValueError, TypeError):
+        raise SystemExit(1)
     raise SystemExit(0)
 if schema == "job-supervision-failure-v1":
     import os
@@ -402,6 +427,9 @@ if (
 PY
 		return $?
 	fi
+	if valid_timeout_receipt "$dir"; then
+		return 0
+	fi
 	if [ -f "$dir/waited" ] && [ ! -L "$dir/waited" ]; then
 		return 0
 	fi
@@ -409,61 +437,17 @@ PY
 }
 
 terminate_job_lease_owner() {
-	local pid_path="$1" identity_path="$2" lease_path="$3"
-	"$PYTHON_BIN" - "$pid_path" "$identity_path" "$lease_path" <<'PY'
-from loopzero.kernel.settings import settings
-import json
-import os
-import re
-import signal
-import stat
-import sys
+	local pid_path="$1" identity_path="$2" lease_path="$3" name="${4:-}"
+	[ -n "$name" ] || name="$(basename "$(dirname "$pid_path")")"
+	"$PYTHON_BIN" - "$(dirname "$pid_path")" "$lease_path" "$name" <<'PY_STOP'
 from pathlib import Path
-
-pid_path = Path(sys.argv[1])
-identity_path = Path(sys.argv[2])
-lease_path = Path(sys.argv[3])
+import sys
+from loopzero.kernel.job_control import request_stop
 try:
-    pid_text = pid_path.read_text(encoding="ascii").strip()
-    if re.fullmatch(r"[1-9][0-9]*", pid_text) is None:
-        raise OSError("invalid pid")
-    pid = int(pid_text)
-    if identity_path.is_symlink():
-        raise OSError("invalid pid identity")
-    identity = json.loads(identity_path.read_text(encoding="utf-8"))
-    lease = lease_path.lstat()
-    if lease_path.is_symlink() or not stat.S_ISREG(lease.st_mode):
-        raise OSError("invalid lease")
-    required = {
-        "schema_version", "name", "pid", "starttime", "lease_dev", "lease_ino"
-    }
-    if (
-        not isinstance(identity, dict)
-        or set(identity) != required
-        or identity.get("schema_version") != "job-pid-identity-v1"
-        or identity.get("name") != pid_path.parent.name
-        or identity.get("pid") != pid
-        or not isinstance(identity.get("starttime"), str)
-        or re.fullmatch(r"[0-9]+", identity["starttime"]) is None
-        or identity.get("lease_dev") != lease.st_dev
-        or identity.get("lease_ino") != lease.st_ino
-    ):
-        raise OSError("pid identity does not match job authority")
-    from loopzero.kernel.linux import pidfd_open, pidfd_send_signal
-    pidfd = pidfd_open(pid)
-    stat_fields = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rpartition(") ")[2].split()
-    if len(stat_fields) < 20 or stat_fields[19] != identity["starttime"]:
-        raise OSError("pid identity is stale")
-except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-    raise SystemExit(1)
-
-try:
-    pidfd_send_signal(pidfd, signal.SIGTERM)
-except OSError:
-    raise SystemExit(1)
-finally:
-    os.close(pidfd)
-PY
+    request_stop(sys.argv[1], Path(sys.argv[2]), sys.argv[3])
+except (OSError, ValueError, IndexError) as exc:
+    raise SystemExit(f"job.sh: cannot stop authenticated supervisor: {exc}")
+PY_STOP
 }
 
 # Advisory locks are usable only when an independent open-file description is
@@ -525,6 +509,16 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+
+from loopzero.kernel.job_control import BOOT_ID, SupervisionTimeout, run_command
+stop_requested = False
+
+def request_termination(signum, frame):
+    global stop_requested
+    stop_requested = True
+
+signal.signal(signal.SIGTERM, request_termination)
+signal.signal(signal.SIGINT, request_termination)
 
 from loopzero.kernel import jobs as job_store
 from loopzero.kernel.sandbox import (
@@ -661,6 +655,7 @@ continuation_owner_path = None
 terminal_artifact_sha256 = None
 terminal_envelope_sha256 = None
 terminal_status = None
+timed_out = False
 try:
     pid_fd, pid_bytes = read_held("pid", wait=True)
     if int(pid_bytes.decode().strip()) != os.getpid():
@@ -698,7 +693,8 @@ try:
     if len(process_stat) < 20:
         raise RuntimeError("executor process identity is unreadable")
     pid_identity = {
-        "schema_version": "job-pid-identity-v1",
+        "schema_version": "job-pid-identity-v2",
+        "boot_id": BOOT_ID.read_text().strip(),
         "name": job_name,
         "pid": os.getpid(),
         "starttime": process_stat[19],
@@ -1072,7 +1068,6 @@ try:
         except job_store.JobStoreError as exc:
             raise RuntimeError(str(exc)) from exc
     run_arguments = {
-        "check": False,
         "stdout": log,
         "stderr": subprocess.STDOUT,
         "env": child_env,
@@ -1090,8 +1085,11 @@ try:
     if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error))
-    completed = subprocess.run(wrapped_command, **run_arguments)
-    final_code = completed.returncode
+    timed_out = False
+    try:
+        final_code = run_command(wrapped_command, run_arguments, lambda: stop_requested)
+    except SupervisionTimeout:
+        timed_out = True
     if bound_temp_context is not None:
         bound_temp_context.cleanup()
 
@@ -1114,6 +1112,9 @@ try:
         os.lseek(binding_fd, 0, os.SEEK_SET)
         if os.read(binding_fd, len(binding_bytes) + 1) != binding_bytes:
             raise RuntimeError("job binding changed during execution")
+
+    if timed_out:
+        raise SupervisionTimeout()
 
     if binding is not None:
         source_flags = os.O_RDONLY
@@ -1186,6 +1187,9 @@ try:
         except BaseException:
             remove_at("terminal-envelope.json")
             raise
+except SupervisionTimeout:
+    report("supervision timeout: owned process group terminated and reaped")
+    final_code = 124
 except BaseException as exc:
     report(f"terminal supervision failed: {exc}")
     final_code = 125
@@ -1199,6 +1203,31 @@ finally:
         except BaseException as exc:
             report(f"terminal exit code could not be sealed: {exc}")
             final_code = 125
+    if owns_launch and final_code == 124 and timed_out:
+        receipt_fd = None
+        try:
+            receipt = {
+                "schema_version": "job-supervision-timeout-v1",
+                "name": job_name,
+                "failure_class": "supervision-timeout",
+                "exit_code": 124,
+            }
+            if binding is not None:
+                receipt.update(
+                    run_id=binding["run_id"], task_id=binding["task_id"],
+                    binding_sha256=hashlib.sha256(binding_bytes).hexdigest(),
+                )
+            receipt_fd = reserve("reconciliation.json.tmp")
+            commit_reserved(
+                "reconciliation.json.tmp", "reconciliation.json", receipt_fd,
+                (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode(),
+            )
+        except BaseException as exc:
+            report(f"supervision timeout could not be reconciled: {exc}")
+            final_code = 125
+        finally:
+            if receipt_fd is not None:
+                os.close(receipt_fd)
     continuation_reaped = False
     if (
         owns_launch
@@ -1517,7 +1546,9 @@ PY
 	local pid=$!
 	RUN_EXECUTOR_PID="$pid"
 	printf '%s\n' "$pid" >"$dir/pid"
-	disown "$pid" 2>/dev/null || true
+	if [ "${HOLD_AUTHORITY_FOR_RUN:-0}" != "1" ]; then
+		disown "$pid" 2>/dev/null || true
+	fi
 	close_job_lease "$lease_fd"
 
 	echo "started job '$name' (pid $pid)"
@@ -1688,8 +1719,14 @@ PY
 			echo "--- last $tail_lines log lines ---" >&2
 			tail -n "$tail_lines" "$dir/log" >&2 2>/dev/null || true
 			echo "full log: $display_dir/log" >&2
-			echo "Do NOT re-wait at --timeout $timeout; that is a poll loop. Use:" >&2
-			echo "  scripts/util/job.sh wait $name --timeout $suggest" >&2
+			if [ "$RUN_INTERNAL_WAIT" -eq 1 ]; then
+				echo "run deadline reached; stopping and reaping the executor" >&2
+			else
+				echo "Do NOT re-wait at --timeout $timeout; that is a poll loop. Use:" >&2
+				echo "  scripts/util/job.sh wait $name --timeout $suggest" >&2
+			fi
+			RUN_WAIT_DEADLINE=1
+			[ -z "$observed_job_fd" ] || eval "exec ${observed_job_fd}>&-"
 			return 124
 		fi
 		sleep 2
@@ -1836,12 +1873,51 @@ cmd_run() {
 	cmd_start "$name" "${binding_args[@]}" -- "$@" >/dev/null || return $?
 	HOLD_AUTHORITY_FOR_RUN=0
 	RUN_INTERNAL_WAIT=1
+	RUN_WAIT_DEADLINE=0
 	cmd_wait "$name" --timeout "$timeout" --tail "$tail_lines" \
 		--authority-fd "$RUN_AUTHORITY_FD" --expected-pid "$RUN_EXECUTOR_PID"
 	local result=$?
+	if [ "$RUN_WAIT_DEADLINE" -eq 1 ]; then
+		local lease_path
+		lease_path="$(job_lease_path "$name")" || return $?
+		if terminate_job_lease_owner "/proc/$$/fd/$RUN_AUTHORITY_FD/./pid" \
+			"/proc/$$/fd/$RUN_AUTHORITY_FD/./pid-identity.json" "$lease_path" "$name"; then
+			wait "$RUN_EXECUTOR_PID"
+			result=$?
+		else
+			result=125
+		fi
+	else
+		wait "$RUN_EXECUTOR_PID"
+		local executor_result=$?
+		if [ "$result" -eq 1 ] && [ "$executor_result" -eq 125 ]; then
+			result=125
+		fi
+	fi
 	RUN_INTERNAL_WAIT=0
 	exec {RUN_AUTHORITY_FD}<&-
 	RUN_EXECUTOR_PID=""
+	return "$result"
+}
+
+cmd_stop() {
+	local name="${1:-}" dir lease_path stop_fd
+	validate_name "$name"
+	[ "$#" -eq 1 ] || die "stop requires exactly one job name"
+	dir="$(job_path "$name")" || return $?
+	[ -d "$dir" ] && [ ! -L "$dir" ] || die "no safe job directory for '$name'"
+	exec {stop_fd}<"$dir" || return 2
+	lease_path="$(job_lease_path "$name")" || return $?
+	if job_running "$dir"; then
+		terminate_job_lease_owner "/proc/$$/fd/$stop_fd/./pid" \
+			"/proc/$$/fd/$stop_fd/./pid-identity.json" "$lease_path" "$name" || return 125
+	fi
+	# Read the pinned generation, never a replacement job with the same name.
+	local result=125
+	if valid_timeout_receipt "/proc/$$/fd/$stop_fd"; then
+		result=124
+	fi
+	exec {stop_fd}<&-
 	return "$result"
 }
 
@@ -2053,6 +2129,10 @@ cmd_reconcile() {
 			;;
 		esac
 	done
+	if valid_timeout_receipt "$dir" "$expected_binding_sha256"; then
+		cat "$dir/reconciliation.json"
+		return 0
+	fi
 	set -- "${reconcile_args[@]}"
 	local binding_schema supplied_artifact="" primary_repo=""
 	binding_schema="$("$PYTHON_BIN" - "$dir/binding.json" <<'PY'
@@ -2677,6 +2757,7 @@ main() {
 	wait) cmd_wait "$@" ;;
 	wait-file) cmd_wait_file "$@" ;;
 	run) cmd_run "$@" ;;
+	stop) cmd_stop "$@" ;;
 	status) cmd_status "$@" ;;
 	log) cmd_log "$@" ;;
 	list) cmd_list "$@" ;;

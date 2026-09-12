@@ -3974,9 +3974,9 @@ def test_live_death_after_binding_is_automatically_reconcilable(
             ),
         ),
         (
-            "    final_code = completed.returncode",
-            "    final_code = completed.returncode\n"
-            "    os.kill(os.getpid(), signal.SIGKILL)",
+            "    if bound_temp_context is not None:",
+            "    os.kill(os.getpid(), signal.SIGKILL)\n"
+            "    if bound_temp_context is not None:",
             (
                 "exit_code.tmp",
                 "terminal-envelope.json.tmp",
@@ -4622,3 +4622,90 @@ def test_seal_wins_before_reconcile_can_acquire_the_lease(tmp_path: Path) -> Non
 
     assert final.returncode == 0, final.stderr
     assert json.loads(final.stdout)["schema_version"] == "job-reconciliation-v2"
+
+
+@requires_nested_user_namespace
+@pytest.mark.parametrize("operation", ["run", "stop"])
+def test_signed_final_ci_repro_timeout_reaps_its_secure_executor(tmp_path: Path, operation: str) -> None:
+    # The package boundary binds the run/task/artifact; consumer signature policy
+    # stays in the consumer. Exercise the real protected ordinary-command path.
+    artifact = _job_worktree(tmp_path, SCRIPT) / "terminal.json"
+    launch = ["run", "final-ci-timeout", "--timeout", "1"] if operation == "run" else ["start", "final-ci-timeout"]
+    result = _job(
+        tmp_path, *launch,
+        "--run-id", "sr_" + "a" * 32, "--task-id", "final-ci-repro",
+        "--terminal-artifact", str(artifact), "--", "/bin/bash", "-c",
+        'sleep 30; echo \'{"task_id":"final-ci-repro","status":"completed"}\' > "$1"',
+        "bash", str(artifact),
+    )
+    directory = tmp_path / "jobs/final-ci-timeout"
+    if operation == "stop":
+        assert result.returncode == 0, result.stdout + result.stderr
+        result = _job(tmp_path, "stop", "final-ci-timeout")
+    assert result.returncode == 124, result.stdout + result.stderr
+    executor = Path(f"/proc/{int((directory / 'pid').read_text())}/stat")
+    if operation == "run":
+        assert not executor.exists()
+    else:
+        assert not executor.exists() or executor.read_text().rpartition(") ")[2].split()[0] == "Z"
+    assert not artifact.exists()
+    assert not (directory / "terminal-envelope.json").exists()
+    assert (directory / "exit_code").read_text() == "124\n"
+    receipt = json.loads((directory / "reconciliation.json").read_text())
+    assert receipt["failure_class"] == "supervision-timeout"
+    assert receipt["binding_sha256"] == hashlib.sha256((directory / "binding.json").read_bytes()).hexdigest()
+    assert _job(tmp_path, "check").returncode == 0
+    replay = _job(tmp_path, "reconcile", "final-ci-timeout")
+    assert replay.returncode == 0, replay.stderr
+    assert json.loads(replay.stdout) == receipt
+    assert _job(tmp_path, "stop", "final-ci-timeout").returncode == 124
+
+
+def test_final_ci_repro_fails_closed_without_systemd_boundary(tmp_path: Path) -> None:
+    # The protected systemd boundary in the retained consumer regression is
+    # bubblewrap in the package. Deny resolution before any command can run.
+    script = _instrumented_job_script(
+        tmp_path, marker='            bwrap = str(system_executable("bwrap"))',
+        replacement='            raise TrustedExecutableError("boundary denied by test")',
+    )
+    artifact = script.parents[2] / "terminal.json"
+    result = _job(
+        tmp_path, "run", "missing-boundary", "--timeout", "30",
+        "--run-id", "sr_" + "b" * 32, "--task-id", "final-ci-repro",
+        "--terminal-artifact", str(artifact), "--", "touch", str(artifact), script=script,
+    )
+    directory = tmp_path / "jobs/missing-boundary"
+    assert result.returncode == 125, result.stdout + result.stderr
+    assert not artifact.exists()
+    assert not (directory / "terminal-envelope.json").exists()
+    assert not (directory / "exit_code").exists()
+    assert "requires protected bubblewrap" in (directory / "log").read_text()
+
+
+@pytest.mark.parametrize("operation", ["run", "stop"])
+def test_job_deadline_and_stop_reap_term_resistant_descendants(tmp_path: Path, operation: str) -> None:
+    pid_file = _job_worktree(tmp_path, SCRIPT) / "descendant.pid"
+    command = ["/bin/bash", "-c", 'trap "" TERM; (trap "" TERM; echo "$BASHPID" > "$1"; sleep 60) & wait', "bash", str(pid_file)]
+    started = time.monotonic()
+    if operation == "run":
+        result = _job(tmp_path, "run", "stop-test", "--timeout", "1", "--", *command)
+    else:
+        launched = _job(tmp_path, "start", "stop-test", "--", *command)
+        assert launched.returncode == 0, launched.stderr
+        deadline = time.monotonic() + 5
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        result = _job(tmp_path, "stop", "stop-test")
+    assert result.returncode == 124, result.stdout + result.stderr
+    assert time.monotonic() - started < 15
+    directory = tmp_path / "jobs/stop-test"
+    assert (directory / "exit_code").read_text() == "124\n"
+    assert json.loads((directory / "reconciliation.json").read_text())["failure_class"] == "supervision-timeout"
+    assert not Path(f"/proc/{int(pid_file.read_text())}").exists()
+    executor = int((directory / "pid").read_text())
+    if operation == "run":
+        with pytest.raises(ProcessLookupError):
+            os.kill(executor, 0)
+    else:
+        proc_stat = Path(f"/proc/{executor}/stat")
+        assert not proc_stat.exists() or proc_stat.read_text().rpartition(") ")[2].split()[0] == "Z"
