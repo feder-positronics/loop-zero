@@ -56,6 +56,7 @@ _RUNNER_CHILD_ENV_SUFFIXES = frozenset(
         "CLAUDE_TOKEN_FILE",
         "CODEX_AUTH_FD",
         "CODEX_AUTH_STATE",
+        "CODEX_REFRESH_OUTPUT",
         "CURSOR_AUTH_FD",
         "CURSOR_AUTH_STATE",
         "OUTER_WORKER_SANDBOX",

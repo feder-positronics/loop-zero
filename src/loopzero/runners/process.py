@@ -6,13 +6,18 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import json
 import logging
 import os
+import pwd
 import select
+import secrets
 import signal
+import shutil
+import stat
 import subprocess
 import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -27,7 +32,19 @@ from .contract import (
 from .containment import worker_child_environment
 
 LOGGER = logging.getLogger(__name__)
-SandboxWrapper = Callable[[Sequence[str]], Sequence[str]]
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchSpec:
+    """Filesystem authority required by exactly one contained child launch."""
+
+    argv: tuple[str, ...]
+    cwd: Path
+    private_mounts: tuple[Path, ...]
+    private_tmpdir: Path
+
+
+SandboxWrapper = Callable[[LaunchSpec], Sequence[str]]
 
 RAW_API_ENV_VARS = frozenset(
     {
@@ -150,6 +167,72 @@ class ProcessGroupError(RuntimeError):
 
 class ProcessIdentityError(ProcessGroupError):
     """Raised when exact launch ownership cannot be captured or persisted."""
+
+
+def _private_state_root() -> Path:
+    """Return the caller-owned state root after pinning its basic invariants."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        raise ProcessGroupError("runtime account home is unavailable") from None
+    if not home.is_absolute() or home == Path("/"):
+        raise ProcessGroupError("runtime account home is unsafe")
+    root = get_settings().state_path(home)
+    try:
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        metadata = root.stat(follow_symlinks=False)
+        if root.is_symlink() or not stat.S_ISDIR(metadata.st_mode):
+            raise ProcessGroupError("runtime state root is unsafe")
+        if metadata.st_uid != os.getuid():
+            raise ProcessGroupError("runtime state root is unsafe")
+        if stat.S_IMODE(metadata.st_mode) != 0o700:
+            root.chmod(0o700, follow_symlinks=False)
+        if stat.S_IMODE(root.stat(follow_symlinks=False).st_mode) != 0o700:
+            raise ProcessGroupError("runtime state root is unsafe")
+    except OSError as exc:
+        raise ProcessGroupError("runtime state root is unavailable") from exc
+    return root
+
+
+@contextmanager
+def private_temporary_directory(kind: str):
+    """Create and scrub one random 0700 directory below the private state root.
+
+    ``mkdir`` is an atomic create-or-fail operation for directories, providing
+    the directory equivalent of ``O_CREAT | O_EXCL``.
+    """
+    root = _private_state_root()
+    directory: Path | None = None
+    for _attempt in range(128):
+        candidate = root / f"{get_settings().temp_name(kind)}{secrets.token_hex(16)}"
+        try:
+            candidate.mkdir(mode=0o700)
+        except FileExistsError:
+            continue
+        try:
+            candidate.chmod(0o700, follow_symlinks=False)
+        except BaseException:
+            shutil.rmtree(candidate, ignore_errors=True)
+            raise
+        directory = candidate
+        break
+    if directory is None:
+        raise ProcessGroupError("private runtime directory is unavailable")
+    try:
+        metadata = directory.stat(follow_symlinks=False)
+        if (
+            directory.is_symlink()
+            or not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o700
+        ):
+            raise ProcessGroupError("private runtime directory is unsafe")
+        yield directory
+    finally:
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,14 +542,17 @@ def launch_cli(
     pass_fds: Sequence[int] = (),
     progress_fd: int | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    private_mounts: Sequence[Path] = (),
+    private_tmpdir: Path | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
     unsandboxed: bool = False,
     unsandboxed_reason: str | None = None,
 ) -> ProcessHandle:
     """Launch an allowlisted CLI child inside a caller-supplied sandbox.
 
-    The wrapper receives the original argv and returns isolated argv. It is
-    supplied by the dispatcher after kernel sandbox policy is settled. A
+    The wrapper receives a :class:`LaunchSpec` and returns isolated argv. Its
+    exact private mounts and writable temporary directory apply only to this
+    launch. It is supplied after kernel sandbox policy is settled. A
     caller may make an exceptional unsandboxed launch only by setting
     ``unsandboxed=True`` and supplying a nonempty reason, which is logged.
     """
@@ -484,10 +570,20 @@ def launch_cli(
             raise ProcessGroupError(
                 "sandboxed runtime launch cannot also request an unsandboxed exception"
             )
-        launch_command = list(sandbox_wrapper(tuple(command)))
+        if private_tmpdir is None:
+            raise ProcessGroupError("sandboxed runtime launch requires a private tmpdir")
+        launch_spec = LaunchSpec(
+            argv=tuple(command),
+            cwd=cwd,
+            private_mounts=tuple(private_mounts),
+            private_tmpdir=private_tmpdir,
+        )
+        launch_command = list(sandbox_wrapper(launch_spec))
         if not launch_command:
             raise ProcessGroupError("sandbox wrapper returned an empty command")
     child_markers = {"AGENT_DISPATCH_DEPTH": "1"}
+    if private_tmpdir is not None:
+        child_markers["TMPDIR"] = str(private_tmpdir)
     if (len(command) >= 3 and command[1] == "-I"
             and Path(command[2]).name == get_settings().bridge_path.name):
         child_markers.update(get_settings().child_environment())
@@ -628,7 +724,7 @@ def _process_exited_without_reaping(process: subprocess.Popen[str]) -> bool:
     return status is not None
 
 
-def run_cli(
+def _run_cli_with_private_tmpdir(
     command: Sequence[str],
     *,
     cwd: Path,
@@ -641,6 +737,8 @@ def run_cli(
     max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
     on_progress: RuntimeProgressCallback | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    private_mounts: Sequence[Path] = (),
+    private_tmpdir: Path | None,
     sandbox_wrapper: SandboxWrapper | None = None,
     unsandboxed: bool = False,
     unsandboxed_reason: str | None = None,
@@ -674,6 +772,8 @@ def run_cli(
             pass_fds=inherited_fds,
             progress_fd=progress_write_fd,
             on_launch=on_launch,
+            private_mounts=private_mounts,
+            private_tmpdir=private_tmpdir,
             sandbox_wrapper=sandbox_wrapper,
             unsandboxed=unsandboxed,
             unsandboxed_reason=unsandboxed_reason,
@@ -810,6 +910,65 @@ def run_cli(
         if progress_thread is not None and progress_thread.is_alive():
             progress_diagnostic.set()
             progress_thread.join(timeout=terminate_grace_s)
+
+
+def run_cli(
+    command: Sequence[str],
+    *,
+    cwd: Path,
+    input_text: str,
+    timeout_s: float,
+    env: Mapping[str, str] | None = None,
+    terminate_grace_s: float = 2.0,
+    pass_fds: Sequence[int] = (),
+    max_stdout_bytes: int = DEFAULT_STDOUT_LIMIT_BYTES,
+    max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
+    on_progress: RuntimeProgressCallback | None = None,
+    on_launch: ProcessLaunchCallback | None = None,
+    private_mounts: Sequence[Path] = (),
+    sandbox_wrapper: SandboxWrapper | None = None,
+    unsandboxed: bool = False,
+    unsandboxed_reason: str | None = None,
+) -> ProcessResult:
+    """Run one child with a fresh writable temporary directory for its lifetime."""
+    if unsandboxed:
+        return _run_cli_with_private_tmpdir(
+            command,
+            cwd=cwd,
+            input_text=input_text,
+            timeout_s=timeout_s,
+            env=env,
+            terminate_grace_s=terminate_grace_s,
+            pass_fds=pass_fds,
+            max_stdout_bytes=max_stdout_bytes,
+            max_stderr_bytes=max_stderr_bytes,
+            on_progress=on_progress,
+            on_launch=on_launch,
+            private_mounts=private_mounts,
+            private_tmpdir=None,
+            sandbox_wrapper=sandbox_wrapper,
+            unsandboxed=unsandboxed,
+            unsandboxed_reason=unsandboxed_reason,
+        )
+    with private_temporary_directory("child-tmp") as private_tmpdir:
+        return _run_cli_with_private_tmpdir(
+            command,
+            cwd=cwd,
+            input_text=input_text,
+            timeout_s=timeout_s,
+            env=env,
+            terminate_grace_s=terminate_grace_s,
+            pass_fds=pass_fds,
+            max_stdout_bytes=max_stdout_bytes,
+            max_stderr_bytes=max_stderr_bytes,
+            on_progress=on_progress,
+            on_launch=on_launch,
+            private_mounts=private_mounts,
+            private_tmpdir=private_tmpdir,
+            sandbox_wrapper=sandbox_wrapper,
+            unsandboxed=unsandboxed,
+            unsandboxed_reason=unsandboxed_reason,
+        )
 
 
 def isolated_python_import_available(

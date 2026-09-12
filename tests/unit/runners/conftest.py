@@ -9,10 +9,11 @@ from loopzero.runners.settings import RuntimeSettings, DEFAULT_SETTINGS
 
 
 @pytest.fixture(autouse=True)
-def runtime_settings(monkeypatch):
+def runtime_settings(monkeypatch, tmp_path):
     settings = RuntimeSettings(
         env_prefix="INTELFLO",
         toolchain_interpreter=Path("fastapi_backend/.venv/bin/python"),
+        state_root=str(tmp_path / "runner-state"),
     )
     # Exported environment-name constants remain strings. Legacy callers that
     # use those names explicitly get their consumer's names in this fixture.

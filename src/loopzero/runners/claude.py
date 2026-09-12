@@ -43,6 +43,7 @@ from .process import (
     filtered_child_environment,
     isolated_python_import_available,
     merge_runtime_cache_environment,
+    private_temporary_directory,
     run_cli as default_run_cli,
 )
 
@@ -1848,6 +1849,7 @@ def _run_refresh_process_group(
     text: bool,
     env: dict[str, str],
     cwd: Path,
+    private_mounts: Sequence[Path] = (),
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Claude refresh through the mandatory contained process seam."""
@@ -1859,6 +1861,7 @@ def _run_refresh_process_group(
         input_text="",
         timeout_s=timeout,
         env=env,
+        private_mounts=private_mounts,
         sandbox_wrapper=sandbox_wrapper,
     )
     if result.timed_out:
@@ -1879,18 +1882,13 @@ def _refresh_credential(
     run_status: Callable[..., subprocess.CompletedProcess[str]],
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> _ValidatedCredential:
-    settings = get_settings()
-    tooling_root = settings.tooling_root or Path.cwd()
-    workspace_root = settings.workspace_root(tooling_root)
-    workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix=settings.temp_name("claude-renewal"), dir=workspace_root
-    ) as directory:
-        staging_home = Path(directory)
-        staging_home.chmod(0o700)
+    with private_temporary_directory("claude-renewal") as staging_home:
         staging_directory = staging_home / ".claude"
         staging_directory.mkdir(mode=0o700)
         staging_credential = staging_directory / ".credentials.json"
+        # The pinned Claude executable accepts OAuth state only through this
+        # HOME-relative file. Codex's SDK bridge can instead consume a sealed
+        # descriptor, so only this CLI refresh needs an input credential file.
         _write_private_file(
             staging_credential,
             _force_staged_expiry(credential, now_ms=now_ms),
@@ -1906,6 +1904,7 @@ def _refresh_credential(
                 "cwd": staging_home,
             }
             if run_status is _run_refresh_process_group:
+                runner_arguments["private_mounts"] = (staging_home,)
                 runner_arguments["sandbox_wrapper"] = sandbox_wrapper
             outcome = run_status(command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:

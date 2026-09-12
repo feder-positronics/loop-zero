@@ -44,6 +44,7 @@ from .process import (
     filtered_child_environment,
     isolated_python_import_available,
     merge_runtime_cache_environment,
+    private_temporary_directory,
     run_cli as default_run_cli,
 )
 
@@ -2004,6 +2005,7 @@ def _run_refresh_process_group(
     text: bool,
     env: dict[str, str],
     cwd: Path,
+    private_mounts: Sequence[Path] = (),
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Codex refresh through the mandatory contained process seam."""
@@ -2015,6 +2017,7 @@ def _run_refresh_process_group(
         input_text="",
         timeout_s=timeout,
         env=env,
+        private_mounts=private_mounts,
         sandbox_wrapper=sandbox_wrapper,
     )
     if result.timed_out:
@@ -2044,16 +2047,9 @@ def _refresh_credential(
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> _ValidatedCredential:
     settings = get_settings()
-    tooling_root = settings.tooling_root or Path.cwd()
-    workspace_root = settings.workspace_root(tooling_root)
-    workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(
-        prefix=settings.temp_name("codex-renewal"), dir=workspace_root
-    ) as directory:
-        staging_home = Path(directory)
-        staging_home.chmod(0o700)
+    with private_temporary_directory("codex-renewal") as staging_home:
         staging_credential = staging_home / "auth.json"
-        _write_private_file(staging_credential, credential.payload)
+        credential_descriptor = _snapshot_descriptor(credential.payload)
         command = list(refresh_command)
         try:
             runner_arguments = {
@@ -2064,10 +2060,18 @@ def _refresh_credential(
                 "env": {
                     **_refresh_environment(staging_home),
                     **settings.child_environment(),
+                    settings.env_name("CODEX_AUTH_FD"): str(
+                        credential_descriptor
+                    ),
+                    settings.env_name("CODEX_REFRESH_OUTPUT"): str(
+                        staging_credential
+                    ),
                 },
                 "cwd": staging_home,
+                "pass_fds": (credential_descriptor,),
             }
             if run_refresh is _run_refresh_process_group:
+                runner_arguments["private_mounts"] = (staging_home,)
                 runner_arguments["sandbox_wrapper"] = sandbox_wrapper
             outcome = run_refresh(command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:
@@ -2078,6 +2082,14 @@ def _refresh_credential(
             raise CodexCredentialRefreshFailed(
                 "Codex credential refresh could not start"
             ) from exc
+        finally:
+            try:
+                os.close(credential_descriptor)
+            except OSError:
+                # ``run_cli`` consumes inherited credential descriptors as
+                # soon as the child has started; injected runners leave the
+                # broker responsible for this close.
+                pass
         authenticated = _status_authenticated(outcome.stdout)
         if authenticated is False:
             raise CodexCredentialRevoked("Codex ChatGPT login was revoked")

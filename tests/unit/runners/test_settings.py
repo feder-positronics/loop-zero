@@ -125,7 +125,10 @@ def test_hostile_parent_authority_never_reaches_child(tmp_path, caplog):
         "UNLISTED_SECRET": "secret",
     }
     allowlist = frozenset({"PATH", "SAFE_MARKER", *set(hostile_names) - {"UNLISTED_SECRET"}})
-    settings = RuntimeSettings(child_env_allowlist=allowlist)
+    settings = RuntimeSettings(
+        child_env_allowlist=allowlist,
+        state_root=str(tmp_path / "runner-state"),
+    )
     script = "import json, os; print(json.dumps(dict(os.environ), sort_keys=True))"
     with settings.use():
         result = process.run_cli(
@@ -146,6 +149,38 @@ def test_hostile_parent_authority_never_reaches_child(tmp_path, caplog):
 def test_launch_cli_refuses_without_sandbox_wrapper(tmp_path):
     with pytest.raises(process.ProcessGroupError, match="requires a sandbox wrapper"):
         process.launch_cli([sys.executable, "-c", "pass"], cwd=tmp_path, env={})
+
+
+def test_launch_spec_provides_a_private_writable_tmpdir(tmp_path):
+    observed = []
+
+    def wrapper(spec):
+        observed.append(spec)
+        return spec.argv
+
+    settings = RuntimeSettings(state_root=str(tmp_path / "state"))
+    script = (
+        "import json, os, tempfile; "
+        "path = tempfile.mkdtemp(); "
+        "print(json.dumps({'tmpdir': os.environ['TMPDIR'], 'path': path}))"
+    )
+    with settings.use():
+        result = process.run_cli(
+            [sys.executable, "-I", "-c", script],
+            cwd=tmp_path,
+            input_text="",
+            timeout_s=2,
+            env={"PATH": os.environ["PATH"]},
+            sandbox_wrapper=wrapper,
+        )
+
+    assert result.returncode == 0
+    assert len(observed) == 1
+    child = json.loads(result.stdout)
+    private_tmpdir = observed[0].private_tmpdir
+    assert Path(child["tmpdir"]) == private_tmpdir
+    assert Path(child["path"]).parent == private_tmpdir
+    assert not private_tmpdir.exists()
 
 
 def test_runner_launch_inventory_matches_checked_in_allowlist():
