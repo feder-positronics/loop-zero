@@ -94,9 +94,16 @@ CLAUDE_BLOCKED_ENV_VARS = frozenset(
 class ClaudeProtocolError(ValueError):
     """Claude emitted malformed or incomplete normalized protocol output."""
 
-    def __init__(self, message: str, *, semantic_event: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        semantic_event: bool = False,
+        incomplete_stream: bool = False,
+    ) -> None:
         super().__init__(message)
         self.semantic_event = semantic_event
+        self.incomplete_stream = incomplete_stream
 
 
 @dataclass(frozen=True, slots=True)
@@ -862,6 +869,7 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
         raise ClaudeProtocolError(
             missing_terminal_diagnostic,
             semantic_event=semantic_seen,
+            incomplete_stream=True,
         )
 
     return ParsedClaudeStream(
@@ -1458,15 +1466,23 @@ class ClaudeAdapter:
             parsed = parse_claude_stream(outcome.stdout)
         except ClaudeProtocolError as exc:
             if _bridge_killed_by_signal(outcome):
+                if exc.incomplete_stream:
+                    return self._result(
+                        request,
+                        outcome=outcome,
+                        status=RuntimeStatus.FAILED,
+                        reason=TerminalReason.TRANSPORT_DISCONNECT,
+                        diagnostics=(
+                            "Claude SDK bridge was disconnected",
+                            *_timeout_diagnostics(outcome.stdout),
+                        ),
+                    )
                 return self._result(
                     request,
                     outcome=outcome,
                     status=RuntimeStatus.FAILED,
-                    reason=TerminalReason.TRANSPORT_DISCONNECT,
-                    diagnostics=(
-                        "Claude SDK bridge was disconnected",
-                        *_timeout_diagnostics(outcome.stdout),
-                    ),
+                    reason=TerminalReason.PROTOCOL_FAILURE,
+                    diagnostics=("Claude SDK bridge emitted malformed protocol",),
                 )
             if (
                 request.read_only

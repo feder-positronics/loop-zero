@@ -63,7 +63,8 @@ bridge error frames carry a sanitized `diagnostics` object (exception class and
 a redacted, bounded message) that the normalized result surfaces as
 `<Vendor> SDK failure: ...`; CLI retry events surface as
 `<Vendor> API retry: ...`, and a bridge killed by an external signal before its
-terminal frame is a `transport-disconnect`.
+terminal frame is a `transport-disconnect` only if its stream is otherwise valid.
+Malformed protocol remains a protocol failure even after a signal.
 
 Create a GitHub Actions environment named `nightly-conformance`, restrict its
 deployment branches to `main`, and configure **no required reviewers** so the

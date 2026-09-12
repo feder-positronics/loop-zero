@@ -147,9 +147,16 @@ CODEX_BLOCKED_ENV_VARS = frozenset(
 class CodexProtocolError(ValueError):
     """Codex emitted malformed or incomplete normalized protocol output."""
 
-    def __init__(self, message: str, *, semantic_event: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        semantic_event: bool = False,
+        incomplete_stream: bool = False,
+    ) -> None:
         super().__init__(message)
         self.semantic_event = semantic_event
+        self.incomplete_stream = incomplete_stream
 
 
 @dataclass(frozen=True, slots=True)
@@ -764,6 +771,7 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
         raise CodexProtocolError(
             missing_terminal_diagnostic,
             semantic_event=semantic_seen,
+            incomplete_stream=True,
         )
 
     return ParsedCodexStream(
@@ -1645,15 +1653,23 @@ class CodexAdapter:
             parsed = parse_codex_stream(outcome.stdout)
         except CodexProtocolError as exc:
             if _bridge_killed_by_signal(outcome):
+                if exc.incomplete_stream:
+                    return self._result(
+                        request,
+                        outcome=outcome,
+                        status=RuntimeStatus.FAILED,
+                        reason=TerminalReason.TRANSPORT_DISCONNECT,
+                        diagnostics=(
+                            "Codex SDK bridge was disconnected",
+                            *_timeout_diagnostics(outcome.stdout),
+                        ),
+                    )
                 return self._result(
                     request,
                     outcome=outcome,
                     status=RuntimeStatus.FAILED,
-                    reason=TerminalReason.TRANSPORT_DISCONNECT,
-                    diagnostics=(
-                        "Codex SDK bridge was disconnected",
-                        *_timeout_diagnostics(outcome.stdout),
-                    ),
+                    reason=TerminalReason.PROTOCOL_FAILURE,
+                    diagnostics=("Codex SDK bridge emitted malformed protocol",),
                 )
             if request.read_only and not exc.semantic_event:
                 return self._run_read_only_fallback(

@@ -7994,6 +7994,73 @@ def test_signalled_bridge_without_terminal_frame_is_a_transport_disconnect(
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "{invalid-json\n",
+        "[]\n",
+        "x" * (contracts.MAX_PROTOCOL_LINE_BYTES + 1) + "\n",
+        json.dumps(
+            {
+                "type": "result",
+                "status": "invalid",
+                "terminal_reason": "completed",
+            }
+        )
+        + "\n",
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "result",
+                        "status": "completed",
+                        "terminal_reason": "completed",
+                        "structured_output": {"ok": True},
+                    }
+                ),
+                json.dumps(
+                    {"type": "event", "kind": "system", "subtype": "late"}
+                ),
+            ]
+        )
+        + "\n",
+    ],
+    ids=[
+        "invalid-json",
+        "non-object",
+        "oversized-frame",
+        "invalid-terminal-schema",
+        "frame-after-terminal",
+    ],
+)
+def test_signalled_bridge_malformed_protocol_is_not_masked_as_disconnect(
+    tmp_path: Path, vendor: str, stream: str
+) -> None:
+    outcome = process.ProcessResult(
+        returncode=-15,
+        stdout=stream,
+        stderr="",
+        duration_s=1.1,
+        timed_out=False,
+    )
+    if vendor == "claude":
+        result = claude.ClaudeAdapter(
+            run_process=lambda *_args, **_kwargs: outcome
+        )._run_sdk(claude_request(tmp_path))
+        prefix = "Claude"
+    else:
+        result = codex.CodexAdapter(
+            run_process=lambda *_args, **_kwargs: outcome
+        )._run_sdk(codex_request(tmp_path))
+        prefix = "Codex"
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.PROTOCOL_FAILURE
+    assert result.returncode == -15
+    assert result.diagnostics == (f"{prefix} SDK bridge emitted malformed protocol",)
+
+
 def test_codex_protected_fallback_carries_sanitized_sdk_diagnostics(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
