@@ -8647,3 +8647,36 @@ def test_codex_effective_config_refusal_precedes_account_and_thread(
         with pytest.raises(RuntimeError, match="unavailable"):
             sdk_bridge._run_codex(request)
     assert calls == ["initialize", "config/read", "close"]
+
+
+@pytest.mark.parametrize("path,output,exit_code,denied", [
+    ("/etc/shadow", "cat: /etc/shadow: Permission denied", 1, True),
+    ("/etc/shadow", "cat: /etc/shadow: Operation not permitted", 1, True),
+    ("/etc/shadow", "cat: /etc/shadow: No such file or directory", 1, False),
+    ("/etc/shadow", "cat: /etc/other: Permission denied", 1, False),
+    ("/etc/other", "cat: /etc/shadow: Permission denied", 1, False),
+    ("/etc/shadow", "cat: /etc/shadow: Permission denied", 0, False),
+    ("/etc/shadow", "private file contents", 0, False),
+])
+def test_codex_command_denial_requires_attempted_read_and_matching_tool_error(
+    capsys, path, output, exit_code, denied
+):
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+
+    item = CommandExecutionThreadItem.model_validate({
+        "id": "test", "type": "commandExecution", "command": "private command",
+        "cwd": "/tmp", "status": "completed", "exitCode": exit_code,
+        "aggregatedOutput": output,
+        "commandActions": [{"type": "read", "command": "private command",
+                            "name": "cat", "path": path}],
+    })
+    sdk_bridge._codex_command_completion(item)
+    stream = capsys.readouterr().out
+    assert output not in stream
+    assert "private command" not in stream
+    result = codex.parse_codex_stream(stream + json.dumps({
+        "type": "result", "status": "completed", "terminal_reason": "completed",
+        "output": "done",
+    }) + "\n")
+    assert any(event.subtype == "denied:/etc/shadow" for event in result.events) is denied
+    assert result.diagnostics[0].startswith("Codex command completed:")

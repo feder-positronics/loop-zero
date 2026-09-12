@@ -65,8 +65,10 @@ accept managed behavior outside that checked set before relying on this route.
 The Codex access-only snapshot keeps the source's `last_refresh`
 timestamp because `0.154.0` treats a missing timestamp as stale and would
 otherwise attempt the refresh the snapshot deliberately cannot perform.  Codex
-permission denial is recorded as `unsupported`: its read-only sandbox enforces
-file access at the OS level without a permission-denial protocol event.  SDK
+permission-denial always launches: it passes only with observed denial evidence
+for the attempted read (a sandbox tool error or denial counter). An otherwise
+valid turn without that evidence is recorded as `unsupported`, with its reason,
+observed command outcomes, and charged cost.  SDK
 bridge error frames carry a sanitized `diagnostics` object (exception class and
 a redacted, bounded message) that the normalized result surfaces as
 `<Vendor> SDK failure: ...`; CLI retry events surface as
@@ -170,8 +172,10 @@ uploads only normalized fields and separates known from conservative charges.
 Gate A-G2 means two consecutive **scheduled** UTC nights on the default branch
 are green for all three runtime jobs. Both nights must have artifacts showing
 the exact pins (including Cursor's build hash), every supported scenario
-passing, Cursor's schema-dependent scenarios explicitly unsupported, charged
-aggregate cost within the configured ceiling, and known or documented
-conservative accounting. A manual dispatch, missing night,
-skip, cancellation, replay-only run, absent artifact, unknown cost, or failed
+passing, Cursor's schema-dependent success and restart/resume scenarios
+explicitly unsupported, and the named **Codex permission-denial exception**
+explicitly accepted by the release decision when a launched turn lacks observable
+denial evidence and is recorded as unsupported. Both nights must also show
+charged aggregate cost within the configured ceiling and known or documented
+conservative accounting. A manual dispatch, missing night, skip, cancellation, replay-only run, absent artifact, unknown cost, or failed
 runtime cannot substitute for either green night.

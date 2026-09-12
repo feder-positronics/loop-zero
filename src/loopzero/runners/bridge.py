@@ -435,6 +435,30 @@ def _codex_command_completion(item: object) -> None:
         "type": "event", "kind": "command_completion", "semantic": False,
         "status": status, "exit_code": exit_code, "output_bytes": output_bytes,
     })
+    # Retain only a fixed denial marker, never command text or file contents.
+    # A generic failed command (including a missing file) is not denial evidence.
+    shadow_read = False
+    for action in getattr(item, "command_actions", ()):
+        action = getattr(action, "root", action)
+        path = getattr(action, "path", None)
+        if (
+            getattr(action, "type", None) == "read"
+            and getattr(path, "root", path) == "/etc/shadow"
+        ):
+            shadow_read = True
+            break
+    if (
+        shadow_read
+        and exit_code is not None
+        and exit_code != 0
+        and output_bytes is not None
+        and any(
+            "/etc/shadow" in line
+            and ("permission denied" in line.casefold() or "operation not permitted" in line.casefold())
+            for line in output.splitlines()
+        )
+    ):
+        _event_frame(kind="tool", subtype="denied:/etc/shadow", semantic=True)
 
 
 def _codex_tool_label(item_root: object) -> RuntimeToolLabel:

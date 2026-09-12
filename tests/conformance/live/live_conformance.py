@@ -645,14 +645,6 @@ def _unsupported_reason(vendor: str, scenario: str) -> str | None:
     """Return the vendor limitation that makes a scenario unobservable."""
     if vendor == "cursor" and scenario in {"success", "restart-resume"}:
         return "pinned Cursor CLI cannot enforce output_schema"
-    if vendor == "codex" and scenario == "permission-denial":
-        # The read-only app-server sandbox enforces file access at the OS
-        # level: a denied read is an ordinary failed command, and the
-        # 0.154 protocol emits no permission-denial event or counter.
-        return (
-            "pinned Codex app-server enforces read-only file access in its "
-            "sandbox without a permission-denial protocol event"
-        )
     return None
 
 
@@ -698,6 +690,34 @@ def _permission_denial_evident(result: RuntimeResult) -> bool:
         for event in result.events
     )
     return explicit_counter or explicit_event or path_named_tool_denial
+
+
+def _post_launch_unsupported_reason(scenario: str, result: RuntimeResult) -> str | None:
+    """Allow the named Codex exception only after an otherwise valid turn."""
+    if (
+        result.vendor == "codex"
+        and scenario == "permission-denial"
+        and not _permission_denial_evident(result)
+        and (
+            (result.status is RuntimeStatus.COMPLETED
+             and result.terminal_reason is TerminalReason.COMPLETED)
+            or (result.status is RuntimeStatus.FAILED
+                and result.terminal_reason in {TerminalReason.PROCESS_EXIT, TerminalReason.MODEL_RESULT})
+        )
+    ):
+        return (
+            "pinned Codex permission-denial turn produced no observable denial "
+            "for the attempted read; command outcomes are recorded separately"
+        )
+    return None
+
+
+def _observed_tool_outcomes(result: RuntimeResult) -> list[str]:
+    """Use the adapter's bounded metadata; never upload raw tool output."""
+    return [
+        item for item in result.diagnostics
+        if item.startswith("Codex command completed:")
+    ] or ["no command completion observed"]
 
 
 def _assert_contract(scenario: str, result: RuntimeResult) -> None:
@@ -1110,16 +1130,23 @@ def test_live_runtime_contract(
                 )
                 charged_cost += scenario_charge
                 unaccounted_runs += scenario_unaccounted
-                _assert_contract(scenario, result)
+                unsupported_reason = _post_launch_unsupported_reason(scenario, result)
+                if unsupported_reason is None:
+                    _assert_contract(scenario, result)
                 if scenario == "restart-resume":
                     assert result.session_id == original_session_id
                 record: dict[str, object] = {
                     "scenario": scenario,
-                    "outcome": "passed",
+                    "outcome": "unsupported" if unsupported_reason else "passed",
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
                     "result": _normalized(result),
                 }
+                if vendor == "codex" and scenario == "permission-denial":
+                    record["observed_tool_outcomes"] = _observed_tool_outcomes(result)
+                if unsupported_reason is not None:
+                    record["status"] = "unsupported"
+                    record["reason"] = unsupported_reason
                 if observed_cost is not None:
                     record["known_cost_usd"] = observed_cost
                 records.append(record)

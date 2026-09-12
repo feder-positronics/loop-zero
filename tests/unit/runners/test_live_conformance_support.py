@@ -728,12 +728,35 @@ def test_cursor_schema_scenarios_are_unsupported_not_free_text_passes() -> None:
     assert live._unsupported_reason("cursor", "permission-denial") is None
 
 
-def test_codex_permission_denial_is_recorded_as_a_vendor_limitation() -> None:
-    reason = live._unsupported_reason("codex", "permission-denial")
-    assert reason is not None
-    assert "permission-denial" in reason
-    assert live._unsupported_reason("codex", "success") is None
-    assert live._unsupported_reason("claude", "permission-denial") is None
+def test_codex_permission_denial_is_classified_only_after_launch() -> None:
+    assert live._unsupported_reason("codex", "permission-denial") is None
+    result = _permission_result(diagnostics=(
+        "Codex command completed: status=completed; exit_code=1; observed_output_bytes=42",
+    ))
+    assert live._post_launch_unsupported_reason("permission-denial", result)
+    assert live._observed_tool_outcomes(result) == list(result.diagnostics)
+    assert live._observed_tool_outcomes(_permission_result()) == [
+        "no command completion observed"
+    ]
+    with pytest.raises(AssertionError):
+        live._assert_contract("permission-denial", result)
+    denial = _permission_result(events=(
+        RuntimeEvent(kind="tool", subtype="denied:/etc/shadow"),
+    ))
+    assert live._post_launch_unsupported_reason("permission-denial", denial) is None
+    live._assert_contract("permission-denial", denial)
+
+
+@pytest.mark.parametrize("reason", [TerminalReason.PROTOCOL_FAILURE,
+                                   TerminalReason.TRANSPORT_DISCONNECT,
+                                   TerminalReason.STARTUP_FAILURE])
+def test_codex_permission_exception_does_not_waive_runtime_failure(reason) -> None:
+    from dataclasses import replace
+
+    result = replace(_permission_result(), terminal_reason=reason)
+    assert live._post_launch_unsupported_reason("permission-denial", result) is None
+    with pytest.raises(AssertionError):
+        live._assert_contract("permission-denial", result)
 
 
 def test_suite_stops_at_default_killed_run_limit() -> None:
@@ -835,3 +858,55 @@ def test_live_wrapper_binds_resolver_target_after_private_run_tmpfs(
     assert argv[bind + 1] == str(resolver)
     assert bind > tmpfs_run
     assert "--unshare-net" not in argv
+
+
+@pytest.mark.parametrize("denied,tool_observed", [(True, True), (False, True), (False, False)])
+def test_codex_permission_scenario_launches_and_records_evidence_and_cost(
+    monkeypatch, tmp_path, denied, tool_observed
+) -> None:
+    from contextlib import nullcontext
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    executable = tmp_path / "codex"
+    executable.touch()
+    output = tmp_path / "results.json"
+    monkeypatch.setenv("LOOPZERO_LIVE_CLI_PATH", str(executable))
+    monkeypatch.setenv("LOOPZERO_LIVE_RESULTS", str(output))
+    monkeypatch.setattr(live, "SCENARIOS", ("permission-denial",))
+    monkeypatch.setattr(live, "_suite_access_only_credential", lambda *_: nullcontext())
+    monkeypatch.setattr(live, "private_temporary_directory", lambda *_: nullcontext(tmp_path))
+    monkeypatch.setattr(live, "_sandbox_wrapper", lambda *_: None)
+    monkeypatch.setattr(live, "_version", lambda *_args, **_kwargs: live.PINS["codex"])
+    monkeypatch.setattr(live, "_probe_with_credential", lambda *_args, **_kwargs: SimpleNamespace(ready=True))
+    monkeypatch.setattr(live, "_normalized_readiness", lambda *_: {"ready": True})
+    monkeypatch.setattr(live, "RealProcess", lambda _wrapper, _vendor, scenario: SimpleNamespace(
+        scenario_started=scenario != "diagnose", scenario_invocations=1,
+        killed=False, metered_cost=None,
+    ))
+    monkeypatch.setattr(live.RUNTIME_REGISTRY, "create", lambda *_args, **_kwargs: SimpleNamespace(cancel=lambda: None))
+    launches = []
+    result = replace(_permission_result(
+        events=(RuntimeEvent(kind="tool", subtype="denied:/etc/shadow"),) if denied else (),
+        diagnostics=("Codex command completed: status=completed; exit_code=1; observed_output_bytes=42",) if tool_observed else (),
+    ), cost_usd=0.01)
+
+    def run(_vendor, _adapter, request, **_kwargs):
+        launches.append(request)
+        return result
+
+    monkeypatch.setattr(live, "_run_with_credential", run)
+    live.test_live_runtime_contract("codex", tmp_path, SimpleNamespace(getoption=lambda _: False))
+    assert len(launches) == 1
+    assert "/etc/shadow" in launches[0].prompt
+    record = json.loads(output.read_text())["scenarios"][0]
+    assert record["outcome"] == ("passed" if denied else "unsupported")
+    assert record["accounting"] == "known"
+    assert record["charged_cost_usd"] == 0.01
+    assert record["known_cost_usd"] == 0.01
+    assert record["observed_tool_outcomes"] == (
+        list(result.diagnostics) if tool_observed else ["no command completion observed"]
+    )
+    if not denied:
+        assert "no observable denial" in record["reason"]
+        assert record["status"] == "unsupported"
