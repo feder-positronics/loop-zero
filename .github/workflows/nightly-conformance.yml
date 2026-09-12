@@ -163,6 +163,26 @@ jobs:
           test ! -e "$ROOT/credential-source.json"
           ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
           test -n "$ACCOUNT_HOME" && test "$ACCOUNT_HOME" != /
+          PYTHON_BIN=$(readlink -f "$(uv python find 3.13)")
+          PYTHON_INSTALL_ROOT=${PYTHON_BIN%/bin/*}
+          test "$PYTHON_INSTALL_ROOT" != "$PYTHON_BIN"
+          for interpreter in "$ROOT"/.venv/bin/python*; do
+            if [ -L "$interpreter" ]; then
+              target=$(readlink -f "$interpreter")
+              case "$target" in
+                "$PYTHON_INSTALL_ROOT"/*) ;;
+                *) echo "venv interpreter escapes uv install root" >&2; exit 1 ;;
+              esac
+            fi
+          done
+          PYTHON_ROOT_LAYOUT=()
+          parent=$(dirname "$PYTHON_INSTALL_ROOT")
+          while [ "$parent" != "$ACCOUNT_HOME" ]; do
+            PYTHON_ROOT_LAYOUT=(--dir "$parent" "${PYTHON_ROOT_LAYOUT[@]}")
+            next=$(dirname "$parent")
+            test "$next" != "$parent"
+            parent="$next"
+          done
           ROOT_LAYOUT=()
           for entry in /bin /lib /lib64 /sbin; do
             if [ -L "$entry" ]; then
@@ -181,10 +201,11 @@ jobs:
             --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
             --ro-bind "$ROOT/.venv" /tmp/venv \
+            --perms 0700 --tmpfs "$ACCOUNT_HOME" "${PYTHON_ROOT_LAYOUT[@]}" \
+            --ro-bind "$PYTHON_INSTALL_ROOT" "$PYTHON_INSTALL_ROOT" \
             --ro-bind "$LOOPZERO_LIVE_RUNTIME_ROOT" /opt/runtime \
             --bind "$RESULTS" /tmp/results \
             --ro-bind "$SNAPSHOT" /run/loopzero-credential.json \
-            --perms 0700 --tmpfs "$ACCOUNT_HOME" \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /opt/runtime/bin:/usr/bin:/bin \
             --setenv HOME /tmp --setenv PYTHONDONTWRITEBYTECODE 1 \
@@ -196,6 +217,7 @@ jobs:
             --setenv LOOPZERO_LIVE_STATE_ROOT "$ACCOUNT_HOME/.local/state/loopzero-live" \
             --setenv LOOPZERO_CONFORMANCE_BUDGET_USD "$EFFECTIVE_BUDGET" \
             --setenv LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS 3 \
+            --setenv LOOPZERO_CONFORMANCE_MAX_UNACCOUNTED_RUNS 3 \
             --setenv LOOPZERO_LIVE_RESULTS "/tmp/results/${LOOPZERO_LIVE_RUNTIMES}.json" \
             --chdir /tmp/workspace -- bash -eu -c '
               /tmp/venv/bin/python -m pytest -q -p no:cacheprovider \
@@ -223,6 +245,7 @@ jobs:
                   summary.write(f"| {row['scenario']} | {row['outcome']} | {row.get('accounting', 'n/a')} | {cost if cost is not None else 'n/a'} |\n")
               summary.write(f"\nTotal charged cost: ${result['charged_cost_usd']:.6f}\n\n")
               summary.write(f"Killed runs: {result['killed_runs']}/{result['max_killed_runs']}\n\n")
+              summary.write(f"Unaccounted runs: {result['unaccounted_runs']}/{result['max_unaccounted_runs']}\n\n")
               summary.write(f"Spend bound: {result['spend_bound']}\n")
           PY
 

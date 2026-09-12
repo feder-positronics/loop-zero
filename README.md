@@ -69,6 +69,10 @@ and exfiltrate the short-lived access token while the network-enabled live job
 runs. The GitHub environment limits secret scope, but is not a per-run human
 approval boundary.
 
+The release broker becomes available only after this branch merges into
+`release/0.3`: that branch does not contain `credential_seal.py` beforehand,
+so the first nightly broker is built from this branch's code after the merge.
+
 The optional repository variable `LOOPZERO_CONFORMANCE_BUDGET_USD` is the
 aggregate charged-cost ceiling per runtime and defaults to USD 2.  Before each
 launch, its remaining allowance narrows the per-run `RuntimeSettings.budget`.
@@ -83,11 +87,11 @@ miscompared with an output-only limit.  There is no separate total-token cap.
 Reporting uses the frozen [`2026-09-12 price table`](src/loopzero/runners/pricing.py),
 not a live lookup. A completed turn with zero output tokens, including one
 that reports positive input, and incomplete usage remain unknown rather than
-priced. If cancellation, disconnect, or timeout kills Claude before usage
-arrives, the aggregate is charged its native per-run USD cap. Killed Codex
-runs are charged the output cap plus a conservative estimate of one input
-token per prompt byte. Cursor exposes no native cost/token cap in the pinned
-CLI, so each killed Cursor run is charged a fixed USD 0.10. Killed runs count
+priced. Every started invocation that ends without known usage is charged
+Claude's native per-run USD cap, Codex's output cap plus a conservative
+estimate of one input token per prompt byte, or a fixed USD 0.10 for Cursor,
+whose pinned CLI exposes no native cost/token cap. Such invocations count
+toward `LOOPZERO_CONFORMANCE_MAX_UNACCOUNTED_RUNS` (default 3). Killed runs count
 toward `LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS` (default 3), after which the suite
 stops; the aggregate ceiling also stops further launches. Each runtime gets
 one private state-root session home bound read-write into both restart/resume
