@@ -31,6 +31,12 @@ def test_sync_check_fails_before_sync_and_passes_after(consumer: Path, capsys):
     assert run("--root", str(consumer), "sync", "--check") == 0
 
 
+def test_sync_dry_run_reports_without_writing(consumer: Path, capsys):
+    assert run("--root", str(consumer), "sync", "--dry-run") == 0
+    assert "would update" in capsys.readouterr().out
+    assert not (consumer / ".loopzero/skills-manifest.json").exists()
+
+
 def test_status_compares_package_and_snapshot(consumer: Path, capsys):
     assert run("--root", str(consumer), "status") == 0
     output = capsys.readouterr().out

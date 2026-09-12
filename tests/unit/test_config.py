@@ -13,6 +13,12 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.checks == {"required": ("tests",), "advisory": (), "scheduled": ("health",)}
     assert profile.hooks == {"worktree_setup": ("make setup",), "acceptance": ("make test",)}
     assert profile.env_prefix == "LOOPZERO"
+    assert profile.skills_dir == Path(".cursor/skills")
+    assert profile.skill_mirrors == (
+        Path(".agents/skills"),
+        Path(".agent/skills"),
+        Path(".claude/skills"),
+    )
     assert profile.state_root_explicit is False
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
 
@@ -27,6 +33,34 @@ def test_profile_records_explicit_state_root(consumer: Path):
     profile = config.load_profile(consumer)
     assert profile.state_root == "/var/lib/intelflo"
     assert profile.state_root_explicit is True
+
+
+def test_profile_loads_custom_skill_layout(consumer: Path):
+    (consumer / "workflow.toml").write_text(
+        minimal_workflow(
+            extra=(
+                '[package]\nskills_dir = ".codex/skills"\n'
+                'skill_mirrors = [".claude/skills"]\nproduct_name = "Consumer"\n'
+                '[toolchain]\nbackend_dir = "server"\n'
+                '[toolchain.commands]\ndocs_verify = "just docs"\n'
+            )
+        ),
+        encoding="utf-8",
+    )
+    profile = config.load_profile(consumer)
+    assert profile.skills_dir == Path(".codex/skills")
+    assert profile.skill_mirrors == (Path(".claude/skills"),)
+    assert profile.toolchain["commands"]["docs_verify"] == "just docs"
+
+
+@pytest.mark.parametrize("value", ["../skills", "/tmp/skills", "."])
+def test_skill_layout_rejects_unsafe_canonical_paths(consumer: Path, value: str):
+    (consumer / "workflow.toml").write_text(
+        minimal_workflow(extra=f'[package]\nskills_dir = "{value}"\n'),
+        encoding="utf-8",
+    )
+    with pytest.raises(config.ConfigError, match="skills_dir"):
+        config.load_profile(consumer)
 
 
 def test_every_problem_is_reported_at_once(tmp_path: Path):

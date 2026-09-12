@@ -82,6 +82,12 @@ class Profile:
     contract: str = CONTRACT_ID
     epoch: int = 1
     sandbox: str = "bwrap"
+    skills_dir: Path = Path(".cursor/skills")
+    skill_mirrors: tuple[Path, ...] = (
+        Path(".agents/skills"),
+        Path(".agent/skills"),
+        Path(".claude/skills"),
+    )
     toolchain: dict[str, Any] = field(default_factory=dict)
     aliases: dict[str, Alias] = field(default_factory=dict)
     tiers: dict[str, Tier] = field(default_factory=dict)
@@ -146,6 +152,23 @@ def _reject_unsafe_rendered_string(value: Any, where: str, problems: list[str]) 
         problems.append(f"{where}: managed-block marker text is forbidden")
         valid = False
     return valid
+
+
+def _repository_relative_path(
+    value: Any, where: str, problems: list[str]
+) -> Path | None:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or Path(value).is_absolute()
+        or not Path(value).parts
+        or ".." in Path(value).parts
+    ):
+        problems.append(f"{where}: must be a nonempty repository-relative path without traversal")
+        return None
+    if not _reject_unsafe_rendered_string(value, where, problems):
+        return None
+    return Path(value)
 
 
 def _hooks(data: dict[str, Any], where: str, problems: list[str]) -> dict[str, tuple[str, ...]]:
@@ -257,10 +280,85 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     if sandbox not in SANDBOXES:
         problems.append(f"[package].sandbox: must be one of {', '.join(SANDBOXES)}")
 
+    skills_dir = _repository_relative_path(
+        package.get("skills_dir", ".cursor/skills"), "[package].skills_dir", problems
+    )
+    mirror_values = package.get(
+        "skill_mirrors", [".agents/skills", ".agent/skills", ".claude/skills"]
+    )
+    skill_mirrors: list[Path] = []
+    if not isinstance(mirror_values, list):
+        problems.append("[package].skill_mirrors: must be a list of repository-relative paths")
+    else:
+        for index, value in enumerate(mirror_values):
+            mirror = _repository_relative_path(
+                value, f"[package].skill_mirrors[{index}]", problems
+            )
+            if mirror is not None:
+                skill_mirrors.append(mirror)
+        if len(set(skill_mirrors)) != len(skill_mirrors):
+            problems.append("[package].skill_mirrors: paths must be unique")
+        if skills_dir is not None and skills_dir in skill_mirrors:
+            problems.append("[package].skill_mirrors: canonical skills_dir cannot be a mirror")
+
+    for key in (
+        "product_name",
+        "primary_env",
+        "docs_root",
+        "rules_root",
+        "constraints_file",
+        "delivery_guide",
+        "skills_readme",
+        "docs_dir",
+        "weekly_issue_workflow",
+        "openapi_document",
+        "commit_identity",
+        "frontend_full_env",
+        "suppressions_file",
+        "core_contract",
+        "core_handoff",
+    ):
+        if key in package:
+            value = package[key]
+            if not isinstance(value, str) or not value:
+                problems.append(f"[package].{key}: must be a nonempty string")
+            else:
+                _reject_unsafe_rendered_string(value, f"[package].{key}", problems)
+
     toolchain = data.get("toolchain", {})
     if not isinstance(toolchain, dict):
         problems.append("[toolchain]: must be a table")
         toolchain = {}
+    for key in (
+        "backend_dir",
+        "frontend_dir",
+        "scripts_dir",
+        "scripts_root",
+        "python",
+        "system_python",
+        "uv",
+        "pnpm",
+        "pytest",
+        "vitest",
+    ):
+        if key in toolchain:
+            value = toolchain[key]
+            if not isinstance(value, str) or not value:
+                problems.append(f"[toolchain].{key}: must be a nonempty string")
+            else:
+                _reject_unsafe_rendered_string(value, f"[toolchain].{key}", problems)
+    skill_commands = toolchain.get("commands", {})
+    if not isinstance(skill_commands, dict):
+        problems.append("[toolchain].commands: must be a table")
+    else:
+        for name, value in skill_commands.items():
+            where = f"[toolchain.commands].{name}"
+            if not isinstance(name, str) or not _ALIAS_RE.match(name.replace("_", "-")):
+                problems.append(f"{where}: command names must use lowercase letters, digits, '_' or '-'")
+            if not isinstance(value, str) or not value:
+                problems.append(f"{where}: must be a nonempty string")
+            else:
+                _reject_unsafe_rendered_string(value, where, problems)
 
     routing = data.get("routing", {})
     aliases: dict[str, Alias] = {}
@@ -382,6 +480,8 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         contract=contract,
         epoch=epoch,
         sandbox=sandbox,
+        skills_dir=skills_dir or Path(".cursor/skills"),
+        skill_mirrors=tuple(skill_mirrors),
         toolchain=dict(toolchain),
         aliases=aliases,
         tiers=tiers,
