@@ -113,7 +113,9 @@ def evaluate(
         if len(ids) != len(set(ids)) or any(not isinstance(value, str) for value in ids):
             raise ValueError("claim ids must be unique strings")
     except (OSError, ValueError, yaml.YAMLError) as exc:
-        grouped["UNSUPPORTED"].append({"id": "MANIFEST", "detail": str(exc), "priority": 0})
+        grouped["UNSUPPORTED"].append(
+            {"id": "GUARDIAN-MANIFEST", "detail": str(exc), "priority": 0}
+        )
         return grouped
 
     for priority, claim in enumerate(claims):
@@ -128,11 +130,18 @@ def evaluate(
         else:
             status, detail = checker.claim_status(claim)
             value = None
+        threshold = claim.get("threshold")
+        try:
+            measured_headroom = float(threshold) - value if value is not None else None
+        except (TypeError, ValueError):
+            measured_headroom = None
         entry = dict(claim)
         entry.update(
             priority=priority,
             detail=detail,
             value=value,
+            headroom=measured_headroom,
+            policy_headroom=claim.get("headroom"),
             command_digest=state.command_digest(str(claim["command"])),
             policy_digest=state.policy_digest(claim),
         )
