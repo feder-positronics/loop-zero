@@ -17,7 +17,12 @@ explicit pinned executable and broker-readable credential path, then name the
 file on the pytest command line.  The GitHub workflow is the reference launch:
 it supplies the required nested bubblewrap wrapper, an external private state
 root and suite-scoped resume home, hard scenario timeouts, normalized JSON
-output, and conservative aggregate spend control. Killed Claude/Codex runs
-without usage are charged their vendor cap; Cursor records its explicit
-timeout-and-scenario-count-only bound. Do not replace that wrapper with the process layer's unsandboxed test
-exception for a live run.
+output, and conservative aggregate spend control. Killed Claude runs without
+usage are charged their USD cap; killed Codex runs add a one-token-per-prompt-
+byte input estimate to the output cap; killed Cursor runs receive a fixed USD
+0.10 charge. A suite stops after three killed runs by default. Cursor schema-
+dependent success and resume evidence is explicitly unsupported rather than
+decoded from free text. Offline tests verify home/argument plumbing, while
+actual provider resume is established only by the nightly artifact. Do not
+replace the wrapper with the process layer's unsandboxed test exception for a
+live run.

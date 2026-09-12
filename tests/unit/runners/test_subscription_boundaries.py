@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -136,6 +137,139 @@ def test_cursor_subscription_environment_is_private_and_cleans_on_failure(
 
     assert not home.exists()
     os.close(fd)
+
+
+def test_cursor_reused_session_home_and_resume_argv_survive_two_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    session_home = state_root / "session"
+    session_home.mkdir(mode=0o700)
+    settings = RuntimeSettings(state_root=str(state_root), session_home=session_home)
+    homes: list[str] = []
+
+    with settings.use():
+        for _ in range(2):
+            fd = _descriptor(
+                tmp_path / f"cursor-{len(homes)}.json",
+                {"accessToken": "access-only", "refreshToken": "access-only"},
+            )
+            monkeypatch.setenv(settings.env_name("CURSOR_AUTH_FD"), str(fd))
+            try:
+                with cursor._cursor_subscription_environment() as (environment, _mounts):
+                    homes.append(environment["HOME"])
+            finally:
+                os.close(fd)
+
+        resume_id = "cursor.session-1"
+        command = cursor.build_cursor_command(
+            replace(_request(tmp_path, "cursor"), resume_session_id=resume_id),
+            isolated_workspace=tmp_path,
+        )
+
+    assert homes == [str(session_home), str(session_home)]
+    assert command[command.index("--resume") + 1] == resume_id
+
+
+def test_claude_reused_session_home_and_resume_sdk_option_survive_two_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    session_home = state_root / "session"
+    session_home.mkdir(mode=0o700)
+    settings = RuntimeSettings(state_root=str(state_root), session_home=session_home)
+    resume_id = "claude.session-1"
+    homes: list[str] = []
+    options = None
+    request = {
+        "vendor": "claude",
+        "prompt": "test",
+        "cwd": str(tmp_path),
+        "requested_model": "claude-fable-5-1",
+        "effort": "low",
+        "read_only": True,
+        "budget_usd": None,
+        "commercial_mode": "subscription-only",
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+        "evidence_read_roots": [],
+        "resume_session_id": resume_id,
+    }
+
+    with settings.use():
+        for index in range(2):
+            fd = _descriptor(tmp_path / f"claude-{index}.json", _access_only_claude())
+            monkeypatch.setenv(settings.env_name("CLAUDE_AUTH_FD"), str(fd))
+            options = bridge._options(request)  # type: ignore[arg-type]
+            homes.append(options.env["HOME"])
+
+    assert homes == [str(session_home), str(session_home)]
+    assert options is not None and options.resume == resume_id
+
+
+def test_codex_reused_session_home_and_resume_sdk_call_survive_two_launches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from loopzero.runners import contract as contracts
+
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    session_home = state_root / "session"
+    session_home.mkdir(mode=0o700)
+    settings = RuntimeSettings(state_root=str(state_root), session_home=session_home)
+    resume_id = "codex.thread-1"
+    homes: list[str] = []
+    request = {
+        "vendor": "codex",
+        "prompt": "test",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-luna",
+        "effort": "low",
+        "read_only": True,
+        "budget_usd": None,
+        "commercial_mode": "subscription-only",
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+        "resume_session_id": resume_id,
+    }
+
+    with settings.use():
+        for index in range(2):
+            fd = _descriptor(
+                tmp_path / f"codex-{index}.json",
+                {"tokens": {"access_token": "access-only"}},
+            )
+            monkeypatch.setenv(settings.env_name("CODEX_AUTH_FD"), str(fd))
+            with bridge._codex_subscription_environment() as (environment, _auth_path):
+                homes.append(environment["CODEX_HOME"])
+
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class Client:
+            def thread_start(self, **_kwargs):
+                pytest.fail("resume must not start a new SDK thread")
+
+            def thread_resume(self, selected: str, **kwargs):
+                calls.append((selected, kwargs))
+                return object()
+
+        kwargs = {
+            "ephemeral": False,
+            "model": "gpt-5.6-luna",
+            "model_provider": "openai",
+            "service_tier": "default",
+            "sandbox": contracts.RuntimeStatus.COMPLETED,
+            "approval_mode": contracts.RuntimeStatus.COMPLETED,
+            "cwd": str(tmp_path),
+        }
+        bridge._codex_start_or_resume_thread(  # type: ignore[arg-type]
+            Client(), request, kwargs
+        )
+
+    assert homes == [str(session_home), str(session_home)]
+    assert calls == [(resume_id, {key: value for key, value in kwargs.items() if key != "ephemeral"})]
 
 
 def test_cursor_rejects_oversized_descriptor_before_read(

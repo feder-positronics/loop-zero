@@ -8,7 +8,16 @@ from pathlib import Path
 
 import pytest
 
+from conftest import REPO
 from loopzero.runners.settings import RuntimeBudget, RuntimeSettings
+from loopzero.runners.contract import (
+    RuntimeCostStatus,
+    RuntimeEvent,
+    RuntimeResult,
+    RuntimeStatus,
+    SubscriptionEligibility,
+    TerminalReason,
+)
 from tests.conformance.live import live_conformance as live
 
 
@@ -37,10 +46,10 @@ def test_live_workspace_is_writable_beside_a_read_only_checkout(
 
 @pytest.mark.parametrize(
     "vendor,expected",
-    [("claude", 0.25), ("codex", 0.065536), ("cursor", None)],
+    [("claude", 0.25), ("codex", 0.065536), ("cursor", 0.1)],
 )
 def test_killed_run_vendor_cap_charge(
-    vendor: str, expected: float | None
+    vendor: str, expected: float
 ) -> None:
     budget = RuntimeBudget(max_tokens=32_768, max_turns=2, max_usd=0.25)
     assert live._vendor_cap_charge(vendor, budget) == expected
@@ -55,7 +64,14 @@ def test_missing_killed_usage_is_known_or_conservatively_bounded(
     assert (charge, accounting) == (0.25, "conservative-vendor-cap")
 
     charge, accounting = live._accounted_cost("cursor", scenario, None, budget)
-    assert (charge, accounting) == (0.0, "harness-only-unpriced")
+    assert (charge, accounting) == (0.1, "fixed-conservative-killed-charge")
+    charge, accounting = live._accounted_cost("cursor", scenario, 0.001, budget)
+    assert (charge, accounting) == (0.1, "fixed-conservative-killed-charge")
+
+
+def test_codex_killed_charge_includes_conservative_prompt_input() -> None:
+    budget = RuntimeBudget(max_tokens=32_768, max_turns=2, max_usd=0.25)
+    assert live._vendor_cap_charge("codex", budget, prompt_bytes=100) == 0.065561
 
 
 def test_remaining_allowance_narrows_next_vendor_cap() -> None:
@@ -97,11 +113,11 @@ def test_live_version_probe_uses_nested_wrapper(
     assert observed["command"] == [str(executable), "--version"]
 
 
-def test_live_credential_source_is_resealed_and_never_modified(
+def test_live_access_only_source_is_reused_without_copy_or_modification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.json"
-    original = b'{"tokens":{"access_token":"access","refresh_token":"refresh"}}'
+    original = b'{"tokens":{"access_token":"access","refresh_token":"access"}}'
     source.write_bytes(original)
     source.chmod(0o400)
     state_root = tmp_path / "state"
@@ -113,7 +129,6 @@ def test_live_credential_source_is_resealed_and_never_modified(
     def broker(**kwargs):
         credential_path = kwargs["credential_path"]
         observed["path"] = credential_path
-        credential_path.write_text('{"rotated":true}', encoding="utf-8")
         fd = os.open(credential_path, os.O_RDONLY)
         try:
             yield fd
@@ -126,5 +141,95 @@ def test_live_credential_source_is_resealed_and_never_modified(
         pass
 
     assert source.read_bytes() == original
-    assert observed["path"] != source
-    assert not observed["path"].exists()
+    assert observed["path"] == source
+
+
+def test_live_local_run_uses_normal_host_credential_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = RuntimeSettings(state_root=str(tmp_path / "state"))
+    monkeypatch.delenv("LOOPZERO_LIVE_CREDENTIAL_PATH", raising=False)
+    observed: dict[str, object] = {}
+
+    @contextmanager
+    def broker(**kwargs):
+        observed.update(kwargs)
+        descriptor_path = tmp_path / "access-only.json"
+        descriptor_path.write_text("{}x", encoding="utf-8")
+        descriptor = os.open(descriptor_path, os.O_RDONLY)
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    monkeypatch.setattr(live.codex, "codex_subscription_credential", broker)
+
+    with live._credential("codex", 5, settings, lambda spec: spec.argv):
+        pass
+
+    assert "credential_path" not in observed
+
+
+def _permission_result(*, events=(), diagnostics=()) -> RuntimeResult:
+    return RuntimeResult(
+        vendor="codex",
+        transport="codex/app-server",
+        requested_model="gpt-5.6-luna",
+        status=RuntimeStatus.FAILED,
+        terminal_reason=TerminalReason.PROCESS_EXIT,
+        attempt_id="permission-test",
+        cost_status=RuntimeCostStatus.UNKNOWN,
+        eligibility=SubscriptionEligibility.APPROVED,
+        events=events,
+        diagnostics=diagnostics,
+    )
+
+
+def test_permission_denial_requires_an_explicit_denial_signal() -> None:
+    ordinary_tool = _permission_result(
+        events=(RuntimeEvent(kind="command", subtype="completed"),)
+    )
+    explicit_event = _permission_result(
+        events=(RuntimeEvent(kind="permission", subtype="denied"),)
+    )
+    explicit_counter = _permission_result(
+        diagnostics=("Claude permission denials: 1: Read",)
+    )
+
+    assert live._permission_denial_evident(ordinary_tool) is False
+    assert live._permission_denial_evident(explicit_event) is True
+    assert live._permission_denial_evident(explicit_counter) is True
+
+
+def test_cursor_schema_scenarios_are_unsupported_not_free_text_passes() -> None:
+    assert live._cursor_unsupported_reason("cursor", "success") is not None
+    assert live._cursor_unsupported_reason("cursor", "restart-resume") is not None
+    assert live._cursor_unsupported_reason("cursor", "permission-denial") is None
+
+
+def test_suite_stops_at_default_killed_run_limit() -> None:
+    assert live.DEFAULT_MAX_KILLED_RUNS == 3
+    assert live._suite_stop_reason(
+        charged_cost=0.2,
+        ceiling=1.0,
+        killed_runs=3,
+        max_killed_runs=3,
+    ) == "aborted-killed-limit"
+
+
+def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> None:
+    workflow = (REPO / ".github/workflows/nightly-conformance.yml").read_text(
+        encoding="utf-8"
+    )
+    seal_step = workflow.index("- name: Seal access-only credential on the host")
+    validation_step = workflow.index("- name: Run live scenarios in the validation bubble")
+    source_delete = workflow.index('\n          rm -f -- "$SOURCE"\n', seal_step)
+    bwrap = workflow.index("bwrap --unshare-user", validation_step)
+    validation_body = workflow[validation_step:]
+
+    assert "refs/remotes/origin/release/0.3" in workflow
+    assert "$RUNNER_TEMP/loopzero-live/broker-venv" in workflow
+    assert seal_step < source_delete < validation_step < bwrap
+    assert '--ro-bind "$SNAPSHOT" /run/loopzero-credential.json' in validation_body
+    assert '--ro-bind "$SOURCE"' not in validation_body
+    assert "LIVE_CREDENTIAL:" not in validation_body

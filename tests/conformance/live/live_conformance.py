@@ -15,6 +15,7 @@ import re
 import shutil
 import subprocess
 import threading
+import math
 from typing import Iterator
 
 import pytest
@@ -65,6 +66,11 @@ DEFAULT_SCENARIO_TIMEOUT_S = 45.0
 FAULT_DELAY_S = 1.0
 LIVE_MAX_OUTPUT_TOKENS = 32_768
 DEFAULT_RUN_BUDGET_USD = 0.25
+DEFAULT_CURSOR_KILLED_CHARGE_USD = 0.10
+DEFAULT_MAX_KILLED_RUNS = 3
+# Prompts are ASCII today, but one token per UTF-8 byte deliberately
+# overestimates the normal tokenizer ratio for killed Codex requests.
+CODEX_ESTIMATED_INPUT_TOKENS_PER_BYTE = 1.0
 KILLED_SCENARIOS = frozenset({"cancellation", "disconnect", "expiry-timeout"})
 
 
@@ -194,12 +200,14 @@ class RealProcess:
         self.cancel = None
         self._fault_timer: threading.Timer | None = None
         self.scenario_started = False
+        self.killed = False
 
     def __call__(self, command, **kwargs) -> ProcessResult:
         marker = f"loopzero-live-{self.scenario}"
         is_scenario_run = marker in kwargs.get("input_text", "")
         self.scenario_started = self.scenario_started or is_scenario_run
         cancelled = False
+        fault_injected = False
         original_on_launch = kwargs.pop("on_launch", None)
 
         def on_launch(identity) -> None:
@@ -211,8 +219,9 @@ class RealProcess:
                 return
 
             def inject_fault() -> None:
-                nonlocal cancelled
+                nonlocal cancelled, fault_injected
                 cancelled = self.scenario == "cancellation"
+                fault_injected = True
                 assert self.cancel is not None
                 self.cancel(handle)
 
@@ -254,6 +263,8 @@ class RealProcess:
                 self.metered_cost = None
         if is_scenario_run and self.scenario == "malformed-output":
             outcome = replace(outcome, stdout=outcome.stdout + "\n{malformed-live-frame")
+        if is_scenario_run:
+            self.killed = self.killed or fault_injected or outcome.timed_out
         if cancelled:
             outcome = replace(outcome, cancelled=True)
         return outcome
@@ -268,23 +279,26 @@ def _credential(vendor: str, timeout_s: float, settings: RuntimeSettings, wrappe
         "codex": codex.codex_subscription_credential,
         "cursor": cursor.cursor_subscription_credential,
     }
-    if path is None:
-        raise RuntimeError("live credential path is missing")
-    metadata = path.stat(follow_symlinks=False)
-    if not path.is_file() or metadata.st_size <= 2 or metadata.st_size > 1024 * 1024:
-        raise RuntimeError("live credential file is invalid")
-    # The workflow mount is immutable.  Give each broker invocation a fresh
-    # private copy so vendor refresh rotation never mutates the secret source
-    # or carries refreshed credentials into the next scenario.
-    with settings.use(), private_temporary_directory("live-credential") as root:
-        sealed_path = root / "credential.json"
-        sealed_path.write_bytes(path.read_bytes())
-        sealed_path.chmod(0o600)
-        kwargs = {"requested_runtime_s": timeout_s, "credential_path": sealed_path}
+    if path is not None:
+        metadata = path.stat(follow_symlinks=False)
+        if (
+            not path.is_file()
+            or metadata.st_size <= 2
+            or metadata.st_size > 1024 * 1024
+        ):
+            raise RuntimeError("live credential file is invalid")
+    # A workflow-supplied file has already been validated/refreshed by the
+    # trusted release wheel. It is access-only and safe to re-lend; without an
+    # explicit file, local runs use the broker's normal host discovery.
+    with settings.use():
+        kwargs = {"requested_runtime_s": timeout_s}
+        if path is not None:
+            kwargs["credential_path"] = path
         if vendor == "claude":
             kwargs.update(
                 claude_binary=settings.claude_cli_path,
                 sandbox_wrapper=wrapper,
+                allow_token_fallback=path is None,
             )
         elif vendor == "codex":
             kwargs["sandbox_wrapper"] = wrapper
@@ -292,15 +306,28 @@ def _credential(vendor: str, timeout_s: float, settings: RuntimeSettings, wrappe
             yield descriptor
 
 
-def _request(vendor: str, scenario: str, root: Path, timeout_s: float, resume: str | None = None) -> RuntimeRequest:
+def _scenario_prompt(vendor: str, scenario: str) -> str:
+    del vendor
     prompt = f"loopzero-live-{scenario}: return only a JSON object with ok=true."
+    if scenario == "permission-denial":
+        return (
+            f"loopzero-live-{scenario}: use a file-read tool on /etc/shadow, "
+            "then return ok=true."
+        )
+    if scenario in {"cancellation", "disconnect"}:
+        return (
+            f"loopzero-live-{scenario}: inspect the repository carefully before "
+            "returning ok=true."
+        )
+    return prompt
+
+
+def _request(vendor: str, scenario: str, root: Path, timeout_s: float, resume: str | None = None) -> RuntimeRequest:
+    prompt = _scenario_prompt(vendor, scenario)
     visible_tools = None
     if scenario == "permission-denial":
-        prompt = f"loopzero-live-{scenario}: use a file-read tool on /etc/shadow, then return ok=true."
         if vendor == "claude":
             visible_tools = ("Read",)
-    if scenario in {"cancellation", "disconnect"}:
-        prompt = f"loopzero-live-{scenario}: inspect the repository carefully before returning ok=true."
     return RuntimeRequest(
         vendor=vendor,
         transport=RUNTIME_REGISTRY.registration(vendor).preferred_transport,
@@ -338,6 +365,45 @@ def _normalized(result: RuntimeResult) -> dict[str, object]:
     }
 
 
+def _cursor_unsupported_reason(vendor: str, scenario: str) -> str | None:
+    if vendor == "cursor" and scenario in {"success", "restart-resume"}:
+        return "pinned Cursor CLI cannot enforce output_schema"
+    return None
+
+
+def _suite_stop_reason(
+    *, charged_cost: float, ceiling: float, killed_runs: int, max_killed_runs: int
+) -> str | None:
+    if charged_cost >= ceiling:
+        return "aborted-budget"
+    if killed_runs >= max_killed_runs:
+        return "aborted-killed-limit"
+    return None
+
+
+def _permission_denial_evident(result: RuntimeResult) -> bool:
+    diagnostics = tuple(item.casefold() for item in result.diagnostics)
+    explicit_counter = any(
+        item.startswith((
+            "claude permission denials:",
+            "claude denied permission checks:",
+        ))
+        for item in diagnostics
+    )
+    explicit_event = any(
+        event.kind.casefold() == "permission"
+        and (event.subtype or "").casefold() in {"denied", "permission-denied"}
+        for event in result.events
+    )
+    path_named_tool_denial = any(
+        event.kind.casefold() in {"tool", "tool-denied", "file"}
+        and "denied" in (event.subtype or "").casefold()
+        and "/etc/shadow" in (event.subtype or "").casefold()
+        for event in result.events
+    )
+    return explicit_counter or explicit_event or path_named_tool_denial
+
+
 def _assert_contract(scenario: str, result: RuntimeResult) -> None:
     if scenario in {"success", "restart-resume"}:
         assert result.status is RuntimeStatus.COMPLETED
@@ -346,13 +412,8 @@ def _assert_contract(scenario: str, result: RuntimeResult) -> None:
             TerminalReason.BUDGET_EXHAUSTED_AFTER_RESULT,
         }
         assert result.session_id is not None
-        structured = result.structured_output
-        if result.vendor == "cursor" and structured is None:
-            try:
-                structured = json.loads(result.final_output or "")
-            except json.JSONDecodeError:
-                structured = None
-        assert structured == {"ok": True}
+        assert result.vendor != "cursor"
+        assert result.structured_output == {"ok": True}
     elif scenario == "malformed-output":
         assert result.status is RuntimeStatus.FAILED
         assert result.terminal_reason in {
@@ -365,12 +426,7 @@ def _assert_contract(scenario: str, result: RuntimeResult) -> None:
             TerminalReason.PROCESS_EXIT,
             TerminalReason.MODEL_RESULT,
         }
-        evidence = " ".join(result.diagnostics).casefold()
-        assert "permission" in evidence or any(
-            any(label in f"{event.kind} {event.subtype or ''}".casefold()
-                for label in ("tool", "command", "file", "permission", "denial"))
-            for event in result.events
-        )
+        assert _permission_denial_evident(result)
     elif scenario == "cancellation":
         assert result.status is RuntimeStatus.CANCELLED
         assert result.terminal_reason is TerminalReason.CANCELLED
@@ -386,7 +442,15 @@ def _assert_contract(scenario: str, result: RuntimeResult) -> None:
     assert result.vendor in {"claude", "codex", "cursor"}
 
 
-def _write_results(vendor: str, pin: str, records: list[dict[str, object]], total: float) -> None:
+def _write_results(
+    vendor: str,
+    pin: str,
+    records: list[dict[str, object]],
+    total: float,
+    *,
+    killed_runs: int,
+    max_killed_runs: int,
+) -> None:
     output = Path(os.environ.get("LOOPZERO_LIVE_RESULTS", f"live-results-{vendor}.json"))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
@@ -395,8 +459,10 @@ def _write_results(vendor: str, pin: str, records: list[dict[str, object]], tota
                 "runtime": vendor,
                 "version": pin,
                 "charged_cost_usd": round(total, 9),
+                "killed_runs": killed_runs,
+                "max_killed_runs": max_killed_runs,
                 "spend_bound": (
-                    "harness-only: scenario timeout and finite scenario count; no vendor cap"
+                    "fixed killed-run charge plus aggregate charged-cost ceiling"
                     if vendor == "cursor"
                     else "vendor cap plus aggregate charged-cost ceiling"
                 ),
@@ -409,14 +475,29 @@ def _write_results(vendor: str, pin: str, records: list[dict[str, object]], tota
     )
 
 
-def _vendor_cap_charge(vendor: str, budget: RuntimeBudget) -> float | None:
+def _vendor_cap_charge(
+    vendor: str,
+    budget: RuntimeBudget,
+    *,
+    prompt_bytes: int = 0,
+) -> float:
     """Return the conservative maximum charge for one killed invocation."""
     if vendor == "claude":
         return budget.max_usd
     if vendor == "codex":
         price = MODEL_PRICES[MODELS[vendor]]
-        return round(budget.max_tokens * price.output_per_million / 1_000_000, 9)
-    return None
+        estimated_input_tokens = math.ceil(
+            prompt_bytes * CODEX_ESTIMATED_INPUT_TOKENS_PER_BYTE
+        )
+        return round(
+            (
+                estimated_input_tokens * price.input_per_million
+                + budget.max_tokens * price.output_per_million
+            )
+            / 1_000_000,
+            9,
+        )
+    return DEFAULT_CURSOR_KILLED_CHARGE_USD
 
 
 def _accounted_cost(
@@ -424,24 +505,44 @@ def _accounted_cost(
     scenario: str,
     observed: float | None,
     budget: RuntimeBudget,
+    *,
+    prompt_bytes: int = 0,
 ) -> tuple[float | None, str]:
+    if scenario in KILLED_SCENARIOS:
+        conservative = _vendor_cap_charge(
+            vendor, budget, prompt_bytes=prompt_bytes
+        )
+        charge = max(conservative, observed or 0.0)
+        return charge, (
+            "fixed-conservative-killed-charge"
+            if vendor == "cursor"
+            else "conservative-vendor-cap"
+        )
     if observed is not None:
         return observed, "known"
-    if scenario not in KILLED_SCENARIOS:
-        return None, "unknown"
-    vendor_cap = _vendor_cap_charge(vendor, budget)
-    if vendor_cap is not None:
-        return vendor_cap, "conservative-vendor-cap"
-    return 0.0, "harness-only-unpriced"
+    return None, "unknown"
 
 
-def _remaining_budget(vendor: str, remaining_usd: float) -> RuntimeBudget:
+def _remaining_budget(
+    vendor: str,
+    remaining_usd: float,
+    *,
+    prompt_bytes: int = 0,
+) -> RuntimeBudget:
     max_tokens = LIVE_MAX_OUTPUT_TOKENS
     if vendor in {"codex", "cursor"}:
         output_rate = MODEL_PRICES[MODELS[vendor]].output_per_million
+        input_reserve = 0.0
+        if vendor == "codex":
+            input_reserve = (
+                math.ceil(prompt_bytes * CODEX_ESTIMATED_INPUT_TOKENS_PER_BYTE)
+                * MODEL_PRICES[MODELS[vendor]].input_per_million
+                / 1_000_000
+            )
+        output_allowance = max(0.0, remaining_usd - input_reserve)
         max_tokens = min(
             max_tokens,
-            max(1, int(remaining_usd * 1_000_000 / output_rate)),
+            max(1, int(output_allowance * 1_000_000 / output_rate)),
         )
     return RuntimeBudget(
         max_tokens=max_tokens,
@@ -457,6 +558,11 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
     assert executable.is_file(), f"pinned {vendor} executable is unavailable"
 
     ceiling = float(os.environ.get("LOOPZERO_CONFORMANCE_BUDGET_USD", "2"))
+    max_killed_runs = int(os.environ.get(
+        "LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS", str(DEFAULT_MAX_KILLED_RUNS)
+    ))
+    if max_killed_runs <= 0:
+        raise pytest.UsageError("LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS must be positive")
     scenario_timeout = float(os.environ.get("LOOPZERO_LIVE_SCENARIO_TIMEOUT_S", str(DEFAULT_SCENARIO_TIMEOUT_S)))
     budget = _remaining_budget(vendor, ceiling)
     base_settings = RuntimeSettings(
@@ -470,6 +576,7 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
     )
     records: list[dict[str, object]] = []
     charged_cost = 0.0
+    killed_runs = 0
     failures: list[str] = []
     with base_settings.use(), private_temporary_directory(
         f"{vendor}-suite-session"
@@ -482,13 +589,48 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
         assert reported_version == PINS[vendor]
 
         for scenario in SCENARIOS:
-            if charged_cost >= ceiling:
+            stop_reason = _suite_stop_reason(
+                charged_cost=charged_cost,
+                ceiling=ceiling,
+                killed_runs=killed_runs,
+                max_killed_runs=max_killed_runs,
+            )
+            if stop_reason is not None:
+                record: dict[str, object] = {
+                    "scenario": scenario,
+                    "outcome": stop_reason,
+                }
+                if stop_reason == "aborted-killed-limit":
+                    record["killed_runs"] = killed_runs
+                records.append(record)
+                break
+            unsupported_reason = _cursor_unsupported_reason(vendor, scenario)
+            if unsupported_reason is not None:
+                records.append({
+                    "scenario": scenario,
+                    "outcome": "unsupported",
+                    "status": "unsupported",
+                    "reason": unsupported_reason,
+                    "accounting": "not-launched",
+                    "charged_cost_usd": 0.0,
+                })
+                continue
+            invocation_count = 2 if scenario == "restart-resume" else 1
+            timeout = 0.05 if scenario == "expiry-timeout" else scenario_timeout
+            prompt_bytes = len(_scenario_prompt(vendor, scenario).encode("utf-8"))
+            scenario_budget = _remaining_budget(
+                vendor,
+                (ceiling - charged_cost) / invocation_count,
+                prompt_bytes=prompt_bytes,
+            )
+            if (
+                scenario in KILLED_SCENARIOS
+                and _vendor_cap_charge(
+                    vendor, scenario_budget, prompt_bytes=prompt_bytes
+                ) > ceiling - charged_cost
+            ):
                 records.append({"scenario": scenario, "outcome": "aborted-budget"})
                 break
-            invocation_count = 2 if scenario == "restart-resume" else 1
-            scenario_budget = _remaining_budget(
-                vendor, (ceiling - charged_cost) / invocation_count
-            )
             scenario_settings = replace(settings, budget=scenario_budget)
             runner = RealProcess(wrapper, vendor, scenario)
             adapter = RUNTIME_REGISTRY.create(
@@ -502,7 +644,6 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
                 ),
             )
             runner.cancel = adapter.cancel
-            timeout = 0.05 if scenario == "expiry-timeout" else scenario_timeout
             scenario_charge: float | None = None
             accounting = "unknown"
             observed_cost: float | None = None
@@ -539,7 +680,11 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
                         else None
                     )
                 scenario_charge, accounting = _accounted_cost(
-                    vendor, scenario, observed_cost, scenario_budget
+                    vendor,
+                    scenario,
+                    observed_cost,
+                    scenario_budget,
+                    prompt_bytes=prompt_bytes,
                 )
                 assert scenario_charge is not None
                 charged_cost += scenario_charge
@@ -558,17 +703,23 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
                 records.append(record)
             except Exception as exc:
                 if scenario_charge is None and runner.scenario_started:
-                    vendor_cap = _vendor_cap_charge(vendor, scenario_budget)
+                    fallback_charge = (
+                        _vendor_cap_charge(
+                            vendor, scenario_budget, prompt_bytes=prompt_bytes
+                        )
+                        if scenario in KILLED_SCENARIOS
+                        else None
+                    )
                     scenario_charge = sum(
-                        value if value is not None else (vendor_cap or 0.0)
+                        value if value is not None else (fallback_charge or 0.0)
                         for value in invocation_costs
                     )
                     if all(value is not None for value in invocation_costs):
                         accounting = "known"
-                    elif vendor_cap is not None:
+                    elif fallback_charge is not None and vendor != "cursor":
                         accounting = "conservative-vendor-cap"
-                    else:
-                        accounting = "harness-only-unpriced"
+                    elif fallback_charge is not None:
+                        accounting = "fixed-conservative-killed-charge"
                     charged_cost += scenario_charge
                 failures.append(f"{scenario}: {type(exc).__name__}")
                 records.append({
@@ -578,7 +729,17 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
                 })
+            finally:
+                if runner.killed:
+                    killed_runs += 1
 
-    _write_results(vendor, reported_version, records, charged_cost)
+    _write_results(
+        vendor,
+        reported_version,
+        records,
+        charged_cost,
+        killed_runs=killed_runs,
+        max_killed_runs=max_killed_runs,
+    )
     assert not failures, "; ".join(failures)
     assert charged_cost <= ceiling

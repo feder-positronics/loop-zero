@@ -1563,6 +1563,22 @@ def _codex_thread_kwargs(request: BridgeRequest) -> CodexThreadKwargs:
     }
 
 
+def _codex_start_or_resume_thread(
+    client: object,
+    request: BridgeRequest,
+    thread_kwargs: CodexThreadKwargs,
+) -> object:
+    """Select the SDK resume call while preserving the same persisted home."""
+    resume_session_id = request.get("resume_session_id")
+    if resume_session_id is None:
+        return client.thread_start(**thread_kwargs)  # type: ignore[attr-defined]
+    resumed_kwargs = dict(thread_kwargs)
+    resumed_kwargs.pop("ephemeral")
+    return client.thread_resume(  # type: ignore[attr-defined]
+        resume_session_id, **resumed_kwargs
+    )
+
+
 def _codex_bootstrap_thread_kwargs(
     request: BridgeRequest,
     *,
@@ -1886,12 +1902,7 @@ def _run_codex(
             if auth_path is not None:
                 auth_path.unlink(missing_ok=True)
             thread_kwargs = _codex_thread_kwargs(request)
-            resume_session_id = request.get("resume_session_id")
-            if resume_session_id is None:
-                thread = codex.thread_start(**thread_kwargs)
-            else:
-                thread_kwargs.pop("ephemeral")
-                thread = codex.thread_resume(resume_session_id, **thread_kwargs)
+            thread = _codex_start_or_resume_thread(codex, request, thread_kwargs)
             session_id = _metadata(getattr(thread, "id", None))
             _event_frame(
                 kind="system",

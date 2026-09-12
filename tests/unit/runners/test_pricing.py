@@ -22,6 +22,9 @@ def test_price_is_unknown_without_tokens_or_a_pinned_model():
     assert estimated_cost_usd(
         "gpt-5.6-luna", RuntimeUsage(input_tokens=0, output_tokens=0)
     ) is None
+    assert estimated_cost_usd(
+        "gpt-5.6-luna", RuntimeUsage(input_tokens=100, output_tokens=0)
+    ) is None
 
 
 def test_codex_cached_input_is_not_billed_twice():

@@ -48,7 +48,9 @@ def estimated_cost_usd(model: str, usage: RuntimeUsage | None) -> float | None:
         or usage.output_tokens is None
     ):
         return None
-    if usage.input_tokens == 0 and usage.output_tokens == 0:
+    # A completed turn with input but no output is commonly a partial or
+    # provider-truncated usage record.  It is unknown, never zero-cost proof.
+    if usage.output_tokens == 0:
         return None
     cache_read = usage.cache_read_tokens or 0
     cache_write = usage.cache_write_tokens or 0
