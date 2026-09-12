@@ -285,9 +285,54 @@ def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
         "input_text": "",
         "timeout_s": 1,
         "env": {},
+        "pass_fds": (),
         "private_mounts": (),
         "sandbox_wrapper": wrapper,
     }
+
+
+def test_default_refresh_runner_owns_the_credential_descriptor_close(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    credential_path = tmp_path / ".codex" / "auth.json"
+    original = _credential(expires_at_s=1_100)
+    refreshed_payload = _credential(expires_at_s=3_000)
+    _write_credential(credential_path, original)
+    credential = codex_credential._read_credential(credential_path)
+    real_close = os.close
+    close_callers: list[str] = []
+
+    def tracked_close(descriptor: int) -> None:
+        close_callers.append(sys._getframe(1).f_code.co_name)
+        real_close(descriptor)
+
+    def contained_run(command, *, env, cwd, **_kwargs):
+        descriptor = int(env["INTELFLO_CODEX_AUTH_FD"])
+        tracked_close(descriptor)
+        _write_credential(Path(env["CODEX_HOME"]) / "auth.json", refreshed_payload)
+        return codex_credential.ProcessResult(
+            returncode=0,
+            stdout='{"authenticated":true}',
+            stderr="",
+            duration_s=0.01,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(codex_credential, "default_run_cli", contained_run)
+    monkeypatch.setattr(codex_credential.os, "close", tracked_close)
+
+    refreshed = codex_credential._refresh_credential(
+        credential,
+        horizon_s=2_000,
+        run_refresh=codex_credential._run_refresh_process_group,
+        refresh_command=("trusted-python", "trusted-bridge", "--codex-refresh"),
+        sandbox_wrapper=lambda spec: spec.argv,
+    )
+
+    assert refreshed.payload == json.dumps(refreshed_payload).encode("utf-8")
+    assert "contained_run" in close_callers
+    assert "_refresh_credential" not in close_callers
 
 
 def test_refresh_bridge_requests_an_explicit_managed_token_refresh(

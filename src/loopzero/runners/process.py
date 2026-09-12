@@ -177,7 +177,17 @@ def _private_state_root() -> Path:
         raise ProcessGroupError("runtime account home is unavailable") from None
     if not home.is_absolute() or home == Path("/"):
         raise ProcessGroupError("runtime account home is unsafe")
-    root = get_settings().state_path(home)
+    settings = get_settings()
+    root = settings.state_path(home).resolve(strict=False)
+    if settings.tooling_root is not None:
+        tooling_root = settings.tooling_root.resolve(strict=False)
+        repository_root = settings.repository_root(tooling_root).resolve(strict=False)
+        workspace_root = settings.workspace_root(tooling_root).resolve(strict=False)
+        if any(
+            root.is_relative_to(protected_root)
+            for protected_root in (tooling_root, repository_root, workspace_root)
+        ):
+            raise ProcessGroupError("runtime state root overlaps governed storage")
     try:
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         metadata = root.stat(follow_symlinks=False)
@@ -572,6 +582,12 @@ def launch_cli(
             )
         if private_tmpdir is None:
             raise ProcessGroupError("sandboxed runtime launch requires a private tmpdir")
+        try:
+            resolved_tmpdir = private_tmpdir.resolve(strict=True)
+        except OSError as exc:
+            raise ProcessGroupError("sandboxed runtime private tmpdir is unsafe") from exc
+        if not resolved_tmpdir.is_dir() or resolved_tmpdir.parent != _private_state_root():
+            raise ProcessGroupError("sandboxed runtime private tmpdir is unsafe")
         launch_spec = LaunchSpec(
             argv=tuple(command),
             cwd=cwd,
@@ -630,8 +646,8 @@ def cancel_cli(handle: ProcessHandle, *, grace_s: float = 2.0) -> bool:
     """Terminate and reap an owned group within *grace_s*.
 
     ``False`` reports that the leader could not be reaped before the shared
-    deadline. Every blocking process operation receives only the time remaining
-    on that deadline.
+    deadline. After SIGKILL, one small bounded floor guarantees a reap attempt
+    even when the process-group sweep consumed the original grace period.
     """
     if os.name != "posix":
         raise ProcessGroupError("native runtime process groups require POSIX")
@@ -656,15 +672,19 @@ def cancel_cli(handle: ProcessHandle, *, grace_s: float = 2.0) -> bool:
     # The direct child may exit after SIGTERM while an SDK/CLI descendant keeps
     # the pipes open. Keep the leader unreaped until after this sweep so its
     # PID/PGID cannot be recycled underneath the signal.
-    if _process_group_has_live_member(handle.pgid):
+    killed = _process_group_has_live_member(handle.pgid)
+    if killed:
         try:
             os.killpg(handle.pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
     remaining = deadline - time.monotonic()
-    if remaining <= 0:
+    if not killed and remaining <= 0:
         LOGGER.error("runtime process-group cancellation timed out")
         return False
+    if killed:
+        remaining = max(remaining, 0.2)
+        deadline = time.monotonic() + remaining
     try:
         handle.process.wait(timeout=remaining)
     except subprocess.TimeoutExpired:
@@ -691,18 +711,29 @@ def cancel_cli(handle: ProcessHandle, *, grace_s: float = 2.0) -> bool:
 def _process_group_has_live_member(pgid: int) -> bool:
     """Return conservatively whether a Linux process group still has live members."""
     try:
-        entries = tuple(PROC_ROOT.iterdir())
+        for entry in PROC_ROOT.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            # A fresh session owns the group for this bounded launch. Linux
+            # allocates its descendants after the leader, so lower PIDs can be
+            # skipped without inspecting their stat files.
+            if pid < pgid:
+                continue
+            try:
+                stat_text = (PROC_ROOT / entry.name / "stat").read_text(
+                    encoding="utf-8"
+                )
+                fields = stat_text.rsplit(")", maxsplit=1)[1].split()
+                state, candidate_pgid = fields[0], int(fields[2])
+            except FileNotFoundError:
+                continue
+            except (IndexError, OSError, ValueError):
+                return True
+            if state != "Z" and candidate_pgid == pgid:
+                return True
     except OSError:
         return True
-    for entry in entries:
-        if not entry.name.isdigit():
-            continue
-        try:
-            candidate = _read_proc_identity(int(entry.name), proc_root=PROC_ROOT)
-        except ProcessIdentityError:
-            return True
-        if candidate is not None and candidate[0] != "Z" and candidate[1] == pgid:
-            return True
     return False
 
 

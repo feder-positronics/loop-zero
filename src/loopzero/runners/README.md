@@ -63,7 +63,11 @@ atomically created 0700 directory below the consumer state root, pass only that
 directory in the refresh launch's `private_mounts`, and scrub it afterwards.
 The wrapper must never bind the state root itself or carry private mounts from
 one launch into another; ordinary workers therefore cannot see refresh
-material. Codex transfers the existing refresh-capable credential to its bridge
+material. Every adapter's worker credential snapshot carries no refresh
+capability: the refresh token is replaced by the access token and expiry is
+clamped to the access-token expiry. Refresh runs only in the host broker under
+the renewal lock in a launch-private staging directory. Codex transfers the
+existing refresh-capable credential to its bridge
 on the original sealed-descriptor boundary and writes only the rotated SDK
 output into staging. The Claude CLI has no descriptor credential input, so its
 input file remains confined to the same launch-private directory.

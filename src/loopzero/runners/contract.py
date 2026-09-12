@@ -349,7 +349,13 @@ class RuntimeResult:
 
 
 class RuntimeAdapter(Protocol):
-    """Transport boundary below dispatcher routing and governance policy."""
+    """Transport boundary below dispatcher routing and governance policy.
+
+    Every worker credential snapshot has no refresh capability: its refresh
+    token is replaced by its access token and its expiry is clamped to the
+    access-token expiry. Refresh runs only in the host broker, under the
+    renewal lock, in a launch-private staging directory.
+    """
 
     def probe(self, request: RuntimeRequest) -> RuntimeReadiness: ...
 

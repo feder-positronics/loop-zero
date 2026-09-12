@@ -151,6 +151,79 @@ def test_launch_cli_refuses_without_sandbox_wrapper(tmp_path):
         process.launch_cli([sys.executable, "-c", "pass"], cwd=tmp_path, env={})
 
 
+def test_launch_cli_refuses_private_tmpdir_outside_state_root(tmp_path):
+    state_root = tmp_path / "state"
+    state_root.mkdir(mode=0o700)
+    foreign_tmpdir = tmp_path / "foreign" / "child-tmp"
+    foreign_tmpdir.mkdir(mode=0o700, parents=True)
+    settings = RuntimeSettings(state_root=str(state_root))
+
+    with settings.use(), pytest.raises(
+        process.ProcessGroupError, match="private tmpdir is unsafe"
+    ):
+        process.launch_cli(
+            [sys.executable, "-c", "pass"],
+            cwd=tmp_path,
+            env={"PATH": os.environ["PATH"]},
+            private_tmpdir=foreign_tmpdir,
+            sandbox_wrapper=lambda spec: spec.argv,
+        )
+
+
+@pytest.mark.parametrize("kind", ["claude-renewal", "codex-renewal", "child-tmp"])
+def test_private_temporary_directories_stay_outside_governed_roots(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    repository_root = tmp_path / "repository"
+    tooling_root = repository_root / "tools"
+    governed_worktree = repository_root / "worktrees" / "governed"
+    tooling_root.mkdir(parents=True)
+    governed_worktree.mkdir(parents=True)
+    state_root = tmp_path / "state"
+    settings = RuntimeSettings(
+        toolchain_interpreter=Path("tools/venv/bin/python"),
+        tooling_root=tooling_root,
+        state_root=str(state_root),
+    )
+    workspace_root = settings.workspace_root(tooling_root)
+
+    with settings.use(), process.private_temporary_directory(kind) as directory:
+        assert directory.parent == state_root
+        for governed_root in (
+            workspace_root,
+            repository_root,
+            governed_worktree,
+            tooling_root,
+        ):
+            assert not directory.is_relative_to(governed_root)
+
+    assert not directory.exists()
+
+
+def test_profile_state_root_inside_repository_is_refused(tmp_path: Path) -> None:
+    repository_root = tmp_path / "repository"
+    repository_root.mkdir()
+    nested_state_root = repository_root / ".state"
+    profile = Profile(
+        root=repository_root,
+        core_repository="example",
+        core_revision="0" * 40,
+        core_path=Path("core"),
+        profiles=(),
+        checks={},
+        state_root=str(nested_state_root),
+        state_root_explicit=True,
+    )
+
+    with RuntimeSettings.from_profile(profile).use(), pytest.raises(
+        process.ProcessGroupError, match="overlaps governed storage"
+    ):
+        process._private_state_root()
+
+    assert not nested_state_root.exists()
+
+
 def test_launch_spec_provides_a_private_writable_tmpdir(tmp_path):
     observed = []
 

@@ -5725,7 +5725,7 @@ def test_run_cli_reaps_descendants_after_normal_parent_exit(tmp_path: Path) -> N
         input_text="",
         timeout_s=2,
         env={"PATH": os.environ["PATH"]},
-        terminate_grace_s=0.05,
+        terminate_grace_s=0.2,
     )
 
     assert result.returncode == 0
@@ -6095,7 +6095,7 @@ def test_cancel_cli_terminates_descendants_after_direct_child_exits(
         input_text="",
         timeout_s=2,
         env={"PATH": os.environ["PATH"]},
-        terminate_grace_s=0.05,
+        terminate_grace_s=0.2,
     )
     child_pid = int(child_pid_path.read_text())
 
@@ -6139,6 +6139,30 @@ def test_cancel_cli_never_signals_after_group_leader_was_reaped(
     process.cancel_cli(handle, grace_s=0)
 
     assert signals == []
+
+
+def test_cancel_cli_with_tiny_grace_reaps_sigterm_ignoring_child(
+    tmp_path: Path,
+) -> None:
+    handle = process.launch_cli(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(60)",
+        ],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"]},
+        unsandboxed=True,
+        unsandboxed_reason="unit test exercises process-group cancellation",
+    )
+    assert handle.process.stdout is not None
+    assert handle.process.stdout.readline() == "ready\n"
+
+    assert process.cancel_cli(handle, grace_s=0.001) is True
+    assert handle.process.returncode == -signal.SIGKILL
 
 
 def test_cancel_cli_skips_grace_delay_when_unreaped_group_is_already_gone(

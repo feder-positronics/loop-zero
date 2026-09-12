@@ -2005,6 +2005,7 @@ def _run_refresh_process_group(
     text: bool,
     env: dict[str, str],
     cwd: Path,
+    pass_fds: Sequence[int] = (),
     private_mounts: Sequence[Path] = (),
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -2017,6 +2018,7 @@ def _run_refresh_process_group(
         input_text="",
         timeout_s=timeout,
         env=env,
+        pass_fds=pass_fds,
         private_mounts=private_mounts,
         sandbox_wrapper=sandbox_wrapper,
     )
@@ -2083,13 +2085,11 @@ def _refresh_credential(
                 "Codex credential refresh could not start"
             ) from exc
         finally:
-            try:
-                os.close(credential_descriptor)
-            except OSError:
-                # ``run_cli`` consumes inherited credential descriptors as
-                # soon as the child has started; injected runners leave the
-                # broker responsible for this close.
-                pass
+            if run_refresh is not _run_refresh_process_group:
+                try:
+                    os.close(credential_descriptor)
+                except OSError:
+                    pass
         authenticated = _status_authenticated(outcome.stdout)
         if authenticated is False:
             raise CodexCredentialRevoked("Codex ChatGPT login was revoked")
