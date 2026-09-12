@@ -6141,6 +6141,31 @@ def test_cancel_cli_never_signals_after_group_leader_was_reaped(
     assert signals == []
 
 
+def test_process_group_sweep_finds_member_with_lower_pid_after_wraparound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After PID wrap-around a descendant can carry a lower number than its leader."""
+    proc_root = tmp_path / "proc"
+    leader = proc_root / "4000"
+    member = proc_root / "50"
+    for entry, pid, state in ((leader, 4000, "Z"), (member, 50, "S")):
+        entry.mkdir(parents=True)
+        (entry / "stat").write_text(
+            f"{pid} (python) {state} 1 4000 4000 0 -1 4194560 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0\n",
+            encoding="utf-8",
+        )
+    (proc_root / "self").mkdir()
+    monkeypatch.setattr(process, "PROC_ROOT", proc_root)
+
+    assert process._process_group_has_live_member(4000) is True
+
+    (member / "stat").write_text(
+        "50 (python) S 1 7 7 0 -1 4194560 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0\n",
+        encoding="utf-8",
+    )
+    assert process._process_group_has_live_member(4000) is False
+
+
 def test_cancel_cli_with_tiny_grace_reaps_sigterm_ignoring_child(
     tmp_path: Path,
 ) -> None:

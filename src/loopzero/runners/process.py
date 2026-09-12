@@ -592,11 +592,12 @@ def launch_cli(
             argv=tuple(command),
             cwd=cwd,
             private_mounts=tuple(private_mounts),
-            private_tmpdir=private_tmpdir,
+            private_tmpdir=resolved_tmpdir,
         )
         launch_command = list(sandbox_wrapper(launch_spec))
         if not launch_command:
             raise ProcessGroupError("sandbox wrapper returned an empty command")
+        private_tmpdir = resolved_tmpdir
     child_markers = {"AGENT_DISPATCH_DEPTH": "1"}
     if private_tmpdir is not None:
         child_markers["TMPDIR"] = str(private_tmpdir)
@@ -714,12 +715,8 @@ def _process_group_has_live_member(pgid: int) -> bool:
         for entry in PROC_ROOT.iterdir():
             if not entry.name.isdigit():
                 continue
-            pid = int(entry.name)
-            # A fresh session owns the group for this bounded launch. Linux
-            # allocates its descendants after the leader, so lower PIDs can be
-            # skipped without inspecting their stat files.
-            if pid < pgid:
-                continue
+            # Every numeric entry is inspected: after PID wrap-around a
+            # descendant can carry a lower number than its leader.
             try:
                 stat_text = (PROC_ROOT / entry.name / "stat").read_text(
                     encoding="utf-8"
