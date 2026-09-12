@@ -70,6 +70,7 @@ LIVE_MAX_OUTPUT_TOKENS = 32_768
 DEFAULT_RUN_BUDGET_USD = 0.25
 DEFAULT_CURSOR_KILLED_CHARGE_USD = 0.10
 DEFAULT_MAX_KILLED_RUNS = 3
+DEFAULT_MAX_UNACCOUNTED_RUNS = 3
 # Prompts are ASCII today, but one token per UTF-8 byte deliberately
 # overestimates the normal tokenizer ratio for killed Codex requests.
 CODEX_ESTIMATED_INPUT_TOKENS_PER_BYTE = 1.0
@@ -206,12 +207,15 @@ class RealProcess:
         self.cancel = None
         self._fault_timer: threading.Timer | None = None
         self.scenario_started = False
+        self.scenario_invocations = 0
         self.killed = False
 
     def __call__(self, command, **kwargs) -> ProcessResult:
         marker = f"loopzero-live-{self.scenario}"
         is_scenario_run = marker in kwargs.get("input_text", "")
         self.scenario_started = self.scenario_started or is_scenario_run
+        if is_scenario_run:
+            self.scenario_invocations += 1
         cancelled = False
         fault_injected = False
         original_on_launch = kwargs.pop("on_launch", None)
@@ -410,12 +414,20 @@ def _cursor_unsupported_reason(vendor: str, scenario: str) -> str | None:
 
 
 def _suite_stop_reason(
-    *, charged_cost: float, ceiling: float, killed_runs: int, max_killed_runs: int
+    *,
+    charged_cost: float,
+    ceiling: float,
+    killed_runs: int,
+    max_killed_runs: int,
+    unaccounted_runs: int,
+    max_unaccounted_runs: int,
 ) -> str | None:
     if charged_cost >= ceiling:
         return "aborted-budget"
     if killed_runs >= max_killed_runs:
         return "aborted-killed-limit"
+    if unaccounted_runs >= max_unaccounted_runs:
+        return "aborted-unaccounted-limit"
     return None
 
 
@@ -488,6 +500,8 @@ def _write_results(
     *,
     killed_runs: int,
     max_killed_runs: int,
+    unaccounted_runs: int,
+    max_unaccounted_runs: int,
 ) -> None:
     output = Path(os.environ.get("LOOPZERO_LIVE_RESULTS", f"live-results-{vendor}.json"))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -499,8 +513,10 @@ def _write_results(
                 "charged_cost_usd": round(total, 9),
                 "killed_runs": killed_runs,
                 "max_killed_runs": max_killed_runs,
+                "unaccounted_runs": unaccounted_runs,
+                "max_unaccounted_runs": max_unaccounted_runs,
                 "spend_bound": (
-                    "fixed killed-run charge plus aggregate charged-cost ceiling"
+                    "fixed fallback charge plus aggregate charged-cost ceiling"
                     if vendor == "cursor"
                     else "vendor cap plus aggregate charged-cost ceiling"
                 ),
@@ -519,7 +535,7 @@ def _vendor_cap_charge(
     *,
     prompt_bytes: int = 0,
 ) -> float:
-    """Return the conservative maximum charge for one killed invocation."""
+    """Return the conservative fallback charge for one invocation."""
     if vendor == "claude":
         return budget.max_usd
     if vendor == "codex":
@@ -546,10 +562,10 @@ def _accounted_cost(
     *,
     prompt_bytes: int = 0,
 ) -> tuple[float | None, str]:
+    conservative = _vendor_cap_charge(
+        vendor, budget, prompt_bytes=prompt_bytes
+    )
     if scenario in KILLED_SCENARIOS:
-        conservative = _vendor_cap_charge(
-            vendor, budget, prompt_bytes=prompt_bytes
-        )
         charge = max(conservative, observed or 0.0)
         return charge, (
             "fixed-conservative-killed-charge"
@@ -558,7 +574,44 @@ def _accounted_cost(
         )
     if observed is not None:
         return observed, "known"
-    return None, "unknown"
+    return conservative, (
+        "fixed-conservative-charge"
+        if vendor == "cursor"
+        else "conservative-vendor-cap"
+    )
+
+
+def _account_invocations(
+    vendor: str,
+    scenario: str,
+    observed_costs: list[float | None],
+    budget: RuntimeBudget,
+    *,
+    prompt_bytes: int = 0,
+) -> tuple[float, str, int]:
+    accounted = [
+        _accounted_cost(
+            vendor,
+            scenario,
+            observed,
+            budget,
+            prompt_bytes=prompt_bytes,
+        )
+        for observed in observed_costs
+    ]
+    unaccounted = sum(observed is None for observed in observed_costs)
+    charge = sum(item[0] for item in accounted if item[0] is not None)
+    if all(item[1] == "known" for item in accounted):
+        accounting = "known"
+    elif vendor == "cursor":
+        accounting = (
+            "fixed-conservative-killed-charge"
+            if scenario in KILLED_SCENARIOS
+            else "fixed-conservative-charge"
+        )
+    else:
+        accounting = "conservative-vendor-cap"
+    return charge, accounting, unaccounted
 
 
 def _remaining_budget(
@@ -601,6 +654,14 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
     ))
     if max_killed_runs <= 0:
         raise pytest.UsageError("LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS must be positive")
+    max_unaccounted_runs = int(os.environ.get(
+        "LOOPZERO_CONFORMANCE_MAX_UNACCOUNTED_RUNS",
+        str(DEFAULT_MAX_UNACCOUNTED_RUNS),
+    ))
+    if max_unaccounted_runs <= 0:
+        raise pytest.UsageError(
+            "LOOPZERO_CONFORMANCE_MAX_UNACCOUNTED_RUNS must be positive"
+        )
     scenario_timeout = float(os.environ.get("LOOPZERO_LIVE_SCENARIO_TIMEOUT_S", str(DEFAULT_SCENARIO_TIMEOUT_S)))
     budget = _remaining_budget(vendor, ceiling)
     base_settings = RuntimeSettings(
@@ -615,6 +676,7 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
     records: list[dict[str, object]] = []
     charged_cost = 0.0
     killed_runs = 0
+    unaccounted_runs = 0
     failures: list[str] = []
     with base_settings.use(), private_temporary_directory(
         f"{vendor}-suite-session"
@@ -632,6 +694,8 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
                 ceiling=ceiling,
                 killed_runs=killed_runs,
                 max_killed_runs=max_killed_runs,
+                unaccounted_runs=unaccounted_runs,
+                max_unaccounted_runs=max_unaccounted_runs,
             )
             if stop_reason is not None:
                 record: dict[str, object] = {
@@ -640,6 +704,8 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
                 }
                 if stop_reason == "aborted-killed-limit":
                     record["killed_runs"] = killed_runs
+                elif stop_reason == "aborted-unaccounted-limit":
+                    record["unaccounted_runs"] = unaccounted_runs
                 records.append(record)
                 break
             unsupported_reason = _cursor_unsupported_reason(vendor, scenario)
@@ -731,15 +797,15 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
                         if observed_cost is not None and resumed_cost is not None
                         else None
                     )
-                scenario_charge, accounting = _accounted_cost(
+                scenario_charge, accounting, scenario_unaccounted = _account_invocations(
                     vendor,
                     scenario,
-                    observed_cost,
+                    invocation_costs,
                     scenario_budget,
                     prompt_bytes=prompt_bytes,
                 )
-                assert scenario_charge is not None
                 charged_cost += scenario_charge
+                unaccounted_runs += scenario_unaccounted
                 _assert_contract(scenario, result)
                 if scenario == "restart-resume":
                     assert result.session_id == original_session_id
@@ -755,24 +821,18 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
                 records.append(record)
             except Exception as exc:
                 if scenario_charge is None and runner.scenario_started:
-                    fallback_charge = (
-                        _vendor_cap_charge(
-                            vendor, scenario_budget, prompt_bytes=prompt_bytes
+                    started_costs = invocation_costs[:runner.scenario_invocations]
+                    scenario_charge, accounting, scenario_unaccounted = (
+                        _account_invocations(
+                            vendor,
+                            scenario,
+                            started_costs,
+                            scenario_budget,
+                            prompt_bytes=prompt_bytes,
                         )
-                        if scenario in KILLED_SCENARIOS
-                        else None
                     )
-                    scenario_charge = sum(
-                        value if value is not None else (fallback_charge or 0.0)
-                        for value in invocation_costs
-                    )
-                    if all(value is not None for value in invocation_costs):
-                        accounting = "known"
-                    elif fallback_charge is not None and vendor != "cursor":
-                        accounting = "conservative-vendor-cap"
-                    elif fallback_charge is not None:
-                        accounting = "fixed-conservative-killed-charge"
                     charged_cost += scenario_charge
+                    unaccounted_runs += scenario_unaccounted
                 failures.append(f"{scenario}: {type(exc).__name__}")
                 records.append({
                     "scenario": scenario,
@@ -792,6 +852,8 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
         charged_cost,
         killed_runs=killed_runs,
         max_killed_runs=max_killed_runs,
+        unaccounted_runs=unaccounted_runs,
+        max_unaccounted_runs=max_unaccounted_runs,
     )
     assert not failures, "; ".join(failures)
     assert charged_cost <= ceiling

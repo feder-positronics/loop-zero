@@ -98,6 +98,30 @@ def test_missing_killed_usage_is_known_or_conservatively_bounded(
     assert (charge, accounting) == (0.1, "fixed-conservative-killed-charge")
 
 
+@pytest.mark.parametrize(
+    "vendor,expected,expected_accounting",
+    [
+        ("claude", 0.25, "conservative-vendor-cap"),
+        ("codex", 0.065536, "conservative-vendor-cap"),
+        ("cursor", 0.1, "fixed-conservative-charge"),
+    ],
+)
+def test_non_killed_exception_without_usage_increases_aggregate(
+    vendor: str, expected: float, expected_accounting: str
+) -> None:
+    budget = RuntimeBudget(max_tokens=32_768, max_turns=2, max_usd=0.25)
+    aggregate = 0.125
+
+    charge, accounting, unaccounted = live._account_invocations(
+        vendor, "permission-denial", [None], budget
+    )
+    aggregate += charge
+
+    assert aggregate == 0.125 + expected
+    assert accounting == expected_accounting
+    assert unaccounted == 1
+
+
 def test_codex_killed_charge_includes_conservative_prompt_input() -> None:
     budget = RuntimeBudget(max_tokens=32_768, max_turns=2, max_usd=0.25)
     assert live._vendor_cap_charge("codex", budget, prompt_bytes=100) == 0.065561
@@ -377,7 +401,21 @@ def test_suite_stops_at_default_killed_run_limit() -> None:
         ceiling=1.0,
         killed_runs=3,
         max_killed_runs=3,
+        unaccounted_runs=0,
+        max_unaccounted_runs=3,
     ) == "aborted-killed-limit"
+
+
+def test_suite_stops_at_default_unaccounted_run_limit() -> None:
+    assert live.DEFAULT_MAX_UNACCOUNTED_RUNS == 3
+    assert live._suite_stop_reason(
+        charged_cost=0.2,
+        ceiling=1.0,
+        killed_runs=0,
+        max_killed_runs=3,
+        unaccounted_runs=3,
+        max_unaccounted_runs=3,
+    ) == "aborted-unaccounted-limit"
 
 
 def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> None:
