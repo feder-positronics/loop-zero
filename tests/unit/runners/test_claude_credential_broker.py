@@ -84,6 +84,32 @@ def test_fresh_credential_is_snapshotted_without_refresh(tmp_path: Path) -> None
         os.fstat(descriptor)
 
 
+def test_default_oauth_uses_account_home_and_accepts_current_extra_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account_home = tmp_path / "account"
+    credential = account_home / ".claude" / ".credentials.json"
+    payload = _credential(expires_at_ms=2_000_000)
+    payload["claudeAiOauth"]["rateLimitTier"] = "default_claude_max_20x"
+    _write_credential(credential, payload)
+    monkeypatch.setattr(
+        claude_credential.pwd,
+        "getpwuid",
+        lambda _uid: type("Account", (), {"pw_dir": str(account_home)})(),
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "untrusted-home"))
+
+    with claude_credential.claude_subscription_credential(
+        requested_runtime_s=600,
+        clock=lambda: 1_000.0,
+        allow_token_fallback=False,
+    ) as descriptor:
+        assert claude_credential.snapshot_source(descriptor) == "oauth-file"
+        assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == (
+            _runtime_snapshot(payload)
+        )
+
+
 def test_expiring_access_only_credential_is_cleanly_unavailable(
     tmp_path: Path,
 ) -> None:
@@ -766,6 +792,31 @@ def test_refreshable_oauth_wins_over_token(token_root, monkeypatch, token_broker
     ) as fd:
         assert token_broker.snapshot_source(fd) == "oauth-file"
         assert token_broker.snapshot_token(fd) is None
+
+
+def test_explicit_access_only_token_snapshot_never_enters_oauth_refresh(
+    token_root, monkeypatch, token_broker
+):
+    token = "sk-ant-oat01-" + "x" * 80
+    credential = token_root / "sealed.json"
+    credential.write_text(json.dumps({
+        "claudeCodeOauthToken": token,
+        "source": "token-file(default)",
+    }))
+    credential.chmod(0o600)
+    monkeypatch.setattr(
+        claude_credential,
+        "_oauth_subscription_credential",
+        lambda **_kwargs: pytest.fail("access-only token entered OAuth refresh"),
+    )
+
+    with claude_credential.claude_subscription_credential(
+        requested_runtime_s=600,
+        credential_path=credential,
+        allow_token_fallback=False,
+    ) as fd:
+        assert token_broker.snapshot_source(fd) == "token-file(default)"
+        assert token_broker.snapshot_token(fd) == token
 
 
 @pytest.mark.parametrize(

@@ -78,7 +78,9 @@ def test_entry_point_writes_only_access_only_mode_0600_snapshot(
     ) == 0
 
     captured = capsys.readouterr()
-    assert captured.out == captured.err == ""
+    expected_source = "oauth-file" if vendor == "claude" else f"{vendor}-auth-file"
+    assert captured.out == f"credential source: {expected_source}\n"
+    assert captured.err == ""
     assert json.loads(output.read_bytes()) == _payload(vendor, access_secret)
     assert b"refresh-capability" not in output.read_bytes()
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
@@ -87,6 +89,7 @@ def test_entry_point_writes_only_access_only_mode_0600_snapshot(
 def test_entry_point_can_seal_from_normal_host_discovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     tmp_path.chmod(0o700)
     output = tmp_path / "snapshot.json"
@@ -119,6 +122,39 @@ def test_entry_point_can_seal_from_normal_host_discovery(
 
     assert credential_seal.main(["claude", "--out", str(output)]) == 0
     assert json.loads(output.read_bytes()) == discovered
+    captured = capsys.readouterr()
+    assert captured.out == "credential source: token-file(default)\n"
+    assert captured.err == ""
+
+
+def test_entry_point_accepts_an_explicit_raw_claude_token_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tmp_path.chmod(0o700)
+    token = "sk-ant-oat01-" + "x" * 80
+    source = tmp_path / "claude-token"
+    source.write_text(token + "\n", encoding="ascii")
+    source.chmod(0o600)
+    output = tmp_path / "snapshot.json"
+    monkeypatch.setattr(
+        credential_seal.claude, "_validate_remote_token", lambda _: None
+    )
+    monkeypatch.setattr(
+        credential_seal, "_host_refresh_wrapper", lambda: (lambda spec: spec.argv)
+    )
+
+    assert credential_seal.main(
+        ["claude", "--source", str(source), "--out", str(output)]
+    ) == 0
+    assert json.loads(output.read_bytes()) == {
+        "claudeCodeOauthToken": token,
+        "source": "token-file",
+    }
+    captured = capsys.readouterr()
+    assert captured.out == "credential source: token-file\n"
+    assert captured.err == ""
 
 
 def test_entry_point_rejects_unsafe_input_and_never_prints_credential(

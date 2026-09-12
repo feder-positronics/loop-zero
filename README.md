@@ -67,7 +67,9 @@ before starting bubblewrap. Only the snapshot is bound read-only into the
 validation bubble, and an access-only snapshot that can no longer cover a
 launch becomes cleanly unavailable without any refresh attempt. Neither file
 is placed in the checkout or artifacts, and credential contents are never
-printed. The remaining risk is explicit: checked-out code on `main` can read
+printed; the seal reports only its bounded source kind (for example,
+`oauth-file` or `token-file(default)`). The remaining risk is explicit:
+checked-out code on `main` can read
 and exfiltrate the short-lived access token while the network-enabled live job
 runs. The GitHub environment limits secret scope, but is not a per-run human
 approval boundary.
@@ -99,7 +101,9 @@ LOOPZERO_LIVE_CREDENTIAL_SEAL=/absolute/trusted/bin/loopzero-credential-seal \
 ```
 
 Set `LOOPZERO_LIVE_CREDENTIAL_SOURCE` only when intentionally overriding normal
-host discovery with a mode-0600 credential JSON file. Set
+host discovery with a mode-0600 credential file. Claude accepts either its
+OAuth credential JSON or a validated `sk-ant-oat01-` token file; the other
+runtimes require their native credential JSON. Set
 `LOOPZERO_LIVE_CREDENTIAL_SEAL` to select a separately installed trusted
 `loopzero-credential-seal` entry point.
 

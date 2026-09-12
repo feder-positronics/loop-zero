@@ -1685,6 +1685,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import fcntl
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -2123,6 +2124,23 @@ def _resolve_claude_binary() -> Path:
     return resolved
 
 
+def _account_home() -> Path:
+    """Resolve native Claude state against the OS account, never ``$HOME``."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        raise ClaudeCredentialUnavailable(
+            "Claude account home is unavailable"
+        ) from None
+    if not home.is_absolute() or home == Path("/"):
+        raise UnsafeClaudeCredential("Claude account home is unsafe")
+    return home
+
+
+def _default_credential_path() -> Path:
+    return _account_home() / ".claude" / ".credentials.json"
+
+
 @contextmanager
 def _oauth_subscription_credential(
     *,
@@ -2136,7 +2154,7 @@ def _oauth_subscription_credential(
     """Renew if needed, then lend one sealed snapshot for a provider command."""
     if requested_runtime_s <= 0:
         raise ValueError("requested_runtime_s must be positive")
-    path = credential_path or Path.home() / ".claude" / ".credentials.json"
+    path = credential_path or _default_credential_path()
     with _renewal_lock(path.parent / BROKER_LOCK_NAME):
         now_ms = int(clock() * 1000)
         horizon_ms = now_ms + int(
@@ -2203,6 +2221,15 @@ def claude_subscription_credential(
 ) -> Iterator[int]:
     """Prefer renewable OAuth; otherwise lend a validated access-only token."""
 
+    if credential_path is not None:
+        token_descriptor = _explicit_token_snapshot(credential_path)
+        if token_descriptor is not None:
+            try:
+                yield token_descriptor
+            finally:
+                os.close(token_descriptor)
+            return
+
     with ExitStack() as stack:
         try:
             descriptor = stack.enter_context(_oauth_subscription_credential(
@@ -2231,13 +2258,49 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import http.client
 import json
 import os
-import pwd
 import re
 from pathlib import Path
 
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 TOKEN_FILE_ENV = DEFAULT_SETTINGS.env_name("CLAUDE_TOKEN_FILE")
 TOKEN_PATTERN = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{40,512}")
+
+
+def _token_snapshot_payload(token: str, *, source: str) -> bytes:
+    return json.dumps(
+        {"claudeCodeOauthToken": token, "source": source}, separators=(",", ":")
+    ).encode()
+
+
+def _explicit_token_snapshot(path: Path) -> int | None:
+    """Recognize raw token files and already-sealed access-only token JSON."""
+    payload = _read_private_payload(path, single_link=True)
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        try:
+            token = payload.decode("ascii").removesuffix("\n")
+        except UnicodeDecodeError:
+            raise UnsafeClaudeCredential(
+                "Claude long-lived token is malformed"
+            ) from None
+        if TOKEN_PATTERN.fullmatch(token) is None:
+            raise UnsafeClaudeCredential("Claude long-lived token is malformed")
+        _validate_remote_token(token)
+        return _snapshot_descriptor(_token_snapshot_payload(token, source="token-file"))
+    if not isinstance(decoded, dict) or "claudeCodeOauthToken" not in decoded:
+        return None
+    if set(decoded) != {"claudeCodeOauthToken", "source"}:
+        raise UnsafeClaudeCredential("Claude token snapshot is invalid")
+    token = decoded["claudeCodeOauthToken"]
+    source = decoded.get("source")
+    if (
+        not isinstance(token, str)
+        or TOKEN_PATTERN.fullmatch(token) is None
+        or source not in {"token-env", "token-file", "token-file(default)"}
+    ):
+        raise UnsafeClaudeCredential("Claude token snapshot is invalid")
+    return _snapshot_descriptor(_token_snapshot_payload(token, source=source))
 
 
 def _validate_remote_token(token: str) -> None:
@@ -2320,14 +2383,7 @@ def _read_host_token_file(path: Path) -> bytes:
 
 def _default_token_path() -> Path:
     """Use the OS account state root, independent of desktop HOME/XDG state."""
-
-    try:
-        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except (KeyError, OSError):
-        raise ClaudeCredentialUnavailable("Claude account home is unavailable") from None
-    if not home.is_absolute() or home == Path("/"):
-        raise UnsafeClaudeCredential("Claude account home is unsafe")
-    return get_settings().state_path(home) / "claude-token"
+    return get_settings().state_path(_account_home()) / "claude-token"
 
 
 def token_snapshot() -> int | None:
@@ -2357,9 +2413,7 @@ def token_snapshot() -> int | None:
     if TOKEN_PATTERN.fullmatch(token) is None:
         raise UnsafeClaudeCredential("Claude long-lived token is malformed")
     _validate_remote_token(token)
-    return _snapshot_descriptor(json.dumps(
-        {"claudeCodeOauthToken": token, "source": source}, separators=(",", ":")
-    ).encode())
+    return _snapshot_descriptor(_token_snapshot_payload(token, source=source))
 
 
 def _snapshot(fd: int) -> dict:

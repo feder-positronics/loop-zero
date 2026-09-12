@@ -267,7 +267,7 @@ def seal_credential(
     output: Path,
     broker: Callable[..., ContextManager[int]] | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
-) -> None:
+) -> str:
     """Validate/refresh *source* and atomically create access-only *output*."""
 
     if vendor not in VENDORS:
@@ -308,8 +308,14 @@ def seal_credential(
         kwargs["sandbox_wrapper"] = wrapper
     with settings.use(), (broker or _broker_for(vendor))(**kwargs) as descriptor:
         payload = _read_snapshot(descriptor)
+        source_kind = (
+            claude.snapshot_source(descriptor)
+            if vendor == "claude"
+            else f"{vendor}-auth-file"
+        )
     _validate_access_only(vendor, payload)
     _write_snapshot(output, payload)
+    return source_kind
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -330,12 +336,15 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        seal_credential(args.vendor, source=args.source, output=args.out)
+        source_kind = seal_credential(
+            args.vendor, source=args.source, output=args.out
+        )
     except Exception:
         # Errors are deliberately content-free: neither provider exceptions nor
         # path values can accidentally echo credential material or locations.
         print("credential sealing failed", file=sys.stderr)
         return 1
+    print(f"credential source: {source_kind}")
     return 0
 
 

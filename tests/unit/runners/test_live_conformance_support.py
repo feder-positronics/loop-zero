@@ -336,6 +336,38 @@ def test_live_preflight_seals_once_and_scenarios_use_access_only_source(
     assert "LOOPZERO_LIVE_CREDENTIAL_PATH" not in os.environ
 
 
+def test_live_failed_seal_stops_before_readiness_or_scenario_broker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tmp_path.chmod(0o700)
+    monkeypatch.delenv("LOOPZERO_LIVE_CREDENTIAL_PATH", raising=False)
+    seal_binary = tmp_path / "loopzero-credential-seal"
+    seal_binary.touch(mode=0o700)
+    monkeypatch.setattr(live, "_seal_command", lambda: seal_binary)
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Completed", (), {"returncode": 1})(),
+    )
+
+    broker_calls: list[dict[str, object]] = []
+
+    @contextmanager
+    def broker(**kwargs):
+        broker_calls.append(kwargs)
+        yield -1
+
+    monkeypatch.setattr(live.claude, "claude_subscription_credential", broker)
+
+    with pytest.raises(RuntimeError, match="live credential sealing failed"):
+        with live._suite_access_only_credential("claude", tmp_path):
+            pytest.fail("failed sealing must not enter live readiness")
+
+    assert broker_calls == []
+    assert "LOOPZERO_LIVE_CREDENTIAL_PATH" not in os.environ
+    assert not (tmp_path / "access-only.json").exists()
+
+
 def test_live_adapter_run_transfers_a_duplicate_not_the_broker_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
