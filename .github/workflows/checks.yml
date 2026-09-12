@@ -73,19 +73,38 @@ jobs:
         run: |
           VENV_ROOT="$RUNNER_TEMP/loopzero-python-${{ matrix.python }}/.venv"
           PYTHON_INSTALL_ROOT=$(uv python dir)
+          UV_BIN=$(readlink -f "$(command -v uv)")
+          # The kernel keeps job authority under the passwd home of the sandbox
+          # account, never under $HOME or the checkout. Give it a private empty
+          # tmpfs at that path; the runner's real home stays outside the sandbox.
+          ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
+          test -n "$ACCOUNT_HOME" && test "$ACCOUNT_HOME" != /
+          # The kernel's mount model keys on whether /bin, /lib, /lib64, and
+          # /sbin are symlinks (merged /usr). Reproduce the runner's layout
+          # instead of flattening every entry into a plain directory.
+          ROOT_LAYOUT=()
+          for entry in /bin /lib /lib64 /sbin; do
+            if [ -L "$entry" ]; then
+              ROOT_LAYOUT+=(--symlink "$(readlink "$entry")" "$entry")
+            elif [ -d "$entry" ]; then
+              ROOT_LAYOUT+=(--ro-bind "$entry" "$entry")
+            fi
+          done
           bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \
             --die-with-parent \
-            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
-            --ro-bind /bin /bin --ro-bind /sbin /sbin \
+            --ro-bind /usr /usr "${ROOT_LAYOUT[@]}" \
             --ro-bind /etc/alternatives /etc/alternatives --ro-bind /etc/ssl /etc/ssl \
             --ro-bind /etc/ld.so.cache /etc/ld.so.cache --ro-bind /etc/passwd /etc/passwd \
             --ro-bind /etc/group /etc/group --ro-bind /etc/hosts /etc/hosts \
             --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
+            --ro-bind "$UV_BIN" /opt/uv/bin/uv \
             --ro-bind "$PYTHON_INSTALL_ROOT" /opt/uv-python \
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
             --ro-bind "$VENV_ROOT" /tmp/venv \
+            --perms 0700 --tmpfs "$ACCOUNT_HOME" \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
+            --setenv PATH /opt/uv/bin:/usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
+            --setenv HOME /tmp \
             --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
             --chdir /tmp/workspace -- bash -eu -c '
               /tmp/venv/bin/python -m pytest -q -p no:cacheprovider

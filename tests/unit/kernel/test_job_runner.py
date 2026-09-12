@@ -63,13 +63,29 @@ def _job(
     }).child_environment())
     return subprocess.run(
         [str(script), *args],
-        cwd=script.resolve().parents[2],
+        cwd=_job_worktree(tmp_path, script),
         env=package_environment(environment),
         capture_output=True,
         text=True,
         timeout=timeout,
         pass_fds=pass_fds,
     )
+
+
+def _job_worktree(tmp_path: Path, script: Path) -> Path:
+    """The runner adopts the nearest repository above its working directory.
+
+    Runs of the shipped script get a private, disposable repository instead
+    of the package checkout: the checkout may be read-only (CI binds it that
+    way) and it must never absorb job artifacts such as ``.audit``.
+    """
+    if script != SCRIPT:
+        return script.resolve().parents[2]
+    worktree = tmp_path / "worktree"
+    if not worktree.is_dir():
+        worktree.mkdir(mode=0o700)
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    return worktree
 
 
 def _default_job(
