@@ -11,7 +11,9 @@ permissions:
 jobs:
   runtime:
     name: ${{ matrix.runtime }} conformance
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    environment: nightly-conformance
     strategy:
       fail-fast: false
       matrix:
@@ -104,8 +106,8 @@ jobs:
           RESULTS="$ROOT/results"
           mkdir -p "$RESULTS"
           umask 077
-          printf '%s' "$LIVE_CREDENTIAL" > "$CREDENTIAL"
           trap 'rm -f -- "$CREDENTIAL"' EXIT
+          printf '%s' "$LIVE_CREDENTIAL" > "$CREDENTIAL"
           chmod 600 "$CREDENTIAL"
           ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
           test -n "$ACCOUNT_HOME" && test "$ACCOUNT_HOME" != /
@@ -129,7 +131,7 @@ jobs:
             --ro-bind "$ROOT/.venv" /tmp/venv \
             --ro-bind "$LOOPZERO_LIVE_RUNTIME_ROOT" /opt/runtime \
             --bind "$RESULTS" /tmp/results \
-            --bind "$CREDENTIAL" /run/loopzero-credential.json \
+            --ro-bind "$CREDENTIAL" /run/loopzero-credential.json \
             --perms 0700 --tmpfs "$ACCOUNT_HOME" \
             --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
             --setenv PATH /opt/runtime/bin:/usr/bin:/bin \
@@ -162,11 +164,12 @@ jobs:
           result = json.load(open(sys.argv[1], encoding="utf-8"))
           with open(sys.argv[2], "a", encoding="utf-8") as summary:
               summary.write(f"### {result['runtime']} {result['version']}\n\n")
-              summary.write("| Scenario | Outcome | Known cost (USD) |\n|---|---:|---:|\n")
+              summary.write("| Scenario | Outcome | Accounting | Charged cost (USD) |\n|---|---:|---|---:|\n")
               for row in result["scenarios"]:
-                  cost = row.get("known_cost_usd")
-                  summary.write(f"| {row['scenario']} | {row['outcome']} | {cost if cost is not None else 'unknown'} |\n")
-              summary.write(f"\nTotal known cost: ${result['known_cost_usd']:.6f}\n")
+                  cost = row.get("charged_cost_usd")
+                  summary.write(f"| {row['scenario']} | {row['outcome']} | {row.get('accounting', 'n/a')} | {cost if cost is not None else 'n/a'} |\n")
+              summary.write(f"\nTotal charged cost: ${result['charged_cost_usd']:.6f}\n\n")
+              summary.write(f"Spend bound: {result['spend_bound']}\n")
           PY
 
       - name: Upload normalized conformance result
