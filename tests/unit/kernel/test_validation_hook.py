@@ -32,6 +32,9 @@ def _git(root: Path, *args: str) -> str:
     ).strip()
 
 
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+
+
 def _signer() -> authority.CoordinatorAuthority:
     ephemeral = authority.TerminalAuthority.generate()
     return authority.CoordinatorAuthority(ephemeral.public_key, ephemeral._private_key)
@@ -52,6 +55,9 @@ def _repo(tmp_path: Path, commands: tuple[str, ...], hook: str = "acceptance") -
     repo = tmp_path / "consumer"
     repo.mkdir()
     (repo / "workflow.toml").write_text(_workflow(commands, hook), encoding="utf-8")
+    # The approved profile's [core].path must exist on disk: vendor the
+    # package's own core snapshot the way a real consumer does.
+    shutil.copytree(_PACKAGE_ROOT / "core", repo / "vendor" / "core")
     _git(repo, "init", "-q", "-b", "main")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
