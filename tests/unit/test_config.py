@@ -17,14 +17,14 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
 
 
-def test_profile_records_explicit_state_root(tmp_path: Path):
-    (tmp_path / "workflow.toml").write_text(
+def test_profile_records_explicit_state_root(consumer: Path):
+    (consumer / "workflow.toml").write_text(
         minimal_workflow(
             extra='[package]\nenv_prefix = "INTELFLO"\nstate_root = "/var/lib/intelflo"\n'
         ),
         encoding="utf-8",
     )
-    profile = config.load_profile(tmp_path)
+    profile = config.load_profile(consumer)
     assert profile.state_root == "/var/lib/intelflo"
     assert profile.state_root_explicit is True
 
