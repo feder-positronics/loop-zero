@@ -3,7 +3,7 @@ name: plan
 description: Bound a requested change with acceptance, ownership and validation before implementation when those decisions are not yet clear.
 ---
 
-Read [the shared contract](../../CONTRACT.md) and the repository's local contract.
+Read [the shared contract]({{package.core_contract}}) and the repository's local contract.
 Produce a bounded real change: acceptance, affected paths, local constraints,
 selected checks and current owner. Use the existing task/PR; a separate plan
 file is optional. Resolve routine implementation choices from available evidence.

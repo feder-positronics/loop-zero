@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>From push-all to search-first — Editorial Modern</title>
+<style>
+:root {
+  --serif: "Iowan Old Style", "Charter", "Georgia", "Cambria", serif;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ink: #1f1611;
+  --paper: #f6f1e6;
+  --paper-deep: #ede4d2;
+  --rule: #d6c8ad;
+  --ochre: #94632a;
+  --ochre-soft: #f0e3c8;
+  --muted: #6a5a44;
+  --known: #4f6b2f;
+  --likely: #7a6a2a;
+  --uncertain: #a67219;
+  --speculative: #8e3535;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  font-family: var(--serif);
+  font-size: 1.125rem;
+  line-height: 1.75;
+  color: var(--ink);
+  background: var(--paper);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+.skip-link { position: absolute; left: -9999px; }
+.skip-link:focus { left: 1rem; top: 1rem; background: var(--ink); color: var(--paper); padding: 0.5rem 1rem; z-index: 10; }
+
+a { color: var(--ochre); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--ochre); outline-offset: 4px; }
+
+article {
+  max-width: 38rem;
+  margin: 0 auto;
+  padding: 5rem 1.5rem 6rem;
+}
+
+.archival-header {
+  border-top: 1px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+  padding: 0.5rem 0;
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--sans);
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink);
+  margin-bottom: 3rem;
+}
+
+.eyebrow {
+  font-family: var(--sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ochre);
+  margin: 0 0 1.5rem 0;
+}
+
+h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-style: italic;
+  font-size: clamp(2.25rem, 1.6rem + 2.6vw, 3.5rem);
+  line-height: 1.05;
+  letter-spacing: -0.015em;
+  margin: 0 0 1.75rem 0;
+  color: var(--ink);
+}
+
+.orientation {
+  font-size: 1.35rem;
+  line-height: 1.5;
+  color: var(--ink);
+  margin: 0 0 2rem 0;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 2rem;
+}
+
+.byline {
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 4rem;
+}
+
+h2 {
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 4rem 0 1rem 0;
+  position: relative;
+}
+
+h2 .chapter {
+  font-family: var(--serif);
+  font-style: italic;
+  font-weight: 400;
+  color: var(--ochre);
+  font-size: 0.85rem;
+  margin-right: 0.6rem;
+  letter-spacing: 0;
+}
+
+p { margin: 0 0 1.25rem 0; }
+
+p.lede::first-letter {
+  font-family: var(--serif);
+  font-size: 4.5rem;
+  line-height: 0.85;
+  float: left;
+  padding: 0.25rem 0.6rem 0 0;
+  font-weight: 400;
+  color: var(--ochre);
+  font-style: normal;
+}
+
+.pull-quote {
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 1.5rem;
+  line-height: 1.4;
+  color: var(--ink);
+  border-left: 3px solid var(--ochre);
+  padding: 0.5rem 0 0.5rem 1.5rem;
+  margin: 2rem 0;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--sans);
+  font-size: 0.9rem;
+  margin: 1.5rem 0;
+}
+table th, table td {
+  text-align: left;
+  padding: 0.85rem 0.75rem 0.85rem 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+table th {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-size: 0.72rem;
+  border-bottom: 1px solid var(--ink);
+}
+tr.recommended td {
+  background: var(--ochre-soft);
+  padding-left: 0.75rem;
+}
+
+figure {
+  margin: 2.5rem -2rem;
+  padding: 1.5rem;
+  background: var(--paper-deep);
+  border: 1px solid var(--rule);
+}
+figure svg { width: 100%; height: auto; display: block; color: var(--ink); }
+figcaption {
+  font-family: var(--sans);
+  font-size: 0.78rem;
+  color: var(--muted);
+  margin-top: 0.75rem;
+  text-align: center;
+  font-style: italic;
+  letter-spacing: 0.02em;
+}
+figcaption::before { content: "Fig. — "; font-style: normal; font-weight: 600; }
+
+.uncertainty {
+  font-family: var(--sans);
+  font-size: 0.66rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  padding: 0.15rem 0.6rem;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  margin-right: 0.5rem;
+  font-weight: 600;
+}
+.uncertainty.known { color: var(--known); }
+.uncertainty.likely { color: var(--likely); }
+.uncertainty.uncertain { color: var(--uncertain); }
+.uncertainty.speculative { color: var(--speculative); }
+
+.takeaway {
+  font-family: var(--serif);
+  font-size: 1.25rem;
+  line-height: 1.55;
+  margin: 4rem 0 0 0;
+  padding: 2rem 0;
+  border-top: 2px solid var(--ink);
+  border-bottom: 1px solid var(--ink);
+}
+.takeaway::before {
+  content: "— The takeaway";
+  display: block;
+  font-family: var(--sans);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ochre);
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+dl dt {
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-top: 1.25rem;
+  color: var(--ochre);
+}
+dl dd { margin: 0.25rem 0 0 0; }
+
+@media print {
+  body { background: #fff; font-size: 11pt; }
+  figure { margin: 1rem 0; break-inside: avoid; }
+}
+@page { margin: 18mm; }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#article">Skip to article</a>
+
+<article id="article">
+  <div class="archival-header">
+    <span>IntelFlo Quarterly</span>
+    <span>№ 01 · Architecture</span>
+    <span>15 May 2026</span>
+  </div>
+
+  <p class="eyebrow">Decision rationale</p>
+  <h1>From push-all to search-first.</h1>
+  <p class="orientation">We're shifting from a pipeline that pushes every datafeed item into a user's inbox, to a model where users search the state of the knowledge on demand — while feeds keep dropping new content into the inbox <em>only</em> for the alerts and sources users have explicitly registered.</p>
+  <p class="byline">A reconstructed rationale · for review · verify before circulating</p>
+
+  <h2><span class="chapter">I.</span> The decision</h2>
+  <p class="lede">Migrate IntelFlo's content pipeline from a <strong>push-all-to-inbox</strong> model to a <strong>search-first</strong> model. The primary surface for <em>"what do we know about X?"</em> becomes a unified search over the internal archive plus external sources (OpenAlex, PubMed). Datafeeds still deliver — but only items matching a registered alert (saved search) or coming from a registered source subscription. Everything else is indexed for search but not pushed. The inbox is no longer a firehose; it is what the reader explicitly asked to be told.</p>
+
+  <p class="pull-quote">The firehose is gone; the targeted delivery survives.</p>
+
+  <h2><span class="chapter">II.</span> Two mental models</h2>
+  <p>In the old model the system <em>pushes</em> everything it finds, and the user filters from a firehose. In the new model the user <em>pulls</em> what they need via search, while the inbox is reduced to the targeted alerts and source subscriptions the user has registered.</p>
+
+  <figure>
+    <svg role="img" aria-labelledby="f2t f2d" viewBox="0 0 820 360">
+      <title id="f2t">Search-first model</title>
+      <desc id="f2d">User query → search layer (internal + external) → ranked results. Datafeeds index everything for search; matched content also flows through an alert/source filter to the inbox.</desc>
+      <g fill="none" stroke="currentColor" stroke-width="1">
+        <rect x="20" y="20" width="120" height="40" rx="2"/>
+        <rect x="260" y="10" width="200" height="60" rx="2"/>
+        <rect x="600" y="10" width="180" height="60" rx="2" fill="var(--ochre-soft)"/>
+        <rect x="160" y="130" width="160" height="40" rx="2"/>
+        <rect x="440" y="130" width="160" height="40" rx="2"/>
+        <rect x="20" y="250" width="120" height="40" rx="2"/>
+        <rect x="280" y="250" width="220" height="40" rx="2"/>
+        <rect x="600" y="240" width="200" height="60" rx="2" fill="var(--paper-deep)"/>
+      </g>
+      <g font-family="Iowan Old Style, Georgia, serif" font-size="13" fill="currentColor">
+        <text x="80" y="45" text-anchor="middle">User query</text>
+        <text x="360" y="35" text-anchor="middle" font-weight="600">Search layer</text>
+        <text x="360" y="55" text-anchor="middle" font-style="italic" font-size="11">internal + external</text>
+        <text x="690" y="35" text-anchor="middle" font-weight="600">Ranked results</text>
+        <text x="690" y="55" text-anchor="middle" font-style="italic" font-size="11">+ provenance</text>
+        <text x="240" y="155" text-anchor="middle">Internal archive</text>
+        <text x="520" y="155" text-anchor="middle">External (OpenAlex)</text>
+        <text x="80" y="275" text-anchor="middle">Datafeeds</text>
+        <text x="390" y="268" text-anchor="middle" font-weight="600" font-size="12">Alert + source filter</text>
+        <text x="390" y="283" text-anchor="middle" font-style="italic" font-size="10">registered alerts / sources</text>
+        <text x="700" y="265" text-anchor="middle" font-weight="600">Inbox</text>
+        <text x="700" y="283" text-anchor="middle" font-style="italic" font-size="10">scoped, no firehose</text>
+      </g>
+      <g stroke="currentColor" stroke-width="1" fill="none">
+        <path d="M140 40 L260 40" marker-end="url(#a)"/>
+        <path d="M460 40 L600 40" marker-end="url(#a)"/>
+        <path d="M240 130 L330 75"/>
+        <path d="M520 130 L390 75"/>
+        <path d="M80 250 C 80 200 80 180 160 165" marker-end="url(#a)"/>
+        <path d="M140 270 L280 270" marker-end="url(#a)"/>
+        <path d="M500 270 L600 270" marker-end="url(#a)"/>
+      </g>
+      <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="currentColor"/></marker></defs>
+    </svg>
+    <figcaption>The proposed model. Feeds keep delivering — but only the items a user has registered for.</figcaption>
+  </figure>
+
+  <h2><span class="chapter">III.</span> Three options</h2>
+  <table>
+    <thead><tr><th>Option</th><th>Shape</th><th>Failure mode</th></tr></thead>
+    <tbody>
+      <tr><td>A. Status quo</td><td>Keep push. Improve filtering.</td><td>Attention overload.</td></tr>
+      <tr><td>B. Pure search</td><td>Drop inbox entirely.</td><td>Users miss material new content.</td></tr>
+      <tr class="recommended"><td><strong>C. Hybrid</strong></td><td>Search primary; inbox scoped to registered alerts + sources.</td><td>Trust ranking becomes load-bearing.</td></tr>
+    </tbody>
+  </table>
+
+  <h2><span class="chapter">IV.</span> Risks &amp; uncertainty</h2>
+  <p><span class="uncertainty known">Known</span> Trust ranking already a reopened blocker (#198 + #488–#491).</p>
+  <p><span class="uncertainty likely">Likely</span> Onboarding to "what to register" becomes the load-bearing UX moment.</p>
+  <p><span class="uncertainty uncertain">Uncertain</span> Migration sequencing; transition handling for existing inbox content.</p>
+  <p><span class="uncertainty speculative">Speculative</span> Long-term, the search layer becomes shared substrate for agent-driven synthesis.</p>
+
+  <h2><span class="chapter">V.</span> Glossary</h2>
+  <dl>
+    <dt>Registered alert</dt>
+    <dd>A saved search the user has chosen to be notified about. Matches flow to inbox.</dd>
+    <dt>Registered source</dt>
+    <dd>A feed the user has explicitly subscribed to. New items flow to inbox.</dd>
+    <dt>Search layer</dt>
+    <dd>Unified query surface spanning the internal archive and external sources.</dd>
+    <dt>Trust ranking</dt>
+    <dd>Ordering heterogeneous results by relevance and credibility — the load-bearing hard problem.</dd>
+  </dl>
+
+  <p class="takeaway">Stop pushing everything; let users pull what they need via search — and let feeds deliver only what they've explicitly registered for. The firehose is gone; the targeted delivery survives. The hard work moves to trust ranking, which we were going to have to do anyway.</p>
+</article>
+</body>
+</html>
