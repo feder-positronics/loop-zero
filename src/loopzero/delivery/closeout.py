@@ -380,6 +380,24 @@ def ensure_authority_clean(primary: Path) -> None:
         raise BootstrapError("canonical primary is dirty")
 
 
+# Mirrors git_config_security._INERT_REMOTE_KEYS; kept in sync by the parity test.
+_INERT_REMOTE_KEYS = frozenset(
+    {
+        "url",
+        "pushurl",
+        "fetch",
+        "push",
+        "mirror",
+        "tagopt",
+        "prune",
+        "prunetags",
+        "skipdefaultupdate",
+        "skipfetchall",
+        "gh-resolved",
+    }
+)
+
+
 def _git_config_key_can_redirect(name: str) -> bool:
     # This bootstrap copy is intentionally self-contained: importing a sibling
     # before source pinning would widen the first-code boundary. Focused parity
@@ -404,6 +422,7 @@ def _git_config_key_can_redirect(name: str) -> bool:
     if normalized.startswith("merge.") and normalized.endswith(".driver"):
         return True
     if normalized in {
+        "extensions.partialclone",
         "extensions.worktreeconfig",
         "core.askpass",
         "core.editor",
@@ -416,11 +435,14 @@ def _git_config_key_can_redirect(name: str) -> bool:
         "core.worktree",
     }:
         return True
-    return normalized.startswith("remote.origin.") and normalized not in {
-        "remote.origin.fetch",
-        "remote.origin.gh-resolved",
-        "remote.origin.url",
-    }
+    remote = re.fullmatch(r"remote\.(.+)\.([^.]+)", normalized)
+    if remote is not None:
+        # Any remote (origin or a second one) keeps only inert bookkeeping:
+        # URLs, refspecs, mirror and prune flags. `vcs`, `proxy`, `uploadpack`,
+        # `receivepack`, `promisor` and `partialclonefilter` select helpers,
+        # commands, or lazy fetching and are rejected for every remote.
+        return remote.group(2) not in _INERT_REMOTE_KEYS
+    return False
 
 
 def _parse_config(

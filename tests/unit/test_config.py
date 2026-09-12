@@ -90,10 +90,10 @@ def test_routing_tiers_must_reference_aliases(tmp_path: Path):
     assert "[routing.tiers].B" in str(info.value)
 
 
-def test_mechanism_configuration_is_typed_and_retained():
-    profile = config.load_profile(
-        Path(__file__).resolve().parents[1] / "example_consumer"
-    )
+def test_mechanism_configuration_is_typed_and_retained(tmp_path: Path):
+    from test_example_consumer import deploy
+
+    profile = config.load_profile(deploy(tmp_path))
     assert profile.toolchain["db_targets"] == ["test-integration"]
     assert profile.toolchain["closeout_launcher_path"] == "scripts/util/pr_closeout.py"
     assert profile.toolchain["closeout_trust_floor_path"] == (
