@@ -35,6 +35,8 @@ from .contract import (
     SubscriptionEligibility,
     TerminalReason,
     is_valid_resume_session_id,
+    sanitized_bridge_failure,
+    sanitized_bridge_text,
 )
 from .process import (
     ProcessHandle,
@@ -289,6 +291,69 @@ def _requires_sdk_transport(request: RuntimeRequest) -> bool:
 # Explicit alias keeps call sites readable while allowing fixtures to use the
 # transport-specific name.
 build_claude_cli_command = build_claude_command
+
+
+API_RETRY_DIAGNOSTIC_PREFIX = "Claude API retry: "
+
+
+def _retain_api_retry_diagnostic(diagnostics: list[str], detail: object) -> None:
+    """Keep only the latest sanitized CLI retry reason within the bound."""
+    text = sanitized_bridge_text(detail)
+    if text is None:
+        return
+    diagnostic = f"{API_RETRY_DIAGNOSTIC_PREFIX}{text}"
+    for index, existing in enumerate(diagnostics):
+        if existing.startswith(API_RETRY_DIAGNOSTIC_PREFIX):
+            diagnostics[index] = diagnostic
+            return
+    if len(diagnostics) < MAX_DIAGNOSTICS:
+        diagnostics.append(diagnostic)
+
+
+def _bridge_killed_by_signal(outcome: ProcessResult) -> bool:
+    """An externally signalled bridge without a terminal frame was disconnected."""
+    return (
+        outcome.returncode is not None
+        and outcome.returncode < 0
+        and not outcome.cancelled
+        and not outcome.timed_out
+    )
+
+
+def _timeout_diagnostics(stream: str) -> tuple[str, ...]:
+    """Retain bounded retry/failure diagnostics from a timed-out bridge stream.
+
+    Buffered frames confer no result authority; an interrupted final line is
+    never a complete frame.  Only the latest retry reason and any bridge
+    error-frame diagnostics are kept.
+    """
+    if len(stream) > MAX_BRIDGE_LINE_BYTES:
+        return ()
+    try:
+        if len(stream.encode("utf-8")) > MAX_BRIDGE_LINE_BYTES:
+            return ()
+    except UnicodeEncodeError:
+        return ()
+    diagnostics: list[str] = []
+    for line in stream.split("\n")[:-1]:
+        try:
+            raw = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        if (
+            raw.get("type") == "event"
+            and raw.get("kind") == "system"
+            and raw.get("subtype") == "api_retry"
+        ):
+            _retain_api_retry_diagnostic(diagnostics, raw.get("detail"))
+            continue
+        if raw.get("type") == "error":
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None and len(diagnostics) < MAX_DIAGNOSTICS - 1:
+                diagnostics.append(f"Claude SDK failure: {failure}")
+    return tuple(diagnostics[: MAX_DIAGNOSTICS - 1])
 
 
 def _bounded_string(
@@ -588,6 +653,8 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
             event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
+            if kind == "system" and subtype == "api_retry":
+                _retain_api_retry_diagnostic(diagnostics, raw.get("detail"))
             event_session_id = _bounded_string(raw.get("session_id"), "session_id")
             if event_session_id is not None:
                 session_id = event_session_id
@@ -778,6 +845,9 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                         "disconnect": "Claude SDK transport disconnected",
                     }[error_reason]
                 )
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None and len(diagnostics) < MAX_DIAGNOSTICS:
+                diagnostics.append(f"Claude SDK failure: {failure}")
             continue
 
         if len(diagnostics) < MAX_DIAGNOSTICS:
@@ -1010,6 +1080,7 @@ class ClaudeAdapter:
                 repair="restore the repository Claude Agent SDK tooling dependency",
             )
         if request.requested_model in MODELS_REQUIRING_SDK_COMPATIBILITY_PROBE:
+            probe_timed_out = False
             try:
                 outcome = self._run_probe(
                     build_sdk_bridge_command(request.tooling_root or request.cwd),
@@ -1018,8 +1089,23 @@ class ClaudeAdapter:
                     timeout_s=min(SDK_IMPORT_TIMEOUT_S, request.timeout_s),
                     env={**filtered_claude_environment(), **get_settings().child_environment()},
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
                 outcome = None
+                probe_timed_out = True
+            except OSError:
+                outcome = None
+            if outcome is not None and outcome.timed_out:
+                probe_timed_out = True
+            if probe_timed_out and request.timeout_s < SDK_IMPORT_TIMEOUT_S:
+                # The request deadline, not the probe budget, elapsed: this is
+                # the request timing out rather than an incompatible SDK.
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.AMBIGUOUS,
+                    failure=ReadinessFailure.REQUEST_TIMEOUT,
+                    repair="allow more request time for the Claude SDK readiness probe",
+                    transport=CLAUDE_SDK_TRANSPORT,
+                )
             if outcome is None or outcome.timed_out or outcome.output_limited:
                 return RuntimeReadiness(
                     ready=False,
@@ -1122,6 +1208,15 @@ class ClaudeAdapter:
             if sdk_readiness.ready:
                 request = replace(request, transport=CLAUDE_SDK_TRANSPORT)
             else:
+                if sdk_readiness.failure is ReadinessFailure.REQUEST_TIMEOUT:
+                    return self._failure(
+                        request,
+                        status=RuntimeStatus.TIMED_OUT,
+                        reason=TerminalReason.TIMEOUT,
+                        diagnostics=(
+                            "Claude request deadline elapsed during SDK readiness",
+                        ),
+                    )
                 if (
                     _requires_sdk_transport(request)
                     or sdk_readiness.failure is ReadinessFailure.MODEL_UNSUPPORTED
@@ -1338,7 +1433,10 @@ class ClaudeAdapter:
                 outcome=outcome,
                 status=RuntimeStatus.TIMED_OUT,
                 reason=TerminalReason.TIMEOUT,
-                diagnostics=("Claude SDK bridge timed out",),
+                diagnostics=(
+                    "Claude SDK bridge timed out",
+                    *_timeout_diagnostics(outcome.stdout),
+                ),
             )
         if outcome.cancelled:
             return self._result(
@@ -1359,6 +1457,17 @@ class ClaudeAdapter:
         try:
             parsed = parse_claude_stream(outcome.stdout)
         except ClaudeProtocolError as exc:
+            if _bridge_killed_by_signal(outcome):
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.TRANSPORT_DISCONNECT,
+                    diagnostics=(
+                        "Claude SDK bridge was disconnected",
+                        *_timeout_diagnostics(outcome.stdout),
+                    ),
+                )
             if (
                 request.read_only
                 and not _has_scoped_tools(request)
@@ -1383,6 +1492,18 @@ class ClaudeAdapter:
                 diagnostics=("Claude SDK bridge emitted malformed protocol",),
             )
         if parsed.status is None or parsed.terminal_reason is None:
+            if _bridge_killed_by_signal(outcome):
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.TRANSPORT_DISCONNECT,
+                    events=parsed.events,
+                    diagnostics=(
+                        "Claude SDK bridge was disconnected",
+                        *parsed.diagnostics,
+                    ),
+                )
             if (
                 request.read_only
                 and not _has_scoped_tools(request)
@@ -1417,6 +1538,7 @@ class ClaudeAdapter:
                 reason=parsed.terminal_reason,
                 duration_s=outcome.duration_s,
                 progress_diagnostic=outcome.progress_diagnostic,
+                sdk_diagnostics=parsed.diagnostics,
             )
         status = parsed.status
         reason = parsed.terminal_reason
@@ -1452,6 +1574,7 @@ class ClaudeAdapter:
         reason: TerminalReason,
         duration_s: float | None = None,
         progress_diagnostic: bool = False,
+        sdk_diagnostics: tuple[str, ...] = (),
     ) -> RuntimeResult:
         def retain_progress_diagnostic(result: RuntimeResult) -> RuntimeResult:
             if (
@@ -1468,6 +1591,13 @@ class ClaudeAdapter:
                 ),
             )
 
+        # Sanitized SDK bridge diagnostics explain why the preferred transport
+        # failed; keep them behind the fixed transport diagnostic.
+        preferred_diagnostics = tuple(
+            item for item in sdk_diagnostics
+            if item.startswith(("Claude SDK ", API_RETRY_DIAGNOSTIC_PREFIX))
+        )[: MAX_DIAGNOSTICS - 1]
+
         if _requires_sdk_transport(request):
             return self._failure(
                 request,
@@ -1475,6 +1605,7 @@ class ClaudeAdapter:
                 reason=reason,
                 diagnostics=(
                     "configured Claude model requires the governed SDK transport",
+                    *preferred_diagnostics,
                 ),
             )
 
@@ -1483,7 +1614,10 @@ class ClaudeAdapter:
                 request,
                 status=RuntimeStatus.FAILED,
                 reason=reason,
-                diagnostics=("scoped Claude tools require the SDK transport",),
+                diagnostics=(
+                    "scoped Claude tools require the SDK transport",
+                    *preferred_diagnostics,
+                ),
             )
         fallback_request = replace(
             request,

@@ -3925,14 +3925,7 @@ def test_codex_sdk_progress_maps_fake_stream_without_retaining_sensitive_content
         def thread_start(self, **_kwargs):
             return FakeThread()
 
-    @contextmanager
-    def fake_config_lock(_request):
-        path = tmp_path / "runtime.config.lock.toml"
-        path.write_text("version = 1\n", encoding="utf-8")
-        yield path
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", fake_config_lock)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda _codex: None)
     reporter = _ProgressRecorder()
 
@@ -4021,33 +4014,6 @@ def test_codex_completed_item_retention_is_constant_and_size_bounded() -> None:
     )
     with pytest.raises(sdk_bridge.BridgeInputError, match="safe limit"):
         sdk_bridge._retain_codex_response_text(final_text, latest_text, oversized)
-
-
-def test_codex_bootstrap_thread_kwargs_replace_project_working_directory(
-    tmp_path: Path,
-) -> None:
-    import openai_codex
-    project = tmp_path / "project"
-    project.mkdir()
-    isolated = tmp_path / "isolated"
-    isolated.mkdir()
-    bridge_request = {
-        "vendor": "codex",
-        "prompt": "private prompt",
-        "cwd": str(project),
-        "requested_model": "gpt-5.6-sol",
-        "effort": "high",
-        "read_only": True,
-        "budget_usd": None,
-    }
-
-    kwargs = sdk_bridge._codex_bootstrap_thread_kwargs(
-        bridge_request,
-        isolated_cwd=isolated,
-    )
-
-    assert kwargs["cwd"] == str(isolated)
-    assert str(project) not in repr(kwargs)
 
 
 def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_account(
@@ -5544,7 +5510,7 @@ def test_bridge_reporter_stops_and_joins_on_every_terminal_path(
     )
     monkeypatch.setattr(sdk_bridge, "_read_request", lambda: {"vendor": "claude"})
     monkeypatch.setattr(sdk_bridge, "_run", fake_run)
-    monkeypatch.setattr(sdk_bridge, "_error_frame", lambda _reason: None)
+    monkeypatch.setattr(sdk_bridge, "_error_frame", lambda _reason, _exc=None: None)
 
     assert asyncio.run(sdk_bridge.main()) == expected_returncode
     assert reporter.closed is True
@@ -7250,12 +7216,7 @@ def command_completion_stream(monkeypatch, tmp_path):
         def thread_start(self, **kwargs):
             return FakeThread()
 
-    @contextmanager
-    def config_lock(_request):
-        yield tmp_path / "unused.config.lock.toml"
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", config_lock)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *args: None)
     monkeypatch.setattr(
         sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
@@ -7735,3 +7696,570 @@ def test_command_completion_unknown_frame_priority(command_completion_stream):
     assert len(result.diagnostics) == codex.MAX_DIAGNOSTICS
     assert result.status is contracts.RuntimeStatus.COMPLETED
     assert result.structured_output == {"ok": True}
+
+
+# --- SDK bridge failure diagnostics (nightly conformance round 10) ---
+
+
+def test_sanitized_bridge_failure_redacts_secrets_and_rejects_hostile_shapes() -> None:
+    failure = contracts.sanitized_bridge_failure(
+        {
+            "exception": "RuntimeError",
+            "message": (
+                "token sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ "
+                "for owner@example.invalid with bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIx.sig"
+            ),
+        }
+    )
+
+    assert failure is not None
+    assert failure.startswith("RuntimeError: token <redacted> for <redacted>")
+    assert "sk-ant" not in failure
+    assert "example.invalid" not in failure
+    assert "eyJ" not in failure
+    assert contracts.sanitized_bridge_failure({"exception": "bad name!"}) is None
+    assert contracts.sanitized_bridge_failure({"message": "no class"}) is None
+    assert contracts.sanitized_bridge_failure("RuntimeError") is None
+    long = contracts.sanitized_bridge_failure(
+        {"exception": "ValueError", "message": "x" * 5_000}
+    )
+    assert long is not None
+    assert len(long) <= len("ValueError: ") + contracts.MAX_BRIDGE_FAILURE_CHARS
+    assert contracts.sanitized_bridge_text("line\x00break") is None
+
+
+def test_bridge_error_frame_describes_the_chained_cause_without_secrets(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    try:
+        try:
+            raise FileNotFoundError("auth.json for sk-proj-ABCDEFGHIJKLMNOP is missing")
+        except FileNotFoundError as cause:
+            raise RuntimeError("startup") from cause
+    except RuntimeError as exc:
+        sdk_bridge._error_frame("startup", exc)
+    frame = json.loads(capsys.readouterr().out.strip())
+
+    assert frame["reason"] == "startup"
+    assert frame["diagnostics"]["exception"] == "FileNotFoundError"
+    assert frame["diagnostics"]["message"] == "auth.json for <redacted> is missing"
+    sdk_bridge._error_frame("protocol")
+    assert "diagnostics" not in json.loads(capsys.readouterr().out.strip())
+
+
+def test_bridge_sanitized_failure_keeps_bare_sentinel_when_no_cause_exists() -> None:
+    failure = sdk_bridge._sanitized_failure(RuntimeError("startup"))
+
+    assert failure == {"exception": "RuntimeError", "message": "startup"}
+
+
+@pytest.mark.parametrize(
+    ("parser", "prefix"),
+    [
+        (claude.parse_claude_stream, "Claude SDK failure: "),
+        (codex.parse_codex_stream, "Codex SDK failure: "),
+    ],
+)
+def test_native_error_frame_diagnostics_are_normalized_and_bounded(
+    parser, prefix
+) -> None:
+    parsed = parser(
+        json.dumps(
+            {
+                "type": "error",
+                "reason": "startup",
+                "diagnostics": {
+                    "exception": "CodexTurnErrorNotification",
+                    "message": "refresh failed for owner@example.invalid",
+                },
+            }
+        )
+    )
+
+    assert parsed.terminal_reason is contracts.TerminalReason.STARTUP_FAILURE
+    assert (
+        f"{prefix}CodexTurnErrorNotification: refresh failed for <redacted>"
+        in parsed.diagnostics
+    )
+    hostile = parser(
+        json.dumps(
+            {
+                "type": "error",
+                "reason": "startup",
+                "diagnostics": {"exception": "../evil", "message": "x"},
+            }
+        )
+    )
+    assert not any(item.startswith(prefix) for item in hostile.diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("parser", "subtype", "prefix"),
+    [
+        (claude.parse_claude_stream, "api_retry", "Claude API retry: "),
+        (codex.parse_codex_stream, "error_retry", "Codex API retry: "),
+    ],
+)
+def test_native_retry_events_keep_only_the_latest_sanitized_reason(
+    parser, subtype, prefix
+) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "event",
+                "kind": "system",
+                "subtype": subtype,
+                "semantic": False,
+                "detail": f"attempt {attempt}/10: Connection error for owner@example.invalid",
+            }
+        )
+        for attempt in (1, 2)
+    ]
+    lines.append(json.dumps({"type": "error", "reason": "protocol"}))
+    parsed = parser("\n".join(lines))
+
+    retries = [item for item in parsed.diagnostics if item.startswith(prefix)]
+    assert retries == [f"{prefix}attempt 2/10: Connection error for <redacted>"]
+    assert parsed.terminal_reason is contracts.TerminalReason.PROTOCOL_FAILURE
+
+
+def test_claude_timeout_diagnostics_retain_latest_retry_reason_from_partial_stream() -> None:
+    stream = "\n".join(
+        [
+            json.dumps({"type": "event", "kind": "system", "subtype": "init"}),
+            json.dumps(
+                {
+                    "type": "event",
+                    "kind": "system",
+                    "subtype": "api_retry",
+                    "detail": "attempt 3/10: status 529: Overloaded",
+                }
+            ),
+            '{"type":"event","kind":"system","subtype":"api_re',
+        ]
+    )
+
+    assert claude._timeout_diagnostics(stream) == (
+        "Claude API retry: attempt 3/10: status 529: Overloaded",
+    )
+
+
+def test_claude_api_retry_detail_is_bounded_and_redacted() -> None:
+    detail = sdk_bridge._claude_api_retry_detail(
+        {
+            "attempt": 2,
+            "max_attempts": 10,
+            "error_status": 401,
+            "error": "  invalid token sk-ant-oat01-" + "a" * 48 + "  rejected ",
+        }
+    )
+
+    assert detail == "attempt 2/10: status 401: invalid token <redacted> rejected"
+    assert sdk_bridge._claude_api_retry_detail({"attempt": True}) is None
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_signalled_bridge_without_terminal_frame_is_a_transport_disconnect(
+    tmp_path: Path, vendor: str
+) -> None:
+    calls: list[list[str]] = []
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "event", "kind": "system", "subtype": "init"}),
+            json.dumps(
+                {
+                    "type": "event",
+                    "kind": "system",
+                    "subtype": "api_retry" if vendor == "claude" else "error_retry",
+                    "detail": "attempt 1/5: stream dropped",
+                }
+            ),
+        ]
+    ) + "\n"
+
+    def run_process(command, **_kwargs):
+        calls.append(list(command))
+        return process.ProcessResult(
+            returncode=-15,
+            stdout=stdout,
+            stderr="",
+            duration_s=1.1,
+            timed_out=False,
+        )
+
+    if vendor == "claude":
+        adapter = claude.ClaudeAdapter(
+            run_process=run_process,
+            run_probe=lambda *args, **kwargs: _auth_process_result(),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/claude",
+        )
+        result = adapter.run(claude_request(tmp_path))
+        prefix = "Claude"
+    else:
+        adapter = codex.CodexAdapter(
+            run_process=run_process,
+            run_probe=lambda *args, **kwargs: _codex_auth_process_result(),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/codex",
+        )
+        result = adapter.run(codex_request(tmp_path))
+        prefix = "Codex"
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.TRANSPORT_DISCONNECT
+    assert result.returncode == -15
+    assert result.diagnostics[0] == f"{prefix} SDK bridge was disconnected"
+    assert f"{prefix} API retry: attempt 1/5: stream dropped" in result.diagnostics
+    assert len(calls) == 1
+
+
+def test_codex_protected_fallback_carries_sanitized_sdk_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential = tmp_path / "auth.json"
+    credential.write_text(json.dumps(_protected_codex_auth()))
+    fd = os.open(credential, os.O_RDONLY)
+    monkeypatch.setenv(codex.CODEX_AUTH_FD_ENV, str(fd))
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "event", "kind": "system", "subtype": "thread_started"}),
+            json.dumps(
+                {
+                    "type": "error",
+                    "reason": "protocol",
+                    "diagnostics": {
+                        "exception": "CodexTurnErrorNotification",
+                        "message": "Your access token could not be refreshed",
+                    },
+                }
+            ),
+        ]
+    ) + "\n"
+    calls: list[list[str]] = []
+
+    def run_process(command, **_kwargs):
+        calls.append(list(command))
+        return process.ProcessResult(
+            returncode=1, stdout=stdout, stderr="", duration_s=2.5, timed_out=False
+        )
+
+    def run_probe(*_args, **_kwargs):
+        return process.ProcessResult(
+            returncode=0,
+            stdout='{"type":"readiness","status":"ready"}\n',
+            stderr="",
+            duration_s=0.01,
+            timed_out=False,
+        )
+
+    adapter = codex.CodexAdapter(
+        run_process=run_process,
+        run_probe=run_probe,
+        sdk_available=lambda *_args: True,
+        which=lambda _name: "/usr/bin/codex",
+    )
+    try:
+        result = adapter.run(codex_request(tmp_path))
+    finally:
+        os.close(fd)
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.PROTOCOL_FAILURE
+    assert result.diagnostics[0] == "Codex SDK transport failed"
+    assert (
+        "Codex SDK failure: CodexTurnErrorNotification: "
+        "Your access token could not be refreshed"
+    ) in result.diagnostics
+    assert len(calls) == 1
+
+
+def test_claude_request_deadline_shorter_than_compat_probe_times_out(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    probe_timeouts: list[float] = []
+
+    def run_probe(command, **kwargs):
+        if "bridge" in " ".join(str(part) for part in command):
+            probe_timeouts.append(kwargs["timeout_s"])
+            return process.ProcessResult(
+                returncode=None, stdout="", stderr="", duration_s=0.05, timed_out=True
+            )
+        return _auth_process_result()
+
+    def run_process(command, **_kwargs):
+        calls.append(list(command))
+        raise AssertionError("no run may start after the deadline elapsed")
+
+    adapter = claude.ClaudeAdapter(
+        run_process=run_process,
+        run_probe=run_probe,
+        sdk_available=lambda *_args: True,
+        which=lambda _name: "/usr/bin/claude",
+    )
+    request = replace(
+        claude_request(tmp_path), requested_model="claude-fable-5-1", timeout_s=0.05
+    )
+    result = adapter.run(request)
+
+    assert result.status is contracts.RuntimeStatus.TIMED_OUT
+    assert result.terminal_reason is contracts.TerminalReason.TIMEOUT
+    assert result.diagnostics == (
+        "Claude request deadline elapsed during SDK readiness",
+    )
+    assert calls == []
+    assert probe_timeouts == [pytest.approx(0.05)]
+    readiness = adapter.probe_sdk(replace(request, timeout_s=30))
+    assert probe_timeouts[-1] == pytest.approx(claude.SDK_IMPORT_TIMEOUT_S)
+    assert readiness.failure is contracts.ReadinessFailure.PROTOCOL_INCOMPATIBLE
+
+
+def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import openai_codex
+    from openai_codex.generated.v2_all import (
+        AgentMessageThreadItem,
+        ErrorNotification,
+        ItemCompletedNotification,
+        ThreadItem,
+        Turn,
+        TurnCompletedNotification,
+        TurnError,
+    )
+    from openai_codex.models import Notification
+
+    def error(message: str, *, will_retry: bool) -> Notification:
+        return Notification(
+            "error",
+            ErrorNotification(
+                error=TurnError(message=message),
+                threadId="private-thread",
+                turnId="private-turn",
+                willRetry=will_retry,
+            ),
+        )
+
+    message_item = ThreadItem(
+        root=AgentMessageThreadItem(
+            id="private-message-id",
+            text=json.dumps({"ok": True}),
+            phase="final_answer",
+            type="agentMessage",
+        )
+    )
+    events: list[Notification] = []
+
+    class FakeStream(list):
+        def close(self) -> None:
+            return None
+
+    class FakeTurn:
+        id = "private-turn"
+
+        def stream(self):
+            return FakeStream(events)
+
+    class FakeThread:
+        id = "private-thread"
+
+        def turn(self, *_args, **_kwargs):
+            return FakeTurn()
+
+    class FakeCodex:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def thread_start(self, **_kwargs):
+            return FakeThread()
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    monkeypatch.setattr(
+        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+    )
+    request = {
+        "vendor": "codex",
+        "prompt": "private prompt",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-sol",
+        "effort": "high",
+        "read_only": True,
+        "budget_usd": None,
+        "commercial_mode": "subscription-only",
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+    }
+
+    events[:] = [
+        error(
+            "response_stream_disconnected: Reconnecting... 2/5 owner@example.invalid",
+            will_retry=True,
+        ),
+        Notification(
+            "item/completed",
+            ItemCompletedNotification(
+                completedAtMs=2,
+                item=message_item,
+                threadId="private-thread",
+                turnId="private-turn",
+            ),
+        ),
+        Notification(
+            "turn/completed",
+            TurnCompletedNotification(
+                threadId="private-thread",
+                turn=Turn(id="private-turn", items=[], status="completed"),
+            ),
+        ),
+    ]
+    sdk_bridge._run_codex(request)
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    retry = [frame for frame in frames if frame.get("subtype") == "error_retry"]
+    assert len(retry) == 1
+    assert retry[0]["semantic"] is False
+    assert retry[0]["detail"] == (
+        "response_stream_disconnected: Reconnecting... 2/5 <redacted>"
+    )
+    assert frames[-1]["status"] == "completed"
+    assert frames[-1]["structured_output"] == {"ok": True}
+
+    events[:] = [error("Your access token could not be refreshed", will_retry=False)]
+    with pytest.raises(RuntimeError, match="protocol") as failure:
+        sdk_bridge._run_codex(request)
+    assert isinstance(failure.value.__cause__, sdk_bridge.CodexTurnErrorNotification)
+    assert sdk_bridge._sanitized_failure(failure.value) == {
+        "exception": "CodexTurnErrorNotification",
+        "message": "Your access token could not be refreshed",
+    }
+
+    events[:] = [
+        Notification(
+            "turn/completed",
+            TurnCompletedNotification(
+                threadId="private-thread",
+                turn=Turn(
+                    id="private-turn",
+                    items=[],
+                    status="failed",
+                    error=TurnError(message="rate limited for owner@example.invalid"),
+                ),
+            ),
+        ),
+    ]
+    sdk_bridge._run_codex(request)
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert frames[-1]["status"] == "failed"
+    assert frames[-1]["diagnostics"] == {
+        "exception": "CodexTurnFailed",
+        "message": "failed: rate limited for <redacted>",
+    }
+    parsed = codex.parse_codex_stream(json.dumps(frames[-1]))
+    assert "Codex SDK failure: CodexTurnFailed: failed: rate limited for <redacted>" in (
+        parsed.diagnostics
+    )
+
+
+def test_codex_bridge_run_applies_runtime_overrides_without_a_config_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import openai_codex
+    from openai_codex.generated.v2_all import Turn, TurnCompletedNotification
+    from openai_codex.models import Notification
+
+    observed: list[object] = []
+
+    class FakeStream(list):
+        def close(self) -> None:
+            return None
+
+    class FakeTurn:
+        id = "private-turn"
+
+        def stream(self):
+            return FakeStream(
+                [
+                    Notification(
+                        "turn/completed",
+                        TurnCompletedNotification(
+                            threadId="private-thread",
+                            turn=Turn(id="private-turn", items=[], status="failed"),
+                        ),
+                    )
+                ]
+            )
+
+    class FakeThread:
+        id = "private-thread"
+
+        def turn(self, *_args, **_kwargs):
+            return FakeTurn()
+
+    class FakeCodex:
+        def __init__(self, config) -> None:
+            observed.append(config)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def thread_start(self, **_kwargs):
+            return FakeThread()
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    monkeypatch.setattr(
+        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+    )
+    sdk_bridge._run_codex(
+        {
+            "vendor": "codex",
+            "prompt": "private prompt",
+            "cwd": str(tmp_path),
+            "requested_model": "gpt-5.6-sol",
+            "effort": "high",
+            "read_only": True,
+            "budget_usd": None,
+            "commercial_mode": "subscription-only",
+            "output_schema": {"type": "object"},
+            "read_roots": [str(tmp_path.resolve())],
+        }
+    )
+    capsys.readouterr()
+
+    assert len(observed) == 1
+    overrides = tuple(observed[0].config_overrides)
+    assert overrides == sdk_bridge.codex_runtime_overrides()
+    assert not any("config_lockfile" in item for item in overrides)
+    assert not hasattr(sdk_bridge, "_codex_effective_config_lock")
+    payload = {
+        "vendor": "codex-lock",
+        "prompt": "private prompt",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-sol",
+        "effort": "high",
+        "read_only": True,
+        "budget_usd": None,
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+    }
+    with pytest.raises(sdk_bridge.BridgeInputError, match="vendor is invalid"):
+        sdk_bridge._validate_request_payload(payload)
+    with pytest.raises(sdk_bridge.BridgeInputError, match="config lock target"):
+        sdk_bridge._validate_request_payload(
+            {
+                **payload,
+                "vendor": "codex",
+                "config_lock_target": str(tmp_path / "x.config.lock.toml"),
+            }
+        )

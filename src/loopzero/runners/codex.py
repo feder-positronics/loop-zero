@@ -37,6 +37,8 @@ from .contract import (
     SubscriptionEligibility,
     TerminalReason,
     is_valid_resume_session_id,
+    sanitized_bridge_failure,
+    sanitized_bridge_text,
 )
 from .pricing import estimated_cost_usd
 from .process import (
@@ -654,6 +656,10 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
             event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
+            if kind == "system" and subtype == "error_retry":
+                _retain_api_retry_diagnostic(
+                    diagnostics, raw.get("detail"), MAX_DIAGNOSTICS
+                )
             event_session_id = _bounded_string(raw.get("session_id"), "session_id")
             if event_session_id is not None:
                 session_id = event_session_id
@@ -702,6 +708,11 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                     semantic=True,
                 ),
             )
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None:
+                _retain_priority_diagnostic(
+                    diagnostics, f"Codex SDK failure: {failure}", MAX_DIAGNOSTICS
+                )
             semantic_seen = True
             continue
 
@@ -733,6 +744,11 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                 }[error_reason],
                 MAX_DIAGNOSTICS,
             )
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None:
+                _retain_priority_diagnostic(
+                    diagnostics, f"Codex SDK failure: {failure}", MAX_DIAGNOSTICS
+                )
             continue
 
         _retain_priority_diagnostic(
@@ -824,6 +840,24 @@ def _command_completion_diagnostic(frame: Mapping[str, object]) -> str | None:
     )
 
 
+API_RETRY_DIAGNOSTIC_PREFIX = "Codex API retry: "
+
+
+def _retain_api_retry_diagnostic(
+    diagnostics: list[str], detail: object, limit: int
+) -> None:
+    """Keep only the latest sanitized app-server retry reason within the bound."""
+    text = sanitized_bridge_text(detail)
+    if text is None:
+        return
+    diagnostic = f"{API_RETRY_DIAGNOSTIC_PREFIX}{text}"
+    for index, existing in enumerate(diagnostics):
+        if existing.startswith(API_RETRY_DIAGNOSTIC_PREFIX):
+            diagnostics[index] = diagnostic
+            return
+    _retain_priority_diagnostic(diagnostics, diagnostic, limit)
+
+
 def _retain_priority_diagnostic(diagnostics: list[str], diagnostic: str, limit: int) -> None:
     """Fixed runtime warnings displace command outcomes, never other warnings."""
     if len(diagnostics) >= limit:
@@ -848,6 +882,16 @@ def _retain_command_completion(diagnostics: list[str], frame: Mapping[str, objec
                     break
 
 
+def _bridge_killed_by_signal(outcome: ProcessResult) -> bool:
+    """An externally signalled bridge without a terminal frame was disconnected."""
+    return (
+        outcome.returncode is not None
+        and outcome.returncode < 0
+        and not outcome.cancelled
+        and not outcome.timed_out
+    )
+
+
 def _timeout_diagnostics(stream: str) -> tuple[str, ...]:
     """Retain bounded diagnostics only; buffered frames confer no result authority."""
     if len(stream) > MAX_BRIDGE_LINE_BYTES:
@@ -867,6 +911,15 @@ def _timeout_diagnostics(stream: str) -> tuple[str, ...]:
                 continue
             if raw.get("type") == "event" and raw.get("kind") == "command_completion":
                 _retain_command_completion(diagnostics, raw, MAX_DIAGNOSTICS - 1)
+                continue
+            if (
+                raw.get("type") == "event"
+                and raw.get("kind") == "system"
+                and raw.get("subtype") == "error_retry"
+            ):
+                _retain_api_retry_diagnostic(
+                    diagnostics, raw.get("detail"), MAX_DIAGNOSTICS - 1
+                )
                 continue
             if raw.get("type") != "error":
                 continue
@@ -1591,6 +1644,17 @@ class CodexAdapter:
         try:
             parsed = parse_codex_stream(outcome.stdout)
         except CodexProtocolError as exc:
+            if _bridge_killed_by_signal(outcome):
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.TRANSPORT_DISCONNECT,
+                    diagnostics=(
+                        "Codex SDK bridge was disconnected",
+                        *_timeout_diagnostics(outcome.stdout),
+                    ),
+                )
             if request.read_only and not exc.semantic_event:
                 return self._run_read_only_fallback(
                     request,
@@ -1611,6 +1675,18 @@ class CodexAdapter:
                 diagnostics=("Codex SDK bridge emitted malformed protocol",),
             )
         if parsed.status is None or parsed.terminal_reason is None:
+            if _bridge_killed_by_signal(outcome):
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.TRANSPORT_DISCONNECT,
+                    events=parsed.events,
+                    diagnostics=(
+                        "Codex SDK bridge was disconnected",
+                        *parsed.diagnostics,
+                    ),
+                )
             if request.read_only and not parsed.semantic_event:
                 return self._run_read_only_fallback(
                     request,
@@ -1640,6 +1716,7 @@ class CodexAdapter:
                 reason=parsed.terminal_reason,
                 duration_s=outcome.duration_s,
                 progress_diagnostic=outcome.progress_diagnostic,
+                sdk_diagnostics=parsed.diagnostics,
             )
         status = parsed.status
         reason = parsed.terminal_reason
@@ -1671,6 +1748,7 @@ class CodexAdapter:
         reason: TerminalReason,
         duration_s: float | None = None,
         progress_diagnostic: bool = False,
+        sdk_diagnostics: tuple[str, ...] = (),
     ) -> RuntimeResult:
         def retain_progress_diagnostic(result: RuntimeResult) -> RuntimeResult:
             if (
@@ -1683,6 +1761,13 @@ class CodexAdapter:
                 diagnostics, "Native runtime progress was dropped", MAX_DIAGNOSTICS
             )
             return replace(result, diagnostics=tuple(diagnostics))
+
+        # Sanitized SDK bridge diagnostics explain why the preferred transport
+        # failed; keep them behind the fixed transport diagnostic.
+        preferred_diagnostics = tuple(
+            item for item in sdk_diagnostics
+            if item.startswith(("Codex SDK failure:", "Codex SDK "))
+        )[: MAX_DIAGNOSTICS - 1]
 
         fallback_request = replace(
             request,
@@ -1708,7 +1793,7 @@ class CodexAdapter:
                 request,
                 status=RuntimeStatus.FAILED,
                 reason=reason,
-                diagnostics=("Codex SDK transport failed",),
+                diagnostics=("Codex SDK transport failed", *preferred_diagnostics),
             )
             return retain_progress_diagnostic(
                 replace(

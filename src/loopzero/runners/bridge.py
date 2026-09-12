@@ -12,7 +12,6 @@ import math
 import os
 import re
 import shlex
-import shutil
 import sys
 import threading
 import time
@@ -62,20 +61,8 @@ from .contract import (
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
 
 
-def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
-    return _codex_isolation.codex_bootstrap_overrides(export_dir)
-
-
 def codex_runtime_overrides() -> tuple[str, ...]:
     return _codex_isolation.codex_runtime_overrides()
-
-
-def codex_config_lock_override(path: Path) -> str:
-    return _codex_isolation.codex_config_lock_override(path)
-
-
-def exported_codex_config_lock(export_dir: Path) -> Path:
-    return _codex_isolation.exported_codex_config_lock(export_dir)
 
 
 if TYPE_CHECKING:
@@ -465,7 +452,7 @@ def _codex_tool_label(item_root: object) -> RuntimeToolLabel:
 class BridgeRequest(TypedDict):
     """Validated input accepted from the system-Python dispatcher."""
 
-    vendor: Literal["claude", "claude-probe", "codex", "codex-lock", "codex-probe"]
+    vendor: Literal["claude", "claude-probe", "codex", "codex-probe"]
     prompt: str
     cwd: str
     requested_model: str
@@ -476,7 +463,6 @@ class BridgeRequest(TypedDict):
     read_roots: list[str]
     evidence_read_roots: list[str]
     commercial_mode: Literal["subscription-only", "promotional-credit", "owner-paid"]
-    config_lock_target: NotRequired[str]
     visible_tools: NotRequired[list[str]]
     allowed_tools: NotRequired[list[str]]
     resume_session_id: NotRequired[str]
@@ -812,7 +798,6 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         "claude",
         "claude-probe",
         "codex",
-        "codex-lock",
         "codex-probe",
     }:
         raise BridgeInputError("bridge request vendor is invalid")
@@ -834,26 +819,14 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         raise BridgeInputError("bridge request commercial_mode is invalid")
     if vendor_value != "claude" and commercial_mode != "subscription-only":
         raise BridgeInputError("bridge request commercial_mode is unexpected")
-    config_lock_target = payload.get("config_lock_target")
-    if vendor_value == "codex-lock":
-        if not isinstance(config_lock_target, str) or not config_lock_target:
-            raise BridgeInputError("bridge config lock target is invalid")
-        target = Path(config_lock_target)
-        if (
-            not target.is_absolute()
-            or not target.name.endswith(".config.lock.toml")
-            or not target.parent.is_dir()
-            or target.exists()
-        ):
-            raise BridgeInputError("bridge config lock target is invalid")
-    elif config_lock_target is not None:
+    if payload.get("config_lock_target") is not None:
         raise BridgeInputError("bridge config lock target is unexpected")
     output_schema = payload.get(
         "output_schema",
-        ({} if vendor_value in {"claude-probe", "codex-lock", "codex-probe"} else None),
+        ({} if vendor_value in {"claude-probe", "codex-probe"} else None),
     )
     if not isinstance(output_schema, dict) or (
-        vendor_value not in {"claude-probe", "codex-lock", "codex-probe"}
+        vendor_value not in {"claude-probe", "codex-probe"}
         and not output_schema
     ):
         raise BridgeInputError("bridge request output_schema is invalid")
@@ -866,7 +839,7 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         "read_roots",
         (
             [cwd]
-            if vendor_value in {"claude-probe", "codex-lock", "codex-probe"}
+            if vendor_value in {"claude-probe", "codex-probe"}
             else None
         ),
     )
@@ -931,7 +904,7 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
     assert model is not None
     request: BridgeRequest = {
         "vendor": cast(
-            Literal["claude", "claude-probe", "codex", "codex-lock", "codex-probe"],
+            Literal["claude", "claude-probe", "codex", "codex-probe"],
             vendor_value,
         ),
         "prompt": prompt,
@@ -948,8 +921,6 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
             commercial_mode,
         ),
     }
-    if isinstance(config_lock_target, str):
-        request["config_lock_target"] = config_lock_target
     if resume_session_id is not None:
         request["resume_session_id"] = resume_session_id
     if vendor_value != "claude" and (
@@ -1061,6 +1032,31 @@ def _model_from_usage(value: object) -> str | None:
     return _metadata(next(iter(value)))
 
 
+def _claude_api_retry_detail(data: Mapping[str, object]) -> str | None:
+    """Summarize a CLI api_retry system event without response bodies."""
+    parts: list[str] = []
+    attempt = data.get("attempt")
+    max_attempts = data.get("max_attempts")
+    if isinstance(attempt, int) and not isinstance(attempt, bool):
+        if isinstance(max_attempts, int) and not isinstance(max_attempts, bool):
+            parts.append(f"attempt {attempt}/{max_attempts}")
+        else:
+            parts.append(f"attempt {attempt}")
+    for key in ("error_status", "status"):
+        status = data.get(key)
+        if isinstance(status, int) and not isinstance(status, bool):
+            parts.append(f"status {status}")
+            break
+    error = data.get("error")
+    if isinstance(error, str) and error.strip():
+        parts.append(
+            _SECRET_PATTERN.sub("<redacted>", " ".join(error.split()))[
+                :MAX_FAILURE_MESSAGE_CHARS
+            ]
+        )
+    return ": ".join(parts) if parts else None
+
+
 def _event_frame(
     *,
     kind: str,
@@ -1069,6 +1065,7 @@ def _event_frame(
     effective_model: str | None = None,
     request_id: str | None = None,
     semantic: bool = False,
+    detail: str | None = None,
 ) -> None:
     frame: dict[str, object] = {
         "type": "event",
@@ -1077,6 +1074,8 @@ def _event_frame(
     }
     if subtype is not None:
         frame["subtype"] = subtype
+    if detail is not None:
+        frame["detail"] = detail[:MAX_METADATA_BYTES]
     if session_id is not None:
         frame["session_id"] = session_id
     if effective_model is not None:
@@ -1583,17 +1582,6 @@ def _codex_start_or_resume_thread(
     )
 
 
-def _codex_bootstrap_thread_kwargs(
-    request: BridgeRequest,
-    *,
-    isolated_cwd: Path,
-) -> CodexThreadKwargs:
-    """Resolve bootstrap defaults without consulting project-local config."""
-    kwargs = _codex_thread_kwargs(request)
-    kwargs["cwd"] = str(isolated_cwd)
-    return kwargs
-
-
 def _codex_turn_kwargs(request: BridgeRequest) -> CodexTurnKwargs:
     from openai_codex import ApprovalMode
 
@@ -1658,6 +1646,35 @@ def _codex_usage_from_sdk(usage: object) -> dict[str, int] | None:
     return _usage_payload(payload)
 
 
+class CodexTurnErrorNotification(Exception):
+    """A Codex app-server error notification, described without raw bodies."""
+
+    def __init__(self, text: str, *, will_retry: bool) -> None:
+        super().__init__(f"{text} (will retry)" if will_retry else text)
+
+
+def _codex_turn_error_text(error: object) -> str:
+    message = getattr(error, "message", None)
+    parts: list[str] = []
+    info = getattr(error, "codex_error_info", None)
+    if info is not None:
+        dump = getattr(info, "model_dump", None)
+        try:
+            summary = dump() if callable(dump) else info
+        except Exception:  # pragma: no cover - defensive against SDK models
+            summary = None
+        if isinstance(summary, str):
+            parts.append(summary)
+        elif isinstance(summary, dict) and len(summary) == 1:
+            key, value = next(iter(summary.items()))
+            parts.append(key if value in (None, {}) else f"{key}={value!r}")
+        elif isinstance(summary, dict) and summary:
+            parts.append(",".join(sorted(str(key) for key in summary)))
+    if isinstance(message, str) and message.strip():
+        parts.append(" ".join(message.split()))
+    return ": ".join(parts) if parts else "codex error notification"
+
+
 def _enforce_codex_chatgpt_login(codex: object) -> None:
     account = getattr(codex, "account", None)
     if not callable(account):
@@ -1690,53 +1707,6 @@ def _retain_codex_response_text(
     if phase == "final_answer":
         return text, latest_text
     return final_text, text
-
-
-@contextmanager
-def _codex_effective_config_lock(request: BridgeRequest) -> Iterator[Path]:
-    """Export a full lock from an empty Codex home without auth or a model turn."""
-    from openai_codex import Codex, CodexConfig
-
-    with TemporaryDirectory(prefix=get_settings().temp_name("codex-bootstrap")) as directory:
-        root = Path(directory)
-        codex_home = root / "home"
-        export_dir = root / "locks"
-        codex_home.mkdir(mode=0o700)
-        export_dir.mkdir(mode=0o700)
-        environment = _filtered_environment()
-        environment["CODEX_HOME"] = str(codex_home)
-        config = CodexConfig(
-            **_codex_bin_kwargs(),
-            config_overrides=(
-                *codex_bootstrap_overrides(export_dir),
-                *_codex_budget_overrides(),
-            ),
-            cwd=str(root),
-            env=environment,
-        )
-        with Codex(config) as codex:
-            # Thread creation resolves defaults and writes the lock but makes no
-            # model request, so the isolated home needs no copied credential.
-            # Both process cwd and thread cwd must remain isolated: Codex also
-            # discovers project-level .codex configuration from thread cwd.
-            codex.thread_start(
-                **_codex_bootstrap_thread_kwargs(request, isolated_cwd=root)
-            )
-        yield exported_codex_config_lock(export_dir)
-
-
-def _export_codex_config_lock(request: BridgeRequest) -> None:
-    target = Path(request["config_lock_target"])
-    with _codex_effective_config_lock(request) as source:
-        shutil.copyfile(source, target)
-        target.chmod(0o600)
-    _write_frame(
-        {
-            "type": "result",
-            "status": "completed",
-            "terminal_reason": "completed",
-        }
-    )
 
 
 def _probe_claude_model_runtime(request: BridgeRequest) -> None:
@@ -1881,6 +1851,7 @@ def _run_codex(
     final_response_text: str | None = None
     latest_response_text: str | None = None
     turn_failed = False
+    turn_failure: dict[str, str] | None = None
     tool_item_types = (
         CollabAgentToolCallThreadItem,
         CommandExecutionThreadItem,
@@ -1895,18 +1866,17 @@ def _run_codex(
         WebSearchThreadItem,
     )
 
-    with (
-        _codex_effective_config_lock(request) as config_lock,
-        _codex_subscription_environment() as (auth_environment, auth_path),
-    ):
+    with _codex_subscription_environment() as (auth_environment, auth_path):
         codex_environment = _filtered_environment()
         codex_environment.update(auth_environment)
         config = CodexConfig(
             **_codex_bin_kwargs(),
-            config_overrides=(
-                codex_config_lock_override(config_lock),
-                *_codex_budget_overrides(),
-            ),
+            # Codex 0.154 removed the 0.147 debug.config_lockfile export, so
+            # the closed runtime layer is applied directly as the
+            # highest-precedence overrides (it already carries the budget's
+            # output_token_limit).  The private CODEX_HOME holds no project
+            # trust entry, so project-level .codex configuration is ignored.
+            config_overrides=codex_runtime_overrides(),
             cwd=request["cwd"],
             env=codex_environment,
         )
@@ -2077,7 +2047,26 @@ def _run_codex(
                         raise RuntimeError("protocol")
                     if isinstance(payload, ErrorNotification):
                         _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
-                        raise RuntimeError("protocol")
+                        error_text = _codex_turn_error_text(payload.error)
+                        if payload.will_retry is True:
+                            # The app-server reconnects transient stream
+                            # failures itself; the turn is still live.  Keep
+                            # a bounded, redacted reason and keep streaming.
+                            _event_frame(
+                                kind="system",
+                                subtype="error_retry",
+                                session_id=_metadata(payload.thread_id) or session_id,
+                                request_id=_metadata(payload.turn_id) or request_id,
+                                effective_model=effective_model,
+                                semantic=False,
+                                detail=_SECRET_PATTERN.sub("<redacted>", error_text)[
+                                    :MAX_FAILURE_MESSAGE_CHARS
+                                ],
+                            )
+                            continue
+                        raise RuntimeError("protocol") from CodexTurnErrorNotification(
+                            error_text, will_retry=False
+                        )
                     if isinstance(payload, TurnCompletedNotification):
                         _observe_progress(reporter, RuntimePhase.RESULT_PACKAGING)
                         saw_terminal = True
@@ -2088,6 +2077,20 @@ def _run_codex(
                             payload.turn.status, "value", payload.turn.status
                         )
                         turn_failed = turn_status in {"failed", "interrupted"}
+                        if turn_failed:
+                            turn_error = getattr(payload.turn, "error", None)
+                            turn_failure = {
+                                "exception": "CodexTurnFailed",
+                                "message": _SECRET_PATTERN.sub(
+                                    "<redacted>",
+                                    f"{turn_status}: "
+                                    + (
+                                        _codex_turn_error_text(turn_error)
+                                        if turn_error is not None
+                                        else "no error detail"
+                                    ),
+                                )[:MAX_FAILURE_MESSAGE_CHARS],
+                            }
                         break
             finally:
                 close_stream = getattr(stream, "close", None)
@@ -2125,7 +2128,11 @@ def _run_codex(
         frame["structured_output"] = structured_output
     if usage_payload is not None:
         frame["usage"] = usage_payload
+    if turn_failure is not None:
+        frame["diagnostics"] = turn_failure
     _write_frame(frame)
+
+
 async def _run_claude(
     request: BridgeRequest,
     *,
@@ -2271,6 +2278,11 @@ async def _run_claude(
                 effective_model=effective_model,
                 request_id=request_id,
                 semantic=False,
+                detail=(
+                    _claude_api_retry_detail(data)
+                    if message.subtype == "api_retry"
+                    else None
+                ),
             )
             continue
         if isinstance(message, StreamEvent):
@@ -2415,9 +2427,6 @@ async def _run(
     if request["vendor"] == "claude-probe":
         await asyncio.to_thread(_probe_claude_model_runtime, request)
         return
-    if request["vendor"] == "codex-lock":
-        await asyncio.to_thread(_export_codex_config_lock, request)
-        return
     if request["vendor"] == "codex-probe":
         await asyncio.to_thread(_probe_codex_app_server, request)
         return
@@ -2427,10 +2436,54 @@ async def _run(
     await _run_claude(request, reporter=reporter)
 
 
-def _error_frame(reason: str) -> None:
+MAX_FAILURE_MESSAGE_CHARS = 200
+_SECRET_PATTERN = re.compile(
+    r"sk-[A-Za-z0-9_-]{8,}"
+    r"|eyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{4,})*"
+    r"|(?i:bearer)\s+[A-Za-z0-9._-]{8,}"
+    r"|[A-Za-z0-9_-]{40,}"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+
+
+def _sanitized_failure(exc: BaseException) -> dict[str, str]:
+    """Describe a startup failure without credential or account material.
+
+    Internal ``RuntimeError("startup")`` sentinels carry no detail of their
+    own, so the nearest chained cause is described instead.  The message is
+    secret-redacted, whitespace-collapsed, and bounded.
+    """
+    cause: BaseException = exc
+    seen: set[int] = set()
+    while (
+        isinstance(cause, RuntimeError)
+        and cause.args
+        and cause.args[0] in {"startup", "protocol", "disconnect"}
+        and id(cause) not in seen
+    ):
+        seen.add(id(cause))
+        nested = cause.__cause__ or cause.__context__
+        if nested is None:
+            break
+        cause = nested
+    failure = {"exception": type(cause).__name__}
+    try:
+        message = " ".join(str(cause).split())
+    except Exception:  # pragma: no cover - defensive against exotic __str__
+        message = ""
+    message = _SECRET_PATTERN.sub("<redacted>", message)
+    if message:
+        failure["message"] = message[:MAX_FAILURE_MESSAGE_CHARS]
+    return failure
+
+
+def _error_frame(reason: str, exc: BaseException | None = None) -> None:
     if reason not in {"startup", "protocol", "disconnect"}:
         reason = "protocol"
-    _write_frame({"type": "error", "reason": reason})
+    frame: dict[str, object] = {"type": "error", "reason": reason}
+    if exc is not None:
+        frame["diagnostics"] = _sanitized_failure(exc)
+    _write_frame(frame)
 
 
 async def main() -> int:
@@ -2448,12 +2501,13 @@ async def main() -> int:
             return 130
         except RuntimeError as exc:
             reason = exc.args[0] if exc.args else "protocol"
-            _error_frame(reason if isinstance(reason, str) else "protocol")
+            _error_frame(reason if isinstance(reason, str) else "protocol", exc)
             return 1
-        except Exception:
-            # Never print exception text: SDK errors can contain prompts, paths,
-            # account details, or vendor response bodies.
-            _error_frame("startup")
+        except Exception as exc:
+            # Never print raw exception text: SDK errors can contain prompts,
+            # paths, account details, or vendor response bodies.  Only the
+            # exception class and a redacted, bounded message are surfaced.
+            _error_frame("startup", exc)
             return 1
         return 0
     finally:
