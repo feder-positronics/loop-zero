@@ -7569,3 +7569,38 @@ def test_command_completion_unknown_frame_priority(command_completion_stream):
     assert len(result.diagnostics) == codex.MAX_DIAGNOSTICS
     assert result.status is contracts.RuntimeStatus.COMPLETED
     assert result.structured_output == {"ok": True}
+
+
+@pytest.mark.parametrize("broker", [claude, codex], ids=["claude", "codex"])
+def test_default_refresh_runner_kills_the_entire_process_group_on_timeout(
+    tmp_path: Path, broker: ModuleType,
+) -> None:
+    # A grandchild of the group leader ignores TERM. Exercise each broker's
+    # real refresh seam with a passthrough wrapper and require group-wide KILL.
+    pid_file = tmp_path / "grandchild.pid"
+    code = (
+        "import os,signal,time; from pathlib import Path; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    parent = (
+        "import subprocess,signal,sys; "
+        "signal.signal(signal.SIGTERM, lambda *_: None); "
+        f"p=subprocess.Popen([sys.executable, '-c', {code!r}]); p.wait()"
+    )
+    leader = (
+        "import subprocess,signal,sys; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"subprocess.run([sys.executable, '-c', {parent!r}])"
+    )
+    with pytest.raises(subprocess.TimeoutExpired):
+        broker._run_refresh_process_group(
+            [sys.executable, "-c", leader], timeout=0.5,
+            check=False, capture_output=True, text=True,
+            cwd=tmp_path, env={"PATH": os.environ["PATH"]},
+            sandbox_wrapper=lambda launch: launch.argv,
+        )
+    pid = int(pid_file.read_text())
+    # Orphan zombies may await the host init; no descendant may remain live.
+    identity = process._read_proc_identity(pid, proc_root=Path("/proc"))
+    assert identity is None or identity[0] == "Z"
