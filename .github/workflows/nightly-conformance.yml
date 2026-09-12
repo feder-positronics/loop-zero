@@ -1,0 +1,178 @@
+name: nightly real-runtime conformance
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime:
+    name: ${{ matrix.runtime }} conformance
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: claude
+            version: "2.1.269"
+            secret: LOOPZERO_CONFORMANCE_CLAUDE_CREDENTIAL
+          - runtime: codex
+            version: "0.154.0"
+            secret: LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL
+          - runtime: cursor
+            version: "2026.09.08"
+            build: "6caf4ff"
+            secret: LOOPZERO_CONFORMANCE_CURSOR_CREDENTIAL
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install uv and containment
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+          enable-cache: false
+
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Resolve locked Python environment
+        run: |
+          uv python install 3.13
+          VENV_ROOT="$RUNNER_TEMP/loopzero-live/.venv"
+          UV_CACHE_ROOT="$RUNNER_TEMP/loopzero-live/uv-cache"
+          mkdir -p "$UV_CACHE_ROOT"
+          UV_CACHE_DIR="$UV_CACHE_ROOT" UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
+            uv sync --locked --python 3.13 --group dev --no-install-project
+
+      - name: Install exact runtime pin
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+          VERSION: ${{ matrix.version }}
+          CURSOR_BUILD: ${{ matrix.build }}
+        run: |
+          set -eu
+          RUNTIME_ROOT="$RUNNER_TEMP/loopzero-live/runtime"
+          mkdir -p "$RUNTIME_ROOT/bin"
+          case "$RUNTIME" in
+            claude)
+              NPM_CONFIG_CACHE="$RUNNER_TEMP/loopzero-live/npm-cache" \
+                npm install --prefix "$RUNTIME_ROOT" \
+                  "@anthropic-ai/claude-code@$VERSION"
+              CLI_PATH="$RUNTIME_ROOT/node_modules/.bin/claude"
+              ;;
+            codex)
+              SOURCE_CLI=$("$RUNNER_TEMP/loopzero-live/.venv/bin/python" -c \
+                'from importlib.metadata import distribution; d=distribution("openai-codex-cli-bin"); print(next(d.locate_file(f) for f in d.files if str(f).endswith("/codex")))')
+              cp "$SOURCE_CLI" "$RUNTIME_ROOT/bin/codex"
+              chmod 755 "$RUNTIME_ROOT/bin/codex"
+              CLI_PATH="$RUNTIME_ROOT/bin/codex"
+              ;;
+            cursor)
+              curl -fsSL \
+                "https://downloads.cursor.com/lab/${VERSION}-${CURSOR_BUILD}/linux/x64/agent-cli-package.tar.gz" \
+                | tar --strip-components=1 -xzf - -C "$RUNTIME_ROOT"
+              CLI_PATH="$RUNTIME_ROOT/cursor-agent"
+              chmod 755 "$CLI_PATH"
+              ;;
+          esac
+          test -x "$CLI_PATH"
+          printf 'LOOPZERO_LIVE_CLI_PATH=%s\n' "$CLI_PATH" >> "$GITHUB_ENV"
+          printf 'LOOPZERO_LIVE_RUNTIME_ROOT=%s\n' "$RUNTIME_ROOT" >> "$GITHUB_ENV"
+
+      - name: Run live scenarios in the validation bubble
+        env:
+          LIVE_CREDENTIAL: ${{ secrets[matrix.secret] }}
+          LOOPZERO_LIVE_RUNTIMES: ${{ matrix.runtime }}
+          BUDGET_USD: ${{ vars.LOOPZERO_CONFORMANCE_BUDGET_USD }}
+        run: |
+          set -eu
+          if [ -z "$LIVE_CREDENTIAL" ]; then
+            echo "missing required repository secret ${{ matrix.secret }}" >&2
+            exit 1
+          fi
+          ROOT="$RUNNER_TEMP/loopzero-live"
+          CREDENTIAL="$ROOT/credential.json"
+          RESULTS="$ROOT/results"
+          mkdir -p "$RESULTS"
+          umask 077
+          printf '%s' "$LIVE_CREDENTIAL" > "$CREDENTIAL"
+          trap 'rm -f -- "$CREDENTIAL"' EXIT
+          chmod 600 "$CREDENTIAL"
+          ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
+          test -n "$ACCOUNT_HOME" && test "$ACCOUNT_HOME" != /
+          ROOT_LAYOUT=()
+          for entry in /bin /lib /lib64 /sbin; do
+            if [ -L "$entry" ]; then
+              ROOT_LAYOUT+=(--symlink "$(readlink "$entry")" "$entry")
+            elif [ -d "$entry" ]; then
+              ROOT_LAYOUT+=(--ro-bind "$entry" "$entry")
+            fi
+          done
+          EFFECTIVE_BUDGET=${BUDGET_USD:-2}
+          bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
+            --die-with-parent --ro-bind /usr /usr "${ROOT_LAYOUT[@]}" \
+            --ro-bind /etc/alternatives /etc/alternatives \
+            --ro-bind /etc/ssl /etc/ssl --ro-bind /etc/ld.so.cache /etc/ld.so.cache \
+            --ro-bind /etc/passwd /etc/passwd --ro-bind /etc/group /etc/group \
+            --ro-bind /etc/hosts /etc/hosts --ro-bind /etc/resolv.conf /etc/resolv.conf \
+            --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
+            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
+            --ro-bind "$ROOT/.venv" /tmp/venv \
+            --ro-bind "$LOOPZERO_LIVE_RUNTIME_ROOT" /opt/runtime \
+            --bind "$RESULTS" /tmp/results \
+            --bind "$CREDENTIAL" /run/loopzero-credential.json \
+            --perms 0700 --tmpfs "$ACCOUNT_HOME" \
+            --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
+            --setenv PATH /opt/runtime/bin:/usr/bin:/bin \
+            --setenv HOME /tmp --setenv PYTHONDONTWRITEBYTECODE 1 \
+            --setenv LOOPZERO_LIVE_RUNTIMES "$LOOPZERO_LIVE_RUNTIMES" \
+            --setenv LOOPZERO_LIVE_CLI_PATH "/opt/runtime/${LOOPZERO_LIVE_CLI_PATH#"$LOOPZERO_LIVE_RUNTIME_ROOT"/}" \
+            --setenv LOOPZERO_LIVE_RUNTIME_ROOT /opt/runtime \
+            --setenv LOOPZERO_LIVE_PYTHON /tmp/venv/bin/python \
+            --setenv LOOPZERO_LIVE_CREDENTIAL_PATH /run/loopzero-credential.json \
+            --setenv LOOPZERO_LIVE_STATE_ROOT "$ACCOUNT_HOME/.local/state/loopzero-live" \
+            --setenv LOOPZERO_CONFORMANCE_BUDGET_USD "$EFFECTIVE_BUDGET" \
+            --setenv LOOPZERO_LIVE_RESULTS "/tmp/results/${LOOPZERO_LIVE_RUNTIMES}.json" \
+            --chdir /tmp/workspace -- bash -eu -c '
+              /tmp/venv/bin/python -m pytest -q -p no:cacheprovider \
+                --basetemp=/tmp/pytest tests/conformance/live/live_conformance.py
+            '
+
+      - name: Add normalized summary
+        if: always()
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          RESULT="$RUNNER_TEMP/loopzero-live/results/$RUNTIME.json"
+          if [ ! -f "$RESULT" ]; then
+            echo "### $RUNTIME: no normalized result artifact" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          "$RUNNER_TEMP/loopzero-live/.venv/bin/python" - "$RESULT" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          result = json.load(open(sys.argv[1], encoding="utf-8"))
+          with open(sys.argv[2], "a", encoding="utf-8") as summary:
+              summary.write(f"### {result['runtime']} {result['version']}\n\n")
+              summary.write("| Scenario | Outcome | Known cost (USD) |\n|---|---:|---:|\n")
+              for row in result["scenarios"]:
+                  cost = row.get("known_cost_usd")
+                  summary.write(f"| {row['scenario']} | {row['outcome']} | {cost if cost is not None else 'unknown'} |\n")
+              summary.write(f"\nTotal known cost: ${result['known_cost_usd']:.6f}\n")
+          PY
+
+      - name: Upload normalized conformance result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-conformance-${{ matrix.runtime }}
+          path: ${{ runner.temp }}/loopzero-live/results/${{ matrix.runtime }}.json
+          if-no-files-found: error

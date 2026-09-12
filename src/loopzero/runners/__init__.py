@@ -18,6 +18,7 @@ from .contract import (
     SubscriptionEligibility,
 )
 from .registry import NATIVE_RUNTIME_REGISTRY, RuntimeRegistration, RuntimeRegistry
+from .settings import RuntimeBudget, RuntimeSettings
 
 __all__ = [
     "RUNTIME_PROGRESS_PROTOCOL_VERSION",
@@ -38,4 +39,6 @@ __all__ = [
     "NATIVE_RUNTIME_REGISTRY",
     "RuntimeRegistration",
     "RuntimeRegistry",
+    "RuntimeBudget",
+    "RuntimeSettings",
 ]

@@ -23,6 +23,7 @@ from .contract import (
     MAX_PROTOCOL_LINE_BYTES,
     MAX_STRUCTURED_OUTPUT_BYTES,
     ReadinessFailure,
+    RuntimeCostStatus,
     RuntimeEvent,
     RuntimeHandle,
     RuntimeProgressCallback,
@@ -36,6 +37,7 @@ from .contract import (
     TerminalReason,
     is_valid_resume_session_id,
 )
+from .pricing import estimated_cost_usd, total_tokens
 from .process import (
     ProcessHandle,
     ProcessResult,
@@ -256,7 +258,7 @@ def map_codex_effort(effort: str) -> str:
 
 def build_codex_bootstrap_command(export_dir: Path) -> list[str]:
     """Build a local-only CLI command that exports authoritative defaults."""
-    command = ["codex"]
+    command = [get_settings().cli("codex", "codex")]
     for override in codex_bootstrap_overrides(export_dir):
         command.extend(("-c", override))
     command.extend(("debug", "prompt-input", "config lock bootstrap"))
@@ -284,7 +286,7 @@ def build_codex_command(
     )
     effort = map_codex_effort(request.effort)
     command = [
-        "codex",
+        get_settings().cli("codex", "codex"),
         "-c",
         codex_config_lock_override(config_lock),
     ]
@@ -901,6 +903,16 @@ class CodexAdapter:
         self._which = which
         self._settings = get_settings()
 
+    def _auth_status_command(self) -> list[str]:
+        return [self._settings.cli("codex", "codex"), "login", "status"]
+
+    def _cli_available(self) -> bool:
+        path = self._settings.codex_cli_path
+        return (
+            path.is_file() and os.access(path, os.X_OK)
+            if path is not None else self._which("codex") is not None
+        )
+
     @staticmethod
     def _default_sdk_available(python: Path, cwd: Path) -> bool:
         del cwd
@@ -931,7 +943,7 @@ class CodexAdapter:
                 failure=ReadinessFailure.SUBSCRIPTION_UNAVAILABLE,
                 repair="confirm the approved Codex ChatGPT subscription login path",
             )
-        if self._which("codex") is None:
+        if not self._cli_available():
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
@@ -969,7 +981,7 @@ class CodexAdapter:
             )
         try:
             outcome = self._run_probe(
-                AUTH_STATUS_COMMAND,
+                self._auth_status_command(),
                 cwd=request.cwd,
                 input_text="",
                 timeout_s=AUTH_STATUS_TIMEOUT_S,
@@ -1368,6 +1380,14 @@ class CodexAdapter:
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Codex CLI timed out",),
             )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Codex CLI was cancelled",),
+            )
         if outcome.output_limited:
             return self._result(
                 request,
@@ -1484,6 +1504,14 @@ class CodexAdapter:
                 status=RuntimeStatus.TIMED_OUT,
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Codex SDK bridge timed out", *_timeout_diagnostics(outcome.stdout)),
+            )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Codex SDK bridge was cancelled",),
             )
         if outcome.output_limited:
             return self._result(
@@ -1741,6 +1769,18 @@ class CodexAdapter:
         structured_output: dict[str, object] | None = None,
     ) -> RuntimeResult:
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
+        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        budget = get_settings().budget
+        measured_tokens = total_tokens(usage)
+        if budget is not None and (
+            (measured_tokens is not None and measured_tokens > budget.max_tokens)
+            or (normalized_cost is not None and normalized_cost > budget.max_usd)
+        ):
+            status = RuntimeStatus.FAILED
+            reason = TerminalReason.BUDGET_EXHAUSTED
+            bounded_diagnostics = ["Codex normalized budget was exhausted"]
+            final_output = None
+            structured_output = None
         if outcome is not None and outcome.progress_diagnostic:
             _retain_priority_diagnostic(
                 bounded_diagnostics,
@@ -1758,7 +1798,12 @@ class CodexAdapter:
             session_id=session_id,
             request_id=request_id,
             usage=usage,
-            cost_usd=cost_usd,
+            cost_usd=normalized_cost,
+            cost_status=(
+                RuntimeCostStatus.ESTIMATED
+                if normalized_cost is not None
+                else RuntimeCostStatus.UNKNOWN
+            ),
             eligibility=request.eligibility,
             fallback_from=request.fallback_from,
             events=events,
@@ -2224,7 +2269,7 @@ def codex_subscription_credential(
 import json
 from pathlib import Path
 
-PINNED_CODEX_VERSION = "0.147.0"
+PINNED_CODEX_VERSION = "0.154.0"
 MAX_CONFIG_LOCK_BYTES = 512 * 1024
 
 _DISABLED_FEATURES = (
@@ -2271,7 +2316,16 @@ def codex_runtime_overrides() -> tuple[str, ...]:
         "include_collaboration_mode_instructions=false",
         "features.code_mode_host=true",
     )
-    return (*fixed, *(f"features.{name}=false" for name in _DISABLED_FEATURES))
+    budget = get_settings().budget
+    budget_overrides = (
+        (f"output_token_limit={budget.max_tokens}",)
+        if budget is not None else ()
+    )
+    return (
+        *fixed,
+        *budget_overrides,
+        *(f"features.{name}=false" for name in _DISABLED_FEATURES),
+    )
 
 
 def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:

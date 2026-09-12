@@ -46,10 +46,12 @@ from .process import (
     private_temporary_directory,
     run_cli as default_run_cli,
 )
+from .pricing import estimated_cost_usd, total_tokens
 
 CLAUDE_SDK_TRANSPORT = "claude/agent-sdk"
 CLAUDE_CLI_TRANSPORT = "claude/cli"
 CLAUDE_AUTO_TRANSPORTS = frozenset({"claude", "claude/auto"})
+PINNED_CLAUDE_CLI_VERSION = "2.1.269"
 AUTH_STATUS_COMMAND = ["claude", "auth", "status", "--json"]
 AUTH_STATUS_TIMEOUT_S = 5.0
 SDK_IMPORT_TIMEOUT_S = 5.0
@@ -200,7 +202,7 @@ def build_claude_command(request: RuntimeRequest) -> list[str]:
     ):
         raise ValueError("Claude resume_session_id is invalid")
     command = [
-        "claude",
+        get_settings().cli("claude", "claude"),
         "-p",
         "--model",
         request.requested_model,
@@ -222,8 +224,15 @@ def build_claude_command(request: RuntimeRequest) -> list[str]:
         '{"mcpServers":{}}',
         "--disable-slash-commands",
     ])
-    if request.budget_usd is not None:
-        command.extend(("--max-budget-usd", f"{request.budget_usd:.2f}"))
+    settings_budget = get_settings().budget
+    usd_ceiling = request.budget_usd
+    if settings_budget is not None:
+        usd_ceiling = min(
+            settings_budget.max_usd,
+            usd_ceiling if usd_ceiling is not None else settings_budget.max_usd,
+        )
+    if usd_ceiling is not None:
+        command.extend(("--max-budget-usd", f"{usd_ceiling:.2f}"))
     if request.read_only:
         if request.output_schema is None:
             raise ValueError("Claude runtime requires an output schema")
@@ -816,6 +825,16 @@ class ClaudeAdapter:
         self._which = which
         self._settings = get_settings()
 
+    def _auth_status_command(self) -> list[str]:
+        return [self._settings.cli("claude", "claude"), "auth", "status", "--json"]
+
+    def _cli_available(self) -> bool:
+        path = self._settings.claude_cli_path
+        return (
+            path.is_file() and os.access(path, os.X_OK)
+            if path is not None else self._which("claude") is not None
+        )
+
     @staticmethod
     def _default_sdk_available(python: Path, cwd: Path) -> bool:
         del cwd
@@ -846,16 +865,34 @@ class ClaudeAdapter:
                 failure=ReadinessFailure.SUBSCRIPTION_UNAVAILABLE,
                 repair="confirm the approved Claude subscription login path",
             )
-        if self._which("claude") is None:
+        if not self._cli_available():
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
                 failure=ReadinessFailure.EXECUTABLE_MISSING,
                 repair="install or restore the approved Claude CLI",
             )
+        raw_auth_fd = os.environ.get(get_settings().env_name("CLAUDE_AUTH_FD"))
+        if raw_auth_fd is not None:
+            try:
+                valid = protected_claude_credential_ready(int(raw_auth_fd))
+            except (ValueError, OSError, ClaudeCredentialError):
+                valid = False
+            if not valid:
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.AUTHENTICATION,
+                    repair="replace the invalid protected Claude credential",
+                )
+            return RuntimeReadiness(
+                ready=True,
+                eligibility=SubscriptionEligibility.APPROVED,
+                transport=CLAUDE_SDK_TRANSPORT,
+            )
         try:
             outcome = self._run_probe(
-                AUTH_STATUS_COMMAND,
+                self._auth_status_command(),
                 cwd=request.cwd,
                 input_text="",
                 timeout_s=AUTH_STATUS_TIMEOUT_S,
@@ -1118,6 +1155,14 @@ class ClaudeAdapter:
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Claude CLI timed out",),
             )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Claude CLI was cancelled",),
+            )
         if outcome.output_limited:
             return self._result(
                 request,
@@ -1245,6 +1290,14 @@ class ClaudeAdapter:
                 status=RuntimeStatus.TIMED_OUT,
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Claude SDK bridge timed out",),
+            )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Claude SDK bridge was cancelled",),
             )
         if outcome.output_limited:
             return self._result(
@@ -1524,6 +1577,18 @@ class ClaudeAdapter:
         structured_output: dict[str, object] | None = None,
     ) -> RuntimeResult:
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
+        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        budget = get_settings().budget
+        measured_tokens = total_tokens(usage)
+        if budget is not None and (
+            (measured_tokens is not None and measured_tokens > budget.max_tokens)
+            or (normalized_cost is not None and normalized_cost > budget.max_usd)
+        ):
+            status = RuntimeStatus.FAILED
+            reason = TerminalReason.BUDGET_EXHAUSTED
+            bounded_diagnostics = ["Claude normalized budget was exhausted"]
+            final_output = None
+            structured_output = None
         if (
             outcome is not None
             and outcome.progress_diagnostic
@@ -1541,10 +1606,10 @@ class ClaudeAdapter:
             session_id=session_id,
             request_id=request_id,
             usage=usage,
-            cost_usd=cost_usd,
+            cost_usd=normalized_cost,
             cost_status=(
                 RuntimeCostStatus.ESTIMATED
-                if cost_usd is not None
+                if normalized_cost is not None
                 else RuntimeCostStatus.UNKNOWN
             ),
             eligibility=request.eligibility,
@@ -2267,4 +2332,31 @@ def protected_token_available() -> bool:
     try:
         return snapshot_token(int(os.environ[get_settings().env_name("CLAUDE_AUTH_FD")])) is not None
     except (KeyError, ValueError, OSError, ClaudeCredentialError):
+        return False
+
+
+def protected_claude_credential_ready(fd: int) -> bool:
+    """Validate either sealed access-only credential form used by the bridge."""
+    try:
+        decoded = _snapshot(fd)
+        if snapshot_token(fd) is not None:
+            return True
+        oauth = decoded.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return False
+        access_token = oauth.get("accessToken")
+        expiry = oauth.get("expiresAt")
+        scopes = oauth.get("scopes")
+        return (
+            isinstance(access_token, str)
+            and bool(access_token)
+            and oauth.get("refreshToken") == access_token
+            and isinstance(expiry, int)
+            and not isinstance(expiry, bool)
+            and oauth.get("refreshTokenExpiresAt") == expiry
+            and isinstance(scopes, list)
+            and REQUIRED_SCOPES.issubset(scopes)
+            and oauth.get("subscriptionType") in ELIGIBLE_SUBSCRIPTION_TYPES
+        )
+    except (OSError, ValueError, ClaudeCredentialError):
         return False

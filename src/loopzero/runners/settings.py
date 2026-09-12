@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 import os
 import json
+import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
@@ -70,6 +71,31 @@ _NAME_KIND_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 
 
 @dataclass(frozen=True, slots=True)
+class RuntimeBudget:
+    """Hard per-run limits supplied independently of prompt content."""
+
+    max_tokens: int
+    max_turns: int
+    max_usd: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.max_tokens, bool) or not isinstance(self.max_tokens, int):
+            raise TypeError("budget max_tokens must be an integer")
+        if isinstance(self.max_turns, bool) or not isinstance(self.max_turns, int):
+            raise TypeError("budget max_turns must be an integer")
+        if self.max_tokens <= 0 or self.max_turns <= 0:
+            raise ValueError("budget token and turn caps must be positive")
+        if (
+            isinstance(self.max_usd, bool)
+            or not isinstance(self.max_usd, (int, float))
+            or not math.isfinite(self.max_usd)
+            or self.max_usd <= 0
+        ):
+            raise ValueError("budget USD ceiling must be positive and finite")
+        object.__setattr__(self, "max_usd", float(self.max_usd))
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     """Everything a runner adapter needs to know about its consumer.
 
@@ -89,6 +115,10 @@ class RuntimeSettings:
     temp_prefix: str | None = None
     tooling_root: Path | None = None
     child_env_allowlist: frozenset[str] = DEFAULT_CHILD_ENV_ALLOWLIST
+    budget: RuntimeBudget | None = None
+    claude_cli_path: Path | None = None
+    codex_cli_path: Path | None = None
+    cursor_cli_path: Path | None = None
 
     def __post_init__(self) -> None:
         if self.temp_prefix is None:
@@ -107,6 +137,12 @@ class RuntimeSettings:
             raise TypeError("toolchain_interpreter must be a Path or None")
         if not isinstance(self.bridge_path, Path):
             raise TypeError("bridge_path must be a Path")
+        if self.budget is not None and not isinstance(self.budget, RuntimeBudget):
+            raise TypeError("budget must be a RuntimeBudget or None")
+        for name in ("claude_cli_path", "codex_cli_path", "cursor_cli_path"):
+            path = getattr(self, name)
+            if path is not None and not isinstance(path, Path):
+                raise TypeError(f"{name} must be a Path or None")
         if not isinstance(self.child_env_allowlist, frozenset) or any(
             not isinstance(name, str) or not _ENV_NAME_RE.match(name)
             for name in self.child_env_allowlist
@@ -163,6 +199,18 @@ class RuntimeSettings:
             "temp_prefix": self.temp_prefix,
             "tooling_root": str(self.tooling_root) if self.tooling_root else None,
             "child_env_allowlist": sorted(self.child_env_allowlist),
+            "budget": (
+                {
+                    "max_tokens": self.budget.max_tokens,
+                    "max_turns": self.budget.max_turns,
+                    "max_usd": self.budget.max_usd,
+                }
+                if self.budget is not None
+                else None
+            ),
+            "claude_cli_path": str(self.claude_cli_path) if self.claude_cli_path else None,
+            "codex_cli_path": str(self.codex_cli_path) if self.codex_cli_path else None,
+            "cursor_cli_path": str(self.cursor_cli_path) if self.cursor_cli_path else None,
         }, separators=(",", ":"))}
 
     @classmethod
@@ -172,9 +220,14 @@ class RuntimeSettings:
         if raw is None:
             return cls()
         values = json.loads(raw)
-        for key in ("toolchain_interpreter", "bridge_path", "tooling_root"):
+        for key in (
+            "toolchain_interpreter", "bridge_path", "tooling_root",
+            "claude_cli_path", "codex_cli_path", "cursor_cli_path",
+        ):
             if values.get(key) is not None:
                 values[key] = Path(values[key])
+        if values.get("budget") is not None:
+            values["budget"] = RuntimeBudget(**values["budget"])
         if "child_env_allowlist" in values:
             values["child_env_allowlist"] = frozenset(values["child_env_allowlist"])
         return cls(**values)
@@ -259,6 +312,19 @@ class RuntimeSettings:
         """Return the isolated-mode bridge launch command."""
         return [str(self.interpreter(tooling_root)), "-I", str(self.bridge(tooling_root))]
 
+    def cli(self, vendor: str, fallback: str) -> str:
+        """Return the explicitly selected executable, or a legacy command name."""
+        paths = {
+            "claude": self.claude_cli_path,
+            "codex": self.codex_cli_path,
+            "cursor": self.cursor_cli_path,
+        }
+        try:
+            path = paths[vendor]
+        except KeyError as exc:
+            raise ValueError(f"unsupported runtime executable {vendor!r}") from exc
+        return str(path) if path is not None else fallback
+
 
 DEFAULT_SETTINGS = RuntimeSettings()
 # Fixed transport bootstrap key; all consumer-owned environment names derive
@@ -287,5 +353,6 @@ __all__ = [
     "DEFAULT_STATE_ROOT",
     "DEFAULT_TEMP_PREFIX",
     "PACKAGED_BRIDGE",
+    "RuntimeBudget",
     "RuntimeSettings",
 ]

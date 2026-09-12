@@ -99,8 +99,10 @@ this same bridge with `--codex-refresh`; `codex_refresh()` imports openai_codex
 only when invoked. The private SDK shims remain intact.
 
 Run the suite with `uv sync --group dev` followed by
-`.venv/bin/python -m pytest -q`. The dev group pins `claude-agent-sdk==0.2.152`
-and `openai-codex==0.147.0`, so the original SDK assertions are unconditional.
+`.venv/bin/python -m pytest -q`. The dev group pins `claude-agent-sdk==0.2.152`,
+`openai-codex==0.154.0`, and `openai-codex-cli-bin==0.154.0`, so SDK and Codex
+worker-version assertions are unconditional. Live settings additionally name
+the exact Claude, Codex, and Cursor executable paths.
 
 `RUNTIME_REGISTRY` adds the deterministic `fake` runner; the legacy
 `NATIVE_RUNTIME_REGISTRY` still lists only Claude, Codex and Cursor. A fake

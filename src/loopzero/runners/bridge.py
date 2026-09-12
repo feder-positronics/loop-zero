@@ -60,6 +60,7 @@ from .contract import (
 )
 
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
+PINNED_CLAUDE_CLI_VERSION = "2.1.269"
 
 
 def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
@@ -524,6 +525,35 @@ def _filtered_environment() -> dict[str, str]:
     environment = dict(os.environ)
     for name in RAW_API_ENV_VARS | PYTHON_IMPORT_ENV_VARS:
         environment.pop(name, None)
+    return environment
+
+
+def _claude_subscription_environment() -> dict[str, str]:
+    """Consume a brokered access-only snapshot without exposing its descriptor."""
+    environment = _filtered_environment()
+    raw_fd = os.environ.pop(get_settings().env_name("CLAUDE_AUTH_FD"), None)
+    if raw_fd is None:
+        return environment
+    try:
+        fd = int(raw_fd)
+        metadata = os.fstat(fd)
+        if metadata.st_size <= 2 or metadata.st_size > 1024 * 1024:
+            raise BridgeInputError("provider credential descriptor is invalid")
+        payload = json.loads(os.pread(fd, metadata.st_size, 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise BridgeInputError("provider credential descriptor is invalid") from exc
+    finally:
+        try:
+            os.close(int(raw_fd))
+        except (OSError, ValueError):
+            pass
+    token = payload.get("claudeCodeOauthToken") if isinstance(payload, dict) else None
+    if token is None and isinstance(payload, dict):
+        oauth = payload.get("claudeAiOauth")
+        token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+    if not isinstance(token, str) or not token:
+        raise BridgeInputError("provider credential descriptor is invalid")
+    environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
     return environment
 
 
@@ -1407,10 +1437,19 @@ def _options(
             )
         ]
     }
+    budget = get_settings().budget
+    usd_ceiling = request["budget_usd"]
+    if budget is not None:
+        usd_ceiling = min(
+            budget.max_usd,
+            usd_ceiling if usd_ceiling is not None else budget.max_usd,
+        )
     return ClaudeAgentOptions(
         model=request["requested_model"],
         effort=request["effort"],
-        max_budget_usd=request["budget_usd"],
+        max_budget_usd=usd_ceiling,
+        max_turns=budget.max_turns if budget is not None else None,
+        task_budget={"total": budget.max_tokens} if budget is not None else None,
         cwd=request["cwd"],
         permission_mode="default",
         tools=visible_tools if explicit_scope else list(DEFAULT_READ_ONLY_TOOLS),
@@ -1424,7 +1463,7 @@ def _options(
         mcp_servers={},
         setting_sources=[],
         skills=[],
-        env=_filtered_environment(),
+        env=_claude_subscription_environment(),
         can_use_tool=permission_callback,
         hooks=hooks,
         include_partial_messages=False,
@@ -1432,6 +1471,7 @@ def _options(
         max_buffer_size=MAX_BRIDGE_LINE_BYTES,
         stderr=lambda _line: None,
         resume=request.get("resume_session_id"),
+        cli_path=get_settings().claude_cli_path,
     )
 
 
@@ -1460,7 +1500,8 @@ def _codex_thread_kwargs(request: BridgeRequest) -> CodexThreadKwargs:
     from openai_codex import ApprovalMode
 
     return {
-        "ephemeral": True,
+        # Session persistence is required for the normalized resume contract.
+        "ephemeral": False,
         "model": request["requested_model"],
         "model_provider": CODEX_MODEL_PROVIDER,
         "service_tier": CODEX_SERVICE_TIER,
@@ -1493,6 +1534,20 @@ def _codex_turn_kwargs(request: BridgeRequest) -> CodexTurnKwargs:
         "cwd": request["cwd"],
         "output_schema": cast("dict[str, JsonValue]", request["output_schema"]),
     }
+
+
+def _codex_budget_overrides() -> tuple[str, ...]:
+    budget = get_settings().budget
+    if budget is None:
+        return ()
+    # Codex exposes a single user turn through this bridge.  Its recognized
+    # output_token_limit is the native token-side bound for that turn.
+    return (f"output_token_limit={budget.max_tokens}",)
+
+
+def _codex_bin_kwargs() -> dict[str, str]:
+    path = get_settings().codex_cli_path
+    return {"codex_bin": str(path)} if path is not None else {}
 
 
 def _codex_account_type(account_response: object) -> str | None:
@@ -1579,7 +1634,11 @@ def _codex_effective_config_lock(request: BridgeRequest) -> Iterator[Path]:
         environment = _filtered_environment()
         environment["CODEX_HOME"] = str(codex_home)
         config = CodexConfig(
-            config_overrides=codex_bootstrap_overrides(export_dir),
+            **_codex_bin_kwargs(),
+            config_overrides=(
+                *codex_bootstrap_overrides(export_dir),
+                *_codex_budget_overrides(),
+            ),
             cwd=str(root),
             env=environment,
         )
@@ -1620,6 +1679,7 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
         options = ClaudeAgentOptions(
             model=request["requested_model"],
             cwd=request["cwd"],
+            cli_path=get_settings().claude_cli_path,
         )
         transport = SubprocessCLITransport(prompt="", options=options)
         selected = Path(transport._find_cli()).resolve(strict=True)
@@ -1628,9 +1688,16 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
             / "_bundled"
             / ("claude.exe" if os.name == "nt" else "claude")
         ).resolve(strict=True)
-        if selected != bundled:
+        configured = get_settings().claude_cli_path
+        expected = (
+            configured.resolve(strict=True) if configured is not None else bundled
+        )
+        if selected != expected:
             raise RuntimeError("startup")
-        version = tuple(int(part) for part in __cli_version__.split("."))
+        selected_version = (
+            PINNED_CLAUDE_CLI_VERSION if configured is not None else __cli_version__
+        )
+        version = tuple(int(part) for part in selected_version.split("."))
         if len(version) != 3:
             raise ValueError("version")
     except Exception:
@@ -1669,7 +1736,11 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
             codex_environment = _filtered_environment()
             codex_environment.update(auth_environment)
             config = CodexConfig(
-                config_overrides=(codex_config_lock_override(config_lock),),
+                **_codex_bin_kwargs(),
+                config_overrides=(
+                    codex_config_lock_override(config_lock),
+                    *_codex_budget_overrides(),
+                ),
                 cwd=request["cwd"],
                 env=codex_environment,
             )
@@ -1756,7 +1827,11 @@ def _run_codex(
         codex_environment = _filtered_environment()
         codex_environment.update(auth_environment)
         config = CodexConfig(
-            config_overrides=(codex_config_lock_override(config_lock),),
+            **_codex_bin_kwargs(),
+            config_overrides=(
+                codex_config_lock_override(config_lock),
+                *_codex_budget_overrides(),
+            ),
             cwd=request["cwd"],
             env=codex_environment,
         )
@@ -2336,7 +2411,11 @@ def codex_refresh() -> int:
         )
         environment = _filtered_environment()
         environment.update(auth_environment)
-        config = CodexConfig(env=environment)
+        config = CodexConfig(
+            **_codex_bin_kwargs(),
+            config_overrides=_codex_budget_overrides(),
+            env=environment,
+        )
         with Codex(config) as codex:
             response = codex.account(refresh_token=True)
         authenticated = response.account is not None

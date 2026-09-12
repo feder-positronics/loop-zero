@@ -257,6 +257,7 @@ class ProcessLaunchIdentity:
 
 
 ProcessLaunchCallback = Callable[[ProcessLaunchIdentity], None]
+ProcessHandleCallback = Callable[["ProcessHandle"], None]
 ProcessIdentityState = Literal["active", "gone", "unverifiable"]
 
 
@@ -278,6 +279,7 @@ class ProcessResult:
     stderr: str = field(repr=False)
     duration_s: float
     timed_out: bool
+    cancelled: bool = False
     output_limited: bool = False
     progress_diagnostic: bool = False
 
@@ -552,6 +554,7 @@ def launch_cli(
     pass_fds: Sequence[int] = (),
     progress_fd: int | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    on_handle: ProcessHandleCallback | None = None,
     private_mounts: Sequence[Path] = (),
     private_tmpdir: Path | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
@@ -640,6 +643,12 @@ def launch_cli(
             raise ProcessIdentityError(
                 "runtime launch identity could not be persisted"
             ) from exc
+    if on_handle is not None:
+        try:
+            on_handle(handle)
+        except BaseException:
+            cancel_cli(handle)
+            raise
     return handle
 
 
@@ -765,6 +774,7 @@ def _run_cli_with_private_tmpdir(
     max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
     on_progress: RuntimeProgressCallback | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    on_handle: ProcessHandleCallback | None = None,
     private_mounts: Sequence[Path] = (),
     private_tmpdir: Path | None,
     sandbox_wrapper: SandboxWrapper | None = None,
@@ -800,6 +810,7 @@ def _run_cli_with_private_tmpdir(
             pass_fds=inherited_fds,
             progress_fd=progress_write_fd,
             on_launch=on_launch,
+            on_handle=on_handle,
             private_mounts=private_mounts,
             private_tmpdir=private_tmpdir,
             sandbox_wrapper=sandbox_wrapper,
@@ -953,6 +964,7 @@ def run_cli(
     max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
     on_progress: RuntimeProgressCallback | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    on_handle: ProcessHandleCallback | None = None,
     private_mounts: Sequence[Path] = (),
     sandbox_wrapper: SandboxWrapper | None = None,
     unsandboxed: bool = False,
@@ -972,6 +984,7 @@ def run_cli(
             max_stderr_bytes=max_stderr_bytes,
             on_progress=on_progress,
             on_launch=on_launch,
+            on_handle=on_handle,
             private_mounts=private_mounts,
             private_tmpdir=None,
             sandbox_wrapper=sandbox_wrapper,
@@ -991,6 +1004,7 @@ def run_cli(
             max_stderr_bytes=max_stderr_bytes,
             on_progress=on_progress,
             on_launch=on_launch,
+            on_handle=on_handle,
             private_mounts=private_mounts,
             private_tmpdir=private_tmpdir,
             sandbox_wrapper=sandbox_wrapper,

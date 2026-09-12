@@ -17,7 +17,13 @@ from loopzero.runners import bridge, claude, codex, process
 from loopzero.runners import claude as claude_token, codex as codex_credential
 from loopzero.runners.contract import governed_result_schema
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
-from loopzero.runners.settings import DEFAULT_SETTINGS, PACKAGED_BRIDGE, RuntimeSettings, get_settings
+from loopzero.runners.settings import (
+    DEFAULT_SETTINGS,
+    PACKAGED_BRIDGE,
+    RuntimeBudget,
+    RuntimeSettings,
+    get_settings,
+)
 
 
 def test_legacy_names_and_defaults():
@@ -30,6 +36,37 @@ def test_legacy_names_and_defaults():
     assert DEFAULT_SETTINGS.env_prefix == "LOOPZERO"
     assert DEFAULT_SETTINGS.bridge_path == PACKAGED_BRIDGE
     assert DEFAULT_SETTINGS.temp_name("cursor-cli") == "loopzero-cursor-cli-"
+
+
+def test_budget_and_pinned_executables_cross_bridge_boundary(tmp_path, monkeypatch):
+    settings = RuntimeSettings(
+        budget=RuntimeBudget(max_tokens=2048, max_turns=2, max_usd=1.25),
+        claude_cli_path=tmp_path / "claude",
+        codex_cli_path=tmp_path / "codex",
+        cursor_cli_path=tmp_path / "cursor-agent",
+    )
+    monkeypatch.setenv("LOOPZERO_RUNTIME_SETTINGS", settings.child_environment()["LOOPZERO_RUNTIME_SETTINGS"])
+
+    restored = RuntimeSettings.from_environment()
+
+    assert restored.budget == settings.budget
+    assert restored.cli("claude", "unused") == str(tmp_path / "claude")
+    assert restored.cli("codex", "unused") == str(tmp_path / "codex")
+    assert restored.cli("cursor", "unused") == str(tmp_path / "cursor-agent")
+    assert "LOOPZERO_RUNTIME_SETTINGS" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "kwargs,error",
+    [
+        ({"max_tokens": 0, "max_turns": 1, "max_usd": 1}, ValueError),
+        ({"max_tokens": 1, "max_turns": 0, "max_usd": 1}, ValueError),
+        ({"max_tokens": 1, "max_turns": 1, "max_usd": float("nan")}, ValueError),
+    ],
+)
+def test_budget_rejects_nonpositive_or_nonfinite_caps(kwargs, error):
+    with pytest.raises(error):
+        RuntimeBudget(**kwargs)
 
 
 def test_profile_paths_and_refresh_command(tmp_path):

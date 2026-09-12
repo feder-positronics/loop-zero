@@ -4,8 +4,10 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 
 import json
+import os
 import shutil
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -15,6 +17,7 @@ from typing import Any
 from .contract import (
     MAX_STRUCTURED_OUTPUT_BYTES,
     ReadinessFailure,
+    RuntimeCostStatus,
     RuntimeEvent,
     RuntimeHandle,
     RuntimeProgressCallback,
@@ -22,15 +25,18 @@ from .contract import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeStatus,
+    RuntimeUsage,
     SubscriptionEligibility,
     TerminalReason,
     is_valid_resume_session_id,
 )
+from .pricing import estimated_cost_usd, total_tokens
 from .process import (
     ProcessHandle,
     ProcessResult,
     cancel_cli,
     filtered_child_environment,
+    private_temporary_directory,
     run_cli,
 )
 
@@ -38,7 +44,9 @@ MAX_RETAINED_EVENTS = 256
 MAX_EVENT_LABEL_CHARS = 64
 MAX_FINAL_OUTPUT_BYTES = MAX_STRUCTURED_OUTPUT_BYTES
 MAX_AUTH_STATUS_BYTES = 256 * 1024
+MAX_USAGE_VALUE = 10**12
 AUTH_STATUS_TIMEOUT_S = 5.0
+PINNED_CURSOR_CLI_VERSION = "2026.09.08"
 AUTH_STATUS_COMMAND = ["cursor-agent", "status", "--format", "json"]
 SUBSCRIPTION_STATUS_COMMAND = ["cursor-agent", "about", "--format", "json"]
 ELIGIBLE_SUBSCRIPTION_TIERS = frozenset(
@@ -126,6 +134,7 @@ class ParsedCursorStream:
     session_id: str | None
     effective_model: str | None
     request_id: str | None
+    usage: RuntimeUsage | None
     events: tuple[RuntimeEvent, ...]
     final_output: str = field(repr=False)
 
@@ -135,6 +144,41 @@ def filtered_cursor_environment(
 ) -> dict[str, str]:
     """Return the native-login environment without API or gateway overrides."""
     return filtered_child_environment(base)
+
+
+@contextmanager
+def _cursor_subscription_environment():
+    """Materialize one brokered access-only snapshot in private runner state."""
+    environment = filtered_cursor_environment()
+    raw_fd = environment.pop(get_settings().env_name("CURSOR_AUTH_FD"), None)
+    if raw_fd is None:
+        yield environment, ()
+        return
+    try:
+        fd = int(raw_fd)
+        metadata = os.fstat(fd)
+        payload = os.pread(fd, metadata.st_size, 0)
+        decoded = json.loads(payload)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise CursorProtocolError("Cursor credential descriptor is invalid") from exc
+    if (
+        metadata.st_size <= 2
+        or metadata.st_size > 1024 * 1024
+        or not isinstance(decoded, dict)
+        or not isinstance(decoded.get("accessToken"), str)
+        or decoded.get("refreshToken") != decoded.get("accessToken")
+    ):
+        raise CursorProtocolError("Cursor credential descriptor is invalid")
+    with private_temporary_directory("cursor-auth") as home:
+        auth_path = home / ".config" / "cursor" / "auth.json"
+        auth_path.parent.mkdir(mode=0o700, parents=True)
+        auth_path.write_bytes(payload)
+        auth_path.chmod(0o600)
+        environment["HOME"] = str(home)
+        try:
+            yield environment, (home,)
+        finally:
+            auth_path.unlink(missing_ok=True)
 
 
 def _auth_payload(stdout: str, command: str) -> dict[str, object]:
@@ -188,7 +232,7 @@ def build_cursor_command(
     ):
         raise ValueError("Cursor resume_session_id is invalid")
     command = [
-        "cursor-agent",
+        get_settings().cli("cursor", "cursor-agent"),
         "-p",
         "--model",
         request.requested_model,
@@ -265,6 +309,31 @@ def _required_final_output(event: dict[str, Any]) -> str:
     return value
 
 
+def _cursor_usage(event: dict[str, Any]) -> RuntimeUsage | None:
+    payload = event.get("usage")
+    if not isinstance(payload, dict):
+        return None
+    aliases = {
+        "input_tokens": ("input_tokens", "inputTokens", "prompt_tokens"),
+        "output_tokens": ("output_tokens", "outputTokens", "completion_tokens"),
+        "cache_read_tokens": ("cache_read_tokens", "cacheReadTokens"),
+        "cache_write_tokens": ("cache_write_tokens", "cacheWriteTokens"),
+        "reasoning_tokens": ("reasoning_tokens", "reasoningTokens"),
+    }
+    values: dict[str, int] = {}
+    for field_name, candidates in aliases.items():
+        for candidate in candidates:
+            value = payload.get(candidate)
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and 0 <= value <= MAX_USAGE_VALUE
+            ):
+                values[field_name] = value
+                break
+    return RuntimeUsage(**values) if values else None
+
+
 def parse_cursor_stream(stream: str) -> ParsedCursorStream:
     """Validate Cursor NDJSON while retaining only safe event metadata.
 
@@ -277,6 +346,7 @@ def parse_cursor_stream(stream: str) -> ParsedCursorStream:
     effective_model: str | None = None
     request_id: str | None = None
     final_output: str | None = None
+    usage: RuntimeUsage | None = None
     terminal: tuple[RuntimeStatus, TerminalReason] | None = None
     saw_event = False
 
@@ -317,6 +387,7 @@ def parse_cursor_stream(stream: str) -> ParsedCursorStream:
         ):
             raise CursorStreamError(CursorParserCause.TERMINAL_INCOMPLETE)
         request_id = _optional_string(raw_event, CursorParserField.REQUEST_ID)
+        usage = _cursor_usage(raw_event)
         final_output = _required_final_output(raw_event)
         if subtype_value == "success" and raw_event["is_error"] is False:
             terminal = (RuntimeStatus.COMPLETED, TerminalReason.COMPLETED)
@@ -335,6 +406,7 @@ def parse_cursor_stream(stream: str) -> ParsedCursorStream:
         session_id=session_id,
         effective_model=effective_model,
         request_id=request_id,
+        usage=usage,
         events=tuple(events),
         final_output=final_output,
     )
@@ -357,6 +429,20 @@ class CursorAdapter:
         self._which = which
         self._settings = get_settings()
 
+    def _auth_commands(self) -> tuple[list[str], list[str]]:
+        executable = self._settings.cli("cursor", "cursor-agent")
+        return (
+            [executable, "status", "--format", "json"],
+            [executable, "about", "--format", "json"],
+        )
+
+    def _cli_available(self) -> bool:
+        path = self._settings.cursor_cli_path
+        return (
+            path.is_file() and os.access(path, os.X_OK)
+            if path is not None else self._which("cursor-agent") is not None
+        )
+
     @using_adapter_settings
     def probe(self, request: RuntimeRequest) -> RuntimeReadiness:
         if request.eligibility is not SubscriptionEligibility.APPROVED:
@@ -366,7 +452,7 @@ class CursorAdapter:
                 failure=ReadinessFailure.SUBSCRIPTION_UNAVAILABLE,
                 repair="confirm the approved Cursor subscription login path",
             )
-        if self._which("cursor-agent") is None:
+        if not self._cli_available():
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
@@ -375,17 +461,20 @@ class CursorAdapter:
             )
         outcomes: list[ProcessResult] = []
         try:
-            for command in (AUTH_STATUS_COMMAND, SUBSCRIPTION_STATUS_COMMAND):
-                outcomes.append(
-                    self._run_probe(
-                        command,
-                        cwd=request.cwd,
-                        input_text="",
-                        timeout_s=AUTH_STATUS_TIMEOUT_S,
-                        env=filtered_cursor_environment(),
+            with _cursor_subscription_environment() as (environment, mounts):
+                for command in self._auth_commands():
+                    arguments = {
+                        "cwd": request.cwd,
+                        "input_text": "",
+                        "timeout_s": AUTH_STATUS_TIMEOUT_S,
+                        "env": environment,
+                    }
+                    if mounts:
+                        arguments["private_mounts"] = mounts
+                    outcomes.append(
+                        self._run_probe(command, **arguments)
                     )
-                )
-        except OSError:
+        except (OSError, CursorProtocolError):
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
@@ -454,22 +543,28 @@ class CursorAdapter:
                 dir=workspace_root,
             ) as directory:
                 isolated_workspace = Path(directory)
-                outcome = self._run_cli(
-                    build_cursor_command(
-                        request,
-                        isolated_workspace=isolated_workspace,
-                    ),
-                    cwd=isolated_workspace,
-                    input_text=(
-                        "The governed worktree is "
-                        f"{request.cwd}. Treat that absolute path as the sole "
-                        "working directory for this task.\n\n"
-                        f"{request.prompt}"
-                    ),
-                    timeout_s=request.timeout_s,
-                    env=filtered_cursor_environment(),
-                )
-        except OSError:
+                with _cursor_subscription_environment() as (environment, mounts):
+                    arguments = {
+                        "cwd": isolated_workspace,
+                        "input_text": (
+                            "The governed worktree is "
+                            f"{request.cwd}. Treat that absolute path as the sole "
+                            "working directory for this task.\n\n"
+                            f"{request.prompt}"
+                        ),
+                        "timeout_s": request.timeout_s,
+                        "env": environment,
+                    }
+                    if mounts:
+                        arguments["private_mounts"] = mounts
+                    outcome = self._run_cli(
+                        build_cursor_command(
+                            request,
+                            isolated_workspace=isolated_workspace,
+                        ),
+                        **arguments,
+                    )
+        except (OSError, CursorProtocolError):
             return RuntimeResult(
                 vendor=request.vendor,
                 transport=self.transport,
@@ -488,6 +583,14 @@ class CursorAdapter:
                 reason=TerminalReason.TIMEOUT,
                 outcome=outcome,
                 diagnostics=("Cursor process timed out",),
+            )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                outcome=outcome,
+                diagnostics=("Cursor process was cancelled",),
             )
         if outcome.output_limited:
             return self._result(
@@ -537,6 +640,7 @@ class CursorAdapter:
             session_id=parsed.session_id,
             effective_model=parsed.effective_model,
             request_id=parsed.request_id,
+            usage=parsed.usage,
             events=parsed.events,
             final_output=parsed.final_output,
         )
@@ -551,10 +655,22 @@ class CursorAdapter:
         session_id: str | None = None,
         effective_model: str | None = None,
         request_id: str | None = None,
+        usage: RuntimeUsage | None = None,
         events: tuple[RuntimeEvent, ...] = (),
         diagnostics: tuple[str, ...] = (),
         final_output: str | None = None,
     ) -> RuntimeResult:
+        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        budget = get_settings().budget
+        measured_tokens = total_tokens(usage)
+        if budget is not None and (
+            (measured_tokens is not None and measured_tokens > budget.max_tokens)
+            or (normalized_cost is not None and normalized_cost > budget.max_usd)
+        ):
+            status = RuntimeStatus.FAILED
+            reason = TerminalReason.BUDGET_EXHAUSTED
+            diagnostics = ("Cursor normalized budget was exhausted",)
+            final_output = None
         return RuntimeResult(
             vendor=request.vendor,
             transport=self.transport,
@@ -565,6 +681,13 @@ class CursorAdapter:
             effective_model=effective_model,
             session_id=session_id,
             request_id=request_id,
+            usage=usage,
+            cost_usd=normalized_cost,
+            cost_status=(
+                RuntimeCostStatus.ESTIMATED
+                if normalized_cost is not None
+                else RuntimeCostStatus.UNKNOWN
+            ),
             eligibility=request.eligibility,
             fallback_from=request.fallback_from,
             events=events,

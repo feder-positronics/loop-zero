@@ -1818,15 +1818,16 @@ def test_claude_sdk_forwards_promotional_credit_mode(tmp_path: Path) -> None:
     assert result.commercial_mode is contracts.RuntimeCommercialMode.PROMOTIONAL_CREDIT
 
 
-def test_claude_sdk_maps_vendor_cost_to_estimated_status(tmp_path: Path) -> None:
+def test_claude_sdk_uses_pinned_token_price_instead_of_vendor_cost(tmp_path: Path) -> None:
     def run_process(command, **kwargs):
         del command, kwargs
         return process.ProcessResult(
             returncode=0,
-            stdout=(
-                '{"type":"result","status":"completed",'
-                '"terminal_reason":"completed","total_cost_usd":0.42}\n'
-            ),
+                stdout=(
+                    '{"type":"result","status":"completed",'
+                    '"terminal_reason":"completed","total_cost_usd":0.42,'
+                    '"usage":{"input_tokens":1,"output_tokens":1}}\n'
+                ),
             stderr="",
             duration_s=0.01,
             timed_out=False,
@@ -1836,7 +1837,7 @@ def test_claude_sdk_maps_vendor_cost_to_estimated_status(tmp_path: Path) -> None
         claude_request(tmp_path)
     )
 
-    assert result.cost_usd == 0.42
+    assert result.cost_usd == 0.00009
     assert result.cost_status is contracts.RuntimeCostStatus.ESTIMATED
 
 
@@ -3666,7 +3667,7 @@ def test_codex_bridge_thread_kwargs_force_first_party_provider_and_deny_all(
 
     assert kwargs["model_provider"] == "openai"
     assert kwargs["service_tier"] == "default"
-    assert kwargs["ephemeral"] is True
+    assert kwargs["ephemeral"] is False
     assert kwargs["approval_mode"].value == "deny_all"
     assert kwargs["sandbox"].value == "read-only"
     assert turn_kwargs["service_tier"] == "default"
