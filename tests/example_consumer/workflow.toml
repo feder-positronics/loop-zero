@@ -48,5 +48,5 @@ source = ["src/**"]
 docs = ["docs/**", "*.md"]
 
 [hooks]
-worktree_setup = ["true"]
-acceptance = ["python3 -m unittest discover -s tests"]
+worktree_setup = ["bash -c true"]
+acceptance = ["bash -c \"python3 -m unittest discover -s tests\""]

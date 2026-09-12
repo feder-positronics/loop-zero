@@ -11,7 +11,12 @@ command's help says so.
 from __future__ import annotations
 
 import argparse
+import json
+import os
+import re
+import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -24,7 +29,9 @@ from .config import (
     Profile,
     effective_hooks,
     load_profile,
+    resolve_base,
 )
+from . import gates
 from . import sync as sync_module
 
 TOOLS = ("git", "bwrap", "openssl", "gh")
@@ -62,13 +69,152 @@ check_integration = "not-applicable: fill in or state why there is no integratio
 """
 
 
-def _run_tool(profile: Profile, name: str, argv: list[str]) -> int:
-    """Run a snapshot tool as a child; the tools parse ``sys.argv`` themselves."""
-    path = profile.snapshot_dir / "tools" / f"{name}.py"
-    if not path.is_file():
-        raise ConfigError([f"{path}: snapshot tool missing; deposit the core snapshot first"])
-    proc = subprocess.run([sys.executable, "-I", str(path), *argv])
-    return proc.returncode
+DEFAULT_EXECUTABLE_PATH = (Path("/usr/bin"),)
+SHELL_METACHARACTERS = re.compile(r"&&|\|\||[;&|<>`\r\n]|\$\(")
+
+
+def _no_symlink_components(path: Path) -> bool:
+    """Return true only for an absolute path with no symlink component."""
+    if not path.is_absolute() or ".." in path.parts:
+        return False
+    current = Path("/")
+    try:
+        for part in path.parts[1:]:
+            current /= part
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _allowed_path(entries: list[str]) -> tuple[Path, ...]:
+    allowed: list[Path] = []
+    problems: list[str] = []
+    for entry in (*map(str, DEFAULT_EXECUTABLE_PATH), *entries):
+        path = Path(entry)
+        if not path.is_absolute():
+            problems.append(f"--path-entry {entry!r}: must be an absolute directory")
+        elif not _no_symlink_components(path):
+            problems.append(f"--path-entry {entry!r}: symlink or unavailable path component")
+        elif not stat.S_ISDIR(os.lstat(path).st_mode):
+            problems.append(f"--path-entry {entry!r}: directory is unavailable")
+        else:
+            allowed.append(path.resolve(strict=True))
+    if problems:
+        raise ConfigError(problems)
+    return tuple(allowed)
+
+
+def _regular_executable(path: Path) -> bool:
+    try:
+        return (
+            _no_symlink_components(path)
+            and stat.S_ISREG(os.lstat(path).st_mode)
+            and os.access(path, os.X_OK)
+        )
+    except OSError:
+        return False
+
+
+def _repository_executable(root: Path, token: str) -> bool:
+    candidate = root / token
+    try:
+        if not _regular_executable(candidate):
+            return False
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _resolve_executable(root: Path, token: str, allowed: tuple[Path, ...]) -> Path | None:
+    if "/" in token:
+        path = Path(token)
+        if not path.is_absolute():
+            return (root / path).resolve() if _repository_executable(root, token) else None
+        for entry in allowed:
+            if not _regular_executable(path):
+                return None
+            try:
+                executable = path.resolve(strict=True)
+                directory = entry.resolve(strict=True)
+            except OSError:
+                continue
+            if executable.parent == directory:
+                return executable
+        return None
+    for directory in allowed:
+        candidate = directory / token
+        if not _regular_executable(candidate):
+            continue
+        try:
+            executable = candidate.resolve(strict=True)
+            allowed_real = directory.resolve(strict=True)
+        except OSError:
+            continue
+        if executable.parent == allowed_real:
+            return executable
+    return None
+
+
+def _lint_hook_commands(
+    profile: Profile, hooks: dict[str, tuple[str, ...]], allowed: tuple[Path, ...]
+) -> list[str]:
+    problems: list[str] = []
+    for name, commands in hooks.items():
+        for command in commands:
+            where = f"[hooks].{name}"
+            if SHELL_METACHARACTERS.search(command):
+                problems.append(f"{where}: shell metacharacters are not allowed: {command!r}")
+                continue
+            try:
+                argv = shlex.split(command, posix=True)
+            except ValueError as exc:
+                problems.append(f"{where}: invalid command quoting: {exc}")
+                continue
+            if not argv:
+                problems.append(f"{where}: command has no executable")
+            elif _resolve_executable(profile.root, argv[0], allowed) is None:
+                problems.append(
+                    f"{where}: executable {argv[0]!r} is not a regular executable in the allowed PATH"
+                )
+    return problems
+
+
+def _run_source_status(profile: Profile, source_arg: str) -> subprocess.CompletedProcess[str]:
+    try:
+        source = Path(source_arg).resolve(strict=True)
+        tool = source / "core" / "tools" / "status.py"
+        if stat.S_ISLNK(os.lstat(tool).st_mode) or not stat.S_ISREG(os.lstat(tool).st_mode):
+            raise OSError("verifier is not a regular file")
+    except OSError as exc:
+        raise ConfigError([f"trusted source verifier unavailable: {exc}"]) from None
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/tmp",
+        "TMPDIR": "/tmp",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+    }
+    return subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(tool),
+            "--consumer",
+            str(profile.root),
+            "--source",
+            str(source),
+        ],
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
 
 
 def cmd_init(args: argparse.Namespace) -> int:
@@ -106,20 +252,26 @@ def cmd_sync(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     profile = load_profile(Path(args.root))
     snapshot = profile.snapshot_version()
-    ok = True
     if snapshot is None:
-        print(f"snapshot: missing at {profile.snapshot_dir}", file=sys.stderr)
-        ok = False
+        print(f"version equality: unavailable; snapshot VERSION missing at {profile.snapshot_dir}")
     elif snapshot != __version__:
-        print(f"version mismatch: package {__version__} vs snapshot {snapshot}", file=sys.stderr)
-        ok = False
+        print(f"version equality: different; package {__version__}, snapshot {snapshot}")
     else:
-        print(f"package {__version__} matches snapshot {snapshot}")
-    if args.source:
-        rc = _run_tool(profile, "status", ["--consumer", str(profile.root), "--source", args.source])
-        ok = ok and rc == 0
-    print("pass" if ok else "fail")
-    return 0 if ok else 1
+        print(f"version equality: equal; package and snapshot are {snapshot}")
+    if not args.source:
+        print("informational only; use --source for byte-level pin verification")
+        return 0
+    verifier = _run_source_status(profile, args.source)
+    if verifier.returncode != 0:
+        if verifier.stderr:
+            print(verifier.stderr.rstrip(), file=sys.stderr)
+        print("fail")
+        return 1
+    if snapshot is None or snapshot != __version__:
+        print("fail")
+        return 1
+    print("pass")
+    return 0
 
 
 def cmd_policy_lint(args: argparse.Namespace) -> int:
@@ -131,29 +283,37 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
             print(problem, file=sys.stderr)
         print("fail")
         return 1
+    if not args.no_hooks and not (args.base or args.base_ref):
+        print("UNVERIFIED: hook-aware policy lint requires --base or --base-ref", file=sys.stderr)
+        return 1
+
+    allowed = _allowed_path(args.path_entry)
     problems: list[str] = []
-    if args.base:
+    base_sha: str | None = None
+    if not args.no_hooks:
         try:
-            hooks = effective_hooks(profile, args.base)
+            base_sha = resolve_base(profile.root, base=args.base, base_ref=args.base_ref)
+            if args.base_ref:
+                print(f"base: {base_sha}")
+            hooks = effective_hooks(profile, base_sha)
         except ConfigError as exc:
             problems.extend(exc.problems)
             hooks = {}
-        for name, commands in hooks.items():
-            for command in commands:
-                executable = command.split()[0]
-                if "/" not in executable and shutil.which(executable) is None:
-                    problems.append(f"[hooks].{name}: executable {executable!r} not on PATH")
+        problems.extend(_lint_hook_commands(profile, hooks, allowed))
     for name, alias in profile.aliases.items():
         if alias.runner in ("claude", "codex", "cursor"):
             binary = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[alias.runner]
-            if shutil.which(binary) is None:
-                problems.append(f"[routing.aliases].{name}: runtime {binary!r} not installed")
+            if _resolve_executable(profile.root, binary, allowed) is None:
+                problems.append(f"[routing.aliases].{name}: runtime {binary!r} not in the allowed PATH")
     if problems:
         for problem in problems:
             print(problem, file=sys.stderr)
         print("fail")
         return 1
-    print("pass")
+    if args.no_hooks:
+        print("policy is valid; hooks were not checked (--no-hooks)")
+    else:
+        print("pass")
     return 0
 
 
@@ -173,10 +333,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def cmd_checks(args: argparse.Namespace) -> int:
     profile = load_profile(Path(args.root))
-    argv = ["checks", "--workflow", str(profile.root / WORKFLOW_FILE)]
-    if args.results:
-        argv += ["--results", args.results]
-    return _run_tool(profile, "checks", argv)
+    try:
+        results = json.loads(Path(args.results).read_text(encoding="utf-8")) if args.results else {}
+        rows = gates.classify(profile.raw["checks"], results)
+    except (OSError, ValueError, TypeError, RecursionError, KeyError) as exc:
+        raise ConfigError([f"checks report: {exc}"]) from None
+    print(json.dumps(rows, indent=2))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -191,22 +354,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_init)
 
     p = sub.add_parser("sync", help="render consumer wiring from workflow.toml")
-    p.add_argument("--check", action="store_true", help="report drift, write nothing; exit 1 on drift")
+    p.add_argument(
+        "--check",
+        action="store_true",
+        help="report drift without changing generated targets; exit 1 on drift",
+    )
     p.set_defaults(func=cmd_sync)
 
-    p = sub.add_parser("status", help="package and snapshot versions must match; optional pin check")
+    p = sub.add_parser("status", help="report version equality; --source performs a trusted pin check")
     p.add_argument("--source", help="local source checkout for the byte-level pin check")
     p.set_defaults(func=cmd_status)
 
     policy = sub.add_parser("policy", help="policy commands").add_subparsers(dest="policy_command", required=True)
-    p = policy.add_parser("lint", help="validate workflow.toml; with --base also resolve hooks from the base")
-    p.add_argument("--base", help="base ref whose [hooks] govern privileged hooks, e.g. origin/main")
+    p = policy.add_parser("lint", help="validate workflow.toml and its base-governed hooks")
+    base = p.add_mutually_exclusive_group()
+    base.add_argument("--base", help="trusted full 40-character base commit SHA")
+    base.add_argument(
+        "--base-ref",
+        help="full refs/heads/... or refs/remotes/... base ref to resolve and print",
+    )
+    base.add_argument("--no-hooks", action="store_true", help="explicitly skip all hook checks")
+    p.add_argument(
+        "--path-entry",
+        action="append",
+        default=[],
+        help="additional absolute executable directory in the lint allowlist",
+    )
     p.set_defaults(func=cmd_policy_lint)
 
     p = sub.add_parser("doctor", help="report required host tools")
     p.set_defaults(func=cmd_doctor)
 
-    p = sub.add_parser("checks", help="read-only check-policy report from the snapshot tool")
+    p = sub.add_parser("checks", help="read-only in-package check-policy report")
     p.add_argument("--results", help="JSON results file keyed by exact check name")
     p.set_defaults(func=cmd_checks)
     return parser

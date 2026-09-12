@@ -15,7 +15,7 @@ plus a generator for consumer wiring. The core ships no scheduler service,
 dashboard, cloud control plane or installer beyond that generator.
 
 See [setup and revision updates](SETUP.md). Run the source tests with
-`python3 -m unittest discover -s tests -v` (Python 3.11+ and Git).
+`.venv/bin/python -m pytest -q` (Python 3.12+ and Git).
 
 A deposit is not evidence of product portability. That requires real changes in
 two consumers on the same final core revision, both runtime entry points used,

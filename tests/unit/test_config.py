@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 import pytest
 
@@ -83,14 +84,144 @@ def test_privileged_hooks_come_from_base_not_candidate(consumer: Path):
     )
     profile = config.load_profile(consumer)
     assert profile.hooks["acceptance"] == ("true",)
-    hooks = config.effective_hooks(profile, base_ref="main")
+    base = config.resolve_base(consumer, base_ref="refs/heads/main")
+    hooks = config.effective_hooks(profile, base)
     assert hooks["acceptance"] == ("make test",), "candidate must not change its own acceptance"
     assert "closeout" not in hooks, "privileged hook absent at base is absent, not adopted"
     assert hooks["worktree_setup"] == ("make setup",)
 
 
 def test_unavailable_base_is_a_blocker_not_no_hooks(consumer: Path):
-    profile = config.load_profile(consumer)
     with pytest.raises(config.ConfigError) as info:
-        config.effective_hooks(profile, base_ref="origin/does-not-exist")
+        config.resolve_base(consumer, base_ref="refs/remotes/origin/does-not-exist")
     assert "unavailable" in str(info.value)
+
+
+@pytest.mark.parametrize("base_ref", ["HEAD", "HEAD~1", "main"])
+def test_base_ref_rejects_revision_expressions_before_git(
+    consumer: Path, monkeypatch, base_ref: str
+):
+    def unexpected_git(*_args, **_kwargs):
+        raise AssertionError("invalid base refs must be rejected before invoking git")
+
+    monkeypatch.setattr(config, "_git", unexpected_git)
+    with pytest.raises(config.ConfigError, match="full named ref"):
+        config.resolve_base(consumer, base_ref=base_ref)
+
+
+def test_packed_full_base_ref_is_accepted(consumer: Path):
+    expected = git(consumer, "rev-parse", "refs/heads/main").strip()
+    git(consumer, "pack-refs", "--all", "--prune")
+    assert not (consumer / ".git/refs/heads/main").exists()
+    assert config.resolve_base(consumer, base_ref="refs/heads/main") == expected
+
+
+def test_annotated_tag_object_is_rejected_as_an_exact_base(consumer: Path):
+    git(consumer, "tag", "-a", "reviewed", "-m", "reviewed base")
+    tag_object = git(consumer, "rev-parse", "refs/tags/reviewed").strip()
+    with pytest.raises(config.ConfigError, match="did not resolve to that exact commit"):
+        config.resolve_base(consumer, base=tag_object)
+
+
+def test_consumer_below_git_top_level_is_rejected(tmp_path: Path):
+    repository = tmp_path / "repository"
+    consumer = repository / "nested-consumer"
+    (consumer / "vendor/loop-zero").mkdir(parents=True)
+    (repository / "workflow.toml").write_text(minimal_workflow(), encoding="utf-8")
+    (consumer / "workflow.toml").write_text(minimal_workflow(), encoding="utf-8")
+    git(repository, "init", "-q", "-b", "main")
+    git(repository, "add", ".")
+    git(repository, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD").strip()
+
+    profile = config.load_profile(consumer)
+    with pytest.raises(config.ConfigError, match="must equal Git top level"):
+        config.effective_hooks(profile, base)
+
+
+@pytest.mark.parametrize(
+    ("workflow", "problem"),
+    [
+        (minimal_workflow() + "\n[routing]\naliases = []\n", "[routing.aliases]"),
+        (minimal_workflow() + "\n[routing]\ntiers = \"wrong\"\n", "[routing.tiers]"),
+        ("path_classes = []\n" + minimal_workflow(), "[path_classes]"),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nbad = { runner = "fake", model = "fake", write = "false" }\n',
+            ".write",
+        ),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nbad = { runner = "fake", model = "fake", agent = 1 }\n',
+            ".agent",
+        ),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nok = { runner = "fake", model = "fake" }\n'
+            + '[routing.tiers]\nC = { alias = "ok", read_only = "false" }\n',
+            ".read_only",
+        ),
+        (
+            minimal_workflow()
+            + '\n[routing.aliases]\nok = { runner = "fake", model = "fake" }\n'
+            + '[routing.tiers]\nC = { alias = "ok", effort = "ultra" }\n',
+            ".effort",
+        ),
+        (
+            "hooks = []\n"
+            + minimal_workflow().replace(
+                '[hooks]\nworktree_setup = ["make setup"]\nacceptance = ["make test"]\n',
+                "",
+            ),
+            "[hooks]",
+        ),
+    ],
+)
+def test_wrong_nested_toml_types_are_config_errors(tmp_path: Path, workflow: str, problem: str):
+    (tmp_path / "workflow.toml").write_text(workflow, encoding="utf-8")
+    with pytest.raises(config.ConfigError) as info:
+        config.load_profile(tmp_path)
+    assert problem in str(info.value)
+
+
+def test_core_path_rejects_traversal_dot_and_symlinks(tmp_path: Path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (tmp_path / "linked").symlink_to(outside, target_is_directory=True)
+    for path in (".", "../outside", "linked/core"):
+        with pytest.raises(config.ConfigError):
+            (tmp_path / "workflow.toml").write_text(
+                minimal_workflow().replace('path = "vendor/loop-zero"', f'path = "{path}"')
+            )
+            config.load_profile(tmp_path)
+
+
+def test_rendered_core_fields_reject_controls_and_managed_markers(tmp_path: Path):
+    (tmp_path / "vendor/loop-zero").mkdir(parents=True)
+    injected = minimal_workflow().replace(
+        'repository = "https://github.com/feder-positronics/loop-zero"',
+        f'repository = """https://example.invalid/core\n{config.MANAGED_BLOCK_END}\n"""',
+    )
+    (tmp_path / "workflow.toml").write_text(injected, encoding="utf-8")
+    with pytest.raises(config.ConfigError) as info:
+        config.load_profile(tmp_path)
+    assert "[core].repository: control characters are forbidden" in str(info.value)
+    assert "[core].repository: managed-block marker text is forbidden" in str(info.value)
+
+    data = tomllib.loads(minimal_workflow())
+    data["core"]["path"] = "vendor/loop-zero\x01"
+    with pytest.raises(config.ConfigError, match=r"\[core\]\.path: control characters"):
+        config.validate(data, tmp_path)
+
+    data = tomllib.loads(minimal_workflow())
+    data["core"]["path"] = f"vendor/{config.MANAGED_BLOCK_END}"
+    with pytest.raises(config.ConfigError, match=r"\[core\]\.path: managed-block marker"):
+        config.validate(data, tmp_path)
+
+
+def test_core_path_rejects_a_missing_component(tmp_path: Path):
+    (tmp_path / "workflow.toml").write_text(minimal_workflow(), encoding="utf-8")
+    with pytest.raises(
+        config.ConfigError, match=r"\[core\]\.path: component .* does not exist"
+    ):
+        config.load_profile(tmp_path)
