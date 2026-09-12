@@ -14,6 +14,18 @@ state_root = "~/.local/state/example"
 contract = "loop-zero-v1"
 epoch = 1
 sandbox = "bwrap"
+skills_dir = ".cursor/skills"
+skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]
+product_name = "Example"
+
+[toolchain]
+backend_dir = "src"
+frontend_dir = "web"
+scripts_dir = "scripts"
+
+[toolchain.commands]
+worktree_setup = "python3 -m venv .venv"
+test_backend_unit = "python3 -m unittest discover -s tests"
 
 [checks]
 required = ["unit"]
