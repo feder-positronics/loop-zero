@@ -33,6 +33,7 @@ from .config import (
 )
 from . import gates
 from . import sync as sync_module
+from .trust import allowed_path, resolve_executable
 
 TOOLS = ("git", "bwrap", "openssl", "gh")
 
@@ -69,94 +70,7 @@ check_integration = "not-applicable: fill in or state why there is no integratio
 """
 
 
-DEFAULT_EXECUTABLE_PATH = (Path("/usr/bin"),)
 SHELL_METACHARACTERS = re.compile(r"&&|\|\||[;&|<>`\r\n]|\$\(")
-
-
-def _no_symlink_components(path: Path) -> bool:
-    """Return true only for an absolute path with no symlink component."""
-    if not path.is_absolute() or ".." in path.parts:
-        return False
-    current = Path("/")
-    try:
-        for part in path.parts[1:]:
-            current /= part
-            if stat.S_ISLNK(os.lstat(current).st_mode):
-                return False
-    except OSError:
-        return False
-    return True
-
-
-def _allowed_path(entries: list[str]) -> tuple[Path, ...]:
-    allowed: list[Path] = []
-    problems: list[str] = []
-    for entry in (*map(str, DEFAULT_EXECUTABLE_PATH), *entries):
-        path = Path(entry)
-        if not path.is_absolute():
-            problems.append(f"--path-entry {entry!r}: must be an absolute directory")
-        elif not _no_symlink_components(path):
-            problems.append(f"--path-entry {entry!r}: symlink or unavailable path component")
-        elif not stat.S_ISDIR(os.lstat(path).st_mode):
-            problems.append(f"--path-entry {entry!r}: directory is unavailable")
-        else:
-            allowed.append(path.resolve(strict=True))
-    if problems:
-        raise ConfigError(problems)
-    return tuple(allowed)
-
-
-def _regular_executable(path: Path) -> bool:
-    try:
-        return (
-            _no_symlink_components(path)
-            and stat.S_ISREG(os.lstat(path).st_mode)
-            and os.access(path, os.X_OK)
-        )
-    except OSError:
-        return False
-
-
-def _repository_executable(root: Path, token: str) -> bool:
-    candidate = root / token
-    try:
-        if not _regular_executable(candidate):
-            return False
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root.resolve(strict=True))
-        return True
-    except (OSError, ValueError):
-        return False
-
-
-def _resolve_executable(root: Path, token: str, allowed: tuple[Path, ...]) -> Path | None:
-    if "/" in token:
-        path = Path(token)
-        if not path.is_absolute():
-            return (root / path).resolve() if _repository_executable(root, token) else None
-        for entry in allowed:
-            if not _regular_executable(path):
-                return None
-            try:
-                executable = path.resolve(strict=True)
-                directory = entry.resolve(strict=True)
-            except OSError:
-                continue
-            if executable.parent == directory:
-                return executable
-        return None
-    for directory in allowed:
-        candidate = directory / token
-        if not _regular_executable(candidate):
-            continue
-        try:
-            executable = candidate.resolve(strict=True)
-            allowed_real = directory.resolve(strict=True)
-        except OSError:
-            continue
-        if executable.parent == allowed_real:
-            return executable
-    return None
 
 
 def _lint_hook_commands(
@@ -176,7 +90,7 @@ def _lint_hook_commands(
                 continue
             if not argv:
                 problems.append(f"{where}: command has no executable")
-            elif _resolve_executable(profile.root, argv[0], allowed) is None:
+            elif resolve_executable(profile.root, argv[0], allowed) is None:
                 problems.append(
                     f"{where}: executable {argv[0]!r} is not a regular executable in the allowed PATH"
                 )
@@ -287,7 +201,7 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
         print("UNVERIFIED: hook-aware policy lint requires --base or --base-ref", file=sys.stderr)
         return 1
 
-    allowed = _allowed_path(args.path_entry)
+    allowed = allowed_path(args.path_entry)
     problems: list[str] = []
     base_sha: str | None = None
     if not args.no_hooks:
@@ -303,7 +217,7 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
     for name, alias in profile.aliases.items():
         if alias.runner in ("claude", "codex", "cursor"):
             binary = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[alias.runner]
-            if _resolve_executable(profile.root, binary, allowed) is None:
+            if resolve_executable(profile.root, binary, allowed) is None:
                 problems.append(f"[routing.aliases].{name}: runtime {binary!r} not in the allowed PATH")
     if problems:
         for problem in problems:
