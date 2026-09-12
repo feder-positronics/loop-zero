@@ -75,6 +75,23 @@ def test_cursor_credential_must_cover_runtime_plus_safety_margin(
             pass
 
 
+def test_expiring_access_only_cursor_credential_is_cleanly_unavailable(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / ".config" / "cursor" / "auth.json"
+    payload = _write_credential(credential, expires_at_s=1_800)
+    payload["refreshToken"] = payload["accessToken"]
+    credential.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(cursor_credential.CursorCredentialUnavailable):
+        with cursor_credential.cursor_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+        ):
+            pass
+
+
 @pytest.mark.parametrize("unsafe_kind", ["mode", "symlink", "malformed"])
 def test_cursor_credential_rejects_unsafe_or_invalid_files(
     tmp_path: Path,

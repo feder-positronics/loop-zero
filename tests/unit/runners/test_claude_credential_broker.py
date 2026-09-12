@@ -83,6 +83,28 @@ def test_fresh_credential_is_snapshotted_without_refresh(tmp_path: Path) -> None
         os.fstat(descriptor)
 
 
+def test_expiring_access_only_credential_is_cleanly_unavailable(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / ".claude" / ".credentials.json"
+    payload = _credential(expires_at_ms=1_100_000, access_token="access-only")
+    oauth = payload["claudeAiOauth"]
+    oauth["refreshToken"] = oauth["accessToken"]
+    oauth["refreshTokenExpiresAt"] = oauth["expiresAt"]
+    _write_credential(credential, payload)
+
+    with pytest.raises(claude_credential.ClaudeCredentialUnavailable):
+        with claude_credential.claude_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+            run_status=lambda *_args, **_kwargs: pytest.fail(
+                "access-only credentials must never refresh"
+            ),
+        ):
+            pass
+
+
 def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
     tmp_path: Path,
 ) -> None:

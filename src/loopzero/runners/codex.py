@@ -1971,14 +1971,30 @@ def _validate_payload(payload: bytes) -> _ValidatedCredential:
 
 
 def _sandbox_snapshot_payload(credential: _ValidatedCredential) -> bytes:
-    """Remove the durable refresh capability from a runtime snapshot."""
+    """Allowlist runtime fields and remove the durable refresh capability."""
     decoded = json.loads(credential.payload)
     tokens = decoded["tokens"]
     assert isinstance(tokens, dict)
     access_token = tokens["access_token"]
     assert isinstance(access_token, str)
-    tokens["refresh_token"] = access_token
-    return json.dumps(decoded, separators=(",", ":")).encode("utf-8")
+    snapshot = {
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "access_token": access_token,
+            "id_token": tokens["id_token"],
+            "refresh_token": access_token,
+            "account_id": tokens["account_id"],
+        },
+    }
+    return json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
+
+
+def _is_access_only_credential(credential: _ValidatedCredential) -> bool:
+    decoded = json.loads(credential.payload)
+    tokens = decoded["tokens"]
+    assert isinstance(tokens, dict)
+    return tokens.get("refresh_token") == tokens.get("access_token")
 
 
 def _read_credential(path: Path) -> _ValidatedCredential:
@@ -2280,6 +2296,10 @@ def codex_subscription_credential(
         horizon_s = now_s + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
         credential = _read_credential(path)
         if credential.expires_at_s <= horizon_s:
+            if _is_access_only_credential(credential):
+                raise CodexCredentialUnavailable(
+                    "Codex access-only credential is unavailable for the requested run"
+                )
             refreshed = _refresh_credential(
                 credential,
                 horizon_s=horizon_s,

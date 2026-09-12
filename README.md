@@ -45,28 +45,29 @@ own mandatory filesystem wrapper; the child environment allowlist and sealed
 credential boundary remain active.
 
 Create a GitHub Actions environment named `nightly-conformance`, restrict its
-deployment branches to `main`, and require an environment reviewer to verify
-the queued commit before releasing credentials.  Configure these environment
-secrets (not repository-level secrets) with the native subscription-login
-credential JSON expected by the corresponding runner broker:
+deployment branches to `main`, and configure **no required reviewers** so the
+scheduled job runs unattended. Configure these environment secrets (not
+repository-level secrets) with the native subscription-login credential JSON
+expected by the corresponding runner broker:
 
 - `LOOPZERO_CONFORMANCE_CLAUDE_CREDENTIAL`
 - `LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL`
 - `LOOPZERO_CONFORMANCE_CURSOR_CREDENTIAL`
 
-A missing secret is a hard job failure.  The workflow installs its cleanup trap
-before writing the mode-0600 source below `RUNNER_TEMP`, binds that source
-read-only at a fixed path in the outer sandbox, and removes it at step exit.
-Each broker invocation copies the source into a new private state-root
-directory, may refresh only that disposable copy, seals an access-only worker
-snapshot, and scrubs the copy.  A refreshed credential is deliberately never
-written back to the environment-secret source, so scenario-to-scenario drift
-cannot accumulate in the job.  If provider rotation invalidates that original
-refresh token, an environment owner must re-seal the approved credential; the
-worker has no capability to update the environment secret. The source is never printed or placed in the
-checkout or artifacts.  Because checked-out conformance code necessarily uses
-the credential broker while network is enabled, the environment approval is
-also the authorization boundary for the exact commit being exercised.
+A missing secret is a hard job failure. Before checked-out code starts, a
+separate host step builds a wheel from the run-pinned commit at `release/0.3`,
+installs it into a dedicated venv below `RUNNER_TEMP`, and runs
+`loopzero-credential-seal`. The trusted broker validates and, when needed,
+refreshes the mode-0600 source, then creates a mode-0600 access-only snapshot
+with no refresh token and a clamped expiry. The workflow deletes the source
+before starting bubblewrap. Only the snapshot is bound read-only into the
+validation bubble, and an access-only snapshot that can no longer cover a
+launch becomes cleanly unavailable without any refresh attempt. Neither file
+is placed in the checkout or artifacts, and credential contents are never
+printed. The remaining risk is explicit: checked-out code on `main` can read
+and exfiltrate the short-lived access token while the network-enabled live job
+runs. The GitHub environment limits secret scope, but is not a per-run human
+approval boundary.
 
 The optional repository variable `LOOPZERO_CONFORMANCE_BUDGET_USD` is the
 aggregate charged-cost ceiling per runtime and defaults to USD 2.  Before each
@@ -80,23 +81,28 @@ this output cap; input and cache counters are used for price reporting, not
 miscompared with an output-only limit.  There is no separate total-token cap.
 
 Reporting uses the frozen [`2026-09-12 price table`](src/loopzero/runners/pricing.py),
-not a live lookup.  A zero-token paid result and incomplete usage remain
-unknown, never zero-cost evidence.  If cancellation, disconnect, or timeout
-kills Claude or Codex before usage arrives, the aggregate is conservatively
-charged the native per-run vendor cap and no further scenario launches once
-the charged ceiling is reached.  Cursor exposes no vendor cost/token cap in
-the pinned CLI; its only pre-return spend bounds are the 45-second timeout and
-finite seven-scenario suite, and its report states `harness-only-unpriced` when
-a killed run has no usage.  Each runtime gets one private state-root session
-home bound read-write into both restart/resume launches and scrubbed at suite
-end.  Each job uploads only normalized fields and reports observed or
-conservatively charged accounting separately.
+not a live lookup. A completed turn with zero output tokens, including one
+that reports positive input, and incomplete usage remain unknown rather than
+priced. If cancellation, disconnect, or timeout kills Claude before usage
+arrives, the aggregate is charged its native per-run USD cap. Killed Codex
+runs are charged the output cap plus a conservative estimate of one input
+token per prompt byte. Cursor exposes no native cost/token cap in the pinned
+CLI, so each killed Cursor run is charged a fixed USD 0.10. Killed runs count
+toward `LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS` (default 3), after which the suite
+stops; the aggregate ceiling also stops further launches. Each runtime gets
+one private state-root session home bound read-write into both restart/resume
+launches and scrubbed at suite end. Offline tests verify the repeated home and
+resume argument/SDK option for every vendor; actual provider resume behavior
+is verified only by the nightly job's normalized artifact. Cursor success and
+restart/resume are recorded as `unsupported` because the pinned CLI cannot
+enforce `output_schema`; free-text JSON is never treated as a pass. Each job
+uploads only normalized fields and separates known from conservative charges.
 
 Gate A-G2 means two consecutive **scheduled** UTC nights on the default branch
-are green for all three runtime jobs.  Both nights must have artifacts showing
-the exact pins (including Cursor's build hash), all seven passing scenarios,
-charged aggregate cost within the configured ceiling, and known or conservative
-vendor-cap accounting (with Cursor's explicit harness-only exception for killed
-runs).  A manual dispatch, missing night,
+are green for all three runtime jobs. Both nights must have artifacts showing
+the exact pins (including Cursor's build hash), every supported scenario
+passing, Cursor's schema-dependent scenarios explicitly unsupported, charged
+aggregate cost within the configured ceiling, and known or documented
+conservative accounting. A manual dispatch, missing night,
 skip, cancellation, replay-only run, absent artifact, unknown cost, or failed
 runtime cannot substitute for either green night.

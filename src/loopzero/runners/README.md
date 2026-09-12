@@ -77,6 +77,11 @@ existing refresh-capable credential to its bridge
 on the original sealed-descriptor boundary and writes only the rotated SDK
 output into staging. The Claude CLI has no descriptor credential input, so its
 input file remains confined to the same launch-private directory.
+An already access-only source is never refreshed. If its access expiry cannot
+cover the requested runtime plus safety margin, the broker returns the typed
+credential-unavailable result. Nightly conformance creates that access-only
+source with the separately installed trusted release-wheel entry point before
+checked-out code starts.
 Every `.git` path and every linked-worktree gitdir reachable through those
 bindings must remain read-only. Runners neither build bubblewrap argv nor decide
 which roots are writable. `worker_child_environment()` starts from the positive

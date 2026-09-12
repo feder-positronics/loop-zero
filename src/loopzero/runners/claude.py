@@ -1787,7 +1787,15 @@ def _validate_payload(payload: bytes, *, now_ms: int) -> _ValidatedCredential:
     refresh_expires_at_ms = _integer_milliseconds(
         oauth.get("refreshTokenExpiresAt"), name="refreshTokenExpiresAt"
     )
+    access_only = (
+        refresh_token == access_token
+        and refresh_expires_at_ms == expires_at_ms
+    )
     if refresh_expires_at_ms <= now_ms:
+        if access_only:
+            raise ClaudeCredentialUnavailable(
+                "Claude access-only credential is unavailable"
+            )
         raise ClaudeCredentialRevoked("Claude refresh credential has expired")
     raw_scopes = oauth.get("scopes")
     if (
@@ -2138,6 +2146,14 @@ def _oauth_subscription_credential(
         refresh_attempts = 0
         refresh_binary = claude_binary
         while credential.expires_at_ms <= horizon_ms:
+            if (
+                credential.oauth.refresh_token == credential.oauth.access_token
+                and credential.oauth.refresh_expires_at_ms
+                == credential.oauth.expires_at_ms
+            ):
+                raise ClaudeCredentialUnavailable(
+                    "Claude access-only credential is unavailable for the requested run"
+                )
             if refresh_attempts >= MAX_REFRESH_ATTEMPTS:
                 raise ClaudeCredentialRefreshFailed(
                     "Claude credential changed during trusted refresh"
@@ -2183,6 +2199,7 @@ def claude_subscription_credential(
     run_status: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     claude_binary: Path | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
+    allow_token_fallback: bool = True,
 ) -> Iterator[int]:
     """Prefer renewable OAuth; otherwise lend a validated access-only token."""
 
@@ -2197,6 +2214,8 @@ def claude_subscription_credential(
                 sandbox_wrapper=sandbox_wrapper,
             ))
         except ClaudeCredentialError:
+            if not allow_token_fallback:
+                raise
             descriptor = token_snapshot()
             if descriptor is None:
                 raise

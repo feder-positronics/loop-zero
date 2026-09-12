@@ -15,6 +15,7 @@ guardian = ["PyYAML>=6"]
 
 [project.scripts]
 loopzero = "loopzero.cli:main"
+loopzero-credential-seal = "loopzero.credential_seal:main"
 
 [project.urls]
 Repository = "https://github.com/feder-positronics/loop-zero"

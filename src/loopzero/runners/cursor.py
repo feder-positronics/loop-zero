@@ -180,7 +180,7 @@ def _cursor_subscription_environment():
     with home_context as home:
         assert home is not None
         auth_path = home / ".config" / "cursor" / "auth.json"
-        auth_path.parent.mkdir(mode=0o700, parents=True)
+        auth_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         auth_path.write_bytes(payload)
         auth_path.chmod(0o600)
         environment["HOME"] = str(home)
@@ -791,7 +791,7 @@ def _jwt_expiry(token: str, *, name: str) -> int:
     return parsed
 
 
-def _read_credential(path: Path) -> tuple[bytes, int]:
+def _read_credential(path: Path) -> tuple[bytes, int, bool]:
     if path.is_symlink():
         raise UnsafeCursorCredential("Cursor credential is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -830,7 +830,11 @@ def _read_credential(path: Path) -> tuple[bytes, int]:
         {"accessToken": access_token, "refreshToken": access_token},
         separators=(",", ":"),
     ).encode("utf-8")
-    return snapshot, _jwt_expiry(access_token, name="accessToken")
+    return (
+        snapshot,
+        _jwt_expiry(access_token, name="accessToken"),
+        refresh_token == access_token,
+    )
 
 
 def _snapshot_descriptor(payload: bytes) -> int:
@@ -881,9 +885,13 @@ def cursor_subscription_credential(
     if requested_runtime_s <= 0:
         raise ValueError("requested_runtime_s must be positive")
     path = credential_path or Path.home() / ".config" / "cursor" / "auth.json"
-    payload, expires_at_s = _read_credential(path)
+    payload, expires_at_s, access_only = _read_credential(path)
     horizon_s = clock() + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
     if expires_at_s <= horizon_s:
+        if access_only:
+            raise CursorCredentialUnavailable(
+                "Cursor access-only credential is unavailable for the requested run"
+            )
         raise CursorCredentialExpired(
             "Cursor browser login expires before the requested run can finish"
         )
