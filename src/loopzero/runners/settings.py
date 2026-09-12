@@ -119,6 +119,7 @@ class RuntimeSettings:
     claude_cli_path: Path | None = None
     codex_cli_path: Path | None = None
     cursor_cli_path: Path | None = None
+    session_home: Path | None = None
 
     def __post_init__(self) -> None:
         if self.temp_prefix is None:
@@ -143,6 +144,11 @@ class RuntimeSettings:
             path = getattr(self, name)
             if path is not None and not isinstance(path, Path):
                 raise TypeError(f"{name} must be a Path or None")
+        if self.session_home is not None:
+            if not isinstance(self.session_home, Path):
+                raise TypeError("session_home must be a Path or None")
+            if not self.session_home.is_absolute():
+                raise ValueError("session_home must be absolute")
         if not isinstance(self.child_env_allowlist, frozenset) or any(
             not isinstance(name, str) or not _ENV_NAME_RE.match(name)
             for name in self.child_env_allowlist
@@ -211,6 +217,7 @@ class RuntimeSettings:
             "claude_cli_path": str(self.claude_cli_path) if self.claude_cli_path else None,
             "codex_cli_path": str(self.codex_cli_path) if self.codex_cli_path else None,
             "cursor_cli_path": str(self.cursor_cli_path) if self.cursor_cli_path else None,
+            "session_home": str(self.session_home) if self.session_home else None,
         }, separators=(",", ":"))}
 
     @classmethod
@@ -222,7 +229,7 @@ class RuntimeSettings:
         values = json.loads(raw)
         for key in (
             "toolchain_interpreter", "bridge_path", "tooling_root",
-            "claude_cli_path", "codex_cli_path", "cursor_cli_path",
+            "claude_cli_path", "codex_cli_path", "cursor_cli_path", "session_home",
         ):
             if values.get(key) is not None:
                 values[key] = Path(values[key])
@@ -267,9 +274,22 @@ class RuntimeSettings:
         return path if path.is_absolute() else home / path
 
     def workspace_root(self, tooling_root: Path) -> Path:
-        """Return the settings-owned parent for per-run adapter workspaces."""
-        root = self.repository_root(self.tooling_root or tooling_root)
-        return root / f".{self.temp_prefix}-runner-workspaces"
+        """Return the private-state parent for per-run adapter workspaces.
+
+        Runner scratch space must remain writable when the tooling checkout is
+        mounted read-only.  Resolve ``~`` against the OS account home rather
+        than the child ``HOME`` environment, matching credential-broker state.
+        ``tooling_root`` remains in the signature for compatibility with the
+        other path resolvers; it is deliberately not used as writable storage.
+        """
+        del tooling_root
+        try:
+            import pwd
+
+            account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        except (ImportError, KeyError, OSError):  # pragma: no cover - non-POSIX
+            account_home = Path.home()
+        return self.state_path(account_home) / f".{self.temp_prefix}-runner-workspaces"
 
     # Toolchain resolution ------------------------------------------------
 

@@ -5,9 +5,10 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 import json
 import os
+import re
 import shutil
 from collections.abc import Callable, Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -30,12 +31,13 @@ from .contract import (
     TerminalReason,
     is_valid_resume_session_id,
 )
-from .pricing import estimated_cost_usd, total_tokens
+from .pricing import estimated_cost_usd
 from .process import (
     ProcessHandle,
     ProcessResult,
     cancel_cli,
     filtered_child_environment,
+    private_session_home,
     private_temporary_directory,
     run_cli,
 )
@@ -46,7 +48,7 @@ MAX_FINAL_OUTPUT_BYTES = MAX_STRUCTURED_OUTPUT_BYTES
 MAX_AUTH_STATUS_BYTES = 256 * 1024
 MAX_USAGE_VALUE = 10**12
 AUTH_STATUS_TIMEOUT_S = 5.0
-PINNED_CURSOR_CLI_VERSION = "2026.09.08"
+PINNED_CURSOR_CLI_VERSION = "2026.09.08-6caf4ff"
 AUTH_STATUS_COMMAND = ["cursor-agent", "status", "--format", "json"]
 SUBSCRIPTION_STATUS_COMMAND = ["cursor-agent", "about", "--format", "json"]
 ELIGIBLE_SUBSCRIPTION_TIERS = frozenset(
@@ -157,19 +159,26 @@ def _cursor_subscription_environment():
     try:
         fd = int(raw_fd)
         metadata = os.fstat(fd)
+        if metadata.st_size <= 2 or metadata.st_size > 1024 * 1024:
+            raise CursorProtocolError("Cursor credential descriptor is invalid")
         payload = os.pread(fd, metadata.st_size, 0)
         decoded = json.loads(payload)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise CursorProtocolError("Cursor credential descriptor is invalid") from exc
     if (
-        metadata.st_size <= 2
-        or metadata.st_size > 1024 * 1024
-        or not isinstance(decoded, dict)
+        not isinstance(decoded, dict)
         or not isinstance(decoded.get("accessToken"), str)
         or decoded.get("refreshToken") != decoded.get("accessToken")
     ):
         raise CursorProtocolError("Cursor credential descriptor is invalid")
-    with private_temporary_directory("cursor-auth") as home:
+    configured_home = private_session_home()
+    home_context = (
+        nullcontext(configured_home)
+        if configured_home is not None
+        else private_temporary_directory("cursor-auth")
+    )
+    with home_context as home:
+        assert home is not None
         auth_path = home / ".config" / "cursor" / "auth.json"
         auth_path.parent.mkdir(mode=0o700, parents=True)
         auth_path.write_bytes(payload)
@@ -443,6 +452,23 @@ class CursorAdapter:
             if path is not None else self._which("cursor-agent") is not None
         )
 
+    def _pinned_version_ready(self, request: RuntimeRequest) -> bool:
+        path = self._settings.cursor_cli_path
+        if path is None:
+            return True
+        outcome = self._run_probe(
+            [str(path), "--version"],
+            cwd=request.cwd,
+            input_text="",
+            timeout_s=AUTH_STATUS_TIMEOUT_S,
+            env=filtered_cursor_environment(),
+        )
+        if outcome.timed_out or outcome.output_limited or outcome.returncode != 0:
+            return False
+        output = (outcome.stdout or outcome.stderr).strip()
+        match = re.search(r"^(\d{4}\.\d{2}\.\d{2}-[0-9a-f]+)\b", output)
+        return match is not None and match.group(1) == PINNED_CURSOR_CLI_VERSION
+
     @using_adapter_settings
     def probe(self, request: RuntimeRequest) -> RuntimeReadiness:
         if request.eligibility is not SubscriptionEligibility.APPROVED:
@@ -458,6 +484,17 @@ class CursorAdapter:
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
                 failure=ReadinessFailure.EXECUTABLE_MISSING,
                 repair="install or restore the approved Cursor CLI",
+            )
+        try:
+            version_ready = self._pinned_version_ready(request)
+        except (OSError, RuntimeError):
+            version_ready = False
+        if not version_ready:
+            return RuntimeReadiness(
+                ready=False,
+                eligibility=SubscriptionEligibility.UNAVAILABLE,
+                failure=ReadinessFailure.SDK_VERSION_MISMATCH,
+                repair="restore the pinned Cursor CLI version",
             )
         outcomes: list[ProcessResult] = []
         try:
@@ -662,7 +699,7 @@ class CursorAdapter:
     ) -> RuntimeResult:
         normalized_cost = estimated_cost_usd(request.requested_model, usage)
         budget = get_settings().budget
-        measured_tokens = total_tokens(usage)
+        measured_tokens = usage.output_tokens if usage is not None else None
         if budget is not None and (
             (measured_tokens is not None and measured_tokens > budget.max_tokens)
             or (normalized_cost is not None and normalized_cost > budget.max_usd)

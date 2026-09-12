@@ -1,5 +1,5 @@
 from loopzero.runners.contract import RuntimeUsage
-from loopzero.runners.pricing import PRICE_TABLE_VERSION, estimated_cost_usd
+from loopzero.runners.pricing import PRICE_TABLE_VERSION, estimated_cost_usd, total_tokens
 
 
 def test_price_table_is_versioned_and_prices_complete_usage():
@@ -19,3 +19,19 @@ def test_price_is_unknown_without_tokens_or_a_pinned_model():
     assert estimated_cost_usd(
         "unlisted-model", RuntimeUsage(input_tokens=1, output_tokens=1)
     ) is None
+    assert estimated_cost_usd(
+        "gpt-5.6-luna", RuntimeUsage(input_tokens=0, output_tokens=0)
+    ) is None
+
+
+def test_codex_cached_input_is_not_billed_twice():
+    usage = RuntimeUsage(
+        input_tokens=17,
+        output_tokens=9,
+        cache_read_tokens=5,
+    )
+    # Codex reports cached input inside input_tokens: 12 uncached input tokens,
+    # five cached input tokens, and nine output tokens.
+    expected = round((12 * 0.25 + 5 * 0.025 + 9 * 2.0) / 1_000_000, 9)
+    assert estimated_cost_usd("gpt-5.6-luna", usage) == expected
+    assert total_tokens(usage, model="gpt-5.6-luna") == 26

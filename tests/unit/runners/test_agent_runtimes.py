@@ -6700,7 +6700,10 @@ def test_cursor_run_workspace_is_inside_documented_settings_root(
     worktree = tmp_path / "worktree"
     tooling_root.mkdir()
     worktree.mkdir()
-    settings = RuntimeSettings(tooling_root=tooling_root)
+    settings = RuntimeSettings(
+        tooling_root=tooling_root,
+        state_root=str(tmp_path / "state"),
+    )
     workspace_root = settings.workspace_root(tooling_root)
     observed_workspace: Path | None = None
 

@@ -11,6 +11,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -37,7 +38,7 @@ from .contract import (
     TerminalReason,
     is_valid_resume_session_id,
 )
-from .pricing import estimated_cost_usd, total_tokens
+from .pricing import estimated_cost_usd
 from .process import (
     ProcessHandle,
     ProcessResult,
@@ -906,6 +907,15 @@ class CodexAdapter:
     def _auth_status_command(self) -> list[str]:
         return [self._settings.cli("codex", "codex"), "login", "status"]
 
+    @staticmethod
+    def _parse_cli_version(output: str) -> str:
+        match = re.search(
+            r"^codex-cli (\d+\.\d+\.\d+)\b", output.strip()
+        )
+        if match is None:
+            raise CodexProtocolError("Codex CLI version output was invalid")
+        return match.group(1)
+
     def _cli_available(self) -> bool:
         path = self._settings.codex_cli_path
         return (
@@ -950,6 +960,36 @@ class CodexAdapter:
                 failure=ReadinessFailure.EXECUTABLE_MISSING,
                 repair="install or restore the approved Codex CLI",
             )
+        pinned_path = self._settings.codex_cli_path
+        if pinned_path is not None:
+            try:
+                version_outcome = self._run_probe(
+                    [str(pinned_path), "--version"],
+                    cwd=request.cwd,
+                    input_text="",
+                    timeout_s=AUTH_STATUS_TIMEOUT_S,
+                    env=filtered_codex_environment(),
+                )
+                version = self._parse_cli_version(
+                    version_outcome.stdout or version_outcome.stderr
+                )
+            except (OSError, subprocess.TimeoutExpired, CodexProtocolError):
+                version_outcome = None
+                version = None
+            if (
+                version_outcome is None
+                or version_outcome.timed_out
+                or version_outcome.output_limited
+                or version_outcome.returncode != 0
+                or version != PINNED_CODEX_VERSION
+            ):
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.SDK_VERSION_MISMATCH,
+                    repair="restore the pinned Codex CLI version",
+                    transport=CODEX_SDK_TRANSPORT,
+                )
         raw_auth_fd = os.environ.get(get_settings().env_name("CODEX_AUTH_FD"))
         if raw_auth_fd is not None:
             try:
@@ -1771,7 +1811,7 @@ class CodexAdapter:
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
         normalized_cost = estimated_cost_usd(request.requested_model, usage)
         budget = get_settings().budget
-        measured_tokens = total_tokens(usage)
+        measured_tokens = usage.output_tokens if usage is not None else None
         if budget is not None and (
             (measured_tokens is not None and measured_tokens > budget.max_tokens)
             or (normalized_cost is not None and normalized_cost > budget.max_usd)

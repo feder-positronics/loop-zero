@@ -204,6 +204,31 @@ def _private_state_root() -> Path:
     return root
 
 
+def private_session_home() -> Path | None:
+    """Validate the optional caller-owned session home below private state.
+
+    The live conformance suite owns this directory across two adapter
+    launches.  Ordinary callers leave it unset and retain per-launch state.
+    """
+    configured = get_settings().session_home
+    if configured is None:
+        return None
+    try:
+        directory = configured.resolve(strict=True)
+        metadata = directory.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ProcessGroupError("runtime session home is unavailable") from exc
+    if (
+        directory.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or directory.parent != _private_state_root()
+    ):
+        raise ProcessGroupError("runtime session home is unsafe")
+    return directory
+
+
 @contextmanager
 def private_temporary_directory(kind: str):
     """Create and scrub one random 0700 directory below the private state root.
@@ -591,10 +616,14 @@ def launch_cli(
             raise ProcessGroupError("sandboxed runtime private tmpdir is unsafe") from exc
         if not resolved_tmpdir.is_dir() or resolved_tmpdir.parent != _private_state_root():
             raise ProcessGroupError("sandboxed runtime private tmpdir is unsafe")
+        resolved_mounts = tuple(private_mounts)
+        session_home = private_session_home()
+        if session_home is not None and session_home not in resolved_mounts:
+            resolved_mounts = (*resolved_mounts, session_home)
         launch_spec = LaunchSpec(
             argv=tuple(command),
             cwd=cwd,
-            private_mounts=tuple(private_mounts),
+            private_mounts=resolved_mounts,
             private_tmpdir=resolved_tmpdir,
         )
         launch_command = list(sandbox_wrapper(launch_spec))

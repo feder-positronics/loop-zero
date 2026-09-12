@@ -57,13 +57,19 @@ configuration bootstraps create temporary files. The wrapper must also provide
 a private `/dev` and `/proc` to the child (Python refuses to start without
 `/dev/urandom`). The venv binding must include the
 interpreter's `pyvenv.cfg`, `bin`, and `lib` so the bridge can import its SDKs.
-Every runner child cwd is inside either the governed worktree or that settings
-workspace root, except credential renewal children. Renewals use a random,
+The settings workspace root is derived below the private state root, never the
+tooling checkout, so read-only source mounts remain compatible with adapter
+scratch space. Every runner child cwd is inside either the governed worktree or
+that settings workspace root, except credential renewal children. Renewals use a random,
 atomically created 0700 directory below the consumer state root, pass only that
 directory in the refresh launch's `private_mounts`, and scrub it afterwards.
 The wrapper must never bind the state root itself or carry private mounts from
 one launch into another; ordinary workers therefore cannot see refresh
-material. Every adapter's worker credential snapshot carries no refresh
+material. The one explicit exception is an opt-in `session_home`: it must be a
+random 0700 direct child of the private state root, is validated and bound into
+each launch using those settings, and is owned and scrubbed by the suite that
+needs cross-launch resume. Credential files inside it are still removed after
+each launch. Every adapter's worker credential snapshot carries no refresh
 capability: the refresh token is replaced by the access token and expiry is
 clamped to the access-token expiry. Refresh runs only in the host broker under
 the renewal lock in a launch-private staging directory. Codex transfers the

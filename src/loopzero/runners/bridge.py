@@ -60,7 +60,6 @@ from .contract import (
 )
 
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
-PINNED_CLAUDE_CLI_VERSION = "2.1.269"
 
 
 def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
@@ -531,7 +530,12 @@ def _filtered_environment() -> dict[str, str]:
 def _claude_subscription_environment() -> dict[str, str]:
     """Consume a brokered access-only snapshot without exposing its descriptor."""
     environment = _filtered_environment()
-    raw_fd = os.environ.pop(get_settings().env_name("CLAUDE_AUTH_FD"), None)
+    descriptor_name = get_settings().env_name("CLAUDE_AUTH_FD")
+    raw_fd = os.environ.pop(descriptor_name, None)
+    environment.pop(descriptor_name, None)
+    session_home = get_settings().session_home
+    if session_home is not None:
+        environment["HOME"] = str(session_home)
     if raw_fd is None:
         return environment
     try:
@@ -547,10 +551,35 @@ def _claude_subscription_environment() -> dict[str, str]:
             os.close(int(raw_fd))
         except (OSError, ValueError):
             pass
+    from .claude import ELIGIBLE_SUBSCRIPTION_TYPES, REQUIRED_SCOPES, TOKEN_PATTERN
+
     token = payload.get("claudeCodeOauthToken") if isinstance(payload, dict) else None
+    if token is not None and (
+        not isinstance(token, str)
+        or TOKEN_PATTERN.fullmatch(token) is None
+        or payload.get("source")
+        not in {"token-env", "token-file", "token-file(default)"}
+    ):
+        raise BridgeInputError("provider credential descriptor is invalid")
     if token is None and isinstance(payload, dict):
         oauth = payload.get("claudeAiOauth")
-        token = oauth.get("accessToken") if isinstance(oauth, dict) else None
+        if not isinstance(oauth, dict):
+            raise BridgeInputError("provider credential descriptor is invalid")
+        token = oauth.get("accessToken")
+        expiry = oauth.get("expiresAt")
+        scopes = oauth.get("scopes")
+        if (
+            not isinstance(token, str)
+            or not token
+            or oauth.get("refreshToken") != token
+            or not isinstance(expiry, int)
+            or isinstance(expiry, bool)
+            or oauth.get("refreshTokenExpiresAt") != expiry
+            or not isinstance(scopes, list)
+            or not REQUIRED_SCOPES.issubset(scopes)
+            or oauth.get("subscriptionType") not in ELIGIBLE_SUBSCRIPTION_TYPES
+        ):
+            raise BridgeInputError("provider credential descriptor is invalid")
     if not isinstance(token, str) or not token:
         raise BridgeInputError("provider credential descriptor is invalid")
     environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
@@ -590,12 +619,33 @@ def _materialize_codex_subscription_auth() -> (
         raise BridgeInputError("provider credential is malformed") from exc
     if not isinstance(decoded, dict) or not decoded:
         raise BridgeInputError("provider credential is malformed")
-    directory = TemporaryDirectory(prefix=get_settings().temp_name("codex-auth"))
-    home = Path(directory.name)
+    configured_home = get_settings().session_home
+    directory = (
+        None
+        if configured_home is not None
+        else TemporaryDirectory(prefix=get_settings().temp_name("codex-auth"))
+    )
+    home = configured_home if configured_home is not None else Path(directory.name)
+    assert home is not None
     auth_path = home / "auth.json"
     auth_path.write_bytes(payload)
     auth_path.chmod(0o600)
     return directory, {"CODEX_HOME": str(home)}, auth_path
+
+
+@contextmanager
+def _codex_subscription_environment() -> Iterator[tuple[dict[str, str], Path | None]]:
+    """Materialize Codex auth and scrub it on every exit path."""
+    directory: TemporaryDirectory[str] | None = None
+    auth_path: Path | None = None
+    try:
+        directory, environment, auth_path = _materialize_codex_subscription_auth()
+        yield environment, auth_path
+    finally:
+        if auth_path is not None:
+            auth_path.unlink(missing_ok=True)
+        if directory is not None:
+            directory.cleanup()
 
 
 def _bounded_string_list(
@@ -1500,7 +1550,9 @@ def _codex_thread_kwargs(request: BridgeRequest) -> CodexThreadKwargs:
     from openai_codex import ApprovalMode
 
     return {
-        # Session persistence is required for the normalized resume contract.
+        # The SDK must persist the first thread for normalized resume.  Live
+        # conformance supplies a private suite-scoped CODEX_HOME that survives
+        # both bridge launches and is scrubbed when the suite ends.
         "ephemeral": False,
         "model": request["requested_model"],
         "model_provider": CODEX_MODEL_PROVIDER,
@@ -1694,10 +1746,7 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
         )
         if selected != expected:
             raise RuntimeError("startup")
-        selected_version = (
-            PINNED_CLAUDE_CLI_VERSION if configured is not None else __cli_version__
-        )
-        version = tuple(int(part) for part in selected_version.split("."))
+        version = tuple(int(part) for part in __cli_version__.split("."))
         if len(version) != 3:
             raise ValueError("version")
     except Exception:
@@ -1706,7 +1755,9 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
         )
         return
     minimum = CLAUDE_MODEL_MINIMUM_CLI_VERSION.get(request["requested_model"])
-    if minimum is not None and version < minimum:
+    # Explicit paths were attested through the parent's mandatory wrapper
+    # before this bridge launch.  The SDK constant applies only to its bundle.
+    if configured is None and minimum is not None and version < minimum:
         _write_frame(
             {"type": "readiness", "status": "failed", "failure": "model-unsupported"}
         )
@@ -1716,8 +1767,6 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
 
 def _probe_codex_app_server(request: BridgeRequest) -> None:
     """Exercise pinned SDK bootstrap and ChatGPT account boundaries without a turn."""
-    auth_directory: TemporaryDirectory[str] | None = None
-    auth_path: Path | None = None
     try:
         import openai_codex
 
@@ -1729,10 +1778,10 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
         from openai_codex import Codex, CodexConfig
 
         _strip_raw_api_from_process_env()
-        auth_directory, auth_environment, auth_path = (
-            _materialize_codex_subscription_auth()
-        )
-        with _codex_effective_config_lock(request) as config_lock:
+        with (
+            _codex_effective_config_lock(request) as config_lock,
+            _codex_subscription_environment() as (auth_environment, auth_path),
+        ):
             codex_environment = _filtered_environment()
             codex_environment.update(auth_environment)
             config = CodexConfig(
@@ -1753,11 +1802,6 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
         # public probe contract retains only this fixed readiness class.
         _write_frame({"type": "readiness", "status": "failed", "failure": "bootstrap"})
         return
-    finally:
-        if auth_path is not None:
-            auth_path.unlink(missing_ok=True)
-        if auth_directory is not None:
-            auth_directory.cleanup()
     _write_frame({"type": "readiness", "status": "ready"})
 
 
@@ -1794,7 +1838,6 @@ def _run_codex(
     from openai_codex.models import Notification
 
     _strip_raw_api_from_process_env()
-    auth_directory, auth_environment, auth_path = _materialize_codex_subscription_auth()
     if openai_codex.__version__ != PINNED_CODEX_VERSION:
         raise RuntimeError("startup")
     saw_message = False
@@ -1823,7 +1866,10 @@ def _run_codex(
         WebSearchThreadItem,
     )
 
-    with _codex_effective_config_lock(request) as config_lock:
+    with (
+        _codex_effective_config_lock(request) as config_lock,
+        _codex_subscription_environment() as (auth_environment, auth_path),
+    ):
         codex_environment = _filtered_environment()
         codex_environment.update(auth_environment)
         config = CodexConfig(
@@ -2056,10 +2102,6 @@ def _run_codex(
     if usage_payload is not None:
         frame["usage"] = usage_payload
     _write_frame(frame)
-    if auth_directory is not None:
-        auth_directory.cleanup()
-
-
 async def _run_claude(
     request: BridgeRequest,
     *,
