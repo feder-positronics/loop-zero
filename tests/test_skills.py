@@ -119,6 +119,7 @@ def _anchors(path: Path) -> set[str]:
 
 def _intelflo_token_block() -> str:
     return '''[skill_tokens]
+readme_consumer_catalogue = "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)"
 base_branch = "origin/main"
 coherence_owner = "Marcin"
 doctrine_d2 = "D-2"
@@ -254,6 +255,12 @@ def test_intelflo_governance_render_is_byte_identical(tmp_path: Path) -> None:
     profile = config.load_profile(consumer)
     sync.write(profile)
 
+    expected_readme = (CORE_SKILLS / "README.md").read_text().replace(
+        "{{skill_tokens.readme_consumer_catalogue}}",
+        "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)",
+    ).replace("{{package.core_contract_from_readme}}", "../../vendor/loop-zero/CONTRACT.md")
+    assert (consumer / ".cursor/skills/README.md").read_bytes() == expected_readme.encode()
+
     compared = 0
     for name in sorted(MOVED_GOVERNANCE):
         expected_directory = canonical / name
@@ -288,6 +295,37 @@ def test_intelflo_governance_render_is_byte_identical(tmp_path: Path) -> None:
             if source.is_file():
                 relative = source.relative_to(canonical / name)
                 assert (consumer / ".cursor" / "skills" / name / relative).read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize("link", [None, "", "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)"])
+def test_readme_consumer_catalogue_renders_exactly(consumer: Path, link: str | None) -> None:
+    if link is not None:
+        with (consumer / "workflow.toml").open("a") as workflow:
+            workflow.write("\n[skill_tokens]\nreadme_consumer_catalogue = " + json.dumps(link) + "\n")
+    profile = config.load_profile(consumer)
+    sync.write(profile)
+    template = (CORE_SKILLS / "README.md").read_text()
+    expected = template.replace(
+        "{{skill_tokens.readme_consumer_catalogue}}\n\n", f"{link}\n\n" if link else ""
+    ).replace("{{package.core_contract_from_readme}}", "../../vendor/loop-zero/CONTRACT.md")
+    actual = (consumer / profile.skills_dir / "README.md").read_text()
+    assert actual == expected
+    assert "\n\n\n## Template configuration" not in actual
+
+
+@pytest.mark.parametrize("value", [
+    "[Catalogue](docs.md)\n", "[Catalogue\nlink](docs.md)",
+    "[Catalogue](docs.md)\r", "[Catalogue](docs.md)\t",
+    "[<!-- loopzero:begin -->](docs.md)",
+    "[Catalogue](docs.md)\n<!-- loopzero:skill-overlay:end -->",
+    "plain prose", "[Catalogue]()", "[Catalogue](docs.md) trailing prose",
+    "[Catalogue\u2028link](docs.md)", 42,
+])
+def test_readme_consumer_catalogue_rejects_invalid_values(consumer: Path, value: object) -> None:
+    with (consumer / "workflow.toml").open("a") as workflow:
+        workflow.write("\n[skill_tokens]\nreadme_consumer_catalogue = " + json.dumps(value) + "\n")
+    with pytest.raises(config.ConfigError, match="readme_consumer_catalogue"):
+        config.load_profile(consumer)
 
 
 def test_documented_intelflo_token_block_is_the_byte_identity_profile() -> None:

@@ -10,6 +10,7 @@ toolchain values. These values, not loop-zero package defaults, preserve the
 
 ````toml
 [skill_tokens]
+readme_consumer_catalogue = "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)"
 base_branch = "origin/main"
 coherence_owner = "Marcin"
 doctrine_d2 = "D-2"

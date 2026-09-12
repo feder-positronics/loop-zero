@@ -45,6 +45,7 @@ _SKILL_TOKEN = re.compile(r"\{\{(?P<name>[a-z0-9_.]+)\}\}")
 _SKILL_NAME = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 _SKILL_TOKEN_DEFAULTS = {
+    "readme_consumer_catalogue": "",
     "base_branch": "the configured base branch",
     "coherence_owner": "the product owner",
     "commit_backend_hook_behavior": (
@@ -447,8 +448,14 @@ def _skill_files(
                     raise ConfigError([f"duplicate rendered skill name: {directory.name}"])
                 add_skill(directory.name, directory, vendor=True)
     readme_source = source_root / "README.md"
+    readme_template = _read_skill_source(readme_source)
+    if not profile.raw.get("skill_tokens", {}).get("readme_consumer_catalogue", ""):
+        # Omit the optional paragraph without leaving an extra blank line.
+        readme_template = readme_template.replace(
+            "{{skill_tokens.readme_consumer_catalogue}}\n\n", ""
+        )
     readme_content = _substitute_skill(
-        _read_skill_source(readme_source), profile, readme_source, consumer_skills
+        readme_template, profile, readme_source, consumer_skills
     )
     rendered.append(Rendered(profile.skills_dir / "README.md", readme_content, False))
     return rendered, records

@@ -128,6 +128,7 @@ SKILL_ROUTE_KEYS = {
     "implement_frontend",
 }
 SKILL_TOKEN_KEYS = {
+    "readme_consumer_catalogue",
     "base_branch",
     "coherence_owner",
     "commit_backend_hook_behavior",
@@ -675,7 +676,15 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             where = f"[skill_tokens].{name}"
             if name not in SKILL_TOKEN_KEYS:
                 problems.append(f"{where}: unknown token")
-            if not isinstance(value, str) or not value:
+            if name == "readme_consumer_catalogue":
+                if not isinstance(value, str):
+                    problems.append(f"{where}: must be a string")
+                elif _reject_unsafe_rendered_string(value, where, problems):
+                    if value and not re.fullmatch(
+                        r"\[[^\[\]\r\n\u0085\u2028\u2029]+\]\([^\s()]+\)", value
+                    ):
+                        problems.append(f"{where}: must be a single-line Markdown link or empty")
+            elif not isinstance(value, str) or not value:
                 problems.append(f"{where}: must be a nonempty string")
             else:
                 _reject_unsafe_skill_token(value, where, problems)
