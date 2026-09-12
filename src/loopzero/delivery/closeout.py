@@ -516,8 +516,21 @@ def _validate_system_tool(path: str, label: str) -> None:
     if not resolved.is_file() or not os.access(resolved, os.X_OK):
         raise BootstrapError(f"pinned {label} executable is unavailable")
     acceptable_owners = {0, os.getuid(), os.stat("/").st_uid}
-    if info.st_uid not in acceptable_owners or info.st_mode & 0o022:
+    if info.st_mode & 0o022:
         raise BootstrapError(f"pinned {label} executable is not root-owned read-only")
+    if info.st_uid not in acceptable_owners:
+        # Inside a user namespace an unmapped root shows as the overflow id.
+        # Accept the tool only when neither it nor its directory is writable
+        # by this account and both share that foreign owner: a read-only
+        # system mount, not a caller-controlled file.
+        parent = resolved.parent.stat()
+        if (
+            parent.st_uid != info.st_uid
+            or parent.st_mode & 0o022
+            or os.access(resolved, os.W_OK)
+            or os.access(resolved.parent, os.W_OK)
+        ):
+            raise BootstrapError(f"pinned {label} executable is not root-owned read-only")
 
 
 def _network_environment(environment: dict[str, str]) -> dict[str, str]:

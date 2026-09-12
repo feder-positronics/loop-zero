@@ -220,6 +220,8 @@ def test_diff_digest_preserves_non_utf8_git_bytes(risk_repo: Path) -> None:
 
 
 def require_historical_commits(root: Path, commit_shas: list[str]) -> None:
+    if not root.is_dir():
+        pytest.skip("historical replay corpus requires the intelflo checkout at " + str(root))
     missing_shas = [
         sha
         for sha in commit_shas

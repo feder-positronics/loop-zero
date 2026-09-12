@@ -214,6 +214,14 @@ def test_planted_repository_gh_config_is_invisible_to_the_child(
                 for name, value in env.items()
                 if name not in {"HOME", "GH_CONFIG_DIR"}
             }
+            # The demonstration only concerns the config lookup; keep gh's
+            # state and cache writes in scratch space rather than the repo.
+            scratch = tmp_path / "gh-fallback-scratch"
+            scratch.mkdir(exist_ok=True)
+            fallback_env.update(
+                XDG_STATE_HOME=str(scratch), XDG_DATA_HOME=str(scratch),
+                XDG_CACHE_HOME=str(scratch),
+            )
             fallback = subprocess.run(
                 [str(REAL_GH), *probe], cwd=kwargs["cwd"], env=fallback_env,
                 text=True, capture_output=True,
