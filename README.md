@@ -52,9 +52,17 @@ the resolved target of `/etc/resolv.conf` read-only when that symlink points
 into `/run` (systemd-resolved hosts); without that bind every provider request
 fails name resolution and both CLIs retry until the scenario timeout.  Codex
 `0.154.0` has no `debug.config_lockfile` export, so the SDK bridge applies the
-closed runtime override layer directly; the private `CODEX_HOME` holds no
-project trust entry, which keeps project-level `.codex` configuration out of
-scope.  The Codex access-only snapshot keeps the source's `last_refresh`
+restrictive runtime overrides directly, then uses app-server `config/read`
+after initialization and before account or thread use.  It refuses the turn as
+unavailable unless the effective MCP registry is empty, every hook list is
+empty, and the model/provider/effort/service-tier, sandbox, and approval values
+match the request-specific pins.  The private `CODEX_HOME` remains empty apart
+from its sealed credential and holds no project trust entry, which keeps
+project-level `.codex` configuration out of scope.  An enterprise-managed or
+cloud-managed layer remains an explicit consumer residual: the attestation
+rejects changes to those executable settings, but a consumer must explicitly
+accept managed behavior outside that checked set before relying on this route.
+The Codex access-only snapshot keeps the source's `last_refresh`
 timestamp because `0.154.0` treats a missing timestamp as stale and would
 otherwise attempt the refresh the snapshot deliberately cannot perform.  Codex
 permission denial is recorded as `unsupported`: its read-only sandbox enforces

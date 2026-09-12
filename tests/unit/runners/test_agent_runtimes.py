@@ -3935,6 +3935,7 @@ def test_codex_sdk_progress_maps_fake_stream_without_retaining_sensitive_content
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda _codex: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
     monkeypatch.setattr(
         sdk_bridge,
         "_materialize_codex_subscription_auth",
@@ -4068,6 +4069,7 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
             assert json.loads((home / "auth.json").read_text(encoding="utf-8"))[
                 "tokens"
             ]
+            self._client = self
 
         def __enter__(self):
             return self
@@ -4078,6 +4080,30 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
         def account(self):
             account_calls.append(None)
             return FakeAccountResponse()
+
+        def request(self, method, params, *, response_model):
+            assert method == "config/read"
+            assert params == {"cwd": str(tmp_path), "includeLayers": True}
+            return response_model.model_validate(
+                {
+                    "config": {
+                        "approval_policy": "never",
+                        "approvals_reviewer": None,
+                        "hooks": {"SessionStart": [], "PreToolUse": []},
+                        "mcp_servers": {},
+                        "model": "gpt-5.6-sol",
+                        "model_provider": "openai",
+                        "model_providers": {},
+                        "model_reasoning_effort": "high",
+                        "review_model": None,
+                        "sandbox_mode": "read-only",
+                        "sandbox_workspace_write": None,
+                        "service_tier": "default",
+                    },
+                    "layers": [],
+                    "origins": {},
+                }
+            )
 
         def thread_start(self, **_kwargs):
             thread_calls.append(None)
@@ -4107,7 +4133,7 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
         os.fstat(read_fd)
     assert observed_homes and not observed_homes[0].exists()
     assert observed_cwds == observed_homes
-    assert observed_overrides == [sdk_bridge.codex_runtime_overrides()]
+    assert observed_overrides == [sdk_bridge._codex_request_runtime_overrides(request)]
     assert capsys.readouterr().out == '{"type":"readiness","status":"ready"}\n'
 
 
@@ -4156,6 +4182,9 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(openai_codex, "CodexConfig", FakeConfig)
+    monkeypatch.setattr(
+        sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None
+    )
 
     sdk_bridge._probe_codex_app_server(
         {
@@ -4185,7 +4214,7 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
 def test_codex_0_154_recorded_readiness_protocol_fixture() -> None:
     """Keep the no-turn SDK exchange aligned with the pinned 0.154 app-server."""
     from openai_codex._initialize_metadata import validate_initialize_metadata
-    from openai_codex.generated.v2_all import GetAccountResponse
+    from openai_codex.generated.v2_all import ConfigReadResponse, GetAccountResponse
     from openai_codex.models import InitializeResponse
 
     fixture = (
@@ -4197,7 +4226,7 @@ def test_codex_0_154_recorded_readiness_protocol_fixture() -> None:
         frame["message"].get("method")
         for frame in frames
         if frame["direction"] == "client"
-    ] == ["initialize", "initialized", "account/read"]
+    ] == ["initialize", "initialized", "config/read", "account/read"]
     assert all(
         frame["message"].get("method") not in {"thread/start", "turn/start"}
         for frame in frames
@@ -4207,9 +4236,74 @@ def test_codex_0_154_recorded_readiness_protocol_fixture() -> None:
     normalized = validate_initialize_metadata(initialize)
     assert normalized.serverInfo is not None
     assert normalized.serverInfo.version.split()[0] == "0.154.0"
-    account = GetAccountResponse.model_validate(frames[4]["message"]["result"])
+    effective = ConfigReadResponse.model_validate(frames[4]["message"]["result"])
+    assert effective.config.mcp_servers == {}
+    assert effective.config.hooks["SessionStart"] == []
+    account = GetAccountResponse.model_validate(frames[6]["message"]["result"])
     assert account.account is None
     assert account.requires_openai_auth is True
+
+
+def test_codex_effective_config_rejects_merged_stray_mcp_fixture(
+    tmp_path: Path,
+) -> None:
+    from openai_codex.generated.v2_all import ConfigReadResponse
+
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "codex_effective_config_stray_mcp_0_154_0.json"
+    )
+    response = ConfigReadResponse.model_validate(
+        json.loads(fixture.read_text(encoding="utf-8"))
+    )
+    calls: list[tuple[str, object]] = []
+
+    class FakeClient:
+        def request(self, method, params, *, response_model):
+            calls.append((method, params))
+            assert response_model is ConfigReadResponse
+            return response
+
+    fake_codex = type("FakeCodex", (), {"_client": FakeClient()})()
+    request = {
+        "vendor": "codex",
+        "prompt": "private prompt",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-sol",
+        "effort": "high",
+        "read_only": True,
+        "budget_usd": None,
+        "commercial_mode": "subscription-only",
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+    }
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        sdk_bridge._enforce_codex_effective_config(fake_codex, request)
+
+    assert calls == [
+        ("config/read", {"cwd": str(tmp_path), "includeLayers": True})
+    ]
+
+
+def test_codex_effective_config_refusal_is_a_typed_unavailable_result(
+    tmp_path: Path,
+) -> None:
+    result = codex.CodexAdapter(
+        run_process=lambda *_args, **_kwargs: process.ProcessResult(
+            returncode=1,
+            stdout='{"type":"error","reason":"unavailable"}\n',
+            stderr="",
+            duration_s=0.1,
+            timed_out=False,
+        )
+    )._run_sdk(codex_request(tmp_path))
+
+    assert result.status is contracts.RuntimeStatus.SUBSCRIPTION_UNAVAILABLE
+    assert result.terminal_reason is contracts.TerminalReason.SUBSCRIPTION_UNAVAILABLE
+    assert result.diagnostics == (
+        "Codex SDK effective configuration was unavailable",
+    )
 
 
 def _codex_auth_process_result() -> object:
@@ -7231,6 +7325,7 @@ def command_completion_stream(monkeypatch, tmp_path):
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *args: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
     monkeypatch.setattr(
         sdk_bridge,
         "_materialize_codex_subscription_auth",
@@ -8230,6 +8325,7 @@ def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
     monkeypatch.setattr(
         sdk_bridge,
         "_materialize_codex_subscription_auth",
@@ -8414,6 +8510,7 @@ def test_brokered_codex_turn_uses_private_home_and_runtime_overrides(
 
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
     operator_codex_home = str(tmp_path / "operator-codex-home")
     operator_home = str(tmp_path / "operator-home")
     monkeypatch.setenv("CODEX_HOME", operator_codex_home)
@@ -8446,7 +8543,13 @@ def test_brokered_codex_turn_uses_private_home_and_runtime_overrides(
     assert operator_codex_home not in observed[0].env.values()
     assert operator_home not in observed[0].env.values()
     overrides = tuple(observed[0].config_overrides)
-    assert overrides == sdk_bridge.codex_runtime_overrides()
+    assert overrides == (
+        *sdk_bridge.codex_runtime_overrides(),
+        'model="gpt-5.6-sol"',
+        'model_reasoning_effort="high"',
+        'sandbox_mode="read-only"',
+        'approval_policy="never"',
+    )
     assert not any("config_lockfile" in item for item in overrides)
     assert not hasattr(sdk_bridge, "_codex_effective_config_lock")
     payload = {
@@ -8470,3 +8573,77 @@ def test_brokered_codex_turn_uses_private_home_and_runtime_overrides(
                 "config_lock_target": str(tmp_path / "x.config.lock.toml"),
             }
         )
+
+
+@pytest.mark.parametrize("mode", ["probe", "turn"])
+@pytest.mark.parametrize("mutation", [
+    {"mcp_servers": {"hostile": {"command": "/bin/false"}}},
+    {"hooks": {"SessionStart": [{"hooks": [{"command": "/bin/false"}]}]}},
+    {"hooks": None},
+    {"mcp_servers": None},
+    {"model": "other"},
+    {"model_provider": "other"},
+    {"model_reasoning_effort": "low"},
+    {"service_tier": "fast"},
+    {"sandbox_mode": "danger-full-access"},
+    {"approval_policy": "on-request"},
+    {"sandbox_workspace_write": {"network_access": True}},
+    {"approvals_reviewer": "guardian_subagent"},
+    {"review_model": "other"},
+    {"model_providers": {"openai": {"base_url": "https://invalid.test"}}},
+    None,
+])
+def test_codex_effective_config_refusal_precedes_account_and_thread(
+    monkeypatch, tmp_path, capsys, mode, mutation
+):
+    import openai_codex
+
+    fixture = Path(__file__).with_name("fixtures") / "codex_app_server_0_154_0.jsonl"
+    payload = json.loads(fixture.read_text().splitlines()[4])["message"]["result"]
+    if mutation is not None:
+        payload["config"].update(mutation)
+    calls = []
+
+    class FakeCodex:
+        def __init__(self, config):
+            self._client = self
+
+        def __enter__(self):
+            calls.append("initialize")
+            return self
+
+        def __exit__(self, *_args):
+            calls.append("close")
+
+        def request(self, method, params, *, response_model):
+            calls.append(method)
+            if mutation is None:
+                raise ValueError("unreadable configuration")
+            return response_model.model_validate(payload)
+
+        def account(self, **_kwargs):
+            calls.append("account")
+            raise AssertionError("account must not be used")
+
+        def thread_start(self, **_kwargs):
+            calls.append("thread")
+            raise AssertionError("thread must not start")
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(
+        sdk_bridge, "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
+    )
+    request = dict(vendor="codex", prompt="private prompt", cwd=str(tmp_path),
+                   requested_model="gpt-5.6-sol", effort="high", read_only=True,
+                   budget_usd=None, commercial_mode="subscription-only",
+                   output_schema={"type": "object"}, read_roots=[str(tmp_path)])
+    if mode == "probe":
+        sdk_bridge._probe_codex_app_server(request)
+        assert json.loads(capsys.readouterr().out) == {
+            "type": "readiness", "status": "failed", "failure": "bootstrap"
+        }
+    else:
+        with pytest.raises(RuntimeError, match="unavailable"):
+            sdk_bridge._run_codex(request)
+    assert calls == ["initialize", "config/read", "close"]

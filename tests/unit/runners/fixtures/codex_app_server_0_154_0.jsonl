@@ -1,5 +1,7 @@
 {"direction":"client","message":{"id":"<request-id>","method":"initialize","params":{"clientInfo":{"name":"codex_python_sdk","title":"Codex Python SDK","version":"0.154.0"},"capabilities":{"experimentalApi":true}}}}
 {"direction":"server","message":{"id":"<request-id>","result":{"userAgent":"codex_python_sdk/0.154.0 (Ubuntu 26.4.0; x86_64) xterm-256color (codex_python_sdk; 0.154.0)","codexHome":"<private-codex-home>","platformFamily":"unix","platformOs":"linux"}}}
 {"direction":"client","message":{"method":"initialized"}}
+{"direction":"client","message":{"id":"<request-id>","method":"config/read","params":{"cwd":"<request-cwd>","includeLayers":true}}}
+{"direction":"server","message":{"id":"<request-id>","result":{"config":{"approval_policy":"never","approvals_reviewer":null,"hooks":{"Interrupt":[],"PermissionRequest":[],"PostCompact":[],"PostToolUse":[],"PreCompact":[],"PreToolUse":[],"SessionEnd":[],"SessionStart":[],"Stop":[],"SubagentStart":[],"SubagentStop":[],"UserPromptSubmit":[]},"mcp_servers":{},"model":"gpt-5.6-sol","model_provider":"openai","model_providers":{},"model_reasoning_effort":"high","review_model":null,"sandbox_mode":"read-only","sandbox_workspace_write":null,"service_tier":"default"},"layers":[],"origins":{}}}}
 {"direction":"client","message":{"id":"<request-id>","method":"account/read","params":{"refreshToken":false}}}
 {"direction":"server","message":{"id":"<request-id>","result":{"account":null,"requiresOpenaiAuth":true}}}

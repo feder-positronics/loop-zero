@@ -1564,6 +1564,86 @@ def _codex_sandbox(read_only: bool) -> "Sandbox":
     return Sandbox.read_only if read_only else Sandbox.workspace_write
 
 
+def _codex_sandbox_mode(request: BridgeRequest) -> str:
+    """Return the effective-config spelling of the pinned SDK sandbox."""
+    sandbox = _codex_sandbox(request["read_only"])
+    return "danger-full-access" if sandbox.value == "full-access" else sandbox.value
+
+
+def _codex_request_runtime_overrides(request: BridgeRequest) -> tuple[str, ...]:
+    """Pin request-specific settings in the app-server's effective config."""
+    return (
+        *codex_runtime_overrides(),
+        f"model={json.dumps(request['requested_model'])}",
+        f"model_reasoning_effort={json.dumps(_codex_effort(request['effort']).value)}",
+        f"sandbox_mode={json.dumps(_codex_sandbox_mode(request))}",
+        'approval_policy="never"',
+    )
+
+
+def _codex_hooks_are_empty(value: object) -> bool:
+    """Accept the pinned hook skeleton only when it contains no handlers."""
+    if not isinstance(value, Mapping):
+        return False
+    for handlers in value.values():
+        if isinstance(handlers, Mapping):
+            if not _codex_hooks_are_empty(handlers):
+                return False
+        elif not isinstance(handlers, list) or handlers:
+            return False
+    return True
+
+
+def _codex_effective_config_is_closed(
+    config: object, request: BridgeRequest
+) -> bool:
+    """Validate the executable settings returned by pinned ``config/read``."""
+    if not isinstance(config, Mapping):
+        return False
+    mcp_servers = config.get("mcp_servers")
+    if not isinstance(mcp_servers, Mapping) or mcp_servers:
+        return False
+    if not _codex_hooks_are_empty(config.get("hooks")):
+        return False
+    pins = {
+        "model": request["requested_model"],
+        "model_provider": CODEX_MODEL_PROVIDER,
+        "model_reasoning_effort": _codex_effort(request["effort"]).value,
+        "service_tier": CODEX_SERVICE_TIER,
+        "sandbox_mode": _codex_sandbox_mode(request),
+        "approval_policy": "never",
+    }
+    if any(config.get(name) != expected for name, expected in pins.items()):
+        return False
+    # These adjacent settings are not part of the pinned thread/turn policy;
+    # a merged lower-layer table or reviewer would widen that policy.
+    return (
+        config.get("sandbox_workspace_write") is None
+        and config.get("approvals_reviewer") is None
+        and config.get("review_model") is None
+        and config.get("model_providers") in (None, {})
+    )
+
+
+def _enforce_codex_effective_config(codex: object, request: BridgeRequest) -> None:
+    """Read and reject unsafe merged configuration before account or thread use."""
+    try:
+        from openai_codex.generated.v2_all import ConfigReadResponse
+
+        client = getattr(codex, "_client")
+        response = client.request(
+            "config/read",
+            {"cwd": request["cwd"], "includeLayers": True},
+            response_model=ConfigReadResponse,
+        )
+        config_model = getattr(response, "config")
+        config = config_model.model_dump(mode="json")
+    except Exception as exc:
+        raise RuntimeError("unavailable") from exc
+    if not _codex_effective_config_is_closed(config, request):
+        raise RuntimeError("unavailable")
+
+
 def _codex_thread_kwargs(request: BridgeRequest) -> CodexThreadKwargs:
     from openai_codex import ApprovalMode
 
@@ -1799,7 +1879,7 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
                 # overrides.  The 0.147-era config-lock export was triggered by
                 # thread/start, is no longer part of the app-server protocol,
                 # and made a readiness check create a thread unnecessarily.
-                config_overrides=codex_runtime_overrides(),
+                config_overrides=_codex_request_runtime_overrides(request),
                 # Account readiness is independent of a project.  Keeping both
                 # process cwd and CODEX_HOME in the private credential home
                 # prevents repository configuration discovery during initialize.
@@ -1807,6 +1887,7 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
                 env=codex_environment,
             )
             with Codex(config) as codex:
+                _enforce_codex_effective_config(codex, request)
                 _enforce_codex_chatgpt_login(codex)
                 if auth_path is not None:
                     auth_path.unlink(missing_ok=True)
@@ -1887,16 +1968,16 @@ def _run_codex(
         codex_environment = _codex_sdk_environment(auth_environment, auth_path)
         config = CodexConfig(
             **_codex_bin_kwargs(),
-            # Codex 0.154 removed the 0.147 debug.config_lockfile export, so
-            # the closed runtime layer is applied directly as the
-            # highest-precedence overrides (it already carries the budget's
-            # output_token_limit).  The private CODEX_HOME holds no project
-            # trust entry, so project-level .codex configuration is ignored.
-            config_overrides=codex_runtime_overrides(),
+            # Codex 0.154 removed the 0.147 debug.config_lockfile export. The
+            # restrictive overrides are therefore applied directly and the
+            # merged effective config is attested below before a thread exists.
+            # The private CODEX_HOME still holds no project trust entry.
+            config_overrides=_codex_request_runtime_overrides(request),
             cwd=request["cwd"],
             env=codex_environment,
         )
         with Codex(config) as codex:
+            _enforce_codex_effective_config(codex, request)
             _enforce_codex_chatgpt_login(codex)
             if auth_path is not None:
                 auth_path.unlink(missing_ok=True)
@@ -2507,7 +2588,7 @@ def _sanitized_failure(exc: BaseException) -> dict[str, str]:
 
 
 def _error_frame(reason: str, exc: BaseException | None = None) -> None:
-    if reason not in {"startup", "protocol", "disconnect"}:
+    if reason not in {"startup", "protocol", "disconnect", "unavailable"}:
         reason = "protocol"
     frame: dict[str, object] = {"type": "error", "reason": reason}
     if exc is not None:

@@ -729,17 +729,23 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                 "startup",
                 "protocol",
                 "disconnect",
+                "unavailable",
             }:
                 raise CodexProtocolError(
                     "Codex error frame was unknown",
                     semantic_event=semantic_seen,
                 )
             terminal = (
-                RuntimeStatus.FAILED,
+                (
+                    RuntimeStatus.SUBSCRIPTION_UNAVAILABLE
+                    if error_reason == "unavailable"
+                    else RuntimeStatus.FAILED
+                ),
                 {
                     "startup": TerminalReason.STARTUP_FAILURE,
                     "protocol": TerminalReason.PROTOCOL_FAILURE,
                     "disconnect": TerminalReason.TRANSPORT_DISCONNECT,
+                    "unavailable": TerminalReason.SUBSCRIPTION_UNAVAILABLE,
                 }[error_reason],
             )
             _retain_priority_diagnostic(
@@ -748,6 +754,7 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                     "startup": "Codex SDK startup failed",
                     "protocol": "Codex SDK protocol failed",
                     "disconnect": "Codex SDK transport disconnected",
+                    "unavailable": "Codex SDK effective configuration was unavailable",
                 }[error_reason],
                 MAX_DIAGNOSTICS,
             )
@@ -2508,7 +2515,7 @@ _DISABLED_FEATURES = (
 
 
 def codex_runtime_overrides() -> tuple[str, ...]:
-    """Build the closed highest-precedence runtime configuration layer."""
+    """Build restrictive static overrides; the bridge attests merged config."""
     fixed = (
         'model_provider="openai"',
         'service_tier="default"',
@@ -2537,7 +2544,7 @@ def codex_runtime_overrides() -> tuple[str, ...]:
 
 
 def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
-    """Build a closed config layer used only to export an effective lock."""
+    """Build restrictive config used only to export an effective lock."""
     return (
         f"debug.config_lockfile.export_dir={json.dumps(str(export_dir))}",
         *codex_runtime_overrides(),
