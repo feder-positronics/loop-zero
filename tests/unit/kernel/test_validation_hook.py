@@ -14,13 +14,30 @@ from pathlib import Path
 
 import pytest
 
-from loopzero.kernel import authority, validation
+from loopzero.kernel import authority, capabilities, validation
 from loopzero.kernel.settings import KernelSettings
+from loopzero.trust import regular_executable
 
 from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON
 from .package_environment import package_environment
 
 JOB_SH = Path(__file__).resolve().parents[3] / "src/loopzero/kernel/job.sh"
+
+
+def _allowlisted_true() -> str:
+    """One no-op hook executable the shared allowlist accepts on this host.
+
+    The allowlist admits only regular files. Debian-style hosts ship ``true``
+    as one; hosts whose coreutils are a multi-call binary alias ``true`` and
+    ship the regular GNU build as ``gnutrue`` instead.
+    """
+    for name in ("true", "gnutrue"):
+        if regular_executable(Path("/usr/bin") / name):
+            return name
+    raise RuntimeError("no regular /usr/bin/true executable is available")
+
+
+TRUE = _allowlisted_true()
 
 
 def _git(root: Path, *args: str) -> str:
@@ -30,6 +47,9 @@ def _git(root: Path, *args: str) -> str:
         text=True,
         env={**os.environ, "GIT_NO_REPLACE_OBJECTS": "1", "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull},
     ).strip()
+
+
+_PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _signer() -> authority.CoordinatorAuthority:
@@ -52,6 +72,9 @@ def _repo(tmp_path: Path, commands: tuple[str, ...], hook: str = "acceptance") -
     repo = tmp_path / "consumer"
     repo.mkdir()
     (repo / "workflow.toml").write_text(_workflow(commands, hook), encoding="utf-8")
+    # The approved profile's [core].path must exist on disk: vendor the
+    # package's own core snapshot the way a real consumer does.
+    shutil.copytree(_PACKAGE_ROOT / "core", repo / "vendor" / "core")
     _git(repo, "init", "-q", "-b", "main")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
@@ -113,7 +136,7 @@ def _run(repo: Path, base: str, artifact: Path, key: Path, *, task: str = "task-
     )
 
 
-def _signed_case(tmp_path: Path, commands: tuple[str, ...] = ("gnutrue",)):
+def _signed_case(tmp_path: Path, commands: tuple[str, ...] = (TRUE,)):
     repo, sha = _repo(tmp_path, commands)
     signer = _signer()
     key = tmp_path / "coordinator.der"
@@ -166,7 +189,7 @@ def test_signed_result_accepts_real_coordinator_signature(tmp_path):
     source = validation.source_identity(repo, approved_head=sha, allow_dirty_tree=False)
     assert validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
         task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance",
-        hook_commands=_actual(repo, ("gnutrue",)), source=source)["status"] == "completed"
+        hook_commands=_actual(repo, (TRUE,)), source=source)["status"] == "completed"
 
 
 def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path):
@@ -174,7 +197,7 @@ def test_final_ci_repro_refuses_an_unsigned_terminal_artifact(tmp_path):
     result.write_text('{"status":"completed"}', encoding="utf-8")
     with pytest.raises(validation.UnsignedResultError):
         validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, (TRUE,)), source=_source(sha))
 
 
 def test_signed_result_rejects_real_tampering(tmp_path):
@@ -183,7 +206,7 @@ def test_signed_result_rejects_real_tampering(tmp_path):
     result.write_text(json.dumps(row), encoding="utf-8")
     with pytest.raises(validation.TamperedResultError):
         validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, (TRUE,)), source=_source(sha))
 
 
 @pytest.mark.parametrize("field,value", [("task_id", "other"), ("base_sha", "f" * 40),
@@ -192,20 +215,20 @@ def test_signed_result_rejects_real_tampering(tmp_path):
 def test_signed_result_rejects_unbound_fields(tmp_path, field, value):
     repo, sha, signer, key, result = _signed_case(tmp_path)
     _artifact(result, signer, task="task-1", base=sha, head=sha, hook="acceptance",
-              commands=_actual(repo, ("gnutrue",)), **{field: value})
+              commands=_actual(repo, (TRUE,)), **{field: value})
     with pytest.raises(validation.UnboundResultError, match=field):
         validation.verify_result_artifact(result, coordinator_public_key=signer.public_key,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, (TRUE,)), source=_source(sha))
 
 
 def test_signed_final_ci_repro_rejects_authority_path_substitution(tmp_path):
     repo, sha, trusted, key, result = _signed_case(tmp_path)
     pinned = validation.read_coordinator_public_key(key)
     attacker = _signer(); key.write_bytes(attacker.public_key)
-    _artifact(result, attacker, task="task-1", base=sha, head=sha, hook="acceptance", commands=_actual(repo, ("gnutrue",)))
+    _artifact(result, attacker, task="task-1", base=sha, head=sha, hook="acceptance", commands=_actual(repo, (TRUE,)))
     with pytest.raises(validation.TamperedResultError):
         validation.verify_result_artifact(result, coordinator_public_key=pinned,
-            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, ("gnutrue",)), source=_source(sha))
+            task_id="task-1", base_sha=sha, head_sha=sha, hook="acceptance", hook_commands=_actual(repo, (TRUE,)), source=_source(sha))
 
 
 def test_verifier_provider_failure_is_retryable_not_tampering(
@@ -364,7 +387,7 @@ def test_validation_accepts_a_tree_hash_bound_dirty_candidate(tmp_path, monkeypa
     assert source.kind == "tree"
     _artifact(
         artifact, signer, task="task-1", base=sha, head=sha,
-        hook="acceptance", commands=_actual(repo, ("gnutrue",)),
+        hook="acceptance", commands=_actual(repo, (TRUE,)),
         source_kind=source.kind, source_sha=source.sha,
         source_filesystem_sha256=source.filesystem_sha256,
     )
@@ -440,7 +463,7 @@ def test_validation_detects_an_empty_directory_created_by_the_child(
 def test_source_identity_rejects_a_symlinked_git_path_ancestor(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
-    repo, sha = _repo(real, ("gnutrue",))
+    repo, sha = _repo(real, (TRUE,))
     alias = tmp_path / "alias"
     alias.symlink_to(real, target_is_directory=True)
 
@@ -451,7 +474,7 @@ def test_source_identity_rejects_a_symlinked_git_path_ancestor(tmp_path):
 
 
 def test_source_identity_rejects_a_symlinked_gitdir_ancestor(tmp_path):
-    repo, sha = _repo(tmp_path, ("gnutrue",))
+    repo, sha = _repo(tmp_path, (TRUE,))
     metadata_parent = tmp_path / "metadata"
     metadata_parent.mkdir()
     moved_git = metadata_parent / "git-dir"
@@ -467,7 +490,7 @@ def test_source_identity_rejects_a_symlinked_gitdir_ancestor(tmp_path):
 
 
 def test_source_identity_rejects_special_filesystem_nodes(tmp_path):
-    repo, sha = _repo(tmp_path, ("gnutrue",))
+    repo, sha = _repo(tmp_path, (TRUE,))
     os.mkfifo(repo / "candidate-fifo")
 
     with pytest.raises(validation.ValidationHookError, match="special node"):
@@ -475,7 +498,7 @@ def test_source_identity_rejects_special_filesystem_nodes(tmp_path):
 
 
 def test_source_identity_distinguishes_independent_files_from_hard_links(tmp_path):
-    repo, _ = _repo(tmp_path, ("gnutrue",))
+    repo, _ = _repo(tmp_path, (TRUE,))
     first = repo / "first.txt"
     second = repo / "second.txt"
     first.write_text("same bytes\n", encoding="utf-8")
@@ -498,7 +521,7 @@ def test_source_identity_distinguishes_independent_files_from_hard_links(tmp_pat
 
 
 def test_source_identity_rejects_a_hard_link_outside_the_worktree(tmp_path):
-    repo, sha = _repo(tmp_path, ("gnutrue",))
+    repo, sha = _repo(tmp_path, (TRUE,))
     os.link(repo / "workflow.toml", tmp_path / "outside-link")
 
     with pytest.raises(validation.ValidationHookError, match="hard links outside"):
@@ -508,7 +531,7 @@ def test_source_identity_rejects_a_hard_link_outside_the_worktree(tmp_path):
 
 
 def test_validation_detects_a_new_hard_link_after_child_exit(tmp_path, monkeypatch):
-    repo, _ = _repo(tmp_path, ("gnutrue",))
+    repo, _ = _repo(tmp_path, (TRUE,))
     first = repo / "first.txt"
     second = repo / "second.txt"
     first.write_text("same bytes\n", encoding="utf-8")
@@ -528,7 +551,7 @@ def test_validation_detects_a_new_hard_link_after_child_exit(tmp_path, monkeypat
         base=sha,
         head=sha,
         hook="acceptance",
-        commands=_actual(repo, ("gnutrue",)),
+        commands=_actual(repo, (TRUE,)),
         source_filesystem_sha256=source.filesystem_sha256,
     )
 
@@ -552,7 +575,7 @@ def test_validation_detects_a_new_hard_link_after_child_exit(tmp_path, monkeypat
 
 
 def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
-    repo, sha = _repo(tmp_path, ("gnutrue",))
+    repo, sha = _repo(tmp_path, (TRUE,))
     _git(repo, "config", "--local", "user.name", "Candidate")
     _git(repo, "config", "--local", "remote.backup.url", "file:///srv/repo")
     _git(repo, "config", "--local", "remote.backup.fetch", "+refs/*:refs/*")
@@ -570,8 +593,32 @@ def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
     )
 
 
+def test_validation_config_screening_accepts_a_cloned_repository_with_origin(tmp_path):
+    upstream, sha = _repo(tmp_path, (TRUE,))
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(upstream), str(clone))
+    _git(clone, "remote", "add", "backup", "https://example.invalid/backup.git")
+    config = (clone / ".git" / "config").read_bytes()
+
+    from loopzero.kernel import git_config_security
+
+    assert git_config_security.origin_url(config) == str(upstream)
+    overlays = validation._repository_config_overlays(
+        validation._repository_layout(clone)
+    )
+    assert len(overlays) == 1
+    assert validation.validated_git_config_entries(overlays[0].payload) == (
+        ("core.repositoryformatversion", "0"),
+        ("core.bare", "false"),
+    )
+    assert validation.source_identity(clone, approved_head=sha, allow_dirty_tree=False)
+    _git(clone, "config", "--local", "remote.origin.url", "ext::sh -c owned")
+    with pytest.raises(validation.ValidationHookError, match="unsafe"):
+        validation._repository_config_overlays(validation._repository_layout(clone))
+
+
 def test_source_identity_hashes_ignored_files(tmp_path):
-    repo, sha = _repo(tmp_path, ("gnutrue",))
+    repo, sha = _repo(tmp_path, (TRUE,))
     (repo / ".gitignore").write_text("ignored-input\n", encoding="utf-8")
     _git(repo, "add", ".gitignore")
     _git(repo, "commit", "-qm", "ignore candidate input")
@@ -599,6 +646,78 @@ def test_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespac
 
 
 @pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+def test_hermetic_hook_can_write_private_cache_and_pass(tmp_path):
+    repo, sha, signer, key, artifact = _script_case(
+        tmp_path,
+        'test "$PYTHONDONTWRITEBYTECODE" = 1\n'
+        'case "$PYTEST_ADDOPTS" in *cache_dir=/tmp/*) ;; *) exit 8 ;; esac\n'
+        'case "$UV_CACHE_DIR" in /tmp/*) ;; *) exit 9 ;; esac\n'
+        'case "$npm_config_cache" in /tmp/*) ;; *) exit 10 ;; esac\n'
+        'case "$UV_PROJECT_ENVIRONMENT" in /tmp/*) ;; *) exit 11 ;; esac\n'
+        'test "$UV_NO_SYNC" = 1 || exit 12\n'
+        'mkdir -p "$UV_PROJECT_ENVIRONMENT" && test ! -e .venv || exit 13\n'
+        'mkdir -p "$UV_CACHE_DIR" "$npm_config_cache"\n'
+        'printf cache > "$UV_CACHE_DIR/hook-cache"\n'
+        'printf cache > "$npm_config_cache/hook-cache"',
+    )
+
+    result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+def test_hermetic_hook_tracked_write_is_rejected_with_binding_exit(tmp_path):
+    repo, sha, signer, key, artifact = _script_case(
+        tmp_path,
+        "printf 'changed\\n' > workflow.toml",
+    )
+
+    result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
+
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert "source changed during hook execution" in result.stderr
+
+
+def test_namespace_probe_failure_is_operational_not_a_hook_exit(
+    tmp_path, monkeypatch, capsys
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    monkeypatch.setattr(
+        capabilities,
+        "probe_bwrap",
+        lambda _bwrap: subprocess.CompletedProcess(
+            ["bwrap"], 1, "", "bwrap: Creating new namespace failed"
+        ),
+    )
+
+    code = validation.main(
+        [
+            "--worktree",
+            str(repo),
+            "--base",
+            sha,
+            "--head",
+            sha,
+            "--task-id",
+            "task-1",
+            "--result-artifact",
+            str(artifact),
+            "--coordinator-public-key",
+            str(key),
+            "--hook",
+            "acceptance",
+        ]
+    )
+
+    assert code == 2
+    diagnostic = capsys.readouterr().err
+    assert "validation hook unavailable" in diagnostic
+    assert "sandbox namespace is unavailable" in diagnostic
+    assert "Creating new namespace failed" in diagnostic
+
+
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
 @pytest.mark.parametrize(
     ("failure", "expected_code", "diagnostic"),
     [
@@ -623,7 +742,7 @@ def test_validation_result_rejection_taxonomy_through_job_main(
     else:
         _artifact(
             artifact, signer, task="task-1", base=sha, head=sha,
-            hook="acceptance", commands=_actual(repo, ("gnutrue",)),
+            hook="acceptance", commands=_actual(repo, (TRUE,)),
             source_sha="f" * 40,
         )
 
@@ -739,7 +858,7 @@ def test_signed_final_ci_repro_blocks_user_manager_escape(tmp_path):
 
 
 def test_preflight_completes_when_collectors_respond(tmp_path, monkeypatch):
-    repo, sha, signer, key, artifact = _signed_case(tmp_path, ("gnutrue", "gnutrue"))
+    repo, sha, signer, key, artifact = _signed_case(tmp_path, (TRUE, TRUE))
     calls = []
     def real(argv, **kwargs):
         calls.append(argv)

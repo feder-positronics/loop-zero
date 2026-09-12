@@ -224,6 +224,8 @@ def test_sandbox_builder_rejects_a_caller_mount_beneath_a_read_only_seal(
 def test_validation_child_overlays_config_and_forces_safe_git_settings(
     tmp_path, monkeypatch
 ) -> None:
+    from loopzero.kernel import capabilities
+
     destination = tmp_path / "repository-config"
     destination.write_text("candidate\n", encoding="utf-8")
     observed: dict[str, object] = {}
@@ -242,6 +244,11 @@ def test_validation_child_overlays_config_and_forces_safe_git_settings(
         return subprocess.CompletedProcess(command, 0, "", "")
 
     monkeypatch.setattr(module, "validation_command", validation_command)
+    monkeypatch.setattr(
+        capabilities,
+        "probe_bwrap",
+        lambda command: subprocess.CompletedProcess(command, 0, "", ""),
+    )
     monkeypatch.setattr(subprocess, "run", run)
     payload = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
 

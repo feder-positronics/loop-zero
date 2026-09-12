@@ -1,5 +1,6 @@
 import fcntl
 import multiprocessing
+import os
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,32 @@ def test_symlinked_target_and_parent_are_refused(consumer: Path, tmp_path: Path)
     with pytest.raises(config.ConfigError, match="symlink|outside"):
         sync.check(profile)
     assert list(outside_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("target_kind", ["fifo", "directory"])
+def test_special_file_generated_target_is_refused(consumer: Path, target_kind: str):
+    profile = config.load_profile(consumer)
+    agents = consumer / "AGENTS.md"
+    agents.unlink()
+    if target_kind == "fifo":
+        os.mkfifo(agents)
+    else:
+        agents.mkdir()
+    with pytest.raises(config.ConfigError, match="regular file"):
+        sync.check(profile)
+
+
+def test_render_asserts_that_generated_content_cannot_add_markers(
+    consumer: Path, monkeypatch
+):
+    profile = config.load_profile(consumer)
+    monkeypatch.setattr(
+        sync,
+        "_cursor_rule",
+        lambda _profile: f"unmanaged\n{sync.END}\n",
+    )
+    with pytest.raises(AssertionError, match="unexpected managed marker"):
+        sync.render(profile)
 
 
 def test_target_outside_root_is_refused(consumer: Path, monkeypatch, tmp_path: Path):

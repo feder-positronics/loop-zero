@@ -560,7 +560,7 @@ def _materialize_codex_subscription_auth() -> (
         raise BridgeInputError("provider credential is malformed") from exc
     if not isinstance(decoded, dict) or not decoded:
         raise BridgeInputError("provider credential is malformed")
-    directory = TemporaryDirectory(prefix="guardian-codex-auth-")
+    directory = TemporaryDirectory(prefix=get_settings().temp_name("codex-auth"))
     home = Path(directory.name)
     auth_path = home / "auth.json"
     auth_path.write_bytes(payload)
@@ -2323,16 +2323,57 @@ async def main() -> int:
 def codex_refresh() -> int:
     if sys.argv[1:] not in ([], ["--codex-refresh"]):
         return 2
+    auth_directory: TemporaryDirectory[str] | None = None
+    auth_path: Path | None = None
     try:
         from openai_codex import Codex, CodexConfig
 
-        environment = dict(os.environ)
+        output_value = os.environ.pop(
+            get_settings().env_name("CODEX_REFRESH_OUTPUT"), None
+        )
+        auth_directory, auth_environment, auth_path = (
+            _materialize_codex_subscription_auth()
+        )
+        environment = _filtered_environment()
+        environment.update(auth_environment)
         config = CodexConfig(env=environment)
         with Codex(config) as codex:
             response = codex.account(refresh_token=True)
         authenticated = response.account is not None
+        if output_value is not None:
+            if auth_path is None:
+                raise BridgeInputError("provider credential descriptor is missing")
+            output = Path(output_value)
+            if not output.is_absolute() or output.parent != Path(
+                os.environ["CODEX_HOME"]
+            ):
+                raise BridgeInputError("provider refresh output is invalid")
+            payload = auth_path.read_bytes()
+            if not payload or len(payload) > 1024 * 1024:
+                raise BridgeInputError("provider credential is oversized")
+            descriptor = os.open(
+                output,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            try:
+                written = 0
+                while written < len(payload):
+                    written += os.write(descriptor, payload[written:])
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
     except Exception:
         return 1
+    finally:
+        if auth_path is not None:
+            auth_path.unlink(missing_ok=True)
+        if auth_directory is not None:
+            auth_directory.cleanup()
     sys.stdout.write(
         json.dumps({"authenticated": authenticated}, separators=(",", ":"))
     )

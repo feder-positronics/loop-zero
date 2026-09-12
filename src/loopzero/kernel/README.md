@@ -60,12 +60,31 @@ surface. A missing adapter raises `MissingAdapter`; it never means accepted
 review evidence. Composition-root registration remains TODO(A4).
 
 `job.sh` uses `LOOPZERO_PYTHON` for the approved installed-package interpreter.
+The interpreter must be a symlink-free executable outside the consumer
+repository and every linked worktree.
 Namespaced `JOB_DIR`, `JOB_TIMEOUT` and `DELIVERY_ROOT` retain their original
 semantics. Its privileged dispatcher and continuation paths are supplied through
 `settings.toolchain['dispatcher']`, `['host_dispatcher']` and
 `['continuation_runner']`. The existing command-shape, descriptor and signed-result
 checks still apply to those paths. Candidate protection receives the consumer
 repository explicitly rather than deriving it from the package installation.
+Bound ordinary jobs receive the filesystem sandbox described above: the host
+view, the account home, and the job authority root are read-only, the job
+directory itself is sealed (reconcile, clean, and status trust its
+`reconciliation.json`, `pid`, and `pid-identity.json`), and the coordinator
+authority directory and `~/.ssh` are hidden behind empty overlays so their
+keys and ledgers are unreadable, not merely unwritable. Only the worktree and
+a private `TMPDIR` are writable. A terminal artifact that the bound command
+produces itself must therefore be named inside the worktree (for example
+under the audit root); that is the one launcher-nameable writable location.
+Bound jobs also lose environment-carried credentials. Unbound jobs are
+detached command-runner children, not validation children; they are stripped
+of only the worktree-lease family (`sandbox.strip_worktree_lease_environment`:
+descriptor, boundary, owner pid, nonce) so they cannot re-enter the launcher's
+lease, and they keep credentials such as `GITHUB_TOKEN` and `SSH_AUTH_SOCK`
+so agents can still run `gh` and `git push` through them. Callers must use
+`sandbox.run_validation_child` or `job.sh consumer-hook` when the validation
+environment, descriptor, network, and Git boundaries are required.
 
 Final-CI reproduction is no longer a job-runner special case. Invoke
 `job.sh consumer-hook` with explicit `--base`, `--head`, `--task-id`,
@@ -81,7 +100,12 @@ are forced into that tree, while the root `.git` administrative entry is sealed
 read-only by the child sandbox. Candidate local Git config is screened before
 repository-directed Git runs, then replaced in the child with only fixed
 `core.repositoryformatversion=0` and `core.bare=false`; no `remote.*` or
-`branch.*` configuration is retained. The isolated repository has no candidate
+`branch.*` configuration is retained. Screening accepts ordinary remotes
+(origin and additional remotes with `url`, `pushurl`, `fetch`, and mirror or
+prune flags) and rejects remote-helper transports such as `ext::` and `fd::`,
+remote `vcs`, `proxy`, `uploadpack`, `receivepack`, and promisor settings,
+`extensions.partialclone`, and any `core.repositoryformatversion` other than
+`0`. The isolated repository has no candidate
 config and a highest-precedence attributes file disables filters, working-tree
 encoding, ident and EOL conversion. Candidate `.gitattributes` content is itself
 hashed but cannot change how any bytes are hashed; nested Git worktrees are
@@ -94,11 +118,21 @@ hooks with `config.effective_hooks`, and launches them with
 
 Executable selection uses the package-wide symlink-free allowlist. This trusts
 only `argv[0]`. Hook operands, interpreted scripts, and candidate test inputs are
-candidate-controlled by design. A zero child exit is therefore not acceptance:
-the parent snapshots the supplied coordinator public key before child launch and
-then recomputes the executed-source identity and verifies a coordinator-signed
-result bound to the task ID, base SHA, approved head SHA, exact clean commit or
-dirty tree SHA, hook name, and exact resolved command vectors. Result files are
+candidate-controlled by design. Hooks must be hermetic: they may write only to
+the private temporary and cache paths supplied in their environment, never to
+the exposed worktree. Python bytecode and pytest, uv, npm, pnpm, and XDG caches
+are redirected accordingly, the uv project environment is redirected into the
+private temporary directory (`UV_PROJECT_ENVIRONMENT`) and uv syncing is
+disabled (`UV_NO_SYNC=1`), so `uv run` neither creates `.venv` nor rewrites
+`uv.lock` in the worktree. Hooks that install into the worktree (for example
+`npm install` creating `node_modules`) still violate hermeticity and fail with
+the binding exit. A zero child exit is therefore not acceptance. The
+parent's evidence is the actual child exit code plus equality of the complete
+source identity before and after execution; only then does it verify a
+coordinator-authorized result artifact bound to the task ID, base SHA, approved
+head SHA, exact clean commit or dirty tree SHA, hook name, and exact resolved
+command vectors. The artifact is pre-authorization for those fields, not an
+attestation that the child ran. Result files are
 opened nonblocking and without symlink following, must be bounded regular files,
 and are read under a deadline. Unsigned/malformed/unreadable, tampered, and
 misbound artifacts are distinct failures. Candidate code is never imported or

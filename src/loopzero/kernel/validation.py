@@ -394,7 +394,11 @@ def _repository_config_overlays(
                 "validation worktree Git configuration is unavailable"
             ) from exc
         try:
-            entries = validated_git_config_entries(raw)
+            entries = validated_git_config_entries(
+                raw,
+                allow_http=settings.toolchain.get("allow_plain_http_remotes", False)
+                is True,
+            )
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise ValidationHookError(
                 "validation worktree Git configuration is unsafe"
@@ -802,6 +806,12 @@ def run_hook(
         if result.stderr:
             sys.stderr.write(result.stderr)
         if result.returncode != 0:
+            # The namespace probe ran inside run_validation_child before this
+            # hook was launched, so a non-zero exit here is the hook's own
+            # unless bubblewrap itself failed in the window between the probe
+            # and the launch. That window is a few milliseconds long and the
+            # hook cannot influence it; a bubblewrap setup failure there
+            # surfaces as the hook's exit code rather than as exit 2.
             return result.returncode
     try:
         after = source_identity(

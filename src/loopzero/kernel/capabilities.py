@@ -24,6 +24,7 @@ def probe_bwrap(bwrap: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         bwrap_probe_command(bwrap), capture_output=True, text=True,
         check=False, timeout=15,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"},
     )
 
 

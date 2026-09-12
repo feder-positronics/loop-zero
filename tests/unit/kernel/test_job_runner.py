@@ -1,6 +1,6 @@
 """Coverage for the detached long-running-command runner used by agents."""
 
-from .package_environment import package_environment
+from .package_environment import PACKAGE_PYTHON, package_environment
 
 import fcntl
 import hashlib
@@ -63,13 +63,29 @@ def _job(
     }).child_environment())
     return subprocess.run(
         [str(script), *args],
-        cwd=script.resolve().parents[2],
+        cwd=_job_worktree(tmp_path, script),
         env=package_environment(environment),
         capture_output=True,
         text=True,
         timeout=timeout,
         pass_fds=pass_fds,
     )
+
+
+def _job_worktree(tmp_path: Path, script: Path) -> Path:
+    """The runner adopts the nearest repository above its working directory.
+
+    Runs of the shipped script get a private, disposable repository instead
+    of the package checkout: the checkout may be read-only (CI binds it that
+    way) and it must never absorb job artifacts such as ``.audit``.
+    """
+    if script != SCRIPT:
+        return script.resolve().parents[2]
+    worktree = tmp_path / "worktree"
+    if not worktree.is_dir():
+        worktree.mkdir(mode=0o700)
+        subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    return worktree
 
 
 def _default_job(
@@ -160,6 +176,79 @@ def test_job_runner_disables_hostile_python_startup_paths(tmp_path: Path) -> Non
     assert result.returncode == 0, result.stderr
     assert not job_marker.exists()
     assert not python_path_job_marker.exists()
+
+
+@pytest.mark.parametrize("location", ("repository", "linked-worktree"))
+def test_job_runner_rejects_interpreter_under_any_worktree(
+    tmp_path: Path, location: str
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    target_root = repo
+    if location == "linked-worktree":
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        target_root = tmp_path / "linked"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "--detach", str(target_root)],
+            cwd=repo,
+            check=True,
+        )
+    interpreter = target_root / "candidate-python"
+    interpreter.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+
+    result = subprocess.run(
+        [str(script), "list"],
+        cwd=repo,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LOOPZERO_PYTHON": str(interpreter),
+            "LOOPZERO_ENV_PREFIX": "INTELFLO",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "outside every repository worktree" in result.stderr
+
+
+def test_job_runner_rejects_symlinked_external_interpreter(tmp_path: Path) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    interpreter = tmp_path / "external-python-link"
+    interpreter.symlink_to(PACKAGE_PYTHON)
+
+    result = subprocess.run(
+        [str(script), "list"],
+        cwd=repo,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LOOPZERO_PYTHON": str(interpreter),
+            "LOOPZERO_ENV_PREFIX": "INTELFLO",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "trusted Python interpreter is unavailable" in result.stderr
 
 
 def test_snapshot_runner_keys_authority_to_declared_delivery(tmp_path: Path) -> None:
@@ -265,6 +354,105 @@ def test_run_propagates_the_job_exit_code(tmp_path: Path) -> None:
 
     assert result.returncode == 7
     assert "exit code 7" in result.stdout
+
+
+def test_unbound_job_strips_parent_worktree_lease_before_guard_commit(
+    tmp_path: Path,
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    environment = package_environment(
+        {
+            "PATH": "/usr/bin:/bin",
+            "INTELFLO_JOB_DIR": str(tmp_path / "jobs"),
+            **KernelSettings(env_prefix="INTELFLO").child_environment(),
+        }
+    )
+    result = subprocess.run(
+        [
+            str(PACKAGE_PYTHON),
+            "-m",
+            "loopzero.kernel.worktree_lease",
+            "exec",
+            "--worktree",
+            str(repo),
+            "--boundary",
+            "job-runner-test",
+            "--",
+            str(script),
+            "run",
+            "unbound-guard",
+            "--timeout",
+            "30",
+            "--",
+            str(PACKAGE_PYTHON),
+            "-m",
+            "loopzero.kernel.worktree_lease",
+            "guard-commit",
+            "--worktree",
+            str(repo),
+        ],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "exit code 1" in result.stdout
+    assert "commit blocked" in result.stdout
+
+
+def test_unbound_job_keeps_credentials_but_strips_the_lease_family(
+    tmp_path: Path,
+) -> None:
+    from loopzero.kernel.sandbox import strip_worktree_lease_environment
+
+    assert strip_worktree_lease_environment(
+        {
+            "INTELFLO_WORKTREE_LEASE_FD": "7",
+            "INTELFLO_WORKTREE_LEASE_BOUNDARY": "b",
+            "INTELFLO_WORKTREE_LEASE_OWNER_PID": "1",
+            "INTELFLO_WORKTREE_LEASE_NONCE": "n",
+            "GITHUB_TOKEN": "placeholder",
+            "SSH_AUTH_SOCK": "/run/agent.sock",
+            "PATH": "/usr/bin:/bin",
+        }
+    ) == {
+        "GITHUB_TOKEN": "placeholder",
+        "SSH_AUTH_SOCK": "/run/agent.sock",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    command = (
+        'test "$GITHUB_TOKEN" = placeholder && '
+        'test "$SSH_AUTH_SOCK" = /run/agent.sock && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_NONCE:-}" && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_OWNER_PID:-}" && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_BOUNDARY:-}" && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_FD:-}"'
+    )
+    result = _job(
+        tmp_path,
+        "run",
+        "unbound-credentials",
+        "--timeout",
+        "30",
+        "--",
+        "sh",
+        "-c",
+        command,
+        env_overrides={
+            "GITHUB_TOKEN": "placeholder",
+            "SSH_AUTH_SOCK": "/run/agent.sock",
+            "INTELFLO_WORKTREE_LEASE_NONCE": "stale-nonce",
+            "INTELFLO_WORKTREE_LEASE_OWNER_PID": "1",
+            "INTELFLO_WORKTREE_LEASE_BOUNDARY": "stale-boundary",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_run_preserves_wrapped_python_script_directory_imports(tmp_path: Path) -> None:
@@ -414,8 +602,21 @@ def test_bound_wrapped_command_cannot_mutate_its_job_authority(tmp_path: Path) -
         json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
         encoding="utf-8",
     )
-    pid_path = tmp_path / "jobs" / "bound" / "pid"
-    command = f'! sh -c \'printf "forged\\n" > "{pid_path}"\''
+    job_dir = tmp_path / "jobs" / "bound"
+    pid_path = job_dir / "pid"
+    identity_path = job_dir / "pid-identity.json"
+    receipt_path = job_dir / "reconciliation.json"
+    # The job directory is sealed: the child can neither overwrite the pid
+    # authority, unlink and recreate the pid or pid identity, nor plant a
+    # reconciliation receipt that would let start/clean/status treat the run
+    # as already reaped.
+    command = (
+        f'! sh -c \'printf "forged\\n" > "{pid_path}"\' && '
+        f'! rm -f "{pid_path}" 2>/dev/null && '
+        f'! rm -f "{identity_path}" 2>/dev/null && '
+        f'! sh -c \'printf "{{}}" > "{receipt_path}"\' && '
+        f'! sh -c \'printf x > "{job_dir}/planted"\''
+    )
 
     result = _job(
         tmp_path,
@@ -437,6 +638,9 @@ def test_bound_wrapped_command_cannot_mutate_its_job_authority(tmp_path: Path) -
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert (tmp_path / "jobs" / "bound" / "exit_code").read_text().strip() == "0"
+    assert not receipt_path.exists()
+    assert not (job_dir / "planted").exists()
+    assert pid_path.exists() and identity_path.exists()
 
 
 @requires_nested_user_namespace
@@ -516,12 +720,16 @@ def test_bound_job_fails_closed_when_capability_probe_fails(tmp_path: Path) -> N
 
 @requires_nested_user_namespace
 def test_bound_job_runs_inside_private_pid_namespace(tmp_path: Path) -> None:
+    # Only the worktree and the private TMPDIR are writable to a bound child,
+    # so the observation is recorded inside an isolated worktree.
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
     artifact = tmp_path / "terminal.json"
     artifact.write_text(
         json.dumps({"task_id": "dispatch-closeout", "status": "completed"}),
         encoding="utf-8",
     )
-    observed_namespace = tmp_path / "bound-pid-namespace"
+    observed_namespace = repo / "bound-pid-namespace"
     parent_namespace = os.readlink("/proc/self/ns/pid")
 
     result = _job(
@@ -543,12 +751,57 @@ def test_bound_job_runs_inside_private_pid_namespace(tmp_path: Path) -> None:
         "sh",
         str(observed_namespace),
         parent_namespace,
+        script=script,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert (
         observed_namespace.read_text(encoding="ascii").strip() != parent_namespace
     )
+
+
+@requires_nested_user_namespace
+def test_bound_child_writes_its_terminal_artifact_inside_the_worktree(
+    tmp_path: Path,
+) -> None:
+    # The launcher-nameable writable location for a bound ordinary job is the
+    # worktree; the child produces the terminal artifact there itself.
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    artifact = repo / ".audit" / "dispatch" / "results" / "dispatch-closeout.json"
+    payload = json.dumps({"task_id": "dispatch-closeout", "status": "completed"})
+
+    result = _job(
+        tmp_path,
+        "run",
+        "child-artifact",
+        "--timeout",
+        "30",
+        "--run-id",
+        "sr_" + "a" * 32,
+        "--task-id",
+        "dispatch-closeout",
+        "--terminal-artifact",
+        str(artifact),
+        "--",
+        "sh",
+        "-c",
+        'test ! -e "$1" && mkdir -p "$(dirname "$1")" && printf "%s" "$2" > "$1"',
+        "sh",
+        str(artifact),
+        payload,
+        script=script,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(artifact.read_text(encoding="utf-8")) == json.loads(payload)
+    job_dir = tmp_path / "jobs" / "child-artifact"
+    envelope = json.loads((job_dir / "terminal-envelope.json").read_text("utf-8"))
+    assert envelope["terminal_artifact_sha256"] == hashlib.sha256(
+        artifact.read_bytes()
+    ).hexdigest()
+    assert envelope["terminal"]["status"] == "completed"
+    assert (job_dir / "exit_code").read_text().strip() == "0"
 
 
 @requires_nested_user_namespace
@@ -695,7 +948,11 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
         working_directory=Path("/var/home/user/repo"),
         command=["true"],
         account_home=Path("/var/home/user"),
-        protected_read_only_paths=(candidate_store,),
+        writable_paths=(
+            Path("/var/home/user/repo"),
+            Path("/var/home/user/tmp/current"),
+        ),
+        protected_read_only_paths=(candidate_store, Path("/var/home/user/repo/.git")),
         **_fake_filesystem_views(
             {
                 "/": ["bin", "dev", "etc", "proc", "sys", "usr", "var"],
@@ -704,12 +961,14 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
             },
             {"/bin": "usr/bin"},
         ),
+        directory_exists=lambda path: str(path)
+        in {"/var/home/user/.ssh", "/var/home/user/.local/state/intelflo/dispatch-authority"},
     )
 
-    def bind(path: str) -> list[str]:
-        return ["--bind", path, path]
+    def bind(path: str, *, writable: bool = False) -> list[str]:
+        return ["--bind" if writable else "--ro-bind", path, path]
 
-    # Top-level entries keep their host view; /proc and /dev are replaced.
+    # Top-level entries keep a read-only host view; /proc and /dev are replaced.
     assert arguments[:4] == [
         "/usr/bin/bwrap",
         "--die-with-parent",
@@ -722,44 +981,49 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert bind("/proc") != _window(arguments, bind("/proc"))
     assert bind("/dev") != _window(arguments, bind("/dev"))
     assert bind("/sys") != _window(arguments, bind("/sys"))
-    # Strict home ancestors are synthesized 0555; the home itself is bound.
+    # Strict home ancestors are synthesized 0555; the home itself is read-only.
     assert _window(arguments, ["--perms", "0555", "--dir", "/var"])
     assert _window(arguments, ["--perms", "0555", "--dir", "/var/home"])
     assert _window(arguments, bind("/var/home/user"))
-    # The home is not re-bound by the authority-ancestor mounts, while
-    # authority ancestors below the home stay bind mount points.
+    # The home is not re-bound writable by authority-ancestor mounts.
     assert arguments.count("/var/home/user") == 2
-    assert _window(arguments, bind("/var/home/user/.local/state/intelflo"))
     protected = "/var/home/user/.local/state/intelflo/jobs/abcd"
     assert _window(arguments, ["--ro-bind", protected, protected])
-    for pinned in (
-        "/var/home/user/project",
-        "/var/home/user/project/.audit",
-        "/var/home/user/project/.audit/delivery-continuations",
-    ):
-        assert _window(arguments, bind(pinned))
+    for writable in ("/var/home/user/repo", "/var/home/user/tmp/current"):
+        assert _window(arguments, bind(writable, writable=True))
+    # Nothing below the sealed authority root is rebound writable.
+    for index, token in enumerate(arguments):
+        if token == "--bind":
+            assert not Path(arguments[index + 2]).is_relative_to(protected)
     assert _window(
         arguments,
         ["--ro-bind", str(candidate_store), str(candidate_store)],
     )
-    shared_jobs_overlay = [
-        "--ro-bind",
-        "/var/home/user/.local/state/intelflo/jobs",
-        "/var/home/user/.local/state/intelflo/jobs",
-    ]
-    overlay_index = next(
-        index
-        for index in range(len(arguments) - len(shared_jobs_overlay) + 1)
-        if arguments[index : index + len(shared_jobs_overlay)] == shared_jobs_overlay
+    # The candidate store is outside the writable worktree here, so no
+    # ancestor pin is needed; `.git` sits directly below the worktree mount.
+    assert not _window(arguments, bind("/var/home/user/project/.audit", writable=True))
+    assert _window(arguments, bind("/var/home/user/repo/.git"))
+    # Coordinator authority and ~/.ssh are hidden behind empty tmpfs overlays
+    # placed after every bind so no later parent mount can shadow them.
+    for hidden in (
+        "/var/home/user/.local/state/intelflo/dispatch-authority",
+        "/var/home/user/.ssh",
+    ):
+        assert _window(arguments, ["--perms", "0555", "--tmpfs", hidden])
+    home_seal = arguments.index("/var/home/user", arguments.index("--proc"))
+    ssh_overlay = arguments.index("/var/home/user/.ssh")
+    authority_seal = arguments.index(protected, home_seal + 1)
+    first_writable = arguments.index("--bind")
+    protected_seal = arguments.index(str(candidate_store), authority_seal + 1)
+    last_bind = max(
+        index for index, token in enumerate(arguments) if token in {"--bind", "--ro-bind"}
     )
-    assert overlay_index > max(
-        index
-        for index, argument in enumerate(arguments)
-        if argument in {"--bind", "--symlink"}
-    )
-    # Procfs and devfs are broad mounts, so they precede every authority seal.
-    assert arguments.index("--proc") < overlay_index
-    assert arguments.index("--dev-bind") < overlay_index
+    assert arguments.index("--proc") < home_seal < authority_seal
+    assert authority_seal < first_writable
+    assert first_writable < protected_seal
+    assert last_bind < ssh_overlay < arguments.index("--remount-ro")
+    _assert_no_mount_shadows_a_hidden_root(arguments)
+    assert arguments.index("--dev-bind") < home_seal
     # The read-only remount of the synthesized root is the final mount.
     tail = arguments[arguments.index("--remount-ro") :]
     assert tail == ["--remount-ro", "/", "--chdir", "/var/home/user/repo", "--", "true"]
@@ -770,6 +1034,230 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     for index in range(proc_index + 2, len(arguments) - 2):
         if arguments[index] in {"--bind", "--ro-bind"}:
             assert Path(arguments[index + 2]) not in forbidden_destinations
+
+
+def test_bound_sandbox_pins_protected_ancestors_inside_the_writable_worktree() -> None:
+    from loopzero.kernel import jobs as job_store
+
+    repo = Path("/home/user/repo")
+    candidate_store = repo / ".audit" / "delivery-continuations" / "candidates"
+    arguments = job_store.build_bound_sandbox_arguments(
+        "/usr/bin/bwrap",
+        protected_authority_root=Path("/home/user/.local/state/intelflo/jobs/abcd"),
+        working_directory=repo,
+        command=["true"],
+        account_home=Path("/home/user"),
+        writable_paths=(repo, Path("/home/user/tmp/current")),
+        protected_read_only_paths=(repo / ".git", candidate_store),
+        **_fake_filesystem_views({"/": ["dev", "home", "proc", "usr"], "/home": ["user"]}, {}),
+        directory_exists=lambda path: False,
+    )
+
+    # rename(2) fails with EBUSY on a mount point, so every ancestor of the
+    # candidate store strictly inside the worktree is pinned; the worktree
+    # itself is already a mount point.
+    worktree = arguments.index(str(repo), arguments.index("--bind"))
+    for ancestor in (repo / ".audit", repo / ".audit" / "delivery-continuations"):
+        assert _window(arguments, ["--bind", str(ancestor), str(ancestor)])
+        assert arguments.index(str(ancestor)) > worktree
+    assert arguments.index(str(candidate_store)) > arguments.index(
+        str(repo / ".audit" / "delivery-continuations")
+    )
+    assert arguments.count(str(repo)) == 3  # writable bind (2) and --chdir
+    assert not _window(arguments, ["--tmpfs", "/home/user/.ssh"])
+
+
+def _emitted_mounts(arguments: list[str]) -> list[tuple[str, str]]:
+    """Return every (mode, destination) mount in emitted argv order."""
+    mounts: list[tuple[str, str]] = []
+    index = 0
+    while index < len(arguments):
+        token = arguments[index]
+        if token in {"--bind", "--ro-bind", "--dev-bind", "--symlink"}:
+            mounts.append((token, arguments[index + 2]))
+            index += 3
+        elif token in {"--tmpfs", "--dir", "--proc"}:
+            mounts.append((token, arguments[index + 1]))
+            index += 2
+        elif token == "--remount-ro":
+            mounts.append((token, arguments[index + 1]))
+            break
+        else:
+            index += 1
+    return mounts
+
+
+def _assert_no_mount_shadows_a_hidden_root(arguments: list[str]) -> None:
+    mounts = _emitted_mounts(arguments)
+    hidden = [
+        (position, destination)
+        for position, (mode, destination) in enumerate(mounts)
+        if mode == "--tmpfs" and destination != "/"
+    ]
+    assert hidden, "no hidden secret overlay was emitted"
+    for position, destination in hidden:
+        shadowing = [
+            (mode, later)
+            for mode, later in mounts[position + 1 :]
+            if mode != "--remount-ro" and Path(destination).is_relative_to(later)
+        ]
+        assert shadowing == [], f"{destination} is shadowed by {shadowing}"
+    for mode, destination in mounts:
+        if mode == "--bind":
+            for _position, hidden_root in hidden:
+                assert not Path(hidden_root).is_relative_to(destination)
+                assert not Path(destination).is_relative_to(hidden_root)
+
+
+def _overlapping_layout_arguments(
+    layout: str, *, state_root: Path | None = None
+) -> list[str]:
+    from loopzero.kernel import jobs as job_store
+    from loopzero.kernel.settings import KernelSettings
+
+    views = _fake_filesystem_views(
+        {"/": ["dev", "home", "proc", "srv", "tmp", "usr"], "/home": ["user"]}, {}
+    )
+    settings = KernelSettings(env_prefix="INTELFLO", state_root=state_root)
+    if layout == "job root is the state root":
+        arguments = dict(
+            protected_authority_root=Path("/home/user/.local/state/intelflo"),
+            working_directory=Path("/home/user/repo"),
+            writable_paths=(Path("/home/user/repo"), Path("/tmp/current")),
+            protected_read_only_paths=(Path("/home/user/repo/.git"),),
+        )
+    elif layout == "state root inside the writable worktree":
+        arguments = dict(
+            protected_authority_root=Path("/tmp/jobs"),
+            working_directory=Path("/srv/project"),
+            writable_paths=(Path("/srv/project"), Path("/tmp/current")),
+            protected_read_only_paths=(Path("/srv/project/.git"),),
+        )
+    elif layout == "authority root contains the home":
+        arguments = dict(
+            protected_authority_root=Path("/home"),
+            working_directory=Path("/srv/work"),
+            writable_paths=(Path("/srv/work"), Path("/tmp/current")),
+            protected_read_only_paths=(Path("/srv/work/.git"),),
+        )
+    else:
+        raise AssertionError(layout)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(job_store, "settings", settings)
+        return job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            command=["true"],
+            account_home=Path("/home/user"),
+            directory_exists=lambda path: True,
+            **arguments,
+            **views,
+        )
+
+
+def test_bound_sandbox_hidden_overlays_survive_a_job_root_at_the_state_root() -> None:
+    arguments = _overlapping_layout_arguments("job root is the state root")
+
+    authority = "/home/user/.local/state/intelflo/dispatch-authority"
+    assert _window(arguments, ["--ro-bind", "/home/user/.local/state/intelflo",
+                               "/home/user/.local/state/intelflo"])
+    assert _window(arguments, ["--perms", "0555", "--tmpfs", authority])
+    assert _window(arguments, ["--perms", "0555", "--tmpfs", "/home/user/.ssh"])
+    assert arguments.index(authority) > arguments.index("/home/user/.local/state/intelflo")
+    _assert_no_mount_shadows_a_hidden_root(arguments)
+
+
+def test_bound_sandbox_rejects_a_state_root_inside_the_writable_worktree() -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="contains a hidden secret root"):
+        _overlapping_layout_arguments(
+            "state root inside the writable worktree",
+            state_root=Path("/srv/project/.state"),
+        )
+
+
+def test_bound_sandbox_hidden_overlays_survive_an_authority_root_over_the_home() -> None:
+    arguments = _overlapping_layout_arguments("authority root contains the home")
+
+    assert _window(arguments, ["--ro-bind", "/home", "/home"])
+    assert _window(arguments, ["--perms", "0555", "--tmpfs", "/home/user/.ssh"])
+    assert arguments.index("/home/user/.ssh") > arguments.index(
+        "/home", arguments.index("--ro-bind", arguments.index("--proc"))
+    )
+    assert arguments.index("/home/user/.ssh") > arguments.index("/srv/work", arguments.index("--bind"))
+    _assert_no_mount_shadows_a_hidden_root(arguments)
+
+
+@pytest.mark.parametrize(
+    "writable",
+    [
+        Path("/home/user/repo"),  # job root configured inside the worktree
+        Path("/home/user/repo/.jobs"),  # the authority root itself
+        Path("/home/user/repo/.jobs/current"),  # a job directory below it
+        Path("/home/user"),  # the account home
+        Path("/home"),  # an ancestor of the account home
+    ],
+)
+def test_bound_sandbox_rejects_writable_paths_that_mask_or_open_a_seal(
+    writable: Path,
+) -> None:
+    from loopzero.kernel import jobs as job_store
+
+    with pytest.raises(job_store.JobStoreError, match="writable path"):
+        job_store.build_bound_sandbox_arguments(
+            "/usr/bin/bwrap",
+            protected_authority_root=Path("/home/user/repo/.jobs"),
+            working_directory=Path("/home/user/repo"),
+            command=["true"],
+            account_home=Path("/home/user"),
+            writable_paths=(writable, Path("/home/user/tmp/current")),
+            protected_read_only_paths=(),
+            **_fake_filesystem_views(
+                {"/": ["dev", "home", "proc", "usr"], "/home": ["user"]}, {}
+            ),
+            directory_exists=lambda path: False,
+        )
+
+
+@pytest.mark.parametrize(
+    "writable",
+    [
+        Path("/srv/project"),  # contains the dispatch-authority root
+        Path("/srv/project/.state"),  # the state root itself
+        Path("/srv/project/.state/dispatch-authority"),  # the hidden root
+        Path("/srv/project/.state/dispatch-authority/ledgers"),  # below it
+        Path("/home/user/.ssh"),  # the hidden SSH root
+        Path("/home/user/.ssh/keys"),  # below it
+    ],
+)
+def test_bound_sandbox_rejects_writable_paths_that_touch_a_hidden_root(
+    writable: Path,
+) -> None:
+    from loopzero.kernel import jobs as job_store
+    from loopzero.kernel.settings import KernelSettings
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            job_store,
+            "settings",
+            KernelSettings(env_prefix="INTELFLO", state_root=Path("/srv/project/.state")),
+        )
+        with pytest.raises(job_store.JobStoreError, match="hidden secret root"):
+            job_store.build_bound_sandbox_arguments(
+                "/usr/bin/bwrap",
+                protected_authority_root=Path("/tmp/jobs"),
+                working_directory=Path("/srv/work"),
+                command=["true"],
+                account_home=Path("/home/user"),
+                writable_paths=(writable, Path("/srv/work")),
+                protected_read_only_paths=(),
+                **_fake_filesystem_views(
+                    {"/": ["dev", "home", "proc", "srv", "tmp", "usr"], "/home": ["user"]},
+                    {},
+                ),
+                # Rejection must not depend on whether the secrets exist yet.
+                directory_exists=lambda path: False,
+            )
 
 
 @pytest.mark.parametrize("root", [Path("/proc/jobs"), Path("/sys/jobs"), Path("/dev/jobs")])
@@ -864,7 +1352,14 @@ def test_bound_sandbox_supports_dev_shm_authority_without_rebinding_dev() -> Non
 
     assert _window(arguments, ["--bind", "/dev", "/dev"]) is None
     assert _window(arguments, ["--bind", "/sys", "/sys"]) is None
-    assert _window(arguments, ["--bind", "/dev/shm", "/dev/shm"])
+    assert _window(
+        arguments,
+        [
+            "--ro-bind",
+            "/dev/shm/loopzero/jobs/current",
+            "/dev/shm/loopzero/jobs/current",
+        ],
+    )
 
 
 def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
@@ -890,7 +1385,7 @@ def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
 
     assert _window(arguments, ["--perms", "0555", "--dir", "/home"])
     assert _window(arguments, ["--perms", "0555", "--dir", "/home/user"])
-    assert _window(arguments, ["--bind", "/home/user", "/home/user"])
+    assert _window(arguments, ["--ro-bind", "/home/user", "/home/user"])
 
 
 @requires_nested_user_namespace
@@ -979,13 +1474,12 @@ def test_bound_sandbox_arguments_keep_external_authority_ancestors_bound() -> No
         ),
     )
 
-    # An authority root outside the home keeps every ancestor a mount point,
-    # preserving the ancestor-substitution protection.
-    assert _window(arguments, ["--bind", "/tmp", "/tmp"])
-    assert _window(arguments, ["--bind", "/tmp/pytest-of-user", "/tmp/pytest-of-user"])
+    # The external host tree and exact authority root are read-only mounts,
+    # preserving ancestor substitution protection without a writable ancestor.
+    assert _window(arguments, ["--ro-bind", "/tmp", "/tmp"])
     assert _window(
         arguments,
-        ["--bind", "/tmp/pytest-of-user/case", "/tmp/pytest-of-user/case"],
+        ["--ro-bind", "/tmp/pytest-of-user/case/jobs", "/tmp/pytest-of-user/case/jobs"],
     )
 
 

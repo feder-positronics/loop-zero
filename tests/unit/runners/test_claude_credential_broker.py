@@ -90,7 +90,8 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
 
     credential = tmp_path / ".claude" / ".credentials.json"
     tooling_root = tmp_path / "tooling"
-    settings = RuntimeSettings(tooling_root=tooling_root)
+    state_root = tmp_path / "state"
+    settings = RuntimeSettings(tooling_root=tooling_root, state_root=str(state_root))
     workspace_root = settings.workspace_root(tooling_root)
     original = _credential(expires_at_ms=1_100_000, access_token="old")
     refreshed = _credential(expires_at_ms=3_000_000, access_token="new")
@@ -108,7 +109,8 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
         assert capture_output is True
         assert text is True
         assert cwd == Path(env["HOME"])
-        assert cwd.parent == workspace_root
+        assert cwd.parent == state_root
+        assert not cwd.is_relative_to(workspace_root)
         assert stat.S_IMODE(cwd.stat().st_mode) == 0o700
         observed_lock["staging_home"] = cwd
         staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
@@ -146,6 +148,79 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
     assert observed_lock["mode"] == 0o600
     assert observed_lock["uid"] == os.getuid()
     assert not Path(observed_lock["staging_home"]).exists()
+
+
+def test_refresh_mount_is_private_to_one_worker_launch(tmp_path: Path) -> None:
+    from loopzero.runners.settings import RuntimeSettings
+
+    state_root = tmp_path / "state"
+    tooling_root = tmp_path / "tooling"
+    settings = RuntimeSettings(
+        tooling_root=tooling_root,
+        state_root=str(state_root),
+    )
+    workspace_root = settings.workspace_root(tooling_root)
+    fake_claude = tmp_path / "claude"
+    fake_claude.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+from pathlib import Path
+
+path = Path(os.environ["HOME"]) / ".claude" / ".credentials.json"
+credential = json.loads(path.read_text(encoding="utf-8"))
+credential["claudeAiOauth"]["accessToken"] += "-refreshed"
+credential["claudeAiOauth"]["expiresAt"] = 3_000_000
+path.write_text(json.dumps(credential), encoding="utf-8")
+path.chmod(0o600)
+print(json.dumps({{"loggedIn": True}}))
+""",
+        encoding="utf-8",
+    )
+    fake_claude.chmod(0o700)
+    rendered_launches: list[list[str]] = []
+
+    def wrapper(spec):
+        rendered = ["test-wrapper"]
+        for mount in (*spec.private_mounts, spec.private_tmpdir):
+            rendered.extend(("--bind", str(mount), str(mount)))
+        rendered.extend(("--", *spec.argv))
+        rendered_launches.append(rendered)
+        return spec.argv
+
+    with settings.use():
+        for worker in ("one", "two"):
+            credential = tmp_path / worker / ".claude" / ".credentials.json"
+            _write_credential(
+                credential,
+                _credential(expires_at_ms=1_100_000, access_token=worker),
+            )
+            with claude_credential.claude_subscription_credential(
+                requested_runtime_s=600,
+                credential_path=credential,
+                clock=lambda: 1_000.0,
+                claude_binary=fake_claude,
+                sandbox_wrapper=wrapper,
+            ):
+                pass
+
+    assert len(rendered_launches) == 2
+    first_staging = next(
+        Path(rendered_launches[0][index + 1])
+        for index, value in enumerate(rendered_launches[0])
+        if value == "--bind" and "claude-renewal" in rendered_launches[0][index + 1]
+    )
+    second_staging = next(
+        Path(rendered_launches[1][index + 1])
+        for index, value in enumerate(rendered_launches[1])
+        if value == "--bind" and "claude-renewal" in rendered_launches[1][index + 1]
+    )
+    assert first_staging != second_staging
+    assert not first_staging.is_relative_to(workspace_root)
+    assert not second_staging.is_relative_to(workspace_root)
+    assert str(first_staging) not in rendered_launches[1]
+    assert not first_staging.exists()
+    assert not second_staging.exists()
 
 
 def test_refresh_accepts_claude_binary_rewrite_with_same_validated_oauth_fields(
@@ -453,7 +528,7 @@ def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
         )
 
     monkeypatch.setattr(claude_credential, "default_run_cli", contained_run)
-    wrapper = lambda command: ["bwrap", "--", *command]
+    wrapper = lambda spec: ["bwrap", "--", *spec.argv]
 
     with pytest.raises(subprocess.TimeoutExpired):
         claude_credential._run_refresh_process_group(
@@ -473,6 +548,7 @@ def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
         "input_text": "",
         "timeout_s": 1,
         "env": {},
+        "private_mounts": (),
         "sandbox_wrapper": wrapper,
     }
 
@@ -904,15 +980,17 @@ def test_unsafe_default_token_refused(
 
 def test_default_path_uses_account_home_not_environment(monkeypatch, token_broker):
     from types import SimpleNamespace
+    from loopzero.runners.settings import RuntimeSettings
 
     monkeypatch.setattr(
         token_broker.pwd, "getpwuid", lambda uid: SimpleNamespace(pw_dir="/account")
     )
     monkeypatch.setenv("HOME", "/untrusted")
     monkeypatch.setenv("XDG_STATE_HOME", "/untrusted-state")
-    assert token_broker._default_token_path() == Path(
-        "/account/.local/state/intelflo/claude-token"
-    )
+    with RuntimeSettings(env_prefix="INTELFLO").use():
+        assert token_broker._default_token_path() == Path(
+            "/account/.local/state/intelflo/claude-token"
+        )
 
 
 @pytest.mark.parametrize("home", ["relative", "/"])

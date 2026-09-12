@@ -1,10 +1,24 @@
 """Carry installed-package identity into explicitly isolated CLI test envs."""
+import atexit
 import os
+import shlex
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
-PACKAGE_PYTHON = Path(__file__).with_name("package-python")
 PACKAGE_ROOT = Path(__file__).resolve().parents[3]
+_WRAPPER_ROOT = Path(tempfile.gettempdir()) / f"loopzero-package-python-{os.getpid()}"
+_WRAPPER_ROOT.mkdir(mode=0o700, exist_ok=True)
+atexit.register(shutil.rmtree, _WRAPPER_ROOT, ignore_errors=True)
+PACKAGE_PYTHON = _WRAPPER_ROOT / "python"
+PACKAGE_PYTHON.write_text(
+    "#!/bin/sh\n"
+    f"export PYTHONPATH={shlex.quote(str(PACKAGE_ROOT / 'src'))}\n"
+    f"exec {shlex.quote(sys.executable)} \"$@\"\n",
+    encoding="utf-8",
+)
+PACKAGE_PYTHON.chmod(0o700)
 
 def package_environment(environment):
     selected = dict(os.environ if environment is None else environment)

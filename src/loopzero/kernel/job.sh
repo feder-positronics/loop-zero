@@ -9,6 +9,10 @@
 #
 # Usage:
 #   scripts/util/job.sh start <name> [--run-id ID --task-id ID --terminal-artifact PATH] -- <command...>
+#       A bound (--run-id) ordinary command runs in a read-only sandbox where
+#       only the worktree and a private TMPDIR are writable; a terminal
+#       artifact the command itself produces must therefore live inside the
+#       worktree (for example under the audit root).
 #   scripts/util/job.sh wait  <name> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
 #   scripts/util/job.sh run   <name> [--timeout SECONDS] [--tail LINES] -- <command...>
 #   scripts/util/job.sh wait-file <path> [--timeout SECONDS] [--tail LINES] [--fast-cadence REASON]
@@ -89,10 +93,54 @@ JOB_WORKTREE="$REPO_ROOT"
 # The consumer injects its approved installed-package interpreter.
 # TODO(A4): obtain this from the approved toolchain at the composition root.
 PYTHON_BIN="${LOOPZERO_PYTHON:-/usr/bin/python3}"
-[ -x "$PYTHON_BIN" ] || {
+python_component="/"
+python_path_safe=1
+case "$PYTHON_BIN" in
+/*) ;;
+*) python_path_safe=0 ;;
+esac
+if [ "$python_path_safe" -eq 1 ]; then
+    old_ifs="$IFS"
+    IFS=/
+    read -ra python_parts <<< "${PYTHON_BIN#/}"
+    IFS="$old_ifs"
+    for python_part in "${python_parts[@]}"; do
+        [ -n "$python_part" ] || continue
+        [ "$python_part" != "." ] && [ "$python_part" != ".." ] || {
+            python_path_safe=0
+            break
+        }
+        python_component="${python_component%/}/$python_part"
+        [ ! -L "$python_component" ] || {
+            python_path_safe=0
+            break
+        }
+    done
+fi
+PYTHON_BIN_REAL="$python_component"
+[ "$python_path_safe" -eq 1 ] && [ -n "$PYTHON_BIN_REAL" ] &&
+    [ -f "$PYTHON_BIN_REAL" ] && [ -x "$PYTHON_BIN_REAL" ] || {
 	echo "job.sh: trusted Python interpreter is unavailable at $PYTHON_BIN" >&2
 	exit 2
 }
+while IFS= read -r python_forbidden_root; do
+    [ -n "$python_forbidden_root" ] || continue
+    case "$PYTHON_BIN_REAL" in
+    "$python_forbidden_root" | "$python_forbidden_root"/*)
+        echo "job.sh: trusted Python interpreter must be outside every repository worktree: $PYTHON_BIN" >&2
+        exit 2
+        ;;
+    esac
+done < <(
+    printf '%s\n' "$REPO_ROOT"
+    /usr/bin/git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null |
+        while IFS= read -r worktree_line; do
+            case "$worktree_line" in
+            "worktree "*) printf '%s\n' "${worktree_line#worktree }" ;;
+            esac
+        done
+)
+PYTHON_BIN="$PYTHON_BIN_REAL"
 
 # Consumer hooks are policy-selected from the approved base, then launched as
 # validation children before any job authority is acquired. Environment paths
@@ -473,11 +521,16 @@ import socket
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
 
 from loopzero.kernel import jobs as job_store
+from loopzero.kernel.sandbox import (
+    strip_authority_environment,
+    strip_worktree_lease_environment,
+)
 from loopzero.kernel.settings import settings
 from loopzero.kernel.trusted_exec import TrustedExecutableError, system_executable
 
@@ -963,11 +1016,21 @@ try:
     # The supervisor's trusted Python helpers need safe-path mode, but a
     # wrapped Python script must retain its own directory as an import root.
     child_env.pop("PYTHONSAFEPATH", None)
+    if requires_bound_sandbox:
+        # Bound ordinary jobs are sealed away from ~/.ssh and the coordinator
+        # authority; environment-carried credentials go with them.
+        child_env = strip_authority_environment(child_env)
+    elif not trusted_dispatcher and not trusted_continuation:
+        # Unbound jobs are detached command-runner children for the agent. They
+        # must not inherit the launcher's worktree lease (re-entrancy), but
+        # they keep credentials so `gh` and `git push` still work through them.
+        child_env = strip_worktree_lease_environment(child_env)
     child_env[settings.env("JOB_NAME")] = job_name
     child_env[settings.env("JOB_EXECUTOR_PID")] = str(os.getpid())
     if trusted_continuation:
         child_env[TRUSTED_CONTINUATION_ENV] = "1"
     wrapped_command = command
+    bound_temp_context = None
     if requires_bound_sandbox:
         assert bwrap is not None
         # The synthesized-root rationale and invariants live on
@@ -977,11 +1040,33 @@ try:
         # exactly one authority root. Legacy recovery is explicit, so the
         # fallback never leaves a second discovered root writable.
         try:
+            bound_temp_context = tempfile.TemporaryDirectory(
+                prefix="loopzero-bound-job-", dir="/tmp"
+            )
+            bound_temp = Path(bound_temp_context.name)
+            child_env.update(
+                {
+                    "HOME": str(pwd.getpwuid(os.getuid()).pw_dir),
+                    "TMPDIR": str(bound_temp),
+                    "TMP": str(bound_temp),
+                    "TEMP": str(bound_temp),
+                    "UV_CACHE_DIR": str(bound_temp / "uv-cache"),
+                    "XDG_CACHE_HOME": str(bound_temp / "xdg-cache"),
+                    "npm_config_cache": str(bound_temp / "npm-cache"),
+                    "npm_config_store_dir": str(bound_temp / "pnpm-store"),
+                }
+            )
             wrapped_command = job_store.build_bound_sandbox_arguments(
                 bwrap,
                 protected_authority_root=job_dir.resolve().parent,
                 working_directory=Path(os.getcwd()),
                 command=list(command),
+                # The job directory stays sealed: reconcile, clean, and status
+                # trust reconciliation.json, pid, and pid-identity.json in it.
+                # A bound child writes its terminal artifact inside the
+                # worktree (the launcher-nameable writable location) and
+                # scratch data under the private temporary directory.
+                writable_paths=(repo_root, bound_temp),
                 protected_read_only_paths=job_store._canonical_candidate_protection_paths(repo_root),
             )
         except job_store.JobStoreError as exc:
@@ -1007,6 +1092,8 @@ try:
         raise OSError(error, os.strerror(error))
     completed = subprocess.run(wrapped_command, **run_arguments)
     final_code = completed.returncode
+    if bound_temp_context is not None:
+        bound_temp_context.cleanup()
 
     for authority_path, authority_fd in authority_chain:
         held = os.fstat(authority_fd)

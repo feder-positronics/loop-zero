@@ -14,7 +14,7 @@ construction is useful for parsing and dependency injection, but it is not an
 executable containment boundary:
 
 ```python
-from loopzero.runners.process import isolated_python_import_available, run_cli
+from loopzero.runners.process import LaunchSpec, isolated_python_import_available, run_cli
 from loopzero.runners.settings import RuntimeSettings
 from loopzero.runners.registry import NATIVE_RUNTIME_REGISTRY
 
@@ -22,7 +22,7 @@ settings = RuntimeSettings.from_profile(profile)
 workspace_root = settings.workspace_root(worktree)
 workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
 # The dispatcher supplies this callable after asking loopzero.kernel.sandbox
-# to settle filesystem authority. Runners only apply it to argv.
+# to settle filesystem authority. Each call receives only that launch's paths.
 sandbox_wrapper = dispatcher_sandbox_wrapper
 contained_run = lambda argv, **kwargs: run_cli(
     argv, sandbox_wrapper=sandbox_wrapper, **kwargs
@@ -44,15 +44,33 @@ result = adapter.run(request)  # retains the settings used at construction
 `launch_cli()` and `run_cli()` refuse execution without a caller-supplied
 `sandbox_wrapper`. The exceptional `unsandboxed=True` path also requires a
 nonempty reason and logs it. It is intended for tightly scoped process-mechanics
-tests, not validation children. The wrapper contract is ``argv -> argv`` and is
-owned by `loopzero.kernel.sandbox`; the dispatcher wires it into runners. The
-wrapper must bind the governed worktree, tooling root, runtime venv root, and
-`settings.workspace_root(tooling_root)`. It must also provide a private `/dev` and `/proc` to the child (Python
-refuses to start without `/dev/urandom`). The venv binding must include the
+tests, not validation children. The wrapper contract is
+``LaunchSpec -> argv`` and is owned by `loopzero.kernel.sandbox`; the dispatcher
+wires it into runners. `LaunchSpec` contains the original `argv`, `cwd`, exact
+per-launch `private_mounts`, and a fresh 0700 `private_tmpdir`. The wrapper must
+bind the governed worktree, tooling root, runtime venv root, and
+`settings.workspace_root(tooling_root)`, then writable-bind only the paths in
+that launch's `private_mounts`. It must writable-bind `private_tmpdir` and the
+runner exports that exact path as `TMPDIR`; a private tmpfs mounted there is an
+equivalent implementation. This is required because bridge credential and
+configuration bootstraps create temporary files. The wrapper must also provide
+a private `/dev` and `/proc` to the child (Python refuses to start without
+`/dev/urandom`). The venv binding must include the
 interpreter's `pyvenv.cfg`, `bin`, and `lib` so the bridge can import its SDKs.
 Every runner child cwd is inside either the governed worktree or that settings
-workspace root; credential renewals use a private, per-refresh directory below
-the workspace root and remove it afterwards.
+workspace root, except credential renewal children. Renewals use a random,
+atomically created 0700 directory below the consumer state root, pass only that
+directory in the refresh launch's `private_mounts`, and scrub it afterwards.
+The wrapper must never bind the state root itself or carry private mounts from
+one launch into another; ordinary workers therefore cannot see refresh
+material. Every adapter's worker credential snapshot carries no refresh
+capability: the refresh token is replaced by the access token and expiry is
+clamped to the access-token expiry. Refresh runs only in the host broker under
+the renewal lock in a launch-private staging directory. Codex transfers the
+existing refresh-capable credential to its bridge
+on the original sealed-descriptor boundary and writes only the rotated SDK
+output into staging. The Claude CLI has no descriptor credential input, so its
+input file remains confined to the same launch-private directory.
 Every `.git` path and every linked-worktree gitdir reachable through those
 bindings must remain read-only. Runners neither build bubblewrap argv nor decide
 which roots are writable. `worker_child_environment()` starts from the positive

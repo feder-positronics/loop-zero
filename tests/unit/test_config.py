@@ -1,4 +1,5 @@
 from pathlib import Path
+import tomllib
 
 import pytest
 
@@ -36,14 +37,14 @@ def test_minimal_profile_loads(consumer: Path):
     assert profile.snapshot_version() == (Path(__file__).resolve().parents[2] / "core/VERSION").read_text().strip()
 
 
-def test_profile_records_explicit_state_root(tmp_path: Path):
-    (tmp_path / "workflow.toml").write_text(
+def test_profile_records_explicit_state_root(consumer: Path):
+    (consumer / "workflow.toml").write_text(
         minimal_workflow(
             extra='[package]\nenv_prefix = "INTELFLO"\nstate_root = "/var/lib/intelflo"\n'
         ),
         encoding="utf-8",
     )
-    profile = config.load_profile(tmp_path)
+    profile = config.load_profile(consumer)
     assert profile.state_root == "/var/lib/intelflo"
     assert profile.state_root_explicit is True
 
@@ -222,6 +223,29 @@ def test_packed_full_base_ref_is_accepted(consumer: Path):
     assert config.resolve_base(consumer, base_ref="refs/heads/main") == expected
 
 
+def test_annotated_tag_object_is_rejected_as_an_exact_base(consumer: Path):
+    git(consumer, "tag", "-a", "reviewed", "-m", "reviewed base")
+    tag_object = git(consumer, "rev-parse", "refs/tags/reviewed").strip()
+    with pytest.raises(config.ConfigError, match="did not resolve to that exact commit"):
+        config.resolve_base(consumer, base=tag_object)
+
+
+def test_consumer_below_git_top_level_is_rejected(tmp_path: Path):
+    repository = tmp_path / "repository"
+    consumer = repository / "nested-consumer"
+    (consumer / "vendor/loop-zero").mkdir(parents=True)
+    (repository / "workflow.toml").write_text(minimal_workflow(), encoding="utf-8")
+    (consumer / "workflow.toml").write_text(minimal_workflow(), encoding="utf-8")
+    git(repository, "init", "-q", "-b", "main")
+    git(repository, "add", ".")
+    git(repository, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "base")
+    base = git(repository, "rev-parse", "HEAD").strip()
+
+    profile = config.load_profile(consumer)
+    with pytest.raises(config.ConfigError, match="must equal Git top level"):
+        config.effective_hooks(profile, base)
+
+
 @pytest.mark.parametrize(
     ("workflow", "problem"),
     [
@@ -277,3 +301,34 @@ def test_core_path_rejects_traversal_dot_and_symlinks(tmp_path: Path):
                 minimal_workflow().replace('path = "vendor/loop-zero"', f'path = "{path}"')
             )
             config.load_profile(tmp_path)
+
+
+def test_rendered_core_fields_reject_controls_and_managed_markers(tmp_path: Path):
+    (tmp_path / "vendor/loop-zero").mkdir(parents=True)
+    injected = minimal_workflow().replace(
+        'repository = "https://github.com/feder-positronics/loop-zero"',
+        f'repository = """https://example.invalid/core\n{config.MANAGED_BLOCK_END}\n"""',
+    )
+    (tmp_path / "workflow.toml").write_text(injected, encoding="utf-8")
+    with pytest.raises(config.ConfigError) as info:
+        config.load_profile(tmp_path)
+    assert "[core].repository: control characters are forbidden" in str(info.value)
+    assert "[core].repository: managed-block marker text is forbidden" in str(info.value)
+
+    data = tomllib.loads(minimal_workflow())
+    data["core"]["path"] = "vendor/loop-zero\x01"
+    with pytest.raises(config.ConfigError, match=r"\[core\]\.path: control characters"):
+        config.validate(data, tmp_path)
+
+    data = tomllib.loads(minimal_workflow())
+    data["core"]["path"] = f"vendor/{config.MANAGED_BLOCK_END}"
+    with pytest.raises(config.ConfigError, match=r"\[core\]\.path: managed-block marker"):
+        config.validate(data, tmp_path)
+
+
+def test_core_path_rejects_a_missing_component(tmp_path: Path):
+    (tmp_path / "workflow.toml").write_text(minimal_workflow(), encoding="utf-8")
+    with pytest.raises(
+        config.ConfigError, match=r"\[core\]\.path: component .* does not exist"
+    ):
+        config.load_profile(tmp_path)

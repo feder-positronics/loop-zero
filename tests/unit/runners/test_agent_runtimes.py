@@ -5725,7 +5725,7 @@ def test_run_cli_reaps_descendants_after_normal_parent_exit(tmp_path: Path) -> N
         input_text="",
         timeout_s=2,
         env={"PATH": os.environ["PATH"]},
-        terminate_grace_s=0.05,
+        terminate_grace_s=0.2,
     )
 
     assert result.returncode == 0
@@ -6095,7 +6095,7 @@ def test_cancel_cli_terminates_descendants_after_direct_child_exits(
         input_text="",
         timeout_s=2,
         env={"PATH": os.environ["PATH"]},
-        terminate_grace_s=0.05,
+        terminate_grace_s=0.2,
     )
     child_pid = int(child_pid_path.read_text())
 
@@ -6139,6 +6139,55 @@ def test_cancel_cli_never_signals_after_group_leader_was_reaped(
     process.cancel_cli(handle, grace_s=0)
 
     assert signals == []
+
+
+def test_process_group_sweep_finds_member_with_lower_pid_after_wraparound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After PID wrap-around a descendant can carry a lower number than its leader."""
+    proc_root = tmp_path / "proc"
+    leader = proc_root / "4000"
+    member = proc_root / "50"
+    for entry, pid, state in ((leader, 4000, "Z"), (member, 50, "S")):
+        entry.mkdir(parents=True)
+        (entry / "stat").write_text(
+            f"{pid} (python) {state} 1 4000 4000 0 -1 4194560 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0\n",
+            encoding="utf-8",
+        )
+    (proc_root / "self").mkdir()
+    monkeypatch.setattr(process, "PROC_ROOT", proc_root)
+
+    assert process._process_group_has_live_member(4000) is True
+
+    (member / "stat").write_text(
+        "50 (python) S 1 7 7 0 -1 4194560 0 0 0 0 0 0 0 0 0 20 0 1 0 0 0 0\n",
+        encoding="utf-8",
+    )
+    assert process._process_group_has_live_member(4000) is False
+
+
+def test_cancel_cli_with_tiny_grace_reaps_sigterm_ignoring_child(
+    tmp_path: Path,
+) -> None:
+    handle = process.launch_cli(
+        [
+            sys.executable,
+            "-u",
+            "-c",
+            "import signal,time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+            "print('ready', flush=True); time.sleep(60)",
+        ],
+        cwd=tmp_path,
+        env={"PATH": os.environ["PATH"]},
+        unsandboxed=True,
+        unsandboxed_reason="unit test exercises process-group cancellation",
+    )
+    assert handle.process.stdout is not None
+    assert handle.process.stdout.readline() == "ready\n"
+
+    assert process.cancel_cli(handle, grace_s=0.001) is True
+    assert handle.process.returncode == -signal.SIGKILL
 
 
 def test_cancel_cli_skips_grace_delay_when_unreaped_group_is_already_gone(
