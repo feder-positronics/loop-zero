@@ -394,7 +394,11 @@ def _repository_config_overlays(
                 "validation worktree Git configuration is unavailable"
             ) from exc
         try:
-            entries = validated_git_config_entries(raw)
+            entries = validated_git_config_entries(
+                raw,
+                allow_http=settings.toolchain.get("allow_plain_http_remotes", False)
+                is True,
+            )
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
             raise ValidationHookError(
                 "validation worktree Git configuration is unsafe"

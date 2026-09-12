@@ -135,6 +135,15 @@ def test_git_configuration_digest_ignores_branch_metadata():
         b'[remote "backup"]\nurl = ext::sh -c owned\n',
         b'[remote "backup"]\npushurl = ext::sh -c owned\n',
         b'[remote "origin"]\nurl = fd::3\n',
+        # `<scheme>://` outside Git's built-in set executes git-remote-<scheme>.
+        b'[remote "origin"]\nurl = madeup://example.invalid/repo\n',
+        b'[remote "backup"]\nurl = ext://sh -c owned\n',
+        b'[remote "backup"]\npushurl = fd://3\n',
+        b'[remote "origin"]\nurl = HTTPS://example.invalid/repo\n',
+        b'[remote "origin"]\nurl = http://example.invalid/repo\n',
+        b'[remote "origin"]\nurl = helper::https://example.invalid/repo\n',
+        b'[remote "origin"]\nurl = [::1]:repo\n',
+        b'[remote "origin"]\nurl = \n',
         b'[remote "origin"]\nvcs = ext\n',
         b'[remote "backup"]\nproxy = /tmp/owned\n',
         b'[remote "backup"]\nuploadPack = /tmp/owned\n',
@@ -163,6 +172,45 @@ def test_git_configuration_rejects_lazy_fetch_and_repository_format_redirects(
 )
 def test_git_configuration_accepts_ordinary_remotes(configuration):
     assert git_config_security.validated_git_config_entries(configuration)
+
+
+@pytest.mark.parametrize(
+    "url",
+    (
+        "https://example.invalid/repo.git",
+        "ssh://git@example.invalid:22/repo.git",
+        "git://example.invalid/repo.git",
+        "git@example.invalid:org/repo.git",
+        "example.invalid:repo.git",
+        "file:///srv/repo",
+        "/srv/repo",
+        "./repo",
+        "../repo",
+        "relative/repo",
+    ),
+)
+def test_git_configuration_accepts_each_allowlisted_remote_form(url):
+    configuration = f'[remote "origin"]\nurl = {url}\npushurl = {url}\n'.encode()
+    assert git_config_security.validated_git_config_entries(configuration) == (
+        ("remote.origin.url", url),
+        ("remote.origin.pushurl", url),
+    )
+    assert git_config_security.origin_url(configuration) == url
+
+
+def test_git_configuration_accepts_plain_http_only_behind_explicit_setting():
+    configuration = b'[remote "origin"]\nurl = http://example.invalid/repo\n'
+    with pytest.raises(ValueError, match="configuration uses"):
+        git_config_security.validated_git_config_entries(configuration)
+    assert git_config_security.validated_git_config_entries(
+        configuration, allow_http=True
+    ) == (("remote.origin.url", "http://example.invalid/repo"),)
+    # The setting never widens the rejection of helper transports.
+    for url in (b"madeup://example.invalid/repo", b"ext::sh -c owned"):
+        with pytest.raises(ValueError, match="configuration uses"):
+            git_config_security.validated_git_config_entries(
+                b'[remote "origin"]\nurl = ' + url + b"\n", allow_http=True
+            )
 
 
 def test_git_configuration_accepts_repository_format_zero():

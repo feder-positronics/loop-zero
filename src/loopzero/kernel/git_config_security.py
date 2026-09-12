@@ -64,11 +64,42 @@ _INERT_REMOTE_KEYS = frozenset(
         "gh-resolved",
     }
 )
-# `<helper>::<address>` selects a remote helper; `ext::` runs an arbitrary
-# command and `fd::` reads from launcher descriptors. Ordinary schemes such as
-# https://, ssh://, git@host:path, file:// and plain paths never contain "::"
-# before the address.
-_REMOTE_HELPER_URL = re.compile(r"[A-Za-z0-9+.\-]*::")
+# Git selects a transport from the URL shape. `<helper>::<address>` names a
+# remote helper explicitly (`ext::` runs an arbitrary command, `fd::` reads
+# launcher descriptors), and any `<scheme>://` outside Git's built-in set also
+# executes `git-remote-<scheme>`. Screening therefore accepts only these
+# spellings, compared case-sensitively because Git's built-in transport match
+# is case-sensitive (`HTTPS://` would select `git-remote-HTTPS`):
+#   * `https://`, `ssh://`, `git://`, plus `http://` behind an explicit
+#     setting that defaults off;
+#   * scp-style `[user@]host:path`, where no `/` precedes the first `:`;
+#   * `file://` and plain absolute or relative paths, which the existing
+#     screening already accepted for local remotes.
+# Everything else, including any `::`, is rejected.
+_BUILTIN_URL_SCHEMES = ("https://", "ssh://", "git://")
+_PLAIN_HTTP_SCHEME = "http://"
+_URL_SCHEME_PREFIX = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://")
+_SCP_STYLE_REMOTE = re.compile(r"(?:[A-Za-z0-9._\-]+@)?[A-Za-z0-9._\-]+:[^:]*")
+# Plain paths never carry a colon: Git would read `./a:b` as a path, but a
+# colon-free rule keeps the local and scp-style forms unambiguous.
+_LOCAL_PATH_REMOTE = re.compile(r"[^:]+")
+
+
+def remote_url_is_screened(value: str, *, allow_http: bool = False) -> bool:
+    """Return whether one remote URL uses only a reviewed transport spelling."""
+    if not value or "::" in value or any(ord(c) < 0x20 for c in value):
+        return False
+    if value.startswith(_BUILTIN_URL_SCHEMES):
+        return True
+    if value.startswith(_PLAIN_HTTP_SCHEME):
+        return allow_http
+    if value.startswith("file://"):
+        return True
+    if _URL_SCHEME_PREFIX.match(value) is not None:
+        return False  # any other `<scheme>://` executes git-remote-<scheme>
+    if _LOCAL_PATH_REMOTE.fullmatch(value) is not None:
+        return True
+    return _SCP_STYLE_REMOTE.fullmatch(value) is not None
 
 
 def git_config_key_can_redirect(name: str) -> bool:
@@ -115,23 +146,30 @@ def git_config_key_can_redirect(name: str) -> bool:
     return False
 
 
-def git_config_value_can_redirect(name: str, value: str | None) -> bool:
-    """Reject transport-redirecting remote URLs such as ``ext::`` and ``fd::``."""
+def git_config_value_can_redirect(
+    name: str, value: str | None, *, allow_http: bool = False
+) -> bool:
+    """Reject remote URLs outside the allowlisted transport spellings."""
     normalized = name.casefold()
     if value is None:
         return False
     if re.fullmatch(r"remote\..+\.(?:url|pushurl)", normalized):
-        return _REMOTE_HELPER_URL.match(value) is not None
+        return not remote_url_is_screened(value, allow_http=allow_http)
     return False
 
 
 def validated_git_config_entries(
     raw_config: bytes,
+    *,
+    allow_http: bool = False,
 ) -> tuple[tuple[str, str | None], ...]:
     entries = parse_git_config_entries(raw_config)
     if (
         any(git_config_key_can_redirect(key) for key, _value in entries)
-        or any(git_config_value_can_redirect(key, value) for key, value in entries)
+        or any(
+            git_config_value_can_redirect(key, value, allow_http=allow_http)
+            for key, value in entries
+        )
         or any(
             key.casefold() == "core.repositoryformatversion" and value != "0"
             for key, value in entries
@@ -144,10 +182,10 @@ def validated_git_config_entries(
     return entries
 
 
-def origin_url(raw_config: bytes) -> str:
+def origin_url(raw_config: bytes, *, allow_http: bool = False) -> str:
     urls = [
         value
-        for key, value in validated_git_config_entries(raw_config)
+        for key, value in validated_git_config_entries(raw_config, allow_http=allow_http)
         if key.casefold() == "remote.origin.url" and value is not None
     ]
     if len(urls) != 1:
@@ -186,14 +224,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Print the single validated origin URL instead of the projection digest.",
     )
+    parser.add_argument(
+        "--allow-http",
+        action="store_true",
+        help="Accept plain http:// remote URLs (default: rejected).",
+    )
     args = parser.parse_args(argv)
     try:
         if args.config.is_symlink() or not args.config.is_file():
             raise ValueError("Git configuration is not one regular file")
         raw_config = args.config.read_bytes()
-        validated_git_config_entries(raw_config)
+        validated_git_config_entries(raw_config, allow_http=args.allow_http)
         print(
-            origin_url(raw_config)
+            origin_url(raw_config, allow_http=args.allow_http)
             if args.origin_url
             else security_projection_sha256(raw_config)
         )
