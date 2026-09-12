@@ -23,6 +23,7 @@ from ..kernel.worktree_lease import identities_match, source_identity
 from .acceptance import review_acceptance_receipt_reasons
 from ..kernel.authority_projection import (
     _authenticated_attempt_terminal_ids,
+    _authenticated_attempt_terminal_registrations,
     _authenticated_coordinator_record_ids,
     _authenticated_open_before_record_projections,
     _authority_record_list,
@@ -1243,9 +1244,17 @@ def delivery_controller_records(
 def registered_dispatcher_delivery_controller_records(
     records: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
-    """Project controller terminals proved by a registered dispatcher."""
+    """Project controller terminals proved by a registered dispatcher.
+
+    A dispatcher key only proves that the registered worker settled its own
+    attempt; it does not prove which PR that attempt delivered.  The PR is
+    therefore bound to the coordinator-signed registration (attempt-start) of
+    the very attempt the terminal completes, and a terminal claiming a
+    different PR than its registration is excluded from the projection.
+    """
     authority_history = _authority_record_list(records)
     registered_before_ids = _registered_authority_before_record_ids(authority_history)
+    registrations = _authenticated_attempt_terminal_registrations(authority_history)
     return [
         record
         for record in delivery_controller_records(authority_history)
@@ -1253,7 +1262,22 @@ def registered_dispatcher_delivery_controller_records(
         and id(record) in registered_before_ids
         and isinstance((proof := record.get("terminal_authority_proof")), Mapping)
         and proof.get("authority_kind") == "dispatcher"
+        and (registration := registrations.get(id(record))) is not None
+        and _registration_binds_terminal_pr(registration, record)
     ]
+
+
+def _registration_binds_terminal_pr(
+    registration: Mapping[str, object], terminal: Mapping[str, object]
+) -> bool:
+    """Accept a terminal PR only when its registration carries the same PR."""
+    registered_pr = registration.get("pr")
+    return (
+        type(registered_pr) is int
+        and registered_pr > 0
+        and terminal.get("pr") == registered_pr
+        and type(terminal.get("pr")) is int
+    )
 
 
 def latest_accepted_review_terminal(

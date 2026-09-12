@@ -354,3 +354,167 @@ def test_pr_number_is_mandatory(tmp_path):
         findings.build_finding_capture_request(
             producer_id="review", findings=[{"severity": "important", "claim": "x"}]
         )
+
+
+def _install_registration_probe(
+    monkeypatch, *, run_id, registration_pr, terminal_pr, terminal_task_id=None
+):
+    """Port of the a4v5 review probe: registration and terminal may disagree."""
+    dispatcher = kernel_authority.TerminalAuthority.generate()
+    coordinator = kernel_authority.CoordinatorAuthority(
+        dispatcher.public_key, dispatcher._private_key
+    )
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    common = {
+        "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": policy.DISPATCH_POLICY_VERSION,
+    }
+    cutover = coordinator.seal(
+        {
+            **common,
+            "type": "coordinator-authority-cutover",
+            "status": "active",
+            "ledger_prefix": authority_projection.coordinator_ledger_prefix([]),
+        },
+        authority_kind="coordinator",
+    )
+    binding = coordinator.seal(
+        {
+            **common,
+            "task_id": "binding-17",
+            "attempt_index": 0,
+            "run_id": run_id,
+            "work_unit_id": "binding-17",
+            "worktree": "/repo",
+            "pr": 17,
+            "type": "attempt-terminal",
+            "outcome": "in_progress",
+        },
+        authority_kind="coordinator",
+    )
+    holder = [[cutover, binding]]
+    monkeypatch.setattr(
+        authority_store, "load_authority_records", lambda *_args: holder[0]
+    )
+    base = {
+        **common,
+        "task_id": "delivery",
+        "attempt_index": 0,
+        "run_id": run_id,
+        "work_unit_id": "delivery",
+        "worktree": "/repo",
+    }
+
+    def register_and_settle():
+        start = coordinator.seal(
+            {
+                **base,
+                "pr": registration_pr,
+                "type": "attempt-start",
+                "registration_authority_version": 1,
+                "terminal_authority": dispatcher.registration(),
+            },
+            authority_kind="coordinator",
+        )
+        terminal_identity = dict(base)
+        if terminal_task_id is not None:
+            terminal_identity["task_id"] = terminal_task_id
+            terminal_identity["work_unit_id"] = terminal_task_id
+        terminal = dispatcher.seal(
+            {
+                **terminal_identity,
+                "pr": terminal_pr,
+                "type": "attempt-terminal",
+                "outcome": "merged",
+            },
+            authority_kind="dispatcher",
+        )
+        holder[0] = [cutover, binding, start, terminal]
+        return start, terminal
+
+    return register_and_settle
+
+
+def _probe_finding(tmp_path, *, run_id):
+    evidence.append_finding_records(
+        tmp_path,
+        task_id="review",
+        result={
+            "findings": [
+                {"severity": "critical", "claim": "probe", "path": "a.py"}
+            ]
+        },
+        snapshot=None,
+        worktree=tmp_path,
+        advisory=False,
+        source_head="a" * 40,
+        producer_skill="review",
+        category="code",
+        delivery_run_id=run_id,
+        pr=17,
+    )
+
+
+def test_registered_dispatcher_cannot_expire_a_pr_its_registration_never_bound(
+    tmp_path, monkeypatch
+):
+    _configure(tmp_path)
+    run_id = "sr_" + "c" * 32
+    _write_run(tmp_path, run_id, pr=17, outcome="in_progress")
+    register_and_settle = _install_registration_probe(
+        monkeypatch, run_id=run_id, registration_pr=99, terminal_pr=17
+    )
+    _probe_finding(tmp_path, run_id=run_id)
+    start, terminal = register_and_settle()
+
+    assert start["pr"] == 99 and terminal["pr"] == 17
+    assert start["run_id"] == terminal["run_id"]
+    assert findings._registered_dispatcher_delivery_terminals(tmp_path) == []
+    assert len(findings.load_finding_history(tmp_path, pr=17)) == 2
+    assert findings.count_live_important(tmp_path, pr=17) == 1
+
+
+def test_registered_dispatcher_terminal_bound_to_registration_pr_expires(
+    tmp_path, monkeypatch
+):
+    _configure(tmp_path)
+    run_id = "sr_" + "c" * 32
+    _write_run(tmp_path, run_id, pr=17, outcome="in_progress")
+    register_and_settle = _install_registration_probe(
+        monkeypatch, run_id=run_id, registration_pr=17, terminal_pr=17
+    )
+    _probe_finding(tmp_path, run_id=run_id)
+    register_and_settle()
+
+    projected = findings._registered_dispatcher_delivery_terminals(tmp_path)
+    assert [(row["run_id"], row["pr"], row["outcome"]) for row in projected] == [
+        (run_id, 17, "merged")
+    ]
+    assert len(findings.load_finding_history(tmp_path, pr=17)) == 2
+    assert findings.count_live_important(tmp_path, pr=17) == 0
+
+
+def test_registered_dispatcher_terminal_for_another_attempt_in_same_run_is_ignored(
+    tmp_path, monkeypatch
+):
+    _configure(tmp_path)
+    run_id = "sr_" + "c" * 32
+    _write_run(tmp_path, run_id, pr=17, outcome="in_progress")
+    register_and_settle = _install_registration_probe(
+        monkeypatch,
+        run_id=run_id,
+        registration_pr=17,
+        terminal_pr=17,
+        terminal_task_id="delivery-other",
+    )
+    _probe_finding(tmp_path, run_id=run_id)
+    start, terminal = register_and_settle()
+
+    assert start["run_id"] == terminal["run_id"]
+    assert start["task_id"] != terminal["task_id"]
+    assert findings._registered_dispatcher_delivery_terminals(tmp_path) == []
+    assert findings.count_live_important(tmp_path, pr=17) == 1
