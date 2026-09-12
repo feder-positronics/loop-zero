@@ -14,7 +14,7 @@ import pytest
 
 from loopzero.config import Alias
 from loopzero.kernel import authority as kernel_authority
-from loopzero.kernel import authority_projection, authority_store, gitscope, patch_identity, policy
+from loopzero.kernel import authority_projection, authority_store, gitscope, patch_identity, policy, worktree_lease
 from loopzero.review import acceptance, authority, evidence, findings, harness, routing
 from loopzero.runners.contract import MAX_RESULT_BYTES, RESULT_FIELDS
 from loopzero.trust import system_executable
@@ -32,6 +32,7 @@ class _MovedFacade:
     patch_identity = patch_identity
     dispatch_review_authority = authority
     system_executable = staticmethod(system_executable)
+    governed_source_identity = staticmethod(worktree_lease.source_identity)
 
     @staticmethod
     def worktree_head(worktree):
@@ -178,6 +179,258 @@ def governed_result(task_id, *, status="completed", summary="done"):
         "escalation_reason": None,
         "recommended_followups": [],
     }
+
+
+def coordinator_cutover(
+    coordinator,
+    *,
+    prefix: list[dict[str, object]] | tuple[dict[str, object], ...] = (),
+    **fields: object,
+) -> dict[str, object]:
+    """Seal a cutover against the exact ordered test-ledger prefix."""
+    record = governed(
+        [
+            {
+                "type": "coordinator-authority-cutover",
+                "status": "active",
+                "ledger_prefix": module.coordinator_ledger_prefix(prefix),
+                **fields,
+            }
+        ]
+    )[0]
+    return coordinator.seal(record, authority_kind="coordinator")
+
+
+class TestReviewRecoveryProjection:
+    def authenticated_attempt(
+        self, git_repo: Path, *, status: str = "completed"
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        signer = module.TerminalAuthority.generate()
+        start = governed(
+            [
+                {
+                    "type": "attempt-start",
+                    "task_id": "dispatch-authenticated-predecessor",
+                    "work_unit_id": "authenticated-phase-1",
+                    "attempt_index": 0,
+                    "run_id": "sr_" + "4" * 32,
+                    "read_only": False,
+                    "worktree": str(git_repo),
+                    "allowed_paths": ["allowed.py"],
+                    "terminal_authority": signer.registration(),
+                }
+            ]
+        )[0]
+        terminal = governed(
+            [
+                {
+                    "type": "attempt-terminal",
+                    "task_id": start["task_id"],
+                    "work_unit_id": start["work_unit_id"],
+                    "attempt_index": 0,
+                    "run_id": start["run_id"],
+                    "status": status,
+                    "worktree": str(git_repo),
+                    "output_identity": module.governed_source_identity(git_repo),
+                    "ts": "2026-08-25T00:00:01+00:00",
+                }
+            ]
+        )[0]
+        return start, signer.seal(terminal, authority_kind="dispatcher")
+
+    def test_post_cutover_unsigned_start_cannot_authenticate_its_terminal(
+        self, git_repo: Path
+    ) -> None:
+        cutover = coordinator_cutover(module.create_coordinator_authority())
+        signer = module.TerminalAuthority.generate()
+        start = governed(
+            [
+                {
+                    "type": "attempt-start",
+                    "registration_authority_version": 1,
+                    "task_id": "forged-current-start",
+                    "work_unit_id": "forged-current-start",
+                    "attempt_index": 0,
+                    "run_id": "sr_" + "7" * 32,
+                    "read_only": True,
+                    "worktree": str(git_repo),
+                    "terminal_authority": signer.registration(),
+                }
+            ]
+        )[0]
+        terminal = signer.seal(
+            governed(
+                [
+                    {
+                        "type": "attempt-terminal",
+                        "task_id": start["task_id"],
+                        "work_unit_id": start["work_unit_id"],
+                        "attempt_index": 0,
+                        "run_id": start["run_id"],
+                        "read_only": True,
+                        "worktree": str(git_repo),
+                        "status": "completed",
+                    }
+                ]
+            )[0],
+            authority_kind="dispatcher",
+        )
+
+        records = [cutover, start, terminal]
+        assert id(terminal) not in module._authenticated_attempt_terminal_ids(records)
+        assert module.authenticated_retry_outcomes(records) == []
+
+    @pytest.mark.parametrize("signed", [True, False])
+    def test_accepted_review_projection_rejects_registered_recovery(
+        self, monkeypatch, git_repo: Path, signed: bool
+    ) -> None:
+        start, deposit = self.authenticated_attempt(
+            git_repo, status="toolchain-failure"
+        )
+        recovery_payload = {
+            **deposit,
+            "type": "attempt-recovery",
+            "status": "completed",
+            "ts": "2026-08-25T00:00:02+00:00",
+        }
+        recovery_payload.pop("terminal_authority_proof")
+        coordinator = module.create_coordinator_authority()
+        recovery = coordinator.seal(
+            governed([recovery_payload])[0],
+            authority_kind="coordinator",
+        )
+        if not signed:
+            recovery.pop("terminal_authority_proof")
+        _setattr_dispatch(
+            monkeypatch,
+            "review_terminal_acceptance_reasons",
+            lambda *_args, **_kwargs: (),
+        )
+        _setattr_dispatch(
+            monkeypatch,
+            "validate_serial_terminal_authority",
+            lambda *_args, **_kwargs: pytest.fail(
+                "registered recovery should be rejected by the batch projection"
+            ),
+        )
+
+        records = [start, deposit, recovery]
+        records.append(coordinator_cutover(coordinator, prefix=records))
+        assert module.accepted_review_terminals(records) == {}
+
+    def test_accepted_review_projection_indexes_legacy_recovery_once(
+        self, monkeypatch, git_repo: Path
+    ) -> None:
+        deposit = governed(
+            [
+                {
+                    "type": "attempt-terminal",
+                    "task_id": "legacy-review",
+                    "work_unit_id": "legacy-review",
+                    "attempt_index": 0,
+                    "run_id": "sr_" + "6" * 32,
+                    "status": "toolchain-failure",
+                    "failure_class": "toolchain",
+                    "worktree": str(git_repo),
+                    "output_identity": {"tree_sha": "a" * 40},
+                }
+            ]
+        )[0]
+        coordinator = module.create_coordinator_authority()
+        recovery = coordinator.seal(
+            governed(
+                [
+                    {
+                        **deposit,
+                        "type": "attempt-recovery",
+                        "status": "completed",
+                        "recovered_terminal_status": "toolchain-failure",
+                        "ts": "2026-08-25T00:00:02+00:00",
+                    }
+                ]
+            )[0],
+            authority_kind="coordinator",
+        )
+        cutover = coordinator_cutover(coordinator, prefix=[deposit])
+        projection_calls = 0
+        project = module._authenticated_open_before_record_projections
+
+        def counted_projection(records):
+            nonlocal projection_calls
+            projection_calls += 1
+            return project(records)
+
+        _setattr_dispatch(
+            monkeypatch,
+            "_authenticated_open_before_record_projections",
+            counted_projection,
+        )
+        _setattr_dispatch(
+            monkeypatch,
+            "validate_serial_terminal_authority",
+            lambda *_args, **_kwargs: pytest.fail("per-recovery full-ledger scan"),
+        )
+        _setattr_dispatch(
+            monkeypatch,
+            "review_terminal_acceptance_reasons",
+            lambda *_args, **_kwargs: (),
+        )
+
+        assert module.accepted_review_terminals([deposit, cutover, recovery]) == {
+            "legacy-review": recovery
+        }
+        assert projection_calls == 1
+
+    @pytest.mark.parametrize("mutated_field", ["run_id", "worktree"])
+    def test_registered_recovery_cannot_escape_projection_by_relabelling_context(
+        self, monkeypatch, git_repo: Path, mutated_field: str
+    ) -> None:
+        start, deposit = self.authenticated_attempt(
+            git_repo, status="toolchain-failure"
+        )
+        recovery = {
+            **deposit,
+            "type": "attempt-recovery",
+            "status": "completed",
+            "ts": "2026-08-25T00:00:02+00:00",
+            mutated_field: (
+                "sr_" + "9" * 32
+                if mutated_field == "run_id"
+                else str(git_repo / "forged")
+            ),
+        }
+        recovery.pop("terminal_authority_proof")
+        _setattr_dispatch(
+            monkeypatch,
+            "review_terminal_acceptance_reasons",
+            lambda *_args, **_kwargs: (),
+        )
+
+        assert module.accepted_review_terminals([start, deposit, recovery]) == {}
+        assert module.authenticated_review_terminals([start, deposit, recovery]) == {
+            str(deposit["task_id"]): deposit
+        }
+
+    def test_registered_terminal_clone_cannot_replace_signed_review_projection(
+        self, monkeypatch, git_repo: Path
+    ) -> None:
+        start, terminal = self.authenticated_attempt(git_repo)
+        forged = {
+            **terminal,
+            "source_identity": {"ref": "refs/heads/forged"},
+            "ts": "2026-08-25T00:00:02+00:00",
+        }
+        forged.pop("terminal_authority_proof")
+        _setattr_dispatch(
+            monkeypatch,
+            "review_terminal_acceptance_reasons",
+            lambda *_args, **_kwargs: (),
+        )
+
+        assert module.authenticated_review_terminals([start, terminal, forged]) == {
+            str(terminal["task_id"]): terminal
+        }
+        assert module.accepted_review_terminals([start, terminal, forged]) == {}
 
 
 class TestReviewSnapshot:
