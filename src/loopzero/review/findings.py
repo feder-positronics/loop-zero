@@ -282,11 +282,6 @@ def load_finding_records(
         if isinstance(finding_id, str) and finding_id:
             latest[finding_id] = record
     records = list(latest.values())
-    if pr is not None and any(
-        record.get("type") == "pr-merged"
-        for record in load_finding_history(repo, pr=pr, strict_malformed=strict_malformed)
-    ):
-        return []
     bound_runs = {
         record["delivery_run_id"]
         for record in records
@@ -692,12 +687,6 @@ def capture_finding_records(
             )
         source_identity = source_identity or {}
     with ledger_lock(repo) as primary:
-        pr = request.get("pr")
-        if type(pr) is int and any(
-            record.get("type") == "pr-merged" and record.get("pr") == pr
-            for record in load_finding_history(primary, pr=pr, strict_malformed=True)
-        ):
-            raise LedgerConflict("findings expire at merge and cannot be appended")
         replay = _operation_replay(
             primary,
             operation_id=operation_id,

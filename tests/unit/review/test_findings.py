@@ -85,6 +85,13 @@ def test_capture_replays_and_authenticated_merge_expires_the_pr(tmp_path):
 def test_fake_merge_sha_has_no_expiry_api(tmp_path):
     _configure(tmp_path)
     findings.capture_finding_records(tmp_path, request=_request(17))
+    finding_log = tmp_path / "findings" / "2026-09-12.jsonl"
+    finding_log.write_text(
+        finding_log.read_text(encoding="utf-8")
+        + json.dumps({"type": "pr-merged", "pr": 17, "merge_sha": "a" * 40})
+        + "\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(AttributeError):
         getattr(findings, "expire_at_merge")(tmp_path, pr=17, merge_sha="a" * 40)
