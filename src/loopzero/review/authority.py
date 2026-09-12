@@ -117,18 +117,26 @@ def uncarryable_delta_authority_is_valid(
 
 _ARCHIVE_VALIDATOR = ContextVar(
     "archive_delta_authority_validator",
-    default=uncarryable_delta_authority_is_valid,
+    default=None,
 )
+_DEFAULT_ARCHIVE_VALIDATOR = uncarryable_delta_authority_is_valid
 
 
 def configure(
     *, uncarryable_delta_authority_is_valid: Callable[..., bool] | None = None
 ) -> None:
     """Install an optional consumer-narrowed archived-delta validator."""
-    _ARCHIVE_VALIDATOR.set(
+    global _DEFAULT_ARCHIVE_VALIDATOR
+    configured = (
         uncarryable_delta_authority_is_valid
         or globals()["uncarryable_delta_authority_is_valid"]
     )
+    _DEFAULT_ARCHIVE_VALIDATOR = configured
+    _ARCHIVE_VALIDATOR.set(configured)
+
+
+def _archive_validator() -> Callable[..., bool]:
+    return _ARCHIVE_VALIDATOR.get() or _DEFAULT_ARCHIVE_VALIDATOR
 
 
 def _latest_attempt_settlement_indices(

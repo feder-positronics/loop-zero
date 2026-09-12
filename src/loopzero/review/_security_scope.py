@@ -110,7 +110,10 @@ def configure(
     _ALWAYS_SECURITY_REVIEW_PATTERNS = (
         tuple(security_patterns) or _DEFAULT_SECURITY_PATTERNS
     )
-    _REQUIRED_SECTIONS = tuple(required_sections) or ("code",)
+    _REQUIRED_SECTIONS = tuple(
+        section for section in dict.fromkeys(required_sections)
+        if section != "security"
+    ) or ("code",)
 
 
 class SecurityReviewScopeError(RuntimeError):

@@ -120,26 +120,33 @@ from ..kernel import settings as kernel_settings
 from . import _acceptance_grammar
 
 _PROFILE: ContextVar[Profile | None] = ContextVar("acceptance_profile", default=None)
+_DEFAULT_PROFILE: Profile | None = None
 
 
 def configure(profile: Profile) -> None:
     """Configure acceptance grammar and tool paths from a validated profile."""
+    global _DEFAULT_PROFILE
+    _DEFAULT_PROFILE = profile
     _acceptance_grammar.configure(profile)
     _PROFILE.set(profile)
 
 
+def _profile() -> Profile | None:
+    return _PROFILE.get() or _DEFAULT_PROFILE
+
+
 def _toolchain() -> dict[str, object]:
-    profile = _PROFILE.get()
+    profile = _profile()
     return profile.toolchain if profile else kernel_settings.settings.toolchain
 
 
 def _audit_root() -> Path:
-    profile = _PROFILE.get()
+    profile = _profile()
     return profile.audit_root if profile else kernel_settings.settings.audit_root
 
 
 def _env_name(suffix: str) -> str:
-    profile = _PROFILE.get()
+    profile = _profile()
     prefix = profile.env_prefix if profile else kernel_settings.settings.env_prefix
     return f"{prefix}_{suffix}"
 
