@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -40,34 +41,66 @@ def test_findings_are_pr_scoped_and_suggestions_are_not_persisted(tmp_path):
     assert findings.load_finding_records(tmp_path, pr=18)[0]["pr"] == 18
 
 
-def test_capture_replays_and_merge_expires_the_pr(tmp_path):
+def test_capture_replays_and_authenticated_merge_expires_the_pr(tmp_path):
     _configure(tmp_path)
     request = _request(17)
     receipt = findings.capture_finding_records(tmp_path, request=request)
     assert findings.capture_finding_records(tmp_path, request=request) == receipt
     assert findings.replay_finding_capture(tmp_path, request=request) == receipt
 
-    findings.expire_at_merge(tmp_path, pr=17, merge_sha="a" * 40)
+    run_id = "sr_" + "1" * 32
+    current = findings.load_finding_records(tmp_path, pr=17)[0]
+    current["delivery_run_id"] = run_id
+    finding_log = tmp_path / "findings" / "2026-09-12.jsonl"
+    finding_log.write_text(
+        finding_log.read_text(encoding="utf-8") + json.dumps(current) + "\n",
+        encoding="utf-8",
+    )
+    runs = tmp_path / ".audit" / "skill-runs"
+    runs.mkdir(parents=True)
+    (runs / "2026-09-12.jsonl").write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in (
+                {
+                    "run_id": run_id,
+                    "pr": 17,
+                    "delivery_contract": "loop-zero-v1",
+                    "outcome": "in_progress",
+                },
+                {
+                    "run_id": run_id,
+                    "pr": 17,
+                    "delivery_contract": "loop-zero-v1",
+                    "outcome": "merged",
+                },
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     assert findings.load_finding_records(tmp_path, pr=17) == []
-    with pytest.raises(findings.LedgerConflict, match="expire"):
-        findings.capture_finding_records(tmp_path, request=_request(17, "review-2"))
 
 
-def test_waiver_requires_authority_and_rationale(tmp_path):
+def test_fake_merge_sha_has_no_expiry_api(tmp_path):
+    _configure(tmp_path)
+    findings.capture_finding_records(tmp_path, request=_request(17))
+
+    with pytest.raises(AttributeError):
+        getattr(findings, "expire_at_merge")(tmp_path, pr=17, merge_sha="a" * 40)
+    assert findings.count_live_important(tmp_path, pr=17) == 1
+
+
+def test_fake_authority_string_cannot_fabricate_a_waiver(tmp_path):
     _configure(tmp_path)
     receipt = findings.capture_finding_records(tmp_path, request=_request(17))
     finding_id = receipt["finding_ids"][0]
-    with pytest.raises(findings.LedgerConflict, match="authority"):
+    with pytest.raises(TypeError, match="unexpected keyword argument 'pr'"):
         findings.append_finding_transition(
             tmp_path, pr=17, finding_id=finding_id, status="waived",
-            authority="", rationale="",
+            authority="maintainer", rationale="accepted risk",
         )
-    row = findings.append_finding_transition(
-        tmp_path, pr=17, finding_id=finding_id, status="waived",
-        authority="maintainer", rationale="accepted risk",
-    )
-    assert row["status"] == "waived"
-    assert findings.count_live_important(tmp_path, pr=17) == 0
+    assert findings.count_live_important(tmp_path, pr=17) == 1
 
 
 def test_pr_number_is_mandatory(tmp_path):

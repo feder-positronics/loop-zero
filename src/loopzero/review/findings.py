@@ -341,34 +341,6 @@ def count_live_important(
     )
 
 
-def expire_at_merge(
-    repo: Path | str, *, pr: int, merge_sha: str
-) -> dict[str, object]:
-    """Expire one PR's operational findings after an exact merge identity."""
-    if type(pr) is not int or pr <= 0:
-        raise LedgerConflict("finding records require a positive PR number")
-    if re.fullmatch(r"[0-9a-f]{40}", merge_sha) is None:
-        raise LedgerConflict("merge SHA must be a full lowercase commit")
-    with ledger_lock(repo) as primary:
-        markers = [
-            record
-            for record in load_finding_history(primary, pr=pr, strict_malformed=True)
-            if record.get("type") == "pr-merged"
-        ]
-        if markers:
-            if markers[-1].get("merge_sha") != merge_sha:
-                raise LedgerConflict("PR already expired at a different merge")
-            return markers[-1]
-        marker: dict[str, object] = {
-            "type": "pr-merged",
-            "pr": pr,
-            "merge_sha": merge_sha,
-            "ts": _timestamp(),
-        }
-        _append_jsonl(primary, FINDINGS_DIR, marker)
-        return marker
-
-
 @contextmanager
 def ledger_lock(
     repo: Path | str,
@@ -1335,61 +1307,17 @@ def active_leases(
 def append_finding_transition(
     repo: Path | str,
     finding_id: str,
-    updates: Mapping[str, object] | None = None,
+    updates: Mapping[str, object],
     *,
-    operation_id: str | None = None,
-    expected_state: object = None,
-    expected_disposition: object = None,
-    expected_digest: str = "",
+    operation_id: str,
+    expected_state: object,
+    expected_disposition: object,
+    expected_digest: str,
     lease_owner: Mapping[str, object] | str | None = None,
     required_lease_id: str | None = None,
     allow_promotion_reopen: bool = False,
-    pr: int | None = None,
-    status: str | None = None,
-    authority: str = "",
-    rationale: str = "",
 ) -> dict[str, object]:
     """Append one CAS-guarded latest-wins transition."""
-    if status is not None:
-        if type(pr) is not int or pr <= 0:
-            raise LedgerConflict("finding records require a positive PR number")
-        if status not in {"resolved", "waived"}:
-            raise LedgerConflict("finding status must be resolved or waived")
-        if status == "waived" and (not authority.strip() or not rationale.strip()):
-            raise LedgerConflict("waiver requires merge authority and rationale")
-        current = {
-            str(record.get("finding_id")): record
-            for record in load_finding_records(repo, pr=pr, strict_malformed=True)
-        }.get(finding_id)
-        if current is None:
-            raise LedgerNotFound(f"finding {finding_id!r} is not in the ledger")
-        expected_state = current.get("state")
-        expected_disposition = current.get("disposition")
-        expected_digest = canonical_record_digest(current)
-        operation_id = operation_id or (
-            "pr-finding-transition-"
-            + hashlib.sha256(
-                _canonical_json(
-                    {"pr": pr, "finding_id": finding_id, "status": status}
-                ).encode("utf-8")
-            ).hexdigest()
-        )
-        updates = {
-            "pr": pr,
-            "state": "waived" if status == "waived" else "addressed",
-            "status": status,
-            "disposition": status,
-            **(
-                {
-                    "waiver_decision_record": authority,
-                    "waiver_reason": rationale,
-                }
-                if status == "waived"
-                else {"resolution_review_task_id": authority or "merge-authority"}
-            ),
-        }
-    if updates is None or operation_id is None:
-        raise LedgerConflict("finding transition requires updates and operation_id")
     transition_owner = _transition_owner_identity(lease_owner)
     if required_lease_id is not None and not required_lease_id.strip():
         raise LedgerAuthorityError("required lease ID must be non-empty")
