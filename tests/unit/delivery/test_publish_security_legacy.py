@@ -526,12 +526,20 @@ class NoDispatcher(importlib.abc.MetaPathFinder):
             raise AssertionError("consumer loaded the dispatcher executable")
 
 sys.meta_path.insert(0, NoDispatcher())
+sys.path.insert(0, sys.argv[1])
 name = sys.argv[2]
 __import__(name)
 assert "agent_dispatch" not in sys.modules
 """
     result = subprocess.run(
-        [sys.executable, "-I", "-c", probe, "unused", consumer],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            probe,
+            str(Path(__file__).resolve().parents[3] / "src"),
+            consumer,
+        ],
         capture_output=True,
         text=True,
         check=False,

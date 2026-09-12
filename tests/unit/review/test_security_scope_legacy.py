@@ -11,10 +11,21 @@ from loopzero.review import _security_scope as module
 
 @pytest.fixture(autouse=True)
 def exact_intelflo_security_policy():
+    previous = (
+        module._ALWAYS_SECURITY_REVIEW_PATTERNS,
+        module._REQUIRED_SECTIONS,
+    )
     module.configure(
         security_patterns=module._DEFAULT_SECURITY_PATTERNS,
         required_sections=("code",),
     )
+    try:
+        yield
+    finally:
+        (
+            module._ALWAYS_SECURITY_REVIEW_PATTERNS,
+            module._REQUIRED_SECTIONS,
+        ) = previous
 
 
 def test_required_review_sections_follow_trigger_paths() -> None:

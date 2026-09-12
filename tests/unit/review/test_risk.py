@@ -15,22 +15,6 @@ def load_module(name: str = "delivery_review_risk"):
     assert name == "delivery_review_risk"
     from loopzero.review import risk
 
-    risk.configure(
-        SimpleNamespace(
-            path_classes={
-                "docs": ("docs/**",),
-                "backend": ("fastapi_backend/**",),
-                "frontend": ("nextjs-frontend/**",),
-                "tooling": ("scripts/**",),
-            },
-            security_patterns=(
-                "**/*.sh", "**/*.bash", "**/*.zsh", "**/*.ps1",
-                "**/config.py", "**/auth/**", "**/middleware/**",
-                "**/integrations/**", "pyproject.toml", "package.json",
-            ),
-            required_sections=("code",),
-        )
-    )
     return risk
 
 
@@ -39,6 +23,15 @@ module = load_module()
 
 @pytest.fixture(autouse=True)
 def configured_target_risk_policy():
+    from loopzero.review import _ci_path_classifier, _security_scope
+
+    previous = (
+        module._SETTINGS.get(),
+        _ci_path_classifier.PATH_CLASSES,
+        _ci_path_classifier.PARENT_CLASSES,
+        _security_scope._ALWAYS_SECURITY_REVIEW_PATTERNS,
+        _security_scope._REQUIRED_SECTIONS,
+    )
     module.configure(
         SimpleNamespace(
             path_classes={
@@ -56,6 +49,14 @@ def configured_target_risk_policy():
             required_sections=("code",),
         )
     )
+    try:
+        yield
+    finally:
+        module._SETTINGS.set(previous[0])
+        _ci_path_classifier.PATH_CLASSES = previous[1]
+        _ci_path_classifier.PARENT_CLASSES = previous[2]
+        _security_scope._ALWAYS_SECURITY_REVIEW_PATTERNS = previous[3]
+        _security_scope._REQUIRED_SECTIONS = previous[4]
 
 from loopzero.kernel import seams
 

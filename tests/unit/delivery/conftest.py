@@ -5,8 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from loopzero.kernel import authority
-
 @pytest.fixture(scope="session")
 def isolated_ptrace_scope_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Provide a stable Yama contract outside per-test Git repositories."""
@@ -27,6 +25,8 @@ def _isolate_git_config_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 def _isolate_delivery_authority_state(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from loopzero.kernel import authority
+
     monkeypatch.setattr(
         authority,
         "_coordinator_state_directory",

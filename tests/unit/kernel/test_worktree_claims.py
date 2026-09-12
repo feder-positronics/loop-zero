@@ -427,6 +427,9 @@ def test_main_renders_issue_claims_from_shared_projection(
     monkeypatch.setattr(module, "collect_claims", lambda _root: worktree_claims)
     monkeypatch.setattr(module, "shared_repo_root", lambda _root: tmp_path)
     monkeypatch.setattr(module, "load_skill_runs", lambda _root: entries)
+    # The requested suite basetemp lives below the account home; keep this
+    # rendering assertion on the source test's original outside-home lane.
+    monkeypatch.setattr(module.Path, "home", lambda: Path("/nonexistent-home"))
     monkeypatch.setattr(sys, "argv", ["worktree_claims.py"])
 
     assert module.main() == 0

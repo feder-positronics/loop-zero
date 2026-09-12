@@ -1,11 +1,14 @@
 """pytest bootstrap: make ``src/`` importable without an install."""
 
+import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+os.environ.setdefault("LOOPZERO_ENV_PREFIX", "INTELFLO")
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[1]

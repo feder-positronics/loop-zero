@@ -11,7 +11,12 @@ from loopzero.review import _ci_path_classifier as module
 
 @pytest.fixture(autouse=True)
 def exact_intelflo_path_tables():
+    previous = module.PATH_CLASSES, module.PARENT_CLASSES
     module.configure(module._DEFAULT_PATH_CLASSES, module._DEFAULT_PARENT_CLASSES)
+    try:
+        yield
+    finally:
+        module.PATH_CLASSES, module.PARENT_CLASSES = previous
 
 
 @pytest.mark.parametrize(
