@@ -1,3 +1,5 @@
+import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -71,3 +73,27 @@ def test_non_idempotent_api_mutation_is_never_retried(tmp_path: Path):
     with pytest.raises(GitHubError, match="connection reset"):
         client.api("repos/acme/widget/pulls", method="POST", fields={"title": "x"})
     assert len(calls) == 2
+
+
+def test_github_integration_is_the_only_subprocess_gh_boundary() -> None:
+    package = Path(__file__).resolve().parents[3] / "src" / "loopzero"
+    violations: list[str] = []
+    for path in package.rglob("*.py"):
+        if path == package / "integrations" / "github.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            owner = node.func.value
+            if (
+                not isinstance(owner, ast.Name)
+                or owner.id != "subprocess"
+                or node.func.attr not in {"run", "Popen", "check_call", "check_output"}
+            ):
+                continue
+            invocation = ast.get_source_segment(source, node) or ""
+            if re.search(r"[\"']gh[\"']", invocation):
+                violations.append(f"{path.relative_to(package)}:{node.lineno}")
+    assert violations == []

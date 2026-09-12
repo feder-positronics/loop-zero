@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import html
-import json
 import re
 import subprocess
 from pathlib import Path
+
+from ..integrations.github import GitHub, GitHubError, GitHubSettings
 
 ISSUE_REFERENCE_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|revert(?:s|ed|ing)?)"
@@ -330,21 +331,23 @@ def _pr_target(pr: str) -> tuple[str, str]:
     return match.group("number"), f"repos/{match.group('owner')}/{match.group('repo')}"
 
 
-def load_pr(pr: str) -> tuple[str, bool, bool, str, str]:
-    number, repository = _pr_target(pr)
+def load_pr(
+    pr: str, *, github: GitHub | None = None
+) -> tuple[str, bool, bool, str, str]:
+    number, requested_repository = _pr_target(pr)
+    client = github or GitHub(
+        Path.cwd(), GitHubSettings(labels={"standalone": "standalone"})
+    )
     try:
-        completed = subprocess.run(
-            [
-                "gh",
-                "api",
-                f"{repository}/pulls/{number}",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        payload = json.loads(completed.stdout)
-    except (OSError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        bound_repository = f"repos/{client.repository().slug}"
+        if requested_repository != "repos/{owner}/{repo}" and (
+            requested_repository != bound_repository
+        ):
+            raise GitHubError("PR URL does not match the repository-bound origin")
+        payload = client.api(f"{bound_repository}/pulls/{number}")
+        if not isinstance(payload, dict):
+            raise GitHubError("GitHub returned malformed PR metadata")
+    except GitHubError as exc:
         raise ValueError(f"cannot load PR metadata for {pr}") from exc
     labels = payload.get("labels") or []
     standalone = any(label.get("name") == "standalone" for label in labels)

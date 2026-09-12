@@ -1,6 +1,7 @@
 import importlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -532,7 +533,37 @@ def test_ci_workflow_aggregates_all_policy_outcomes() -> None:
     assert "not applicable" in workflow
 
 
-def test_load_pr_reads_live_policy_fields(monkeypatch) -> None:
+def _github_client(tmp_path: Path, payload: dict, captured: list[list[str]]):
+    subprocess.run(["/usr/bin/git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(
+        [
+            "/usr/bin/git",
+            "-C",
+            str(tmp_path),
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/example/project.git",
+        ],
+        check=True,
+    )
+
+    def fake_run(command, **_kwargs):
+        captured.append(command)
+        if command[-1] == "version":
+            return subprocess.CompletedProcess(
+                command, 0, "gh version 2.40.1 (test)\n", ""
+            )
+        return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+    return module.GitHub(
+        tmp_path,
+        module.GitHubSettings(labels={}, retries=0),
+        run=fake_run,
+    )
+
+
+def test_load_pr_reads_live_policy_fields_through_github_integration(tmp_path) -> None:
     payload = {
         "body": "Issue-less by design",
         "draft": False,
@@ -541,34 +572,23 @@ def test_load_pr_reads_live_policy_fields(monkeypatch) -> None:
         "head": {"sha": "b" * 40},
     }
 
-    class Completed:
-        stdout = json.dumps(payload)
-
     captured: list[list[str]] = []
+    github = _github_client(tmp_path, payload, captured)
 
-    def fake_run(command, **_kwargs):
-        captured.append(command)
-        return Completed()
-
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-
-    assert module.load_pr("123") == (
+    assert module.load_pr("123", github=github) == (
         "Issue-less by design",
         False,
         True,
         "a" * 40,
         "b" * 40,
     )
-    assert captured == [
-        [
-            "gh",
-            "api",
-            "repos/{owner}/{repo}/pulls/123",
-        ]
+    assert captured[0][1:] == ["version"]
+    assert captured[1][1:] == [
+        "api", "--method", "GET", "repos/example/project/pulls/123"
     ]
 
 
-def test_load_pr_preserves_url_repository_identity(monkeypatch) -> None:
+def test_load_pr_rejects_url_outside_repository_binding(tmp_path) -> None:
     payload = {
         "body": "Issue-less by design",
         "draft": False,
@@ -577,16 +597,13 @@ def test_load_pr_preserves_url_repository_identity(monkeypatch) -> None:
         "head": {"sha": "b" * 40},
     }
     captured: list[list[str]] = []
+    github = _github_client(tmp_path, payload, captured)
 
-    def fake_run(command, **_kwargs):
-        captured.append(command)
-        return type("Completed", (), {"stdout": json.dumps(payload)})()
-
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-
-    module.load_pr("https://github.com/other/project/pull/123")
-
-    assert captured[0] == ["gh", "api", "repos/other/project/pulls/123"]
+    with pytest.raises(ValueError, match="cannot load PR metadata"):
+        module.load_pr(
+            "https://github.com/other/project/pull/123", github=github
+        )
+    assert captured == []
 
 
 def test_ready_check_does_not_keep_draft_exemption(monkeypatch, capsys) -> None:
