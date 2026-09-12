@@ -8,6 +8,8 @@ from types import ModuleType
 
 import pytest
 
+from loopzero.integrations.github import GitHub, GitHubSettings
+
 
 def load_module() -> ModuleType:
     return importlib.import_module("loopzero.delivery._body_check")
@@ -556,9 +558,9 @@ def _github_client(tmp_path: Path, payload: dict, captured: list[list[str]]):
             )
         return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
 
-    return module.GitHub(
+    return GitHub(
         tmp_path,
-        module.GitHubSettings(labels={}, retries=0),
+        GitHubSettings(labels={}, retries=0),
         run=fake_run,
     )
 

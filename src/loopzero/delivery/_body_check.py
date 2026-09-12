@@ -7,8 +7,10 @@ import html
 import re
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from ..integrations.github import GitHub, GitHubError, GitHubSettings
+if TYPE_CHECKING:
+    from ..integrations.github import GitHub
 
 ISSUE_REFERENCE_RE = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?|revert(?:s|ed|ing)?)"
@@ -334,6 +336,10 @@ def _pr_target(pr: str) -> tuple[str, str]:
 def load_pr(
     pr: str, *, github: GitHub | None = None
 ) -> tuple[str, bool, bool, str, str]:
+    try:
+        from ..integrations.github import GitHub, GitHubError, GitHubSettings
+    except ImportError as exc:
+        raise ValueError("package GitHub integration is unavailable") from exc
     number, requested_repository = _pr_target(pr)
     client = github or GitHub(
         Path.cwd(), GitHubSettings(labels={"standalone": "standalone"})
