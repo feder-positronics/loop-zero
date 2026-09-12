@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero.kernel import authority, validation
+from loopzero.kernel import authority, capabilities, validation
 from loopzero.kernel.settings import KernelSettings
 
 from .capabilities import NAMESPACE_AVAILABLE, NAMESPACE_REASON
@@ -554,8 +554,6 @@ def test_validation_detects_a_new_hard_link_after_child_exit(tmp_path, monkeypat
 def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
     repo, sha = _repo(tmp_path, ("gnutrue",))
     _git(repo, "config", "--local", "user.name", "Candidate")
-    _git(repo, "config", "--local", "remote.backup.url", "file:///srv/repo")
-    _git(repo, "config", "--local", "remote.backup.fetch", "+refs/*:refs/*")
     _git(repo, "config", "--local", "branch.main.remote", "backup")
     _git(repo, "config", "--local", "branch.main.merge", "refs/heads/main")
 
@@ -596,6 +594,75 @@ def test_signed_final_ci_repro_runs_provider_sandbox_without_outer_user_namespac
     repo, sha, signer, key, artifact = _signed_case(tmp_path)
     result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+def test_hermetic_hook_can_write_private_cache_and_pass(tmp_path):
+    repo, sha, signer, key, artifact = _script_case(
+        tmp_path,
+        'test "$PYTHONDONTWRITEBYTECODE" = 1\n'
+        'case "$PYTEST_ADDOPTS" in *cache_dir=/tmp/*) ;; *) exit 8 ;; esac\n'
+        'case "$UV_CACHE_DIR" in /tmp/*) ;; *) exit 9 ;; esac\n'
+        'case "$npm_config_cache" in /tmp/*) ;; *) exit 10 ;; esac\n'
+        'mkdir -p "$UV_CACHE_DIR" "$npm_config_cache"\n'
+        'printf cache > "$UV_CACHE_DIR/hook-cache"\n'
+        'printf cache > "$npm_config_cache/hook-cache"',
+    )
+
+    result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)
+def test_hermetic_hook_tracked_write_is_rejected_with_binding_exit(tmp_path):
+    repo, sha, signer, key, artifact = _script_case(
+        tmp_path,
+        "printf 'changed\\n' > workflow.toml",
+    )
+
+    result = _run(repo, sha, artifact, key, env=_environment(tmp_path))
+
+    assert result.returncode == 127, result.stdout + result.stderr
+    assert "source changed during hook execution" in result.stderr
+
+
+def test_namespace_probe_failure_is_operational_not_a_hook_exit(
+    tmp_path, monkeypatch, capsys
+):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    monkeypatch.setattr(
+        capabilities,
+        "probe_bwrap",
+        lambda _bwrap: subprocess.CompletedProcess(
+            ["bwrap"], 1, "", "bwrap: Creating new namespace failed"
+        ),
+    )
+
+    code = validation.main(
+        [
+            "--worktree",
+            str(repo),
+            "--base",
+            sha,
+            "--head",
+            sha,
+            "--task-id",
+            "task-1",
+            "--result-artifact",
+            str(artifact),
+            "--coordinator-public-key",
+            str(key),
+            "--hook",
+            "acceptance",
+        ]
+    )
+
+    assert code == 2
+    diagnostic = capsys.readouterr().err
+    assert "validation hook unavailable" in diagnostic
+    assert "sandbox namespace is unavailable" in diagnostic
+    assert "Creating new namespace failed" in diagnostic
 
 
 @pytest.mark.skipif(not NAMESPACE_AVAILABLE, reason=NAMESPACE_REASON)

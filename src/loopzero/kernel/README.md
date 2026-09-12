@@ -60,12 +60,18 @@ surface. A missing adapter raises `MissingAdapter`; it never means accepted
 review evidence. Composition-root registration remains TODO(A4).
 
 `job.sh` uses `LOOPZERO_PYTHON` for the approved installed-package interpreter.
+The interpreter must be a symlink-free executable outside the consumer
+repository and every linked worktree.
 Namespaced `JOB_DIR`, `JOB_TIMEOUT` and `DELIVERY_ROOT` retain their original
 semantics. Its privileged dispatcher and continuation paths are supplied through
 `settings.toolchain['dispatcher']`, `['host_dispatcher']` and
 `['continuation_runner']`. The existing command-shape, descriptor and signed-result
 checks still apply to those paths. Candidate protection receives the consumer
 repository explicitly rather than deriving it from the package installation.
+Bound ordinary jobs receive the filesystem sandbox described above. Unbound
+jobs are detached command-runner children, not validation children; callers
+must use `sandbox.run_validation_child` or `job.sh consumer-hook` when the
+validation environment, descriptor, network, and Git boundaries are required.
 
 Final-CI reproduction is no longer a job-runner special case. Invoke
 `job.sh consumer-hook` with explicit `--base`, `--head`, `--task-id`,
@@ -94,11 +100,16 @@ hooks with `config.effective_hooks`, and launches them with
 
 Executable selection uses the package-wide symlink-free allowlist. This trusts
 only `argv[0]`. Hook operands, interpreted scripts, and candidate test inputs are
-candidate-controlled by design. A zero child exit is therefore not acceptance:
-the parent snapshots the supplied coordinator public key before child launch and
-then recomputes the executed-source identity and verifies a coordinator-signed
-result bound to the task ID, base SHA, approved head SHA, exact clean commit or
-dirty tree SHA, hook name, and exact resolved command vectors. Result files are
+candidate-controlled by design. Hooks must be hermetic: they may write only to
+the private temporary and cache paths supplied in their environment, never to
+the exposed worktree. Python bytecode and pytest, uv, npm, pnpm, and XDG caches
+are redirected accordingly. A zero child exit is therefore not acceptance. The
+parent's evidence is the actual child exit code plus equality of the complete
+source identity before and after execution; only then does it verify a
+coordinator-authorized result artifact bound to the task ID, base SHA, approved
+head SHA, exact clean commit or dirty tree SHA, hook name, and exact resolved
+command vectors. The artifact is pre-authorization for those fields, not an
+attestation that the child ran. Result files are
 opened nonblocking and without symlink following, must be bounded regular files,
 and are read under a deadline. Unsigned/malformed/unreadable, tampered, and
 misbound artifacts are distinct failures. Candidate code is never imported or

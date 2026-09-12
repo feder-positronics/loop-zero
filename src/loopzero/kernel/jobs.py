@@ -509,6 +509,7 @@ def build_bound_sandbox_arguments(
     working_directory: Path,
     command: Sequence[str],
     account_home: Path | None = None,
+    writable_paths: Sequence[Path] = (),
     protected_read_only_paths: Sequence[Path] | None = None,
     list_directory: Callable[[Path], list[str]] | None = None,
     read_symlink_target: Callable[[Path], str | None] | None = None,
@@ -525,18 +526,18 @@ def build_bound_sandbox_arguments(
     back, and every other top-level entry keeps its normal host bind, so
     both walks stay sound inside the sandbox without relaxing either check.
     Anti-forgery is preserved: every ancestor of the job collection is either
-    a bind mount point or a directory inside the read-only tmpfs root, so a
-    child cannot rename an ancestor, recreate the lexical job path, and feed
-    reconciliation forged files. The shared default jobs root is also bound
-    read-only, closing writes into another worktree's authority collection.
+    a read-only bind mount point or a directory inside the read-only tmpfs root,
+    so a child cannot rename an ancestor, recreate the lexical job path, and
+    feed reconciliation forged files. The host view, account home, and current
+    authority root are read-only. Only the current job directory, its worktree,
+    and its private temporary directory are explicitly rebound writable by the
+    supervisor. This closes writes to coordinator keys, host ledger state,
+    global Git configuration, SSH state, sibling jobs, and unrelated caches.
     Additional trusted-input stores, including continuation candidates, are
-    overlaid read-only after the account-home bind. Their ancestor bind mounts
-    must precede the shared jobs-root overlay: a later bind of a common
-    ancestor (for example ``/tmp`` in an isolated installation) would otherwise
-    hide the read-only jobs mount and silently restore sibling writes.
-    The synthetic root, root-entry binds, home bind, procfs and writable devfs
-    are all broad mounts. They precede authority ancestors and every read-only
-    authority seal. State, authority, and protected paths below kernel
+    overlaid read-only after the writable worktree carve-out. The synthetic
+    root and root-entry binds are broad read-only mounts. Private procfs and
+    writable devfs precede the home, authority, and Git seals. State,
+    authority, writable, and protected paths below kernel
     filesystems are rejected up front; the sole exception is an authority
     rooted below ``/dev/shm``, whose ancestors never re-bind ``/dev`` itself.
     """
@@ -561,12 +562,10 @@ def build_bound_sandbox_arguments(
         protected_read_only_paths = _canonical_candidate_protection_paths()
     for protected in protected_read_only_paths:
         _reject_kernel_filesystem_path(protected, label="protected read-only path")
-    shared_jobs_root = settings.account_state_root(account_home) / "jobs"
-    _reject_kernel_filesystem_path(
-        shared_jobs_root,
-        label="job state root",
-        allow_dev_shm_authority=True,
-    )
+    for writable in writable_paths:
+        if not writable.is_absolute() or writable == Path("/"):
+            raise JobStoreError("bound sandbox writable path is invalid")
+        _reject_kernel_filesystem_path(writable, label="bound sandbox writable path")
 
     if list_directory is None:
 
@@ -619,10 +618,11 @@ def build_bound_sandbox_arguments(
             )
             return ["--symlink", target, str(source)]
         return emit_mount(
-            "--bind",
+            "--ro-bind",
             source,
             source,
             label="bound sandbox root destination",
+            kernel_owned_seal=True,
         )
 
     home_chain = [
@@ -667,15 +667,6 @@ def build_bound_sandbox_arguments(
             if entry_path == next_component:
                 continue
             root_view.extend(bind_entry(entry_path))
-    root_view.extend(
-        emit_mount(
-            "--bind",
-            account_home,
-            account_home,
-            label="bound sandbox account-home destination",
-        )
-    )
-
     # These broad mounts precede every authority mount in the emitted argv.
     emitted_mounts.extend(
         (
@@ -683,70 +674,14 @@ def build_bound_sandbox_arguments(
             _BoundMount("--dev-bind", Path("/dev"), Path("/dev")),
         )
     )
+    home_seal = emit_mount(
+        "--ro-bind",
+        account_home,
+        account_home,
+        label="bound sandbox account-home destination",
+        kernel_owned_seal=True,
+    )
 
-    authority_mounts: list[str] = []
-    for ancestor in reversed(protected_authority_root.parents):
-        if (
-            ancestor == Path("/")
-            or ancestor in _KERNEL_FILESYSTEM_ROOTS
-            or ancestor == account_home
-            or ancestor in account_home.parents
-        ):
-            # Already unrenameable: the account home is a bind mount point and
-            # its strict ancestors live in the read-only tmpfs root.
-            continue
-        authority_mounts.extend(
-            emit_mount(
-                "--bind",
-                ancestor,
-                ancestor,
-                label="bound sandbox authority destination",
-            )
-        )
-    shared_root_mount: list[str] = []
-    protected_mounts: list[str] = []
-    protected_ancestors: set[Path] = set()
-    for protected in protected_read_only_paths:
-        if not protected.is_absolute() or protected == Path("/"):
-            raise JobStoreError("protected read-only path is invalid")
-        for ancestor in reversed(protected.parents):
-            if (
-                ancestor == Path("/")
-                or ancestor in _KERNEL_FILESYSTEM_ROOTS
-                or ancestor == account_home
-                or ancestor in account_home.parents
-                or ancestor in protected_ancestors
-            ):
-                continue
-            protected_mounts.extend(
-                emit_mount(
-                    "--bind",
-                    ancestor,
-                    ancestor,
-                    label="protected read-only ancestor destination",
-                )
-            )
-            protected_ancestors.add(ancestor)
-        protected_mounts.extend(
-            emit_mount(
-                "--ro-bind",
-                protected,
-                protected,
-                label="protected read-only destination",
-                builder_emitted=False,
-                kernel_owned_seal=True,
-            )
-        )
-    if protected_authority_root.parent == shared_jobs_root:
-        shared_root_mount.extend(
-            emit_mount(
-                "--ro-bind",
-                shared_jobs_root,
-                shared_jobs_root,
-                label="bound sandbox shared authority destination",
-                kernel_owned_seal=True,
-            )
-        )
     authority_seal = emit_mount(
         "--ro-bind",
         protected_authority_root,
@@ -754,6 +689,32 @@ def build_bound_sandbox_arguments(
         label="bound sandbox authority seal destination",
         kernel_owned_seal=True,
     )
+    writable_mounts: list[str] = []
+    for writable in sorted(
+        dict.fromkeys(writable_paths), key=lambda path: len(path.parts)
+    ):
+        writable_mounts.extend(
+            emit_mount(
+                "--bind",
+                writable,
+                writable,
+                label="bound sandbox writable destination",
+            )
+        )
+    protected_mounts: list[str] = []
+    for protected in protected_read_only_paths:
+        if not protected.is_absolute() or protected == Path("/"):
+            raise JobStoreError("protected read-only path is invalid")
+        protected_mounts.extend(
+            emit_mount(
+                "--ro-bind",
+                protected,
+                protected,
+                label="protected read-only destination",
+                builder_emitted=True,
+                kernel_owned_seal=True,
+            )
+        )
     return [
         bubblewrap,
         "--die-with-parent",
@@ -772,13 +733,13 @@ def build_bound_sandbox_arguments(
         "--dev-bind",
         "/dev",
         "/dev",
-        *authority_mounts,
-        *protected_mounts,
-        # Keep this after every writable ancestor bind. Bubblewrap applies
-        # mounts in argument order, so this must be the last view of the
-        # shared collection before the current authority is sealed below.
-        *shared_root_mount,
+        *home_seal,
         *authority_seal,
+        *writable_mounts,
+        *protected_mounts,
+        # Bubblewrap applies mounts in argument order: broad read-only views
+        # precede narrow writable carve-outs, and protected child seals follow
+        # the writable worktree that contains them.
         "--remount-ro",
         "/",
         "--chdir",

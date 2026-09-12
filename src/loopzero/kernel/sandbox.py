@@ -32,6 +32,11 @@ GUARDIAN_BIN_ROOT = settings.sandbox_bin_root
 GUARDIAN_COREPACK_HOME = settings.sandbox_corepack_home
 _DEFAULT_SANDBOX_PATH = f"{GUARDIAN_BIN_ROOT}:/usr/bin:/bin"
 SAFE_PASSTHROUGH_ENV = settings.sandbox_passthrough | {SANDBOX_BOUNDARY_ENV}
+_AUTHORITY_ENV_MARKERS = (
+    "LEASE", "NONCE", "TOKEN", "CREDENTIAL", "AUTH_FD", "SECRET",
+    "PRIVATE_KEY", "SIGNING", "API_KEY", "ACCESS_KEY", "PASSWORD",
+    "COOKIE", "SESSION", "SSH_AUTH", "BEARER",
+)
 
 
 class SandboxError(RuntimeError):
@@ -158,13 +163,26 @@ def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
             "GIT_TERMINAL_PROMPT": "0",
             "GH_CONFIG_DIR": "/tmp/guardian-gh-config",
             "TMPDIR": "/tmp",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTEST_ADDOPTS": "-o cache_dir=/tmp/guardian-pytest-cache",
             "UV_CACHE_DIR": "/tmp/guardian-uv-cache",
+            "npm_config_cache": "/tmp/guardian-npm-cache",
+            "npm_config_store_dir": "/tmp/guardian-pnpm-store",
             "XDG_CACHE_HOME": "/tmp/guardian-xdg-cache",
         }
     )
     if _mounted_corepack_home_available():
         selected["COREPACK_HOME"] = str(GUARDIAN_COREPACK_HOME)
     return selected
+
+
+def strip_authority_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Remove every environment-carried validation or credential authority."""
+    return {
+        key: value
+        for key, value in source.items()
+        if not any(marker in key.upper() for marker in _AUTHORITY_ENV_MARKERS)
+    }
 
 
 def _parents(path: Path) -> list[Path]:
@@ -935,14 +953,7 @@ def run_validation_child(argv: Sequence[str], *, worktree: Path,
     child_environment = environment(source_environment)
     child_environment.update(settings.child_environment())
     # A consumer allowlist must never reintroduce lease, nonce or credentials.
-    child_environment = {
-        key: value for key, value in child_environment.items()
-        if not any(part in key.upper() for part in
-                   ("LEASE", "NONCE", "TOKEN", "CREDENTIAL", "AUTH_FD",
-                    "SECRET", "PRIVATE_KEY", "SIGNING", "API_KEY",
-                    "ACCESS_KEY", "PASSWORD", "COOKIE", "SESSION",
-                    "SSH_AUTH", "BEARER"))
-    }
+    child_environment = strip_authority_environment(child_environment)
     for key in tuple(child_environment):
         if key == "GIT_CONFIG_COUNT" or key.startswith(
             ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
@@ -970,13 +981,27 @@ def run_validation_child(argv: Sequence[str], *, worktree: Path,
             snapshot.write_bytes(payload)
             snapshot.chmod(0o444)
             config_mounts.append((snapshot, destination))
-        return subprocess.run(
-            validation_command(
+        sandbox_command = validation_command(
                 argv,
                 worktree=worktree,
                 read_only_roots=read_only_roots,
                 read_only_file_mounts=config_mounts,
-            ),
+            )
+        from .capabilities import probe_bwrap
+
+        try:
+            probe = probe_bwrap(sandbox_command[0])
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxError(
+                "validation sandbox namespace probe could not run"
+            ) from exc
+        if probe.returncode != 0:
+            detail = probe.stderr.strip() or f"exit {probe.returncode}"
+            raise SandboxError(
+                f"validation sandbox namespace is unavailable: {detail}"
+            )
+        return subprocess.run(
+            sandbox_command,
             env=child_environment, close_fds=True, pass_fds=(),
             capture_output=True, text=True, timeout=timeout, check=False,
         )

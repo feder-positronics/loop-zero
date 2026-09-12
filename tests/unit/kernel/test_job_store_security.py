@@ -22,6 +22,81 @@ requires_nested_user_namespace = pytest.mark.skipif(
 )
 
 
+@requires_nested_user_namespace
+def test_bound_sandbox_denies_coordinator_ledger_and_global_git_writes(
+    tmp_path: Path,
+) -> None:
+    from loopzero.kernel import jobs as job_store
+
+    home = tmp_path / "home"
+    authority = home / ".local/state/example/dispatch-authority"
+    job_root = home / ".local/state/example/jobs/repository"
+    job_dir = job_root / "current"
+    worktree = home / "worktree"
+    private_temp = home / "tmp/current"
+    global_git = home / ".config/git"
+    ssh = home / ".ssh"
+    for directory in (
+        authority,
+        job_dir,
+        worktree,
+        private_temp,
+        global_git,
+        ssh,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    coordinator_key = authority / "coordinator-ed25519.pem"
+    host_ledger = authority / "ledgers" / ("a" * 64 + ".json")
+    dot_gitconfig = home / ".gitconfig"
+    config_git = global_git / "config"
+    ssh_config = ssh / "config"
+    protected = {
+        coordinator_key: "coordinator-key\n",
+        host_ledger: "ledger-state\n",
+        dot_gitconfig: "[user]\n\tname = Coordinator\n",
+        config_git: "[core]\n\thooksPath = /dev/null\n",
+        ssh_config: "Host *\n\tBatchMode yes\n",
+    }
+    for path, payload in protected.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload, encoding="utf-8")
+
+    arguments = job_store.build_bound_sandbox_arguments(
+        "/usr/bin/bwrap",
+        protected_authority_root=job_root,
+        working_directory=worktree,
+        command=[
+            "/bin/sh",
+            "-c",
+            'for target in "$@"; do ! printf attacker > "$target" || exit 9; done; '
+            'touch "$JOB_DIR/job-write" "$WORKTREE/worktree-write" "$PRIVATE_TEMP/temp-write"',
+            "sh",
+            *map(str, protected),
+        ],
+        account_home=home,
+        writable_paths=(job_dir, worktree, private_temp),
+        protected_read_only_paths=(),
+    )
+    result = subprocess.run(
+        arguments,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "JOB_DIR": str(job_dir),
+            "WORKTREE": str(worktree),
+            "PRIVATE_TEMP": str(private_temp),
+        },
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert {path: path.read_text(encoding="utf-8") for path in protected} == protected
+    assert (job_dir / "job-write").exists()
+    assert (worktree / "worktree-write").exists()
+    assert (private_temp / "temp-write").exists()
+
+
 def _isolated_job_script(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     script = repo / "scripts" / "util" / "job.sh"

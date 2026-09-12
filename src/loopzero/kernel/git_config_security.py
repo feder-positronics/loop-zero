@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -50,6 +51,8 @@ def parse_git_config_entries(raw_config: bytes) -> tuple[tuple[str, str | None],
 
 def git_config_key_can_redirect(name: str) -> bool:
     normalized = name.casefold()
+    if re.fullmatch(r"remote\..+\.(?:url|pushurl|fetch)", normalized):
+        return True
     if normalized.startswith(
         (
             "credential.",
@@ -69,6 +72,7 @@ def git_config_key_can_redirect(name: str) -> bool:
     if normalized.startswith("merge.") and normalized.endswith(".driver"):
         return True
     if normalized in {
+        "extensions.partialclone",
         "extensions.worktreeconfig",
         "core.askpass",
         "core.editor",
@@ -81,18 +85,17 @@ def git_config_key_can_redirect(name: str) -> bool:
         "core.worktree",
     }:
         return True
-    return normalized.startswith("remote.origin.") and normalized not in {
-        "remote.origin.fetch",
-        "remote.origin.gh-resolved",
-        "remote.origin.url",
-    }
+    return normalized.startswith("remote.origin.") and normalized != "remote.origin.gh-resolved"
 
 
 def validated_git_config_entries(
     raw_config: bytes,
 ) -> tuple[tuple[str, str | None], ...]:
     entries = parse_git_config_entries(raw_config)
-    if any(git_config_key_can_redirect(key) for key, _value in entries):
+    if any(git_config_key_can_redirect(key) for key, _value in entries) or any(
+        key.casefold() == "core.repositoryformatversion" and value != "0"
+        for key, value in entries
+    ):
         raise ValueError(
             "Git configuration uses unmeasured execution, redirect, include, "
             "URL rewrite, or worktree configuration"

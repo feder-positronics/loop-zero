@@ -129,6 +129,29 @@ def test_git_configuration_digest_ignores_branch_metadata():
     assert git_config_security.security_projection_sha256(base) == git_config_security.security_projection_sha256(base + b'[branch "topic"]\nremote = origin\n')
 
 
+@pytest.mark.parametrize(
+    "configuration",
+    (
+        b'[remote "backup"]\nurl = ext::sh -c owned\n',
+        b'[remote "backup"]\npushurl = file:///tmp/owned\n',
+        b'[remote "backup"]\nfetch = +refs/*:refs/*\n',
+        b"[extensions]\npartialClone = backup\n",
+        b"[core]\nrepositoryFormatVersion = 1\n",
+    ),
+)
+def test_git_configuration_rejects_lazy_fetch_and_repository_format_redirects(
+    configuration,
+):
+    with pytest.raises(ValueError, match="configuration uses"):
+        git_config_security.validated_git_config_entries(configuration)
+
+
+def test_git_configuration_accepts_repository_format_zero():
+    assert git_config_security.validated_git_config_entries(
+        b"[core]\nrepositoryFormatVersion = 0\n"
+    ) == (("core.repositoryformatversion", "0"),)
+
+
 def test_settings_round_trip_in_installed_child_and_shell_job(tmp_path):
     import os
     settings = KernelSettings(env_prefix="ACME", audit_root=Path("evidence"),

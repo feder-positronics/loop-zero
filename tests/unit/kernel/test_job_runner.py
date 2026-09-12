@@ -1,6 +1,6 @@
 """Coverage for the detached long-running-command runner used by agents."""
 
-from .package_environment import package_environment
+from .package_environment import PACKAGE_PYTHON, package_environment
 
 import fcntl
 import hashlib
@@ -162,6 +162,79 @@ def test_job_runner_disables_hostile_python_startup_paths(tmp_path: Path) -> Non
     assert not python_path_job_marker.exists()
 
 
+@pytest.mark.parametrize("location", ("repository", "linked-worktree"))
+def test_job_runner_rejects_interpreter_under_any_worktree(
+    tmp_path: Path, location: str
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    target_root = repo
+    if location == "linked-worktree":
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "base",
+            ],
+            cwd=repo,
+            check=True,
+        )
+        target_root = tmp_path / "linked"
+        subprocess.run(
+            ["git", "worktree", "add", "-q", "--detach", str(target_root)],
+            cwd=repo,
+            check=True,
+        )
+    interpreter = target_root / "candidate-python"
+    interpreter.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    interpreter.chmod(0o700)
+
+    result = subprocess.run(
+        [str(script), "list"],
+        cwd=repo,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LOOPZERO_PYTHON": str(interpreter),
+            "LOOPZERO_ENV_PREFIX": "INTELFLO",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "outside every repository worktree" in result.stderr
+
+
+def test_job_runner_rejects_symlinked_external_interpreter(tmp_path: Path) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    interpreter = tmp_path / "external-python-link"
+    interpreter.symlink_to(PACKAGE_PYTHON)
+
+    result = subprocess.run(
+        [str(script), "list"],
+        cwd=repo,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "LOOPZERO_PYTHON": str(interpreter),
+            "LOOPZERO_ENV_PREFIX": "INTELFLO",
+        },
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 2
+    assert "trusted Python interpreter is unavailable" in result.stderr
+
+
 def test_snapshot_runner_keys_authority_to_declared_delivery(tmp_path: Path) -> None:
     delivery = tmp_path / "delivery"
     delivery.mkdir(mode=0o700)
@@ -265,6 +338,54 @@ def test_run_propagates_the_job_exit_code(tmp_path: Path) -> None:
 
     assert result.returncode == 7
     assert "exit code 7" in result.stdout
+
+
+def test_unbound_job_strips_parent_worktree_lease_before_guard_commit(
+    tmp_path: Path,
+) -> None:
+    script = _isolated_job_script(tmp_path)
+    repo = script.resolve().parents[2]
+    environment = package_environment(
+        {
+            "PATH": "/usr/bin:/bin",
+            "INTELFLO_JOB_DIR": str(tmp_path / "jobs"),
+            **KernelSettings(env_prefix="INTELFLO").child_environment(),
+        }
+    )
+    result = subprocess.run(
+        [
+            str(PACKAGE_PYTHON),
+            "-m",
+            "loopzero.kernel.worktree_lease",
+            "exec",
+            "--worktree",
+            str(repo),
+            "--boundary",
+            "job-runner-test",
+            "--",
+            str(script),
+            "run",
+            "unbound-guard",
+            "--timeout",
+            "30",
+            "--",
+            str(PACKAGE_PYTHON),
+            "-m",
+            "loopzero.kernel.worktree_lease",
+            "guard-commit",
+            "--worktree",
+            str(repo),
+        ],
+        cwd=repo,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "exit code 1" in result.stdout
+    assert "commit blocked" in result.stdout
 
 
 def test_run_preserves_wrapped_python_script_directory_imports(tmp_path: Path) -> None:
@@ -695,6 +816,11 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
         working_directory=Path("/var/home/user/repo"),
         command=["true"],
         account_home=Path("/var/home/user"),
+        writable_paths=(
+            Path("/var/home/user/.local/state/intelflo/jobs/abcd/current"),
+            Path("/var/home/user/repo"),
+            Path("/var/home/user/tmp/current"),
+        ),
         protected_read_only_paths=(candidate_store,),
         **_fake_filesystem_views(
             {
@@ -706,10 +832,10 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
         ),
     )
 
-    def bind(path: str) -> list[str]:
-        return ["--bind", path, path]
+    def bind(path: str, *, writable: bool = False) -> list[str]:
+        return ["--bind" if writable else "--ro-bind", path, path]
 
-    # Top-level entries keep their host view; /proc and /dev are replaced.
+    # Top-level entries keep a read-only host view; /proc and /dev are replaced.
     assert arguments[:4] == [
         "/usr/bin/bwrap",
         "--die-with-parent",
@@ -722,44 +848,31 @@ def test_bound_sandbox_arguments_synthesize_only_the_home_ancestors() -> None:
     assert bind("/proc") != _window(arguments, bind("/proc"))
     assert bind("/dev") != _window(arguments, bind("/dev"))
     assert bind("/sys") != _window(arguments, bind("/sys"))
-    # Strict home ancestors are synthesized 0555; the home itself is bound.
+    # Strict home ancestors are synthesized 0555; the home itself is read-only.
     assert _window(arguments, ["--perms", "0555", "--dir", "/var"])
     assert _window(arguments, ["--perms", "0555", "--dir", "/var/home"])
     assert _window(arguments, bind("/var/home/user"))
-    # The home is not re-bound by the authority-ancestor mounts, while
-    # authority ancestors below the home stay bind mount points.
+    # The home is not re-bound writable by authority-ancestor mounts.
     assert arguments.count("/var/home/user") == 2
-    assert _window(arguments, bind("/var/home/user/.local/state/intelflo"))
     protected = "/var/home/user/.local/state/intelflo/jobs/abcd"
     assert _window(arguments, ["--ro-bind", protected, protected])
-    for pinned in (
-        "/var/home/user/project",
-        "/var/home/user/project/.audit",
-        "/var/home/user/project/.audit/delivery-continuations",
+    for writable in (
+        "/var/home/user/.local/state/intelflo/jobs/abcd/current",
+        "/var/home/user/repo",
+        "/var/home/user/tmp/current",
     ):
-        assert _window(arguments, bind(pinned))
+        assert _window(arguments, bind(writable, writable=True))
     assert _window(
         arguments,
         ["--ro-bind", str(candidate_store), str(candidate_store)],
     )
-    shared_jobs_overlay = [
-        "--ro-bind",
-        "/var/home/user/.local/state/intelflo/jobs",
-        "/var/home/user/.local/state/intelflo/jobs",
-    ]
-    overlay_index = next(
-        index
-        for index in range(len(arguments) - len(shared_jobs_overlay) + 1)
-        if arguments[index : index + len(shared_jobs_overlay)] == shared_jobs_overlay
-    )
-    assert overlay_index > max(
-        index
-        for index, argument in enumerate(arguments)
-        if argument in {"--bind", "--symlink"}
-    )
-    # Procfs and devfs are broad mounts, so they precede every authority seal.
-    assert arguments.index("--proc") < overlay_index
-    assert arguments.index("--dev-bind") < overlay_index
+    home_seal = arguments.index("/var/home/user", arguments.index("--proc"))
+    authority_seal = arguments.index(protected, home_seal + 1)
+    first_writable = arguments.index("--bind")
+    protected_seal = arguments.index(str(candidate_store), authority_seal + 1)
+    assert arguments.index("--proc") < home_seal < authority_seal < first_writable
+    assert first_writable < protected_seal
+    assert arguments.index("--dev-bind") < home_seal
     # The read-only remount of the synthesized root is the final mount.
     tail = arguments[arguments.index("--remount-ro") :]
     assert tail == ["--remount-ro", "/", "--chdir", "/var/home/user/repo", "--", "true"]
@@ -864,7 +977,14 @@ def test_bound_sandbox_supports_dev_shm_authority_without_rebinding_dev() -> Non
 
     assert _window(arguments, ["--bind", "/dev", "/dev"]) is None
     assert _window(arguments, ["--bind", "/sys", "/sys"]) is None
-    assert _window(arguments, ["--bind", "/dev/shm", "/dev/shm"])
+    assert _window(
+        arguments,
+        [
+            "--ro-bind",
+            "/dev/shm/loopzero/jobs/current",
+            "/dev/shm/loopzero/jobs/current",
+        ],
+    )
 
 
 def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
@@ -890,7 +1010,7 @@ def test_bound_sandbox_arguments_support_execute_only_home_ancestor() -> None:
 
     assert _window(arguments, ["--perms", "0555", "--dir", "/home"])
     assert _window(arguments, ["--perms", "0555", "--dir", "/home/user"])
-    assert _window(arguments, ["--bind", "/home/user", "/home/user"])
+    assert _window(arguments, ["--ro-bind", "/home/user", "/home/user"])
 
 
 @requires_nested_user_namespace
@@ -979,13 +1099,12 @@ def test_bound_sandbox_arguments_keep_external_authority_ancestors_bound() -> No
         ),
     )
 
-    # An authority root outside the home keeps every ancestor a mount point,
-    # preserving the ancestor-substitution protection.
-    assert _window(arguments, ["--bind", "/tmp", "/tmp"])
-    assert _window(arguments, ["--bind", "/tmp/pytest-of-user", "/tmp/pytest-of-user"])
+    # The external host tree and exact authority root are read-only mounts,
+    # preserving ancestor substitution protection without a writable ancestor.
+    assert _window(arguments, ["--ro-bind", "/tmp", "/tmp"])
     assert _window(
         arguments,
-        ["--bind", "/tmp/pytest-of-user/case", "/tmp/pytest-of-user/case"],
+        ["--ro-bind", "/tmp/pytest-of-user/case/jobs", "/tmp/pytest-of-user/case/jobs"],
     )
 
 

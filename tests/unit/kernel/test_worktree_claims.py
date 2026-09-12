@@ -434,7 +434,7 @@ def test_main_renders_issue_claims_from_shared_projection(
     assert "#4096" in output
     assert "sr_77777777777777777777777777777777" in output
     assert "LIVE" in output
-    assert str(other) in output
+    assert module._display_path(other, current) in output
 
 
 def test_main_fails_visibly_when_git_inventory_is_unavailable(
