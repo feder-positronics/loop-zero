@@ -47,6 +47,24 @@ per-launch wrapper uses `--unshare-net`: version/readiness probes and provider
 scenarios require outbound network, while filesystem visibility remains the
 positive allowlist described above.
 
+The per-launch wrapper mounts a private tmpfs over `/run`, so it also binds
+the resolved target of `/etc/resolv.conf` read-only when that symlink points
+into `/run` (systemd-resolved hosts); without that bind every provider request
+fails name resolution and both CLIs retry until the scenario timeout.  Codex
+`0.154.0` has no `debug.config_lockfile` export, so the SDK bridge applies the
+closed runtime override layer directly; the private `CODEX_HOME` holds no
+project trust entry, which keeps project-level `.codex` configuration out of
+scope.  The Codex access-only snapshot keeps the source's `last_refresh`
+timestamp because `0.154.0` treats a missing timestamp as stale and would
+otherwise attempt the refresh the snapshot deliberately cannot perform.  Codex
+permission denial is recorded as `unsupported`: its read-only sandbox enforces
+file access at the OS level without a permission-denial protocol event.  SDK
+bridge error frames carry a sanitized `diagnostics` object (exception class and
+a redacted, bounded message) that the normalized result surfaces as
+`<Vendor> SDK failure: ...`; CLI retry events surface as
+`<Vendor> API retry: ...`, and a bridge killed by an external signal before its
+terminal frame is a `transport-disconnect`.
+
 Create a GitHub Actions environment named `nightly-conformance`, restrict its
 deployment branches to `main`, and configure **no required reviewers** so the
 scheduled job runs unattended. Configure these environment secrets (not
