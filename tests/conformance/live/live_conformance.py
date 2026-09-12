@@ -13,7 +13,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import threading
 from typing import Iterator
@@ -31,7 +30,8 @@ from loopzero.runners.contract import (
     TerminalReason,
 )
 from loopzero.runners.process import LaunchSpec, ProcessResult, run_cli
-from loopzero.runners.pricing import estimated_cost_usd
+from loopzero.runners.process import private_temporary_directory
+from loopzero.runners.pricing import MODEL_PRICES, estimated_cost_usd
 from loopzero.runners.registry import RUNTIME_REGISTRY
 
 
@@ -63,6 +63,9 @@ SCHEMA = {
 }
 DEFAULT_SCENARIO_TIMEOUT_S = 45.0
 FAULT_DELAY_S = 1.0
+LIVE_MAX_OUTPUT_TOKENS = 32_768
+DEFAULT_RUN_BUDGET_USD = 0.25
+KILLED_SCENARIOS = frozenset({"cancellation", "disconnect", "expiry-timeout"})
 
 
 def _selected_runtimes() -> tuple[str, ...]:
@@ -74,20 +77,29 @@ def _selected_runtimes() -> tuple[str, ...]:
     return selected
 
 
-def _version(executable: Path, vendor: str) -> str:
-    completed = subprocess.run(
+def _version(
+    executable: Path,
+    vendor: str,
+    *,
+    settings: RuntimeSettings,
+    wrapper,
+) -> str:
+    with settings.use():
+        completed = run_cli(
         [str(executable), "--version"],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=10,
+        cwd=Path.cwd(),
+        input_text="",
+        timeout_s=10,
         env={"HOME": "/tmp", "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        sandbox_wrapper=wrapper,
     )
+    if completed.returncode != 0 or completed.timed_out or completed.output_limited:
+        raise AssertionError(f"{vendor} version probe failed")
     text = (completed.stdout or completed.stderr).strip()
     patterns = {
         "claude": r"^(\d+\.\d+\.\d+)\b",
         "codex": r"^codex-cli (\d+\.\d+\.\d+)\b",
-        "cursor": r"^(\d{4}\.\d{2}\.\d{2})(?:-|$)",
+        "cursor": r"^(\d{4}\.\d{2}\.\d{2}-[0-9a-f]+)\b",
     }
     match = re.search(patterns[vendor], text)
     if match is None:
@@ -180,43 +192,34 @@ class RealProcess:
         self.scenario = scenario
         self.metered_cost: float | None = None
         self.cancel = None
+        self._fault_timer: threading.Timer | None = None
+        self.scenario_started = False
 
     def __call__(self, command, **kwargs) -> ProcessResult:
         marker = f"loopzero-live-{self.scenario}"
         is_scenario_run = marker in kwargs.get("input_text", "")
+        self.scenario_started = self.scenario_started or is_scenario_run
         cancelled = False
         original_on_launch = kwargs.pop("on_launch", None)
 
         def on_launch(identity) -> None:
-            nonlocal cancelled
             if original_on_launch is not None:
                 original_on_launch(identity)
-            if not is_scenario_run or self.scenario != "disconnect":
-                return
-
-            def terminate() -> None:
-                try:
-                    os.killpg(identity.pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-
-            timer = threading.Timer(FAULT_DELAY_S, terminate)
-            timer.daemon = True
-            timer.start()
 
         def on_handle(handle) -> None:
-            if not is_scenario_run or self.scenario != "cancellation":
+            if not is_scenario_run or self.scenario not in {"cancellation", "disconnect"}:
                 return
 
-            def request_cancel() -> None:
+            def inject_fault() -> None:
                 nonlocal cancelled
-                cancelled = True
+                cancelled = self.scenario == "cancellation"
                 assert self.cancel is not None
                 self.cancel(handle)
 
-            timer = threading.Timer(FAULT_DELAY_S, request_cancel)
+            timer = threading.Timer(FAULT_DELAY_S, inject_fault)
             timer.daemon = True
             timer.start()
+            self._fault_timer = timer
 
         env = kwargs.get("env", {})
         pass_fds = tuple(
@@ -225,14 +228,18 @@ class RealProcess:
             if name.endswith(("CLAUDE_AUTH_FD", "CODEX_AUTH_FD", "CURSOR_AUTH_FD"))
             and value.isdecimal()
         )
-        outcome = run_cli(
-            command,
-            **kwargs,
-            pass_fds=pass_fds,
-            on_launch=on_launch,
-            on_handle=on_handle,
-            sandbox_wrapper=self.wrapper,
-        )
+        try:
+            outcome = run_cli(
+                command,
+                **kwargs,
+                pass_fds=pass_fds,
+                on_launch=on_launch,
+                on_handle=on_handle,
+                sandbox_wrapper=self.wrapper,
+            )
+        finally:
+            if self._fault_timer is not None:
+                self._fault_timer.cancel()
         if is_scenario_run:
             try:
                 parsed = {
@@ -261,16 +268,28 @@ def _credential(vendor: str, timeout_s: float, settings: RuntimeSettings, wrappe
         "codex": codex.codex_subscription_credential,
         "cursor": cursor.cursor_subscription_credential,
     }
-    kwargs = {"requested_runtime_s": timeout_s, "credential_path": path}
-    if vendor == "claude":
-        kwargs.update(
-            claude_binary=settings.claude_cli_path,
-            sandbox_wrapper=wrapper,
-        )
-    elif vendor == "codex":
-        kwargs["sandbox_wrapper"] = wrapper
-    with brokers[vendor](**kwargs) as descriptor:
-        yield descriptor
+    if path is None:
+        raise RuntimeError("live credential path is missing")
+    metadata = path.stat(follow_symlinks=False)
+    if not path.is_file() or metadata.st_size <= 2 or metadata.st_size > 1024 * 1024:
+        raise RuntimeError("live credential file is invalid")
+    # The workflow mount is immutable.  Give each broker invocation a fresh
+    # private copy so vendor refresh rotation never mutates the secret source
+    # or carries refreshed credentials into the next scenario.
+    with settings.use(), private_temporary_directory("live-credential") as root:
+        sealed_path = root / "credential.json"
+        sealed_path.write_bytes(path.read_bytes())
+        sealed_path.chmod(0o600)
+        kwargs = {"requested_runtime_s": timeout_s, "credential_path": sealed_path}
+        if vendor == "claude":
+            kwargs.update(
+                claude_binary=settings.claude_cli_path,
+                sandbox_wrapper=wrapper,
+            )
+        elif vendor == "codex":
+            kwargs["sandbox_wrapper"] = wrapper
+        with brokers[vendor](**kwargs) as descriptor:
+            yield descriptor
 
 
 def _request(vendor: str, scenario: str, root: Path, timeout_s: float, resume: str | None = None) -> RuntimeRequest:
@@ -327,6 +346,13 @@ def _assert_contract(scenario: str, result: RuntimeResult) -> None:
             TerminalReason.BUDGET_EXHAUSTED_AFTER_RESULT,
         }
         assert result.session_id is not None
+        structured = result.structured_output
+        if result.vendor == "cursor" and structured is None:
+            try:
+                structured = json.loads(result.final_output or "")
+            except json.JSONDecodeError:
+                structured = None
+        assert structured == {"ok": True}
     elif scenario == "malformed-output":
         assert result.status is RuntimeStatus.FAILED
         assert result.terminal_reason in {
@@ -339,6 +365,12 @@ def _assert_contract(scenario: str, result: RuntimeResult) -> None:
             TerminalReason.PROCESS_EXIT,
             TerminalReason.MODEL_RESULT,
         }
+        evidence = " ".join(result.diagnostics).casefold()
+        assert "permission" in evidence or any(
+            any(label in f"{event.kind} {event.subtype or ''}".casefold()
+                for label in ("tool", "command", "file", "permission", "denial"))
+            for event in result.events
+        )
     elif scenario == "cancellation":
         assert result.status is RuntimeStatus.CANCELLED
         assert result.terminal_reason is TerminalReason.CANCELLED
@@ -359,11 +391,62 @@ def _write_results(vendor: str, pin: str, records: list[dict[str, object]], tota
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(
-            {"runtime": vendor, "version": pin, "known_cost_usd": round(total, 9), "scenarios": records},
+            {
+                "runtime": vendor,
+                "version": pin,
+                "charged_cost_usd": round(total, 9),
+                "spend_bound": (
+                    "harness-only: scenario timeout and finite scenario count; no vendor cap"
+                    if vendor == "cursor"
+                    else "vendor cap plus aggregate charged-cost ceiling"
+                ),
+                "scenarios": records,
+            },
             indent=2,
             sort_keys=True,
         ) + "\n",
         encoding="utf-8",
+    )
+
+
+def _vendor_cap_charge(vendor: str, budget: RuntimeBudget) -> float | None:
+    """Return the conservative maximum charge for one killed invocation."""
+    if vendor == "claude":
+        return budget.max_usd
+    if vendor == "codex":
+        price = MODEL_PRICES[MODELS[vendor]]
+        return round(budget.max_tokens * price.output_per_million / 1_000_000, 9)
+    return None
+
+
+def _accounted_cost(
+    vendor: str,
+    scenario: str,
+    observed: float | None,
+    budget: RuntimeBudget,
+) -> tuple[float | None, str]:
+    if observed is not None:
+        return observed, "known"
+    if scenario not in KILLED_SCENARIOS:
+        return None, "unknown"
+    vendor_cap = _vendor_cap_charge(vendor, budget)
+    if vendor_cap is not None:
+        return vendor_cap, "conservative-vendor-cap"
+    return 0.0, "harness-only-unpriced"
+
+
+def _remaining_budget(vendor: str, remaining_usd: float) -> RuntimeBudget:
+    max_tokens = LIVE_MAX_OUTPUT_TOKENS
+    if vendor in {"codex", "cursor"}:
+        output_rate = MODEL_PRICES[MODELS[vendor]].output_per_million
+        max_tokens = min(
+            max_tokens,
+            max(1, int(remaining_usd * 1_000_000 / output_rate)),
+        )
+    return RuntimeBudget(
+        max_tokens=max_tokens,
+        max_turns=2,
+        max_usd=min(DEFAULT_RUN_BUDGET_USD, remaining_usd),
     )
 
 
@@ -372,76 +455,130 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path, monkeypatch: pytest.
     executable_value = os.environ.get("LOOPZERO_LIVE_CLI_PATH")
     executable = Path(executable_value) if executable_value else Path(shutil.which(EXECUTABLE_NAMES[vendor]) or "")
     assert executable.is_file(), f"pinned {vendor} executable is unavailable"
-    reported_version = _version(executable, vendor)
-    assert reported_version == PINS[vendor]
 
     ceiling = float(os.environ.get("LOOPZERO_CONFORMANCE_BUDGET_USD", "2"))
     scenario_timeout = float(os.environ.get("LOOPZERO_LIVE_SCENARIO_TIMEOUT_S", str(DEFAULT_SCENARIO_TIMEOUT_S)))
-    settings = RuntimeSettings(
+    budget = _remaining_budget(vendor, ceiling)
+    base_settings = RuntimeSettings(
         tooling_root=Path.cwd(),
         toolchain_interpreter=Path(os.environ.get("LOOPZERO_LIVE_PYTHON", os.sys.executable)),
         state_root=os.environ.get("LOOPZERO_LIVE_STATE_ROOT"),
-        budget=RuntimeBudget(max_tokens=4096, max_turns=2, max_usd=ceiling),
+        budget=budget,
         claude_cli_path=executable if vendor == "claude" else None,
         codex_cli_path=executable if vendor == "codex" else None,
         cursor_cli_path=executable if vendor == "cursor" else None,
     )
-    wrapper = _sandbox_wrapper(settings)
     records: list[dict[str, object]] = []
-    known_cost = 0.0
+    charged_cost = 0.0
     failures: list[str] = []
-
-    for scenario in SCENARIOS:
-        if known_cost > ceiling:
-            records.append({"scenario": scenario, "outcome": "aborted-budget"})
-            break
-        runner = RealProcess(wrapper, vendor, scenario)
-        adapter = RUNTIME_REGISTRY.create(
-            vendor,
-            settings=settings,
-            run_cli=runner,
-            run_probe=runner,
-            **(
-                {"sdk_available": lambda *_: True}
-                if vendor in {"claude", "codex"} else {}
-            ),
+    with base_settings.use(), private_temporary_directory(
+        f"{vendor}-suite-session"
+    ) as session_home:
+        settings = replace(base_settings, session_home=session_home)
+        wrapper = _sandbox_wrapper(settings)
+        reported_version = _version(
+            executable, vendor, settings=settings, wrapper=wrapper
         )
-        runner.cancel = adapter.cancel
-        timeout = 0.05 if scenario == "expiry-timeout" else scenario_timeout
-        try:
-            with _credential(vendor, scenario_timeout + 10, settings, wrapper) as descriptor:
-                monkeypatch.setenv(settings.env_name(f"{vendor.upper()}_AUTH_FD"), str(descriptor))
-                result = adapter.run(_request(vendor, scenario, tmp_path, timeout))
-            scenario_cost = (
-                result.cost_usd
-                if result.cost_usd is not None
-                else runner.metered_cost
-            )
-            if scenario == "restart-resume" and result.session_id is not None:
-                resumed_adapter = RUNTIME_REGISTRY.create(
-                    vendor, settings=settings, run_cli=runner, run_probe=runner,
-                    **({"sdk_available": lambda *_: True} if vendor in {"claude", "codex"} else {}),
-                )
-                with _credential(vendor, scenario_timeout + 10, settings, wrapper) as descriptor:
-                    monkeypatch.setenv(settings.env_name(f"{vendor.upper()}_AUTH_FD"), str(descriptor))
-                    resumed = resumed_adapter.run(
-                        _request(vendor, scenario, tmp_path, timeout, result.session_id)
-                    )
-                _assert_contract(scenario, resumed)
-                assert resumed.session_id == result.session_id
-                result = resumed
-                scenario_cost = (
-                    result.cost_usd + scenario_cost
-                    if result.cost_usd is not None and scenario_cost is not None else None
-                )
-            _assert_contract(scenario, result)
-            assert scenario_cost is not None
-            known_cost += scenario_cost
-            records.append({"scenario": scenario, "outcome": "passed", "known_cost_usd": scenario_cost, "result": _normalized(result)})
-        except Exception as exc:
-            failures.append(f"{scenario}: {type(exc).__name__}")
-            records.append({"scenario": scenario, "outcome": "failed", "failure_class": type(exc).__name__})
+        assert reported_version == PINS[vendor]
 
-    _write_results(vendor, reported_version, records, known_cost)
+        for scenario in SCENARIOS:
+            if charged_cost >= ceiling:
+                records.append({"scenario": scenario, "outcome": "aborted-budget"})
+                break
+            invocation_count = 2 if scenario == "restart-resume" else 1
+            scenario_budget = _remaining_budget(
+                vendor, (ceiling - charged_cost) / invocation_count
+            )
+            scenario_settings = replace(settings, budget=scenario_budget)
+            runner = RealProcess(wrapper, vendor, scenario)
+            adapter = RUNTIME_REGISTRY.create(
+                vendor,
+                settings=scenario_settings,
+                run_cli=runner,
+                run_probe=runner,
+                **(
+                    {"sdk_available": lambda *_: True}
+                    if vendor in {"claude", "codex"} else {}
+                ),
+            )
+            runner.cancel = adapter.cancel
+            timeout = 0.05 if scenario == "expiry-timeout" else scenario_timeout
+            scenario_charge: float | None = None
+            accounting = "unknown"
+            observed_cost: float | None = None
+            invocation_costs: list[float | None] = []
+            try:
+                with _credential(vendor, scenario_timeout + 10, scenario_settings, wrapper) as descriptor:
+                    monkeypatch.setenv(scenario_settings.env_name(f"{vendor.upper()}_AUTH_FD"), str(descriptor))
+                    invocation_costs.append(None)
+                    result = adapter.run(_request(vendor, scenario, tmp_path, timeout))
+                observed_cost = (
+                    result.cost_usd
+                    if result.cost_usd is not None
+                    else runner.metered_cost
+                )
+                invocation_costs[-1] = observed_cost
+                if scenario == "restart-resume" and result.session_id is not None:
+                    resumed_adapter = RUNTIME_REGISTRY.create(
+                        vendor, settings=scenario_settings, run_cli=runner, run_probe=runner,
+                        **({"sdk_available": lambda *_: True} if vendor in {"claude", "codex"} else {}),
+                    )
+                    with _credential(vendor, scenario_timeout + 10, scenario_settings, wrapper) as descriptor:
+                        monkeypatch.setenv(scenario_settings.env_name(f"{vendor.upper()}_AUTH_FD"), str(descriptor))
+                        invocation_costs.append(None)
+                        resumed = resumed_adapter.run(
+                            _request(vendor, scenario, tmp_path, timeout, result.session_id)
+                        )
+                    resumed_cost = resumed.cost_usd if resumed.cost_usd is not None else runner.metered_cost
+                    invocation_costs[-1] = resumed_cost
+                    original_session_id = result.session_id
+                    result = resumed
+                    observed_cost = (
+                        observed_cost + resumed_cost
+                        if observed_cost is not None and resumed_cost is not None
+                        else None
+                    )
+                scenario_charge, accounting = _accounted_cost(
+                    vendor, scenario, observed_cost, scenario_budget
+                )
+                assert scenario_charge is not None
+                charged_cost += scenario_charge
+                _assert_contract(scenario, result)
+                if scenario == "restart-resume":
+                    assert result.session_id == original_session_id
+                record: dict[str, object] = {
+                    "scenario": scenario,
+                    "outcome": "passed",
+                    "accounting": accounting,
+                    "charged_cost_usd": scenario_charge,
+                    "result": _normalized(result),
+                }
+                if observed_cost is not None:
+                    record["known_cost_usd"] = observed_cost
+                records.append(record)
+            except Exception as exc:
+                if scenario_charge is None and runner.scenario_started:
+                    vendor_cap = _vendor_cap_charge(vendor, scenario_budget)
+                    scenario_charge = sum(
+                        value if value is not None else (vendor_cap or 0.0)
+                        for value in invocation_costs
+                    )
+                    if all(value is not None for value in invocation_costs):
+                        accounting = "known"
+                    elif vendor_cap is not None:
+                        accounting = "conservative-vendor-cap"
+                    else:
+                        accounting = "harness-only-unpriced"
+                    charged_cost += scenario_charge
+                failures.append(f"{scenario}: {type(exc).__name__}")
+                records.append({
+                    "scenario": scenario,
+                    "outcome": "failed",
+                    "failure_class": type(exc).__name__,
+                    "accounting": accounting,
+                    "charged_cost_usd": scenario_charge,
+                })
+
+    _write_results(vendor, reported_version, records, charged_cost)
     assert not failures, "; ".join(failures)
-    assert known_cost <= ceiling
+    assert charged_cost <= ceiling

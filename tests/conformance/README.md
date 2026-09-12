@@ -16,6 +16,8 @@ comma-separated `LOOPZERO_LIVE_RUNTIMES=claude,codex,cursor`, provide the
 explicit pinned executable and broker-readable credential path, then name the
 file on the pytest command line.  The GitHub workflow is the reference launch:
 it supplies the required nested bubblewrap wrapper, an external private state
-root, hard scenario timeouts, normalized JSON output, and aggregate spend
-control.  Do not replace that wrapper with the process layer's unsandboxed test
+root and suite-scoped resume home, hard scenario timeouts, normalized JSON
+output, and conservative aggregate spend control. Killed Claude/Codex runs
+without usage are charged their vendor cap; Cursor records its explicit
+timeout-and-scenario-count-only bound. Do not replace that wrapper with the process layer's unsandboxed test
 exception for a live run.
