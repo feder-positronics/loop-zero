@@ -109,6 +109,14 @@ and paths to the bridge and is consumed before the SDK runs. Codex refresh uses
 this same bridge with `--codex-refresh`; `codex_refresh()` imports openai_codex
 only when invoked. The private SDK shims remain intact.
 
+Codex SDK turns require a brokered credential descriptor and fail closed when
+one is absent. Each brokered turn pins both `CODEX_HOME` and `HOME` to its
+private credential home, which contains no operator project trust table, while
+the session override layer pins the governed runtime settings. Together these
+neutralize project-level `.codex/config.toml` configuration. Candidate
+`AGENTS.md` instruction injection from the governed working directory remains
+enabled by design; it is candidate input, not a Codex configuration layer.
+
 Run the suite with `uv sync --group dev` followed by
 `.venv/bin/python -m pytest -q`. The dev group pins `claude-agent-sdk==0.2.152`,
 `openai-codex==0.154.0`, and `openai-codex-cli-bin==0.154.0`, so SDK and Codex

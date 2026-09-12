@@ -638,6 +638,25 @@ def _codex_subscription_environment() -> Iterator[tuple[dict[str, str], Path | N
             directory.cleanup()
 
 
+def _codex_sdk_environment(
+    auth_environment: Mapping[str, str], auth_path: Path | None
+) -> dict[str, str]:
+    """Build an SDK child environment rooted only in the brokered home."""
+    if auth_path is None:
+        raise RuntimeError("startup")
+    private_home = str(auth_path.parent)
+    environment = _filtered_environment()
+    environment.pop("CODEX_HOME", None)
+    environment.pop("HOME", None)
+    environment.update(auth_environment)
+    # Pin both lookup roots even if a malformed test seam supplied conflicting
+    # values. Codex uses CODEX_HOME directly and other child tooling may use
+    # HOME to derive configuration paths.
+    environment["CODEX_HOME"] = private_home
+    environment["HOME"] = private_home
+    return environment
+
+
 def _bounded_string_list(
     value: object,
     name: str,
@@ -1775,10 +1794,9 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
 
         _strip_raw_api_from_process_env()
         with _codex_subscription_environment() as (auth_environment, auth_path):
-            if auth_path is None:
-                raise RuntimeError("startup")
-            codex_environment = _filtered_environment()
-            codex_environment.update(auth_environment)
+            codex_environment = _codex_sdk_environment(
+                auth_environment, auth_path
+            )
             config = CodexConfig(
                 **_codex_bin_kwargs(),
                 # Codex 0.154 initializes directly from the highest-precedence
@@ -1867,8 +1885,10 @@ def _run_codex(
     )
 
     with _codex_subscription_environment() as (auth_environment, auth_path):
-        codex_environment = _filtered_environment()
-        codex_environment.update(auth_environment)
+        # A turn is never allowed to fall back to the operator's Codex login or
+        # configuration. Login-status probing remains available without a
+        # descriptor, but the SDK turn itself requires brokered credentials.
+        codex_environment = _codex_sdk_environment(auth_environment, auth_path)
         config = CodexConfig(
             **_codex_bin_kwargs(),
             # Codex 0.154 removed the 0.147 debug.config_lockfile export, so
