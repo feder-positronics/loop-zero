@@ -388,6 +388,57 @@ def test_unbound_job_strips_parent_worktree_lease_before_guard_commit(
     assert "commit blocked" in result.stdout
 
 
+def test_unbound_job_keeps_credentials_but_strips_the_lease_family(
+    tmp_path: Path,
+) -> None:
+    from loopzero.kernel.sandbox import strip_worktree_lease_environment
+
+    assert strip_worktree_lease_environment(
+        {
+            "INTELFLO_WORKTREE_LEASE_FD": "7",
+            "INTELFLO_WORKTREE_LEASE_BOUNDARY": "b",
+            "INTELFLO_WORKTREE_LEASE_OWNER_PID": "1",
+            "INTELFLO_WORKTREE_LEASE_NONCE": "n",
+            "GITHUB_TOKEN": "placeholder",
+            "SSH_AUTH_SOCK": "/run/agent.sock",
+            "PATH": "/usr/bin:/bin",
+        }
+    ) == {
+        "GITHUB_TOKEN": "placeholder",
+        "SSH_AUTH_SOCK": "/run/agent.sock",
+        "PATH": "/usr/bin:/bin",
+    }
+
+    command = (
+        'test "$GITHUB_TOKEN" = placeholder && '
+        'test "$SSH_AUTH_SOCK" = /run/agent.sock && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_NONCE:-}" && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_OWNER_PID:-}" && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_BOUNDARY:-}" && '
+        'test -z "${INTELFLO_WORKTREE_LEASE_FD:-}"'
+    )
+    result = _job(
+        tmp_path,
+        "run",
+        "unbound-credentials",
+        "--timeout",
+        "30",
+        "--",
+        "sh",
+        "-c",
+        command,
+        env_overrides={
+            "GITHUB_TOKEN": "placeholder",
+            "SSH_AUTH_SOCK": "/run/agent.sock",
+            "INTELFLO_WORKTREE_LEASE_NONCE": "stale-nonce",
+            "INTELFLO_WORKTREE_LEASE_OWNER_PID": "1",
+            "INTELFLO_WORKTREE_LEASE_BOUNDARY": "stale-boundary",
+        },
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_run_preserves_wrapped_python_script_directory_imports(tmp_path: Path) -> None:
     sibling = tmp_path / "sibling.py"
     sibling.write_text("VALUE = 42\n")

@@ -185,6 +185,24 @@ def strip_authority_environment(source: Mapping[str, str]) -> dict[str, str]:
     }
 
 
+_WORKTREE_LEASE_ENV_MARKER = "WORKTREE_LEASE"
+
+
+def strip_worktree_lease_environment(source: Mapping[str, str]) -> dict[str, str]:
+    """Remove only the worktree-lease family (descriptor, boundary, owner pid, nonce).
+
+    Unbound detached jobs must not inherit the launcher's lease and re-enter
+    its boundary, but they keep credentials such as ``GITHUB_TOKEN`` and
+    ``SSH_AUTH_SOCK`` so agents can still run ``gh`` and ``git push`` through
+    them. Every namespaced lease variable contains ``WORKTREE_LEASE``.
+    """
+    return {
+        key: value
+        for key, value in source.items()
+        if _WORKTREE_LEASE_ENV_MARKER not in key.upper()
+    }
+
+
 def _parents(path: Path) -> list[Path]:
     current = path.parent
     parents: list[Path] = []

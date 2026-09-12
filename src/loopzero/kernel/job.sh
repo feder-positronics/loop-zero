@@ -527,7 +527,10 @@ import time
 from pathlib import Path
 
 from loopzero.kernel import jobs as job_store
-from loopzero.kernel.sandbox import strip_authority_environment
+from loopzero.kernel.sandbox import (
+    strip_authority_environment,
+    strip_worktree_lease_environment,
+)
 from loopzero.kernel.settings import settings
 from loopzero.kernel.trusted_exec import TrustedExecutableError, system_executable
 
@@ -1013,8 +1016,15 @@ try:
     # The supervisor's trusted Python helpers need safe-path mode, but a
     # wrapped Python script must retain its own directory as an import root.
     child_env.pop("PYTHONSAFEPATH", None)
-    if not trusted_dispatcher and not trusted_continuation:
+    if requires_bound_sandbox:
+        # Bound ordinary jobs are sealed away from ~/.ssh and the coordinator
+        # authority; environment-carried credentials go with them.
         child_env = strip_authority_environment(child_env)
+    elif not trusted_dispatcher and not trusted_continuation:
+        # Unbound jobs are detached command-runner children for the agent. They
+        # must not inherit the launcher's worktree lease (re-entrancy), but
+        # they keep credentials so `gh` and `git push` still work through them.
+        child_env = strip_worktree_lease_environment(child_env)
     child_env[settings.env("JOB_NAME")] = job_name
     child_env[settings.env("JOB_EXECUTOR_PID")] = str(os.getpid())
     if trusted_continuation:
