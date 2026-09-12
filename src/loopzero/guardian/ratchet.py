@@ -21,6 +21,41 @@ class ClaimChecker(Protocol):
 
 STATUSES = ("VERIFIED", "KNOWN-GAP", "VIOLATED", "FIXED?!", "UNSUPPORTED")
 
+# IntelFlo ``guardian_tick.MANIFEST_SENTINEL_POLICY``: every manifest-level
+# failure, including a claim that is not a mapping, is reported as this one
+# synthetic claim so downstream consumers see a complete record.
+MANIFEST_SENTINEL_POLICY: dict[str, Any] = {
+    "id": "GUARDIAN-MANIFEST",
+    "claim": "Guardian quality manifest is readable and structurally valid",
+    "type": "metric_max",
+    "command": "guardian-manifest-validation",
+    "threshold": None,
+    "headroom": None,
+    "repair_scope": [],
+    "acceptance_command": None,
+    "candidate_command": None,
+}
+
+# The evaluated record is built from this fixed field set (plus the two
+# digests) exactly as IntelFlo does; manifest keys such as ``type``,
+# ``expected`` or ``tracked`` never leak into the output contract.
+RECORD_FIELDS = (
+    "id",
+    "claim",
+    "detail",
+    "command",
+    "threshold",
+    "headroom",
+    "policy_headroom",
+    "repair_scope",
+    "acceptance_command",
+    "candidate_command",
+    "value",
+    "priority",
+    "command_digest",
+    "policy_digest",
+)
+
 
 @dataclass(frozen=True)
 class RatchetComposition:
@@ -81,6 +116,32 @@ def _policy_error(claim: Mapping[str, Any]) -> str | None:
         if type(value) not in (int, float) or not math.isfinite(float(value)):
             return f"quality claim requires finite {field}"
     return None
+
+
+def _manifest_failure(
+    grouped: dict[str, list[dict[str, Any]]], detail: str
+) -> None:
+    """Append the full GUARDIAN-MANIFEST sentinel record (IntelFlo contract)."""
+    grouped["UNSUPPORTED"].append(
+        {
+            "id": MANIFEST_SENTINEL_POLICY["id"],
+            "claim": MANIFEST_SENTINEL_POLICY["claim"],
+            "detail": detail,
+            "command": MANIFEST_SENTINEL_POLICY["command"],
+            "threshold": None,
+            "headroom": None,
+            "policy_headroom": None,
+            "repair_scope": [],
+            "acceptance_command": None,
+            "candidate_command": None,
+            "value": None,
+            "command_digest": state.command_digest(
+                MANIFEST_SENTINEL_POLICY["command"]
+            ),
+            "policy_digest": state.policy_digest(MANIFEST_SENTINEL_POLICY),
+            "priority": 0,
+        }
+    )
 
 
 def _metric_status(
@@ -148,14 +209,14 @@ def evaluate_claims(
         if len(ids) != len(set(ids)) or any(not isinstance(value, str) for value in ids):
             raise ValueError("claim ids must be unique strings")
     except (OSError, ValueError, yaml.YAMLError) as exc:
-        grouped["UNSUPPORTED"].append(
-            {"id": "GUARDIAN-MANIFEST", "detail": str(exc), "priority": 0}
-        )
+        _manifest_failure(grouped, str(exc))
         return grouped
 
     for priority, claim in enumerate(claims):
         if not isinstance(claim, dict):
-            grouped["UNSUPPORTED"].append({"id": "?", "detail": "claim must be a mapping", "priority": priority})
+            _manifest_failure(
+                grouped, f"{claim_group} claim {priority} must be a mapping"
+            )
             continue
         problem = _policy_error(claim)
         if problem:
@@ -170,16 +231,25 @@ def evaluate_claims(
             measured_headroom = float(threshold) - value if value is not None else None
         except (TypeError, ValueError):
             measured_headroom = None
-        entry = dict(claim)
-        entry.update(
-            priority=priority,
-            detail=detail,
-            value=value,
-            headroom=measured_headroom,
-            policy_headroom=claim.get("headroom"),
-            command_digest=state.command_digest(str(claim["command"])),
-            policy_digest=state.policy_digest(claim),
-        )
+        entry: dict[str, Any] = {
+            "id": str(claim.get("id", "?")),
+            "claim": str(claim.get("claim", "")),
+            "detail": detail,
+            "command": str(claim.get("command", "")),
+            "threshold": threshold,
+            "headroom": measured_headroom,
+            "policy_headroom": claim.get("headroom"),
+            "repair_scope": claim.get("repair_scope", []),
+            "acceptance_command": claim.get("acceptance_command"),
+            "candidate_command": claim.get("candidate_command"),
+            "value": value,
+            "priority": priority,
+        }
+        if entry["command"].strip():
+            entry["command_digest"] = state.command_digest(entry["command"])
+        else:
+            entry["command_digest"] = None
+        entry["policy_digest"] = state.policy_digest(claim)
         grouped[status].append(entry)
     return grouped
 
@@ -205,6 +275,8 @@ def select_ticket(grouped: Mapping[str, list[dict[str, Any]]]) -> dict[str, Any]
 
 __all__ = [
     "ClaimChecker",
+    "MANIFEST_SENTINEL_POLICY",
+    "RECORD_FIELDS",
     "RatchetComposition",
     "STATUSES",
     "configure",
