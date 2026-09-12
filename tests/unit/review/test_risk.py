@@ -296,28 +296,67 @@ def test_missing_historical_commit_fails_in_full_clone(
         require_historical_commits(tmp_path, ["b" * 40])
 
 
-def test_historical_changed_path_replay_corpus_has_no_t2_escape() -> None:
+def test_historical_changed_path_replay_corpus_has_no_t2_escape(
+    tmp_path: Path,
+) -> None:
     corpus_path = Path(__file__).parent / "fixtures" / "delivery_review_risk_replay_v1.json"
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
 
-    security_patterns = tuple(
-        path
-        for case in corpus["cases"]
-        for path in case["security_trigger_paths"]
+    repo = tmp_path / "historical-replay"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "risk-replay@example.test"],
+        cwd=repo,
+        check=True,
     )
-    for case in corpus["cases"]:
-        classified_security = sorted(
-            path for path in case["changed_paths"] if module._matches(path, security_patterns)
+    subprocess.run(
+        ["git", "config", "user.name", "Risk Replay"], cwd=repo, check=True
+    )
+    (repo / "README.md").write_text("historical replay\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "replay root"], cwd=repo, check=True)
+
+    for index, case in enumerate(corpus["cases"]):
+        for relative in case["changed_paths"]:
+            path = repo / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"# preserved historical baseline {index}\n",
+                encoding="utf-8",
+            )
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", f"{case['name']} base"], cwd=repo, check=True
         )
-        if classified_security:
-            tier = "T2"
-        elif all(path.startswith("docs/") and path.endswith((".md", ".mdx", ".html")) for path in case["changed_paths"]):
-            tier = "T0"
-        else:
-            tier = "T1"
-        assert tier == case["expected_tier"], case["name"]
-        assert classified_security == case["security_trigger_paths"]
-        assert not (case["expected_tier"] == "T2" and tier == "T0")
+        base_sha = git(repo, "rev-parse", "HEAD")
+
+        for relative in case["changed_paths"]:
+            path = repo / relative
+            historical_change = (
+                "def verify_authority():\n    raise RuntimeError('provider timeout')\n"
+                if relative
+                in {
+                    "scripts/util/dispatch_authority.py",
+                    "scripts/util/dispatch_authority_projection.py",
+                }
+                else f"# preserved historical change {index}\n"
+            )
+            path.write_text(historical_change, encoding="utf-8")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", f"{case['name']} head"], cwd=repo, check=True
+        )
+        head_sha = git(repo, "rev-parse", "HEAD")
+
+        envelope = module.compute_review_risk(repo, base_sha, head_sha)
+        artifact = module.parse_review_risk(envelope["review_risk_json"])
+        assert artifact["changed_paths"] == sorted(case["changed_paths"]), case["name"]
+        assert artifact["tier"] == case["expected_tier"], case["name"]
+        assert artifact["security_trigger_paths"] == case["security_trigger_paths"]
+        assert not (
+            case["expected_tier"] == "T2" and artifact["tier"] == "T0"
+        )
 
 
 def test_strictest_tier_is_monotonic() -> None:
