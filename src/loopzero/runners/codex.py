@@ -1288,6 +1288,22 @@ class CodexAdapter:
             if sdk_readiness.ready:
                 request = replace(request, transport=CODEX_SDK_TRANSPORT)
             else:
+                if os.environ.get(
+                    get_settings().env_name("CODEX_AUTH_FD")
+                ) is not None:
+                    # A protected snapshot is deliberately unusable by the CLI.
+                    # Preserve the app-server diagnosis and do not probe or
+                    # record a fallback that policy can never launch.
+                    sdk_request = replace(request, transport=CODEX_SDK_TRANSPORT)
+                    unavailable = self._unavailable(sdk_request, sdk_readiness)
+                    return replace(
+                        unavailable,
+                        transport_attempts=(
+                            self._readiness_attempt(
+                                sdk_request, sdk_readiness, selected_next=False
+                            ),
+                        ),
+                    )
                 fallback_request = replace(
                     request,
                     transport=CODEX_CLI_TRANSPORT,
@@ -1661,6 +1677,35 @@ class CodexAdapter:
             request,
             transport=CODEX_CLI_TRANSPORT,
         )
+        if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
+            preferred = RuntimeTransportAttempt(
+                transport=request.transport,
+                requested_model=request.requested_model,
+                phase="run",
+                status=RuntimeStatus.FAILED.value,
+                terminal_reason=reason.value,
+                failure_class=(
+                    "startup"
+                    if reason is TerminalReason.STARTUP_FAILURE
+                    else "protocol"
+                ),
+                duration_s=duration_s,
+                semantic=False,
+                selected_next=False,
+            )
+            original = self._failure(
+                request,
+                status=RuntimeStatus.FAILED,
+                reason=reason,
+                diagnostics=("Codex SDK transport failed",),
+            )
+            return retain_progress_diagnostic(
+                replace(
+                    original,
+                    duration_s=duration_s,
+                    transport_attempts=(preferred,),
+                )
+            )
         readiness = self._cli_launch_readiness(fallback_request)
         preferred = RuntimeTransportAttempt(
             transport=request.transport,
@@ -1677,23 +1722,6 @@ class CodexAdapter:
         )
         if not readiness.ready:
             unavailable = self._unavailable(fallback_request, readiness)
-            if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
-                original = self._failure(
-                    request,
-                    status=RuntimeStatus.FAILED,
-                    reason=reason,
-                    diagnostics=("Codex SDK transport failed",),
-                )
-                return retain_progress_diagnostic(
-                    replace(
-                        original,
-                        duration_s=duration_s,
-                        transport_attempts=(
-                            preferred,
-                            *unavailable.transport_attempts,
-                        ),
-                    )
-                )
             return retain_progress_diagnostic(
                 replace(
                     unavailable,

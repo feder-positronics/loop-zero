@@ -2287,6 +2287,7 @@ def _read_host_token_file(path: Path) -> bytes:
         raise UnsafeClaudeCredential("Claude token file path is invalid")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     directory = os.open("/", flags)
+    current_directory = Path("/")
     try:
         for component in (*path.parts[1:-1], None):
             try:
@@ -2294,11 +2295,18 @@ def _read_host_token_file(path: Path) -> bytes:
             except FileNotFoundError:
                 pass
             else:
-                raise UnsafeClaudeCredential("Claude token file must be outside repositories")
+                # Name only the directory whose repository marker caused the
+                # rejection.  The credential filename and contents remain
+                # absent from diagnostics.
+                raise UnsafeClaudeCredential(
+                    "Claude token file must be outside repositories; "
+                    f"offending directory: {current_directory}"
+                )
             if component is not None:
                 child = os.open(component, flags, dir_fd=directory)
                 os.close(directory)
                 directory = child
+                current_directory /= component
         return _read_private_payload(
             Path(path.name), directory_fd=directory, single_link=True
         )

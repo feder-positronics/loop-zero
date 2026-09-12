@@ -41,16 +41,21 @@ def _inside_repository(path: Path) -> bool:
     return False
 
 
-def _validate_paths(source: Path, output: Path) -> tuple[Path, Path]:
-    if not source.is_absolute() or not output.is_absolute() or source == output:
+def _validate_paths(source: Path | None, output: Path) -> tuple[Path | None, Path]:
+    if not output.is_absolute() or (source is not None and source == output):
         raise CredentialSealError("credential paths are invalid")
-    source_alias = source.is_symlink()
+    if source is not None and not source.is_absolute():
+        raise CredentialSealError("credential paths are invalid")
+    source_alias = source.is_symlink() if source is not None else False
     output_parent_alias = output.parent.is_symlink()
     try:
-        source = source.resolve(strict=True)
         output_parent = output.parent.resolve(strict=True)
-        source_metadata = source.stat(follow_symlinks=False)
         parent_metadata = output_parent.stat(follow_symlinks=False)
+        if source is not None:
+            source = source.resolve(strict=True)
+            source_metadata = source.stat(follow_symlinks=False)
+        else:
+            source_metadata = None
     except OSError as exc:
         raise CredentialSealError("credential path is unavailable") from exc
     output = output_parent / output.name
@@ -62,23 +67,28 @@ def _validate_paths(source: Path, output: Path) -> tuple[Path, Path]:
     )
     if (
         source_alias
-        or not stat.S_ISREG(source_metadata.st_mode)
-        or source_metadata.st_uid != os.getuid()
-        or source_metadata.st_nlink != 1
-        or stat.S_IMODE(source_metadata.st_mode) != 0o600
-        or source_metadata.st_size <= 2
-        or source_metadata.st_size > MAX_SNAPSHOT_BYTES
+        or (
+            source_metadata is not None
+            and (
+                not stat.S_ISREG(source_metadata.st_mode)
+                or source_metadata.st_uid != os.getuid()
+                or source_metadata.st_nlink != 1
+                or stat.S_IMODE(source_metadata.st_mode) != 0o600
+                or source_metadata.st_size <= 2
+                or source_metadata.st_size > MAX_SNAPSHOT_BYTES
+            )
+        )
         or output.exists()
         or output_parent_alias
         or not stat.S_ISDIR(parent_metadata.st_mode)
         or parent_metadata.st_uid != os.getuid()
         or stat.S_IMODE(parent_metadata.st_mode) != 0o700
-        or _inside_repository(source)
+        or (source is not None and _inside_repository(source))
         or _inside_repository(output)
         or (
             workspace is not None
             and (
-                source.is_relative_to(workspace)
+                (source is not None and source.is_relative_to(workspace))
                 or output.is_relative_to(workspace)
             )
         )
@@ -183,6 +193,15 @@ def _validate_access_only(vendor: str, payload: bytes) -> None:
             and type(oauth.get("expiresAt")) is int
             and oauth.get("refreshTokenExpiresAt") == oauth.get("expiresAt")
         )
+        if not valid:
+            token = decoded.get("claudeCodeOauthToken")
+            valid = (
+                set(decoded) == {"claudeCodeOauthToken", "source"}
+                and isinstance(token, str)
+                and claude.TOKEN_PATTERN.fullmatch(token) is not None
+                and decoded.get("source")
+                in {"token-env", "token-file", "token-file(default)"}
+            )
     elif vendor == "codex" and isinstance(decoded, dict):
         tokens = decoded.get("tokens")
         valid = (
@@ -244,7 +263,7 @@ def _broker_for(vendor: str) -> Callable[..., ContextManager[int]]:
 def seal_credential(
     vendor: str,
     *,
-    source: Path,
+    source: Path | None = None,
     output: Path,
     broker: Callable[..., ContextManager[int]] | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
@@ -258,24 +277,32 @@ def seal_credential(
     runtime_value = os.environ.get("LOOPZERO_LIVE_CLI_PATH")
     runtime = Path(runtime_value).resolve(strict=True) if runtime_value else None
     state_root = output.parent / ".loopzero-credential-broker-state"
+    discovery_state_root = os.environ.get("LOOPZERO_LIVE_STATE_ROOT")
     settings = RuntimeSettings(
         tooling_root=Path(sys.prefix).resolve(),
         toolchain_interpreter=Path(sys.executable).resolve(),
         bridge_path=Path(codex.__file__).resolve().with_name("bridge.py"),
-        state_root=str(state_root),
+        # Preserve the live host's configured (or standard) account-state token
+        # discovery path when no explicit credential file was supplied. The
+        # private output-adjacent state remains appropriate for CI's source.
+        state_root=(
+            discovery_state_root if source is None else str(state_root)
+        ),
         claude_cli_path=runtime if vendor == "claude" else None,
         codex_cli_path=runtime if vendor == "codex" else None,
         cursor_cli_path=runtime if vendor == "cursor" else None,
     )
-    kwargs: dict[str, object] = {
-        "requested_runtime_s": SEALED_RUNTIME_S,
-        "credential_path": source,
-    }
+    kwargs: dict[str, object] = {"requested_runtime_s": SEALED_RUNTIME_S}
+    if source is not None:
+        kwargs["credential_path"] = source
     if vendor == "claude":
         kwargs.update(
             claude_binary=runtime,
             sandbox_wrapper=wrapper,
-            allow_token_fallback=False,
+            # Normal host discovery may deliberately use the independently
+            # validated long-lived token source. Explicit CI credential files
+            # remain OAuth-only and fail closed.
+            allow_token_fallback=source is None,
         )
     elif vendor == "codex":
         kwargs["sandbox_wrapper"] = wrapper
@@ -291,7 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Create an access-only native-runtime credential snapshot.",
     )
     parser.add_argument("vendor", choices=VENDORS)
-    parser.add_argument("--source", type=Path, required=True)
+    parser.add_argument(
+        "--source",
+        type=Path,
+        help="explicit mode-0600 source; omit to use normal host discovery",
+    )
     parser.add_argument("--out", type=Path, required=True)
     return parser
 

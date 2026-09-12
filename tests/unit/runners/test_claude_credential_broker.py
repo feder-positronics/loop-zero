@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -910,6 +911,27 @@ def test_token_file_cannot_be_exposed_through_worktree_or_alias(
     monkeypatch.setenv("INTELFLO_CLAUDE_TOKEN_FILE", str(token_file))
     with pytest.raises(claude_credential.ClaudeCredentialError):
         token_broker.token_snapshot()
+
+
+def test_token_repository_error_names_offending_directory_not_token(
+    token_root, monkeypatch, token_broker
+):
+    offending = token_root / "unexpected-repository"
+    credential_directory = offending / "private" / "state"
+    credential_directory.mkdir(parents=True)
+    (offending / ".git").mkdir()
+    token_file = credential_directory / "never-name-this-token-file"
+    token_file.write_text("sk-ant-oat01-" + "x" * 80)
+    token_file.chmod(0o600)
+    monkeypatch.setenv("INTELFLO_CLAUDE_TOKEN_FILE", str(token_file))
+
+    with pytest.raises(
+        claude_credential.UnsafeClaudeCredential,
+        match=re.escape(f"offending directory: {offending}"),
+    ) as raised:
+        token_broker.token_snapshot()
+
+    assert token_file.name not in str(raised.value)
 
 
 @pytest.mark.parametrize("source", ["token-env", "token-file"])

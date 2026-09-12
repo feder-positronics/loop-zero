@@ -11,6 +11,7 @@ import stat
 import pytest
 
 from loopzero import credential_seal
+from loopzero.runners.settings import get_settings
 
 
 def _payload(vendor: str, secret: str) -> dict[str, object]:
@@ -81,6 +82,43 @@ def test_entry_point_writes_only_access_only_mode_0600_snapshot(
     assert json.loads(output.read_bytes()) == _payload(vendor, access_secret)
     assert b"refresh-capability" not in output.read_bytes()
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
+
+
+def test_entry_point_can_seal_from_normal_host_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tmp_path.chmod(0o700)
+    output = tmp_path / "snapshot.json"
+    token = "sk-ant-oat01-" + "x" * 80
+    discovered = {
+        "claudeCodeOauthToken": token,
+        "source": "token-file(default)",
+    }
+    snapshot = json.dumps(discovered).encode()
+    discovery_root = tmp_path / "host-state"
+    monkeypatch.setenv("LOOPZERO_LIVE_STATE_ROOT", str(discovery_root))
+
+    @contextmanager
+    def broker(**kwargs):
+        assert "credential_path" not in kwargs
+        assert kwargs["allow_token_fallback"] is True
+        assert get_settings().state_root == str(discovery_root)
+        broker_snapshot = tmp_path / "broker-snapshot.json"
+        broker_snapshot.write_bytes(snapshot)
+        descriptor = os.open(broker_snapshot, os.O_RDONLY)
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+    monkeypatch.setattr(credential_seal, "_broker_for", lambda _vendor: broker)
+    monkeypatch.setattr(
+        credential_seal, "_host_refresh_wrapper", lambda: (lambda spec: spec.argv)
+    )
+
+    assert credential_seal.main(["claude", "--out", str(output)]) == 0
+    assert json.loads(output.read_bytes()) == discovered
 
 
 def test_entry_point_rejects_unsafe_input_and_never_prints_credential(

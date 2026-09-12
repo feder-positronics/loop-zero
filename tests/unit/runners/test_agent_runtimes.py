@@ -4308,6 +4308,34 @@ def test_codex_protected_credential_keeps_sdk_failure_when_cli_is_forbidden(
     assert readiness.repair == "restore the repository openai-codex tooling dependency"
 
 
+def test_codex_protected_prelaunch_failure_stops_before_cli_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    credential = tmp_path / "auth.json"
+    credential.write_text(json.dumps(_protected_codex_auth()))
+    descriptor = os.open(credential, os.O_RDONLY)
+    monkeypatch.setenv(codex.CODEX_AUTH_FD_ENV, str(descriptor))
+    cli_readiness = MagicMock(side_effect=AssertionError("CLI fallback was consulted"))
+    adapter = codex.CodexAdapter(sdk_available=lambda *_args: False)
+    monkeypatch.setattr(adapter, "_cli_launch_readiness", cli_readiness)
+    try:
+        result = adapter.run(codex_request(tmp_path))
+    finally:
+        os.close(descriptor)
+
+    cli_readiness.assert_not_called()
+    assert result.transport == codex.CODEX_SDK_TRANSPORT
+    assert result.status is contracts.RuntimeStatus.SUBSCRIPTION_UNAVAILABLE
+    assert result.diagnostics == (
+        "restore the repository openai-codex tooling dependency",
+    )
+    assert [attempt.transport for attempt in result.transport_attempts] == [
+        codex.CODEX_SDK_TRANSPORT
+    ]
+    assert result.transport_attempts[0].failure_class == "sdk-unavailable"
+    assert result.transport_attempts[0].selected_next is False
+
+
 def test_codex_protected_credential_never_falls_back_to_cli(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4349,9 +4377,8 @@ def test_codex_protected_credential_never_falls_back_to_cli(
     assert result.terminal_reason is contracts.TerminalReason.STARTUP_FAILURE
     assert [attempt.transport for attempt in result.transport_attempts] == [
         codex.CODEX_SDK_TRANSPORT,
-        codex.CODEX_CLI_TRANSPORT,
     ]
-    assert result.transport_attempts[1].failure_class == "eligibility"
+    assert result.transport_attempts[0].selected_next is False
     assert len(launches) == 1
     assert launches[0][0].endswith("/bin/python")
     assert all("exec" not in command for command in launches)
