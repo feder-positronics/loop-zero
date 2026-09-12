@@ -380,6 +380,29 @@ def _tool_path_components(path: Path) -> tuple[Path, set[Path]]:
     return current, components
 
 
+def _interpreter_symlink_chain(interpreter: Path) -> tuple[tuple[Path, str], ...]:
+    """Return every lexical symlink traversed while resolving an interpreter."""
+    remaining = deque(Path(os.path.abspath(interpreter)).parts[1:])
+    current = Path("/")
+    links: list[tuple[Path, str]] = []
+    while remaining:
+        part = remaining.popleft()
+        current = current.parent if part == ".." else current / part
+        if not current.is_symlink():
+            continue
+        if len(links) >= 40:
+            raise SandboxError("sandbox interpreter has too many symlink hops")
+        target = os.readlink(current)
+        links.append((current, target))
+        target_path = Path(target)
+        current = Path("/") if target_path.is_absolute() else current.parent
+        parts = (
+            target_path.parts[1:] if target_path.is_absolute() else target_path.parts
+        )
+        remaining.extendleft(reversed(parts))
+    return tuple(links)
+
+
 def _protected_tool_path(path: Path, *, forbidden_roots: Sequence[Path]) -> Path:
     """Protect provider credentials and acceptance execution from PATH redirection."""
     lexical = path.absolute()
@@ -661,6 +684,27 @@ def command(
         emitted_mounts.append(mount)
         mounts.append(mount)
 
+    def add_symlink(target: str, destination: Path) -> None:
+        validated_parent = _validated_destination(
+            destination.parent,
+            label="sandbox interpreter symlink destination",
+            emitted_mounts=emitted_mounts,
+            builder_emitted=True,
+        )
+        validated_destination = validated_parent / destination.name
+        _reject_kernel_filesystem_path(
+            validated_destination,
+            label="sandbox interpreter symlink destination",
+        )
+        link = _EmittedMount(
+            "--symlink",
+            None,
+            validated_destination,
+            symlink_target=target,
+        )
+        emitted_mounts.append(link)
+        mounts.append(link)
+
     if audit_source is not None:
         if audit_destination is None or not audit_destination.is_absolute():
             raise SandboxError("sandbox audit destination is invalid")
@@ -729,11 +773,20 @@ def command(
             builder_emitted=True,
             kernel_owned_seal=True,
         )
-    runtime_roots: set[tuple[Path, Path]] = set()
-    for root in (
-        *(_validated(path, directory=True) for path in read_only_roots),
-        *(_validated(source, directory=True) for source, _ in read_only_mounts),
-    ):
+    trusted_roots = tuple(
+        dict.fromkeys(
+            (
+                *(_validated(path, directory=True) for path in read_only_roots),
+                *(
+                    _validated(source, directory=True)
+                    for source, _ in read_only_mounts
+                ),
+            )
+        )
+    )
+    runtime_roots: set[Path] = set()
+    runtime_links: dict[Path, str] = {}
+    for root in trusted_roots:
         configured_interpreter = settings.toolchain.get("interpreter")
         if configured_interpreter is None and settings.env_prefix == "INTELFLO":
             configured_interpreter = "fastapi_backend/.venv/bin/python"
@@ -744,27 +797,44 @@ def command(
             resolved_interpreter = interpreter.resolve()
             if not resolved_interpreter.is_relative_to(root):
                 resolved_runtime = resolved_interpreter.parent.parent
-                runtime_roots.add(
-                    (
-                        resolved_runtime,
-                        resolved_runtime,
+                runtime_roots.add(resolved_runtime)
+                allowed_roots = (*trusted_roots, resolved_runtime)
+                for link, target in _interpreter_symlink_chain(interpreter):
+                    if any(
+                        link == allowed or link.is_relative_to(allowed)
+                        for allowed in allowed_roots
+                    ):
+                        continue
+                    target_path = Path(target)
+                    lexical_target = (
+                        target_path
+                        if target_path.is_absolute()
+                        else link.parent / target_path
                     )
-                )
-                if interpreter.is_symlink():
-                    lexical = Path(os.readlink(interpreter))
-                    if lexical.is_absolute():
-                        destination = Path(os.path.realpath(lexical.parent.parent))
-                        runtime_roots.add(
-                            (
-                                resolved_runtime,
-                                destination,
-                            )
+                    try:
+                        resolved_target = lexical_target.resolve(strict=True)
+                    except (OSError, RuntimeError) as exc:
+                        raise SandboxError(
+                            "sandbox interpreter symlink target is unavailable"
+                        ) from exc
+                    if not any(
+                        resolved_target == allowed
+                        or resolved_target.is_relative_to(allowed)
+                        for allowed in allowed_roots
+                    ):
+                        raise SandboxError(
+                            "sandbox interpreter symlink escapes read-only roots"
                         )
-    for source, destination in sorted(runtime_roots):
+                    previous = runtime_links.setdefault(link, target)
+                    if previous != target:
+                        raise SandboxError("sandbox interpreter symlink changed")
+    for link, target in runtime_links.items():
+        add_symlink(target, link)
+    for runtime_root in sorted(runtime_roots):
         add_mount(
             "--ro-bind",
-            source,
-            destination,
+            runtime_root,
+            runtime_root,
             label="sandbox interpreter destination",
             builder_emitted=True,
             kernel_owned_seal=True,
@@ -884,7 +954,12 @@ def command(
             if parent not in created:
                 built.extend(["--dir", str(parent)])
                 created.add(parent)
-        built.extend([mount.mode, str(mount.source), str(mount.destination)])
+        if mount.mode == "--symlink":
+            assert mount.symlink_target is not None
+            built.extend([mount.mode, mount.symlink_target, str(mount.destination)])
+        else:
+            assert mount.source is not None
+            built.extend([mount.mode, str(mount.source), str(mount.destination)])
     env_bindings: list[str] = [
         "--chmod",
         "0555",

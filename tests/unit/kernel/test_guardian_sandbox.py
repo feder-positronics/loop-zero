@@ -829,7 +829,7 @@ def test_trusted_read_only_venv_can_mount_its_external_runtime(
     ]
 
 
-def test_trusted_uv_venv_mounts_the_versioned_runtime_behind_an_alias(
+def test_trusted_uv_venv_models_alias_before_mounting_versioned_runtime(
     monkeypatch, tmp_path: Path
 ) -> None:
     worktree = tmp_path / "worktree"
@@ -840,7 +840,7 @@ def test_trusted_uv_venv_mounts_the_versioned_runtime_behind_an_alias(
     runtime_python = versioned_runtime / "bin" / "python3.14"
     _write_executable(runtime_python)
     runtime_alias = uv_python_root / "cpython-3.14-linux-x86_64-gnu"
-    runtime_alias.symlink_to(versioned_runtime, target_is_directory=True)
+    runtime_alias.symlink_to(versioned_runtime.name, target_is_directory=True)
     primary_python = primary_venv / "bin" / "python"
     primary_python.parent.mkdir(parents=True)
     primary_python.symlink_to(runtime_alias / "bin" / "python3.14")
@@ -863,10 +863,143 @@ def test_trusted_uv_venv_mounts_the_versioned_runtime_behind_an_alias(
         include_model_runtime=False,
     )
 
+    alias_link = ["--symlink", versioned_runtime.name, str(runtime_alias)]
+    alias_index = argv.index(str(runtime_alias))
+    assert alias_link == argv[alias_index - 2 : alias_index + 1]
     runtime_mount = ["--ro-bind", str(versioned_runtime), str(versioned_runtime)]
-    runtime_index = argv.index(str(versioned_runtime))
-    assert runtime_mount == argv[runtime_index - 1 : runtime_index + 2]
-    assert str(runtime_alias) not in argv
+    runtime_index = next(
+        index
+        for index, value in enumerate(argv[:-2])
+        if value == "--ro-bind" and argv[index : index + 3] == runtime_mount
+    )
+    assert alias_index < runtime_index
+
+
+def test_trusted_uv_venv_rejects_an_interpreter_chain_escape(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    primary_venv = tmp_path / "trusted" / ".venv"
+    uv_python_root = tmp_path / "home" / ".local" / "share" / "uv" / "python"
+    versioned_runtime = uv_python_root / "cpython-3.14.2-linux-x86_64-gnu"
+    runtime_python = versioned_runtime / "bin" / "python3.14"
+    _write_executable(runtime_python)
+    runtime_alias = uv_python_root / "cpython-3.14-linux-x86_64-gnu"
+    runtime_alias.symlink_to(versioned_runtime.name, target_is_directory=True)
+    primary_python = primary_venv / "bin" / "python"
+    primary_python.parent.mkdir(parents=True)
+    primary_python.symlink_to(runtime_alias / "bin" / "python3.14")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    uv = tmp_path / "host-tools" / "uv"
+    _write_executable(uv)
+    monkeypatch.setenv("PATH", str(uv.parent))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+    real_readlink = module.os.readlink
+    alias_reads = 0
+
+    def retarget_alias_after_resolution(path: os.PathLike[str] | str) -> str:
+        nonlocal alias_reads
+        if Path(path) != runtime_alias:
+            return real_readlink(path)
+        alias_reads += 1
+        return real_readlink(path) if alias_reads == 1 else str(outside)
+
+    monkeypatch.setattr(module.os, "readlink", retarget_alias_after_resolution)
+
+    with pytest.raises(module.SandboxError, match="escapes read-only roots"):
+        module.command(
+            [str(worktree / "fastapi_backend" / ".venv" / "bin" / "python")],
+            worktree=worktree,
+            writable_worktree=True,
+            audit_source=None,
+            audit_destination=None,
+            git_source=None,
+            git_destination=None,
+            writable_git=False,
+            read_only_mounts=(
+                (primary_venv, worktree / "fastapi_backend" / ".venv"),
+            ),
+            deny_network=True,
+            include_model_runtime=False,
+        )
+
+
+def test_trusted_uv_venv_argv_tree_has_no_dangling_interpreter_symlink(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    primary_venv = tmp_path / "trusted" / ".venv"
+    uv_python_root = tmp_path / "home" / ".local" / "share" / "uv" / "python"
+    versioned_runtime = uv_python_root / "cpython-3.14.2-linux-x86_64-gnu"
+    resolved_python = versioned_runtime / "bin" / "python3.14"
+    _write_executable(resolved_python)
+    runtime_alias = uv_python_root / "cpython-3.14-linux-x86_64-gnu"
+    runtime_alias.symlink_to(versioned_runtime.name, target_is_directory=True)
+    primary_python = primary_venv / "bin" / "python"
+    primary_python.parent.mkdir(parents=True)
+    primary_python.symlink_to(runtime_alias / "bin" / "python3.14")
+    uv = tmp_path / "host-tools" / "uv"
+    _write_executable(uv)
+    monkeypatch.setenv("PATH", str(uv.parent))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    sandbox_python = worktree / "fastapi_backend" / ".venv" / "bin" / "python"
+    argv = module.command(
+        [str(sandbox_python)],
+        worktree=worktree,
+        writable_worktree=True,
+        audit_source=None,
+        audit_destination=None,
+        git_source=None,
+        git_destination=None,
+        writable_git=False,
+        read_only_mounts=((primary_venv, sandbox_python.parent.parent),),
+        deny_network=True,
+        include_model_runtime=False,
+    )
+    bound_roots = {
+        Path(argv[index + 2]): Path(argv[index + 1])
+        for index, value in enumerate(argv[:-2])
+        if value == "--ro-bind"
+    }
+    modeled_links = {
+        Path(argv[index + 2]): argv[index + 1]
+        for index, value in enumerate(argv[:-2])
+        if value == "--symlink"
+    }
+
+    remaining = list(sandbox_python.parts[1:])
+    current = Path("/")
+    while remaining:
+        current /= remaining.pop(0)
+        mounted = next(
+            (
+                (destination, source)
+                for destination, source in bound_roots.items()
+                if current == destination or current.is_relative_to(destination)
+            ),
+            None,
+        )
+        host_path = (
+            mounted[1] / current.relative_to(mounted[0]) if mounted else current
+        )
+        target = (
+            os.readlink(host_path)
+            if mounted is not None and host_path.is_symlink()
+            else modeled_links.get(current)
+        )
+        if target is None:
+            continue
+        target_path = Path(target)
+        current = Path("/") if target_path.is_absolute() else current.parent
+        target_parts = (
+            target_path.parts[1:] if target_path.is_absolute() else target_path.parts
+        )
+        remaining[0:0] = target_parts
+    assert current == resolved_python
 
 
 def test_interpreter_destination_with_a_symlinked_component_still_fails(
