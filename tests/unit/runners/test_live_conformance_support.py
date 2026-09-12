@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import sys
@@ -17,12 +18,26 @@ from loopzero.runners.contract import (
     RuntimeEvent,
     RuntimeResult,
     RuntimeStatus,
+    RuntimeTransportAttempt,
     SubscriptionEligibility,
     TerminalReason,
 )
 from loopzero.runners.fake import Scenario
 from loopzero.runners.registry import RUNTIME_REGISTRY
 from tests.conformance.live import live_conformance as live
+
+
+def _codex_access_only() -> bytes:
+    return json.dumps({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "access_token": "access-only",
+            "id_token": "identity",
+            "refresh_token": "access-only",
+            "account_id": "account",
+        },
+    }).encode()
 
 
 def test_live_workspace_is_writable_beside_a_read_only_checkout(
@@ -71,6 +86,34 @@ def test_live_sandbox_probe_reports_bubblewraps_last_error_line(
         match="bubblewrap user-namespace probe failed: actual namespace failure",
     ):
         live._sandbox_wrapper(settings)
+
+
+def test_live_wrapper_argv_for_scenarios_does_not_unshare_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = RuntimeSettings(
+        tooling_root=REPO,
+        state_root=str(tmp_path / "state"),
+    )
+    monkeypatch.setattr(live.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Probe", (), {"returncode": 0})(),
+    )
+    wrapper = live._sandbox_wrapper(settings)
+    private_tmpdir = tmp_path / "private-tmp"
+    private_tmpdir.mkdir()
+    argv = wrapper(live.LaunchSpec(
+        argv=("/usr/bin/true",),
+        cwd=tmp_path,
+        private_mounts=(),
+        private_tmpdir=private_tmpdir,
+    ))
+
+    assert "--unshare-net" not in argv
+    assert "--unshare-user" in argv
+    assert "--cap-drop" in argv
 
 
 @pytest.mark.parametrize(
@@ -166,11 +209,60 @@ def test_live_version_probe_uses_nested_wrapper(
     assert observed["command"] == [str(executable), "--version"]
 
 
+def test_live_process_lends_codex_credential_only_to_sdk_bridge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential = tmp_path / "credential.json"
+    credential.write_bytes(_codex_access_only())
+    credential.chmod(0o600)
+    descriptor = os.open(credential, os.O_RDONLY)
+    observed: list[tuple[list[str], tuple[int, ...]]] = []
+
+    def fake_run(command, **kwargs):
+        observed.append((list(command), kwargs["pass_fds"]))
+        return live.ProcessResult(
+            returncode=0,
+            stdout="",
+            stderr="",
+            duration_s=0.01,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(live, "run_cli", fake_run)
+    runner = live.RealProcess(lambda spec: spec.argv, "codex", "success")
+    environment = {"LOOPZERO_CODEX_AUTH_FD": str(descriptor)}
+    try:
+        runner(
+            ["/opt/runtime/codex", "--version"],
+            cwd=tmp_path,
+            input_text="",
+            timeout_s=1,
+            env=environment,
+        )
+        runner(
+            [sys.executable, "-I", str(RuntimeSettings().bridge_path)],
+            cwd=tmp_path,
+            input_text="",
+            timeout_s=1,
+            env=environment,
+        )
+    finally:
+        os.close(descriptor)
+
+    assert observed == [
+        (["/opt/runtime/codex", "--version"], ()),
+        (
+            [sys.executable, "-I", str(RuntimeSettings().bridge_path)],
+            (descriptor,),
+        ),
+    ]
+
+
 def test_live_access_only_source_is_reused_without_copy_or_modification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = tmp_path / "source.json"
-    original = b'{"tokens":{"access_token":"access","refresh_token":"access"}}'
+    original = _codex_access_only()
     source.write_bytes(original)
     source.chmod(0o400)
     state_root = tmp_path / "state"
@@ -197,19 +289,34 @@ def test_live_access_only_source_is_reused_without_copy_or_modification(
     assert observed["path"] == source
 
 
-def test_live_local_run_uses_normal_host_credential_discovery(
+def test_live_preflight_seals_once_and_scenarios_use_access_only_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    tmp_path.chmod(0o700)
     settings = RuntimeSettings(state_root=str(tmp_path / "state"))
     monkeypatch.delenv("LOOPZERO_LIVE_CREDENTIAL_PATH", raising=False)
-    observed: dict[str, object] = {}
+    seal_binary = tmp_path / "loopzero-credential-seal"
+    seal_binary.touch(mode=0o700)
+    monkeypatch.setattr(live, "_seal_command", lambda: seal_binary)
+    seal_calls: list[list[str]] = []
+    scenario_sources: list[Path] = []
+
+    def seal(command, **_kwargs):
+        seal_calls.append(command)
+        output = Path(command[command.index("--out") + 1])
+        output.write_bytes(_codex_access_only())
+        output.chmod(0o600)
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(live.subprocess, "run", seal)
 
     @contextmanager
     def broker(**kwargs):
-        observed.update(kwargs)
-        descriptor_path = tmp_path / "access-only.json"
-        descriptor_path.write_text("{}x", encoding="utf-8")
-        descriptor = os.open(descriptor_path, os.O_RDONLY)
+        assert "sandbox_wrapper" not in kwargs
+        credential_path = kwargs["credential_path"]
+        scenario_sources.append(credential_path)
+        assert credential_path.read_bytes() == _codex_access_only()
+        descriptor = os.open(credential_path, os.O_RDONLY)
         try:
             yield descriptor
         finally:
@@ -217,17 +324,25 @@ def test_live_local_run_uses_normal_host_credential_discovery(
 
     monkeypatch.setattr(live.codex, "codex_subscription_credential", broker)
 
-    with live._credential("codex", 5, settings, lambda spec: spec.argv):
-        pass
+    with live._suite_access_only_credential("codex", tmp_path) as sealed:
+        assert sealed.name == "access-only.json"
+        for _scenario in ("success", "disconnect"):
+            with live._credential("codex", 5, settings, lambda spec: spec.argv):
+                pass
 
-    assert "credential_path" not in observed
+    assert len(seal_calls) == 1
+    assert scenario_sources == [sealed, sealed]
+    assert not sealed.exists()
+    assert "LOOPZERO_LIVE_CREDENTIAL_PATH" not in os.environ
 
 
 def test_live_adapter_run_transfers_a_duplicate_not_the_broker_descriptor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     credential = tmp_path / "credential.json"
-    credential.write_text("{}x", encoding="utf-8")
+    credential.write_bytes(_codex_access_only())
+    credential.chmod(0o600)
+    monkeypatch.setenv("LOOPZERO_LIVE_CREDENTIAL_PATH", str(credential))
     settings = RuntimeSettings(state_root=str(tmp_path / "state"))
     broker_descriptor: int | None = None
 
@@ -316,7 +431,9 @@ def test_live_credential_launch_path_runs_all_registry_fake_scenarios(
     scenario: Scenario, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     credential = tmp_path / "credential.json"
-    credential.write_text("{}x", encoding="utf-8")
+    credential.write_bytes(_codex_access_only())
+    credential.chmod(0o600)
+    monkeypatch.setenv("LOOPZERO_LIVE_CREDENTIAL_PATH", str(credential))
     settings = RuntimeSettings(state_root=str(tmp_path / "state"))
 
     @contextmanager
@@ -370,6 +487,59 @@ def _permission_result(*, events=(), diagnostics=()) -> RuntimeResult:
         events=events,
         diagnostics=diagnostics,
     )
+
+
+def test_live_result_json_includes_sdk_fallback_readiness_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _permission_result(diagnostics=("safe CLI diagnostic",))
+    result = live.replace(
+        result,
+        transport="codex/cli",
+        transport_attempts=(
+            RuntimeTransportAttempt(
+                transport="codex/app-server",
+                requested_model="gpt-5.6-luna",
+                phase="readiness",
+                status="subscription-unavailable",
+                terminal_reason="subscription-unavailable",
+                failure_class="sdk-version-mismatch",
+                duration_s=None,
+                semantic=False,
+                selected_next=True,
+            ),
+        ),
+    )
+
+    normalized = live._normalized(result)
+    output = tmp_path / "result.json"
+    monkeypatch.setenv("LOOPZERO_LIVE_RESULTS", str(output))
+    live._write_results(
+        "codex",
+        "0.154.0",
+        [{"scenario": "success", "result": normalized}],
+        0.0,
+        killed_runs=0,
+        max_killed_runs=3,
+        unaccounted_runs=0,
+        max_unaccounted_runs=3,
+    )
+    serialized = json.loads(output.read_text())["scenarios"][0]["result"]
+
+    assert serialized["diagnostics"] == ["safe CLI diagnostic"]
+    assert serialized["transport_attempts"] == [
+        {
+            "transport": "codex/app-server",
+            "requested_model": "gpt-5.6-luna",
+            "phase": "readiness",
+            "status": "subscription-unavailable",
+            "terminal_reason": "subscription-unavailable",
+            "failure_class": "sdk-version-mismatch",
+            "duration_s": None,
+            "semantic": False,
+            "selected_next": True,
+        }
+    ]
 
 
 def test_permission_denial_requires_an_explicit_denial_signal() -> None:
@@ -427,6 +597,7 @@ def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> 
     source_delete = workflow.index('\n          rm -f -- "$SOURCE"\n', seal_step)
     bwrap = workflow.index("bwrap --unshare-user", validation_step)
     validation_body = workflow[validation_step:]
+    bwrap_command = workflow[bwrap:workflow.index("--chdir", bwrap)]
 
     assert "refs/remotes/origin/release/0.3" in workflow
     assert "$RUNNER_TEMP/loopzero-live/broker-venv" in workflow
@@ -434,3 +605,8 @@ def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> 
     assert '--ro-bind "$SNAPSHOT" /run/loopzero-credential.json' in validation_body
     assert '--ro-bind "$SOURCE"' not in validation_body
     assert "LIVE_CREDENTIAL:" not in validation_body
+    assert "--unshare-net" not in bwrap_command
+    assert "--diagnose" in validation_body
+    assert validation_body.index("--diagnose") < validation_body.index(
+        "--basetemp=/tmp/pytest tests/conformance/live/live_conformance.py"
+    )

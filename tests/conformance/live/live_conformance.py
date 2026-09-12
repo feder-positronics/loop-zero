@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import math
@@ -21,6 +22,7 @@ from typing import Iterator
 
 import pytest
 
+from loopzero import credential_seal
 from loopzero.runners import RuntimeBudget, RuntimeSettings
 from loopzero.runners import claude, codex, cursor
 from loopzero.runners.contract import (
@@ -36,6 +38,7 @@ from loopzero.runners.process import LaunchSpec, ProcessResult, run_cli
 from loopzero.runners.process import private_temporary_directory
 from loopzero.runners.pricing import MODEL_PRICES, estimated_cost_usd
 from loopzero.runners.registry import RUNTIME_REGISTRY
+from loopzero.runners.settings import get_settings
 
 
 PINS = {
@@ -71,6 +74,7 @@ DEFAULT_RUN_BUDGET_USD = 0.25
 DEFAULT_CURSOR_KILLED_CHARGE_USD = 0.10
 DEFAULT_MAX_KILLED_RUNS = 3
 DEFAULT_MAX_UNACCOUNTED_RUNS = 3
+HOST_SEAL_TIMEOUT_S = 60
 # Prompts are ASCII today, but one token per UTF-8 byte deliberately
 # overestimates the normal tokenizer ratio for killed Codex requests.
 CODEX_ESTIMATED_INPUT_TOKENS_PER_BYTE = 1.0
@@ -95,13 +99,13 @@ def _version(
 ) -> str:
     with settings.use():
         completed = run_cli(
-        [str(executable), "--version"],
-        cwd=Path.cwd(),
-        input_text="",
-        timeout_s=10,
-        env={"HOME": "/tmp", "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
-        sandbox_wrapper=wrapper,
-    )
+            [str(executable), "--version"],
+            cwd=Path.cwd(),
+            input_text="",
+            timeout_s=10,
+            env={"HOME": "/tmp", "PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            sandbox_wrapper=wrapper,
+        )
     if completed.returncode != 0 or completed.timed_out or completed.output_limited:
         raise AssertionError(f"{vendor} version probe failed")
     text = (completed.stdout or completed.stderr).strip()
@@ -117,7 +121,12 @@ def _version(
 
 
 def _sandbox_wrapper(settings: RuntimeSettings):
-    """Nest each adapter child in the checks.yml-style filesystem bubble."""
+    """Nest each adapter child in the live filesystem-only bubble.
+
+    Live provider calls require the host network.  This wrapper deliberately
+    omits ``--unshare-net`` while retaining the positive filesystem allowlist,
+    private process namespace, dropped capabilities, and mandatory wrapper.
+    """
     bwrap = shutil.which("bwrap")
     if bwrap is None:
         pytest.skip("live containment unavailable: bwrap is not installed")
@@ -241,11 +250,24 @@ class RealProcess:
             self._fault_timer = timer
 
         env = kwargs.get("env", {})
-        pass_fds = tuple(
-            int(value)
-            for name, value in env.items()
-            if name.endswith(("CLAUDE_AUTH_FD", "CODEX_AUTH_FD", "CURSOR_AUTH_FD"))
-            and value.isdecimal()
+        # Credential descriptors are single-use launch authority. Inherit one
+        # only into the SDK bridge that consumes it, never into version or
+        # bootstrap probes. In particular, run_cli closes an explicitly lent
+        # Codex descriptor after launch.
+        is_sdk_bridge = (
+            len(command) >= 3
+            and command[1] == "-I"
+            and Path(command[2]).name == get_settings().bridge_path.name
+        )
+        pass_fds = (
+            tuple(
+                int(value)
+                for name, value in env.items()
+                if name.endswith(("CLAUDE_AUTH_FD", "CODEX_AUTH_FD"))
+                and value.isdecimal()
+            )
+            if is_sdk_bridge
+            else ()
         )
         try:
             outcome = run_cli(
@@ -280,38 +302,104 @@ class RealProcess:
         return outcome
 
 
+def _validate_access_only_path(vendor: str, path: Path) -> Path:
+    """Validate the suite input before any readiness or scenario process."""
+
+    if not path.is_absolute() or path.is_symlink():
+        raise RuntimeError("live access-only credential path is unsafe")
+    try:
+        metadata = path.stat(follow_symlinks=False)
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError("live access-only credential path is unavailable") from exc
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or metadata.st_nlink != 1
+        or stat.S_IMODE(metadata.st_mode) not in {0o400, 0o600}
+        or metadata.st_size <= 2
+        or metadata.st_size > credential_seal.MAX_SNAPSHOT_BYTES
+        or len(payload) != metadata.st_size
+    ):
+        raise RuntimeError("live access-only credential path is unsafe")
+    credential_seal._validate_access_only(vendor, payload)
+    return path
+
+
+def _seal_command() -> Path:
+    configured = os.environ.get("LOOPZERO_LIVE_CREDENTIAL_SEAL")
+    if configured:
+        command = Path(configured)
+    else:
+        discovered = shutil.which("loopzero-credential-seal")
+        if discovered is None:
+            raise RuntimeError("live credential sealing command is unavailable")
+        command = Path(discovered)
+    if (
+        not command.is_absolute()
+        or not command.is_file()
+        or not os.access(command, os.X_OK)
+    ):
+        raise RuntimeError("live credential sealing command is unavailable")
+    return command
+
+
+@contextmanager
+def _suite_access_only_credential(vendor: str, root: Path) -> Iterator[Path]:
+    """Seal once on the host, then expose only that snapshot to scenarios."""
+
+    existing = os.environ.get("LOOPZERO_LIVE_CREDENTIAL_PATH")
+    created = existing is None
+    path = Path(existing) if existing is not None else root / "access-only.json"
+    previous = existing
+    if created:
+        command = [str(_seal_command()), vendor, "--out", str(path)]
+        source = os.environ.get("LOOPZERO_LIVE_CREDENTIAL_SOURCE")
+        if source is not None:
+            command.extend(("--source", source))
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=HOST_SEAL_TIMEOUT_S,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError("live credential sealing failed")
+    path = _validate_access_only_path(vendor, path)
+    os.environ["LOOPZERO_LIVE_CREDENTIAL_PATH"] = str(path)
+    try:
+        yield path
+    finally:
+        if previous is None:
+            os.environ.pop("LOOPZERO_LIVE_CREDENTIAL_PATH", None)
+        else:
+            os.environ["LOOPZERO_LIVE_CREDENTIAL_PATH"] = previous
+        if created:
+            path.unlink(missing_ok=True)
+
+
 @contextmanager
 def _credential(vendor: str, timeout_s: float, settings: RuntimeSettings, wrapper) -> Iterator[int]:
+    del wrapper
     raw_path = os.environ.get("LOOPZERO_LIVE_CREDENTIAL_PATH")
-    path = Path(raw_path) if raw_path else None
+    if not raw_path:
+        raise RuntimeError("live suite preflight did not provide a sealed credential")
+    path = _validate_access_only_path(vendor, Path(raw_path))
     brokers = {
         "claude": claude.claude_subscription_credential,
         "codex": codex.codex_subscription_credential,
         "cursor": cursor.cursor_subscription_credential,
     }
-    if path is not None:
-        metadata = path.stat(follow_symlinks=False)
-        if (
-            not path.is_file()
-            or metadata.st_size <= 2
-            or metadata.st_size > 1024 * 1024
-        ):
-            raise RuntimeError("live credential file is invalid")
-    # A workflow-supplied file has already been validated/refreshed by the
-    # trusted release wheel. It is access-only and safe to re-lend; without an
-    # explicit file, local runs use the broker's normal host discovery.
+    # Host preflight has already validated/refreshed this source exactly once.
+    # Re-lending the access-only snapshot cannot enter a refresh path, so no
+    # scenario wrapper is passed to the broker at all.
     with settings.use():
-        kwargs = {"requested_runtime_s": timeout_s}
-        if path is not None:
-            kwargs["credential_path"] = path
+        kwargs = {"requested_runtime_s": timeout_s, "credential_path": path}
         if vendor == "claude":
             kwargs.update(
-                claude_binary=settings.claude_cli_path,
-                sandbox_wrapper=wrapper,
-                allow_token_fallback=path is None,
+                allow_token_fallback=False,
             )
-        elif vendor == "codex":
-            kwargs["sandbox_wrapper"] = wrapper
         with brokers[vendor](**kwargs) as descriptor:
             yield descriptor
 
@@ -336,6 +424,36 @@ def _run_with_credential(
         os.environ[descriptor_name] = str(child_descriptor)
         try:
             return adapter.run(request)
+        finally:
+            if previous is None:
+                os.environ.pop(descriptor_name, None)
+            else:
+                os.environ[descriptor_name] = previous
+            try:
+                os.close(child_descriptor)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+
+
+def _probe_with_credential(
+    vendor: str,
+    adapter: RuntimeAdapter,
+    request: RuntimeRequest,
+    *,
+    timeout_s: float,
+    settings: RuntimeSettings,
+    wrapper,
+):
+    """Run the no-turn readiness probe with one disposable descriptor."""
+
+    descriptor_name = settings.env_name(f"{vendor.upper()}_AUTH_FD")
+    previous = os.environ.get(descriptor_name)
+    with _credential(vendor, timeout_s, settings, wrapper) as snapshot:
+        child_descriptor = os.dup(snapshot)
+        os.environ[descriptor_name] = str(child_descriptor)
+        try:
+            return adapter.probe(request)
         finally:
             if previous is None:
                 os.environ.pop(descriptor_name, None)
@@ -404,7 +522,35 @@ def _normalized(result: RuntimeResult) -> dict[str, object]:
         "cost_status": result.cost_status.value,
         "returncode": result.returncode,
         "duration_s": result.duration_s,
+        "diagnostics": list(result.diagnostics),
+        "transport_attempts": [
+            asdict(attempt) for attempt in result.transport_attempts
+        ],
     }
+
+
+def _normalized_readiness(readiness) -> dict[str, object]:
+    return {
+        "ready": readiness.ready,
+        "transport": readiness.transport,
+        "eligibility": readiness.eligibility.value,
+        "failure": readiness.failure.value if readiness.failure else None,
+        "diagnostic": readiness.repair,
+    }
+
+
+def _print_readiness(vendor: str, version: str, readiness) -> None:
+    """Print only bounded version and readiness fields, never provider output."""
+
+    failure = readiness.failure.value if readiness.failure else "-"
+    diagnostic = readiness.repair or "ready"
+    print("| runtime | seal | version | transport | ready | failure | diagnostic |")
+    print("|---|---|---|---|---|---|---|")
+    print(
+        f"| {vendor} | access-only | {version} | "
+        f"{readiness.transport or '-'} | {'yes' if readiness.ready else 'no'} | "
+        f"{failure} | {diagnostic} |"
+    )
 
 
 def _cursor_unsupported_reason(vendor: str, scenario: str) -> str | None:
@@ -502,6 +648,7 @@ def _write_results(
     max_killed_runs: int,
     unaccounted_runs: int,
     max_unaccounted_runs: int,
+    readiness: dict[str, object] | None = None,
 ) -> None:
     output = Path(os.environ.get("LOOPZERO_LIVE_RESULTS", f"live-results-{vendor}.json"))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -520,6 +667,7 @@ def _write_results(
                     if vendor == "cursor"
                     else "vendor cap plus aggregate charged-cost ceiling"
                 ),
+                "readiness": readiness,
                 "scenarios": records,
             },
             indent=2,
@@ -643,7 +791,9 @@ def _remaining_budget(
 
 
 @pytest.mark.parametrize("vendor", _selected_runtimes())
-def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
+def test_live_runtime_contract(
+    vendor: str, tmp_path: Path, pytestconfig: pytest.Config
+) -> None:
     executable_value = os.environ.get("LOOPZERO_LIVE_CLI_PATH")
     executable = Path(executable_value) if executable_value else Path(shutil.which(EXECUTABLE_NAMES[vendor]) or "")
     assert executable.is_file(), f"pinned {vendor} executable is unavailable"
@@ -678,15 +828,63 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
     killed_runs = 0
     unaccounted_runs = 0
     failures: list[str] = []
-    with base_settings.use(), private_temporary_directory(
-        f"{vendor}-suite-session"
-    ) as session_home:
+    with (
+        _suite_access_only_credential(vendor, tmp_path),
+        base_settings.use(),
+        private_temporary_directory(f"{vendor}-suite-session") as session_home,
+    ):
         settings = replace(base_settings, session_home=session_home)
         wrapper = _sandbox_wrapper(settings)
         reported_version = _version(
             executable, vendor, settings=settings, wrapper=wrapper
         )
         assert reported_version == PINS[vendor]
+        readiness_runner = RealProcess(wrapper, vendor, "diagnose")
+        readiness_adapter = RUNTIME_REGISTRY.create(
+            vendor,
+            settings=settings,
+            run_cli=readiness_runner,
+            run_probe=readiness_runner,
+            **(
+                {"sdk_available": lambda *_: True}
+                if vendor in {"claude", "codex"}
+                else {}
+            ),
+        )
+        readiness = _probe_with_credential(
+            vendor,
+            readiness_adapter,
+            _request(vendor, "success", tmp_path, scenario_timeout),
+            timeout_s=scenario_timeout + 10,
+            settings=settings,
+            wrapper=wrapper,
+        )
+        readiness_record = _normalized_readiness(readiness)
+        assert not readiness_runner.scenario_started
+        if pytestconfig.getoption("live_diagnose"):
+            _print_readiness(vendor, reported_version, readiness)
+            assert readiness.ready, readiness.repair or "live runtime is not ready"
+            return
+        if not readiness.ready:
+            records.append({
+                "scenario": "preflight",
+                "outcome": "not-ready",
+                "accounting": "not-launched",
+                "charged_cost_usd": 0.0,
+                "readiness": readiness_record,
+            })
+            _write_results(
+                vendor,
+                reported_version,
+                records,
+                charged_cost,
+                killed_runs=killed_runs,
+                max_killed_runs=max_killed_runs,
+                unaccounted_runs=unaccounted_runs,
+                max_unaccounted_runs=max_unaccounted_runs,
+                readiness=readiness_record,
+            )
+            pytest.fail(readiness.repair or "live runtime is not ready")
 
         for scenario in SCENARIOS:
             stop_reason = _suite_stop_reason(
@@ -752,6 +950,7 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
             accounting = "unknown"
             observed_cost: float | None = None
             invocation_costs: list[float | None] = []
+            result: RuntimeResult | None = None
             try:
                 invocation_costs.append(None)
                 result = _run_with_credential(
@@ -834,13 +1033,18 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
                     charged_cost += scenario_charge
                     unaccounted_runs += scenario_unaccounted
                 failures.append(f"{scenario}: {type(exc).__name__}")
-                records.append({
+                failed_record: dict[str, object] = {
                     "scenario": scenario,
                     "outcome": "failed",
                     "failure_class": type(exc).__name__,
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
-                })
+                }
+                if result is not None:
+                    # Contract assertion failures must not erase the bounded
+                    # SDK readiness/fallback evidence that explains the result.
+                    failed_record["result"] = _normalized(result)
+                records.append(failed_record)
             finally:
                 if runner.killed:
                     killed_runs += 1
@@ -854,6 +1058,7 @@ def test_live_runtime_contract(vendor: str, tmp_path: Path) -> None:
         max_killed_runs=max_killed_runs,
         unaccounted_runs=unaccounted_runs,
         max_unaccounted_runs=max_unaccounted_runs,
+        readiness=readiness_record,
     )
     assert not failures, "; ".join(failures)
     assert charged_cost <= ceiling

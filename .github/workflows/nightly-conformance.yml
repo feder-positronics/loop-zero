@@ -192,6 +192,9 @@ jobs:
             fi
           done
           EFFECTIVE_BUDGET=${BUDGET_USD:-2}
+          # Provider version/readiness probes and paid scenarios need outbound
+          # network. Deliberately omit --unshare-net; the positive filesystem
+          # mounts, child wrapper, private namespaces, and capability drop stay.
           bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts \
             --die-with-parent --ro-bind /usr /usr "${ROOT_LAYOUT[@]}" \
             --ro-bind /etc/alternatives /etc/alternatives \
@@ -220,6 +223,9 @@ jobs:
             --setenv LOOPZERO_CONFORMANCE_MAX_UNACCOUNTED_RUNS 3 \
             --setenv LOOPZERO_LIVE_RESULTS "/tmp/results/${LOOPZERO_LIVE_RUNTIMES}.json" \
             --chdir /tmp/workspace -- bash -eu -c '
+              /tmp/venv/bin/python -m pytest -q -s -p no:cacheprovider \
+                --basetemp=/tmp/pytest-diagnose --diagnose \
+                tests/conformance/live/live_conformance.py
               /tmp/venv/bin/python -m pytest -q -p no:cacheprovider \
                 --basetemp=/tmp/pytest tests/conformance/live/live_conformance.py
             '

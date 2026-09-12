@@ -42,7 +42,10 @@ cancellation, child disconnect, restart/resume, and timeout.  The validation
 shell follows the ordinary `checks.yml` bubblewrap layout, but deliberately
 retains network access for these jobs.  Every adapter child is nested in its
 own mandatory filesystem wrapper; the child environment allowlist and sealed
-credential boundary remain active.
+credential boundary remain active. Neither the outer validation bubble nor the
+per-launch wrapper uses `--unshare-net`: version/readiness probes and provider
+scenarios require outbound network, while filesystem visibility remains the
+positive allowlist described above.
 
 Create a GitHub Actions environment named `nightly-conformance`, restrict its
 deployment branches to `main`, and configure **no required reviewers** so the
@@ -68,6 +71,37 @@ printed. The remaining risk is explicit: checked-out code on `main` can read
 and exfiltrate the short-lived access token while the network-enabled live job
 runs. The GitHub environment limits secret scope, but is not a per-run human
 approval boundary.
+
+For a host login, the zero-cost readiness preflight uses normal credential
+discovery, seals one access-only snapshot outside the scenario wrapper, probes
+the exact CLI version and SDK/app-server readiness, and prints only a sanitized
+table. Select one runtime and its exact executable:
+
+```bash
+LOOPZERO_LIVE_RUNTIMES=codex \
+LOOPZERO_LIVE_CLI_PATH=/absolute/path/to/codex \
+LOOPZERO_LIVE_CREDENTIAL_SEAL=/absolute/trusted/bin/loopzero-credential-seal \
+.venv/bin/python -m pytest -q -s -p no:cacheprovider \
+  --basetemp=/tmp/loopzero-live-diagnose --diagnose \
+  tests/conformance/live/live_conformance.py
+```
+
+The paid live run uses the same once-per-suite host seal and passes only its
+access-only result to scenario launches:
+
+```bash
+LOOPZERO_LIVE_RUNTIMES=codex \
+LOOPZERO_LIVE_CLI_PATH=/absolute/path/to/codex \
+LOOPZERO_LIVE_CREDENTIAL_SEAL=/absolute/trusted/bin/loopzero-credential-seal \
+.venv/bin/python -m pytest -q -p no:cacheprovider \
+  --basetemp=/tmp/loopzero-live-run \
+  tests/conformance/live/live_conformance.py
+```
+
+Set `LOOPZERO_LIVE_CREDENTIAL_SOURCE` only when intentionally overriding normal
+host discovery with a mode-0600 credential JSON file. Set
+`LOOPZERO_LIVE_CREDENTIAL_SEAL` to select a separately installed trusted
+`loopzero-credential-seal` entry point.
 
 The release broker becomes available only after this branch merges into
 `release/0.3`: that branch does not contain `credential_seal.py` beforehand,
