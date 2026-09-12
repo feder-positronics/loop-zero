@@ -16,7 +16,7 @@ from loopzero import config, sync
 
 REPO = Path(__file__).resolve().parents[1]
 CORE_SKILLS = REPO / "core" / "skills"
-INTELFLO = Path("/home/marcin/dev/intelflo")
+INTELFLO = Path(os.environ.get("LOOPZERO_INTELFLO_CHECKOUT", "/home/marcin/dev/intelflo"))
 MOVED_GOVERNANCE = {
     "align",
     "archive-docs",
@@ -291,7 +291,7 @@ def test_intelflo_governance_render_is_byte_identical(tmp_path: Path) -> None:
 
 
 def test_documented_intelflo_token_block_is_the_byte_identity_profile() -> None:
-    readme = (CORE_SKILLS / "README.md").read_text(encoding="utf-8")
+    readme = (CORE_SKILLS / "INTELFLO-PROFILE.md").read_text(encoding="utf-8")
     documented = readme.split("````toml\n", 1)[1].split("\n````", 1)[0]
     assert documented == _intelflo_token_block().strip()
 
