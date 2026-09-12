@@ -153,8 +153,10 @@ def _sandbox_wrapper(settings: RuntimeSettings):
 
     roots = [Path("/usr"), Path("/etc"), Path("/bin"), Path("/lib"), Path("/lib64"), Path("/sbin")]
     tooling_root = (settings.tooling_root or Path.cwd()).resolve()
-    interpreter = settings.interpreter(tooling_root).resolve()
-    interpreter_root = interpreter.parent.parent
+    interpreter = settings.interpreter(tooling_root)
+    venv_root = interpreter.parent.parent
+    resolved_interpreter = Path(os.path.realpath(interpreter))
+    interpreter_root = resolved_interpreter.parent.parent
     workspace_root = settings.workspace_root(tooling_root)
     workspace_root.mkdir(mode=0o700, parents=True, exist_ok=True)
     runtime_root_value = os.environ.get("LOOPZERO_LIVE_RUNTIME_ROOT")
@@ -176,7 +178,11 @@ def _sandbox_wrapper(settings: RuntimeSettings):
             if parent != Path("/"):
                 command.extend(("--dir", str(parent)))
         command.extend(("--ro-bind", str(tooling_root), str(tooling_root)))
-        if not interpreter.is_relative_to(tooling_root):
+        if venv_root != tooling_root:
+            command.extend(("--ro-bind", str(venv_root), str(venv_root)))
+        if not resolved_interpreter.is_relative_to(venv_root):
+            for parent in reversed(interpreter_root.parents[:-1]):
+                command.extend(("--dir", str(parent)))
             command.extend(("--ro-bind", str(interpreter_root), str(interpreter_root)))
         if runtime_root is not None:
             command.extend(("--ro-bind", str(runtime_root), str(runtime_root)))

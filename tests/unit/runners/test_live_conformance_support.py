@@ -116,6 +116,54 @@ def test_live_wrapper_argv_for_scenarios_does_not_unshare_network(
     assert "--cap-drop" in argv
 
 
+def test_live_wrapper_binds_every_venv_interpreter_symlink_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "checkout"
+    venv_bin = checkout / ".venv" / "bin"
+    install_root = tmp_path / "uv" / "cpython-3.13.14-linux-x86_64-gnu"
+    install_bin = install_root / "bin"
+    venv_bin.mkdir(parents=True)
+    install_bin.mkdir(parents=True)
+    resolved_python = install_bin / "python3.13"
+    resolved_python.write_bytes(b"python")
+    (venv_bin / "python").symlink_to(resolved_python)
+    (venv_bin / "python3").symlink_to("python")
+    settings = RuntimeSettings(
+        tooling_root=checkout,
+        toolchain_interpreter=venv_bin / "python",
+        state_root=str(tmp_path / "state"),
+    )
+    monkeypatch.setattr(live.shutil, "which", lambda _name: "/usr/bin/bwrap")
+    monkeypatch.setattr(
+        live.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Probe", (), {"returncode": 0})(),
+    )
+
+    wrapper = live._sandbox_wrapper(settings)
+    private_tmpdir = tmp_path / "private-tmp"
+    private_tmpdir.mkdir()
+    argv = wrapper(live.LaunchSpec(
+        argv=(str(venv_bin / "python"),),
+        cwd=tmp_path,
+        private_mounts=(),
+        private_tmpdir=private_tmpdir,
+    ))
+    bound_roots = {
+        Path(argv[index + 1]).resolve()
+        for index, value in enumerate(argv[:-2])
+        if value == "--ro-bind"
+    }
+
+    assert (checkout / ".venv").resolve() in bound_roots
+    assert install_root.resolve() in bound_roots
+    for interpreter in venv_bin.glob("python*"):
+        if interpreter.is_symlink():
+            target = Path(os.path.realpath(interpreter))
+            assert any(target.is_relative_to(root) for root in bound_roots)
+
+
 @pytest.mark.parametrize(
     "vendor,expected",
     [("claude", 0.25), ("codex", 0.065536), ("cursor", 0.1)],
