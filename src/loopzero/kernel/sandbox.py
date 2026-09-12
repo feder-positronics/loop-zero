@@ -753,7 +753,7 @@ def command(
                 if interpreter.is_symlink():
                     lexical = Path(os.readlink(interpreter))
                     if lexical.is_absolute():
-                        destination = lexical.parent.parent
+                        destination = Path(os.path.realpath(lexical.parent.parent))
                         runtime_roots.add(
                             (
                                 resolved_runtime,

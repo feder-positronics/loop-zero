@@ -827,3 +827,58 @@ def test_trusted_read_only_venv_can_mount_its_external_runtime(
     assert ["--ro-bind", str(runtime), str(runtime)] == argv[
         argv.index(str(runtime)) - 1 : argv.index(str(runtime)) + 2
     ]
+
+
+def test_trusted_uv_venv_mounts_the_versioned_runtime_behind_an_alias(
+    monkeypatch, tmp_path: Path
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    primary_venv = tmp_path / "trusted" / ".venv"
+    uv_python_root = tmp_path / "home" / ".local" / "share" / "uv" / "python"
+    versioned_runtime = uv_python_root / "cpython-3.14.2-linux-x86_64-gnu"
+    runtime_python = versioned_runtime / "bin" / "python3.14"
+    _write_executable(runtime_python)
+    runtime_alias = uv_python_root / "cpython-3.14-linux-x86_64-gnu"
+    runtime_alias.symlink_to(versioned_runtime, target_is_directory=True)
+    primary_python = primary_venv / "bin" / "python"
+    primary_python.parent.mkdir(parents=True)
+    primary_python.symlink_to(runtime_alias / "bin" / "python3.14")
+    uv = tmp_path / "host-tools" / "uv"
+    _write_executable(uv)
+    monkeypatch.setenv("PATH", str(uv.parent))
+    monkeypatch.setattr(module, "_system_tool", lambda name: Path(f"/usr/bin/{name}"))
+
+    argv = module.command(
+        [str(worktree / "fastapi_backend" / ".venv" / "bin" / "python")],
+        worktree=worktree,
+        writable_worktree=True,
+        audit_source=None,
+        audit_destination=None,
+        git_source=None,
+        git_destination=None,
+        writable_git=False,
+        read_only_mounts=((primary_venv, worktree / "fastapi_backend" / ".venv"),),
+        deny_network=True,
+        include_model_runtime=False,
+    )
+
+    runtime_mount = ["--ro-bind", str(versioned_runtime), str(versioned_runtime)]
+    runtime_index = argv.index(str(versioned_runtime))
+    assert runtime_mount == argv[runtime_index - 1 : runtime_index + 2]
+    assert str(runtime_alias) not in argv
+
+
+def test_interpreter_destination_with_a_symlinked_component_still_fails(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    alias = tmp_path / "runtime-alias"
+    alias.symlink_to(runtime, target_is_directory=True)
+
+    with pytest.raises(module.SandboxError, match="symlinked component"):
+        module._validated_destination(
+            alias / "bin",
+            label="sandbox interpreter destination",
+        )
