@@ -554,6 +554,8 @@ def test_validation_detects_a_new_hard_link_after_child_exit(tmp_path, monkeypat
 def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
     repo, sha = _repo(tmp_path, ("gnutrue",))
     _git(repo, "config", "--local", "user.name", "Candidate")
+    _git(repo, "config", "--local", "remote.backup.url", "file:///srv/repo")
+    _git(repo, "config", "--local", "remote.backup.fetch", "+refs/*:refs/*")
     _git(repo, "config", "--local", "branch.main.remote", "backup")
     _git(repo, "config", "--local", "branch.main.merge", "refs/heads/main")
 
@@ -566,6 +568,30 @@ def test_validation_config_snapshot_retains_only_kernel_allowed_keys(tmp_path):
         ("core.repositoryformatversion", "0"),
         ("core.bare", "false"),
     )
+
+
+def test_validation_config_screening_accepts_a_cloned_repository_with_origin(tmp_path):
+    upstream, sha = _repo(tmp_path, ("gnutrue",))
+    clone = tmp_path / "clone"
+    _git(tmp_path, "clone", "-q", str(upstream), str(clone))
+    _git(clone, "remote", "add", "backup", "https://example.invalid/backup.git")
+    config = (clone / ".git" / "config").read_bytes()
+
+    from loopzero.kernel import git_config_security
+
+    assert git_config_security.origin_url(config) == str(upstream)
+    overlays = validation._repository_config_overlays(
+        validation._repository_layout(clone)
+    )
+    assert len(overlays) == 1
+    assert validation.validated_git_config_entries(overlays[0].payload) == (
+        ("core.repositoryformatversion", "0"),
+        ("core.bare", "false"),
+    )
+    assert validation.source_identity(clone, approved_head=sha, allow_dirty_tree=False)
+    _git(clone, "config", "--local", "remote.origin.url", "ext::sh -c owned")
+    with pytest.raises(validation.ValidationHookError, match="unsafe"):
+        validation._repository_config_overlays(validation._repository_layout(clone))
 
 
 def test_source_identity_hashes_ignored_files(tmp_path):

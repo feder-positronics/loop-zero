@@ -49,10 +49,30 @@ def parse_git_config_entries(raw_config: bytes) -> tuple[tuple[str, str | None],
     return tuple(entries)
 
 
+_INERT_REMOTE_KEYS = frozenset(
+    {
+        "url",
+        "pushurl",
+        "fetch",
+        "push",
+        "mirror",
+        "tagopt",
+        "prune",
+        "prunetags",
+        "skipdefaultupdate",
+        "skipfetchall",
+        "gh-resolved",
+    }
+)
+# `<helper>::<address>` selects a remote helper; `ext::` runs an arbitrary
+# command and `fd::` reads from launcher descriptors. Ordinary schemes such as
+# https://, ssh://, git@host:path, file:// and plain paths never contain "::"
+# before the address.
+_REMOTE_HELPER_URL = re.compile(r"[A-Za-z0-9+.\-]*::")
+
+
 def git_config_key_can_redirect(name: str) -> bool:
     normalized = name.casefold()
-    if re.fullmatch(r"remote\..+\.(?:url|pushurl|fetch)", normalized):
-        return True
     if normalized.startswith(
         (
             "credential.",
@@ -85,16 +105,37 @@ def git_config_key_can_redirect(name: str) -> bool:
         "core.worktree",
     }:
         return True
-    return normalized.startswith("remote.origin.") and normalized != "remote.origin.gh-resolved"
+    remote = re.fullmatch(r"remote\.(.+)\.([^.]+)", normalized)
+    if remote is not None:
+        # Any remote (origin or a second one) keeps only inert bookkeeping:
+        # URLs, refspecs, mirror and prune flags. `vcs`, `proxy`, `uploadpack`,
+        # `receivepack`, `promisor` and `partialclonefilter` select helpers,
+        # commands, or lazy fetching and are rejected for every remote.
+        return remote.group(2) not in _INERT_REMOTE_KEYS
+    return False
+
+
+def git_config_value_can_redirect(name: str, value: str | None) -> bool:
+    """Reject transport-redirecting remote URLs such as ``ext::`` and ``fd::``."""
+    normalized = name.casefold()
+    if value is None:
+        return False
+    if re.fullmatch(r"remote\..+\.(?:url|pushurl)", normalized):
+        return _REMOTE_HELPER_URL.match(value) is not None
+    return False
 
 
 def validated_git_config_entries(
     raw_config: bytes,
 ) -> tuple[tuple[str, str | None], ...]:
     entries = parse_git_config_entries(raw_config)
-    if any(git_config_key_can_redirect(key) for key, _value in entries) or any(
-        key.casefold() == "core.repositoryformatversion" and value != "0"
-        for key, value in entries
+    if (
+        any(git_config_key_can_redirect(key) for key, _value in entries)
+        or any(git_config_value_can_redirect(key, value) for key, value in entries)
+        or any(
+            key.casefold() == "core.repositoryformatversion" and value != "0"
+            for key, value in entries
+        )
     ):
         raise ValueError(
             "Git configuration uses unmeasured execution, redirect, include, "

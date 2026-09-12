@@ -100,7 +100,12 @@ are forced into that tree, while the root `.git` administrative entry is sealed
 read-only by the child sandbox. Candidate local Git config is screened before
 repository-directed Git runs, then replaced in the child with only fixed
 `core.repositoryformatversion=0` and `core.bare=false`; no `remote.*` or
-`branch.*` configuration is retained. The isolated repository has no candidate
+`branch.*` configuration is retained. Screening accepts ordinary remotes
+(origin and additional remotes with `url`, `pushurl`, `fetch`, and mirror or
+prune flags) and rejects remote-helper transports such as `ext::` and `fd::`,
+remote `vcs`, `proxy`, `uploadpack`, `receivepack`, and promisor settings,
+`extensions.partialclone`, and any `core.repositoryformatversion` other than
+`0`. The isolated repository has no candidate
 config and a highest-precedence attributes file disables filters, working-tree
 encoding, ident and EOL conversion. Candidate `.gitattributes` content is itself
 hashed but cannot change how any bytes are hashed; nested Git worktrees are

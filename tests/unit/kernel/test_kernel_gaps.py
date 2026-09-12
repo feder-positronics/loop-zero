@@ -133,8 +133,12 @@ def test_git_configuration_digest_ignores_branch_metadata():
     "configuration",
     (
         b'[remote "backup"]\nurl = ext::sh -c owned\n',
-        b'[remote "backup"]\npushurl = file:///tmp/owned\n',
-        b'[remote "backup"]\nfetch = +refs/*:refs/*\n',
+        b'[remote "backup"]\npushurl = ext::sh -c owned\n',
+        b'[remote "origin"]\nurl = fd::3\n',
+        b'[remote "origin"]\nvcs = ext\n',
+        b'[remote "backup"]\nproxy = /tmp/owned\n',
+        b'[remote "backup"]\nuploadPack = /tmp/owned\n',
+        b'[remote "backup"]\npromisor = true\n',
         b"[extensions]\npartialClone = backup\n",
         b"[core]\nrepositoryFormatVersion = 1\n",
     ),
@@ -144,6 +148,21 @@ def test_git_configuration_rejects_lazy_fetch_and_repository_format_redirects(
 ):
     with pytest.raises(ValueError, match="configuration uses"):
         git_config_security.validated_git_config_entries(configuration)
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    (
+        b'[remote "origin"]\nurl = https://example.invalid/repo.git\n'
+        b"fetch = +refs/heads/*:refs/remotes/origin/*\n",
+        b'[remote "origin"]\nurl = git@example.invalid:repo.git\n'
+        b"pushurl = ssh://git@example.invalid/repo.git\n",
+        b'[remote "backup"]\nurl = file:///srv/repo\nfetch = +refs/*:refs/*\n'
+        b"mirror = true\nprune = true\n",
+    ),
+)
+def test_git_configuration_accepts_ordinary_remotes(configuration):
+    assert git_config_security.validated_git_config_entries(configuration)
 
 
 def test_git_configuration_accepts_repository_format_zero():
