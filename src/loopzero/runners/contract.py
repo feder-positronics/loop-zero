@@ -18,6 +18,47 @@ MAX_PROTOCOL_LINE_BYTES = 6 * MAX_STRUCTURED_OUTPUT_BYTES + 64 * 1024
 RESUME_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 
+MAX_BRIDGE_FAILURE_CHARS = 200
+BRIDGE_EXCEPTION_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]{0,127}$")
+_BRIDGE_SECRET_PATTERN = re.compile(
+    r"sk-[A-Za-z0-9_-]{8,}"
+    r"|eyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{4,})*"
+    r"|(?i:bearer)\s+[A-Za-z0-9._-]{8,}"
+    r"|[A-Za-z0-9_-]{40,}"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+
+
+def sanitized_bridge_text(value: object) -> str | None:
+    """Bound and secret-redact one bridge-supplied diagnostic string."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if not text or not text.isprintable():
+        return None
+    text = _BRIDGE_SECRET_PATTERN.sub("<redacted>", text)
+    return text[:MAX_BRIDGE_FAILURE_CHARS]
+
+
+def sanitized_bridge_failure(value: object) -> str | None:
+    """Normalize an SDK bridge error frame's ``diagnostics`` object.
+
+    The bridge already redacts secrets before writing the frame; the parent
+    re-validates the shape and re-redacts so a malformed or hostile frame can
+    never widen what the normalized result carries.
+    """
+    if not isinstance(value, Mapping):
+        return None
+    exception = value.get("exception")
+    if (
+        not isinstance(exception, str)
+        or BRIDGE_EXCEPTION_NAME_PATTERN.fullmatch(exception) is None
+    ):
+        return None
+    message = sanitized_bridge_text(value.get("message"))
+    return f"{exception}: {message}" if message else exception
+
+
 def is_valid_resume_session_id(value: object) -> bool:
     """Return whether *value* is safe to hand to a vendor resume interface."""
     return (
@@ -47,6 +88,8 @@ class ReadinessFailure(StrEnum):
     SDK_VERSION_MISMATCH = "sdk-version-mismatch"
     MODEL_UNSUPPORTED = "model-unsupported"
     CONFIG_BOOTSTRAP = "config-bootstrap"
+    CONTAINMENT_FAILURE = "containment-failure"
+    REQUEST_TIMEOUT = "request-timeout"
 
 
 class RuntimeStatus(StrEnum):
@@ -299,6 +342,7 @@ class RuntimeEvent:
     kind: str
     subtype: str | None = None
     semantic: bool = False
+    item_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -57,13 +57,19 @@ configuration bootstraps create temporary files. The wrapper must also provide
 a private `/dev` and `/proc` to the child (Python refuses to start without
 `/dev/urandom`). The venv binding must include the
 interpreter's `pyvenv.cfg`, `bin`, and `lib` so the bridge can import its SDKs.
-Every runner child cwd is inside either the governed worktree or that settings
-workspace root, except credential renewal children. Renewals use a random,
+The settings workspace root is derived below the private state root, never the
+tooling checkout, so read-only source mounts remain compatible with adapter
+scratch space. Every runner child cwd is inside either the governed worktree or
+that settings workspace root, except credential renewal children. Renewals use a random,
 atomically created 0700 directory below the consumer state root, pass only that
 directory in the refresh launch's `private_mounts`, and scrub it afterwards.
 The wrapper must never bind the state root itself or carry private mounts from
 one launch into another; ordinary workers therefore cannot see refresh
-material. Every adapter's worker credential snapshot carries no refresh
+material. The one explicit exception is an opt-in `session_home`: it must be a
+random 0700 direct child of the private state root, is validated and bound into
+each launch using those settings, and is owned and scrubbed by the suite that
+needs cross-launch resume. Credential files inside it are still removed after
+each launch. Every adapter's worker credential snapshot carries no refresh
 capability: the refresh token is replaced by the access token and expiry is
 clamped to the access-token expiry. Refresh runs only in the host broker under
 the renewal lock in a launch-private staging directory. Codex transfers the
@@ -71,6 +77,11 @@ existing refresh-capable credential to its bridge
 on the original sealed-descriptor boundary and writes only the rotated SDK
 output into staging. The Claude CLI has no descriptor credential input, so its
 input file remains confined to the same launch-private directory.
+An already access-only source is never refreshed. If its access expiry cannot
+cover the requested runtime plus safety margin, the broker returns the typed
+credential-unavailable result. Nightly conformance creates that access-only
+source with the separately installed trusted release-wheel entry point before
+checked-out code starts.
 Every `.git` path and every linked-worktree gitdir reachable through those
 bindings must remain read-only. Runners neither build bubblewrap argv nor decide
 which roots are writable. `worker_child_environment()` starts from the positive
@@ -98,9 +109,19 @@ and paths to the bridge and is consumed before the SDK runs. Codex refresh uses
 this same bridge with `--codex-refresh`; `codex_refresh()` imports openai_codex
 only when invoked. The private SDK shims remain intact.
 
+Codex SDK turns require a brokered credential descriptor and fail closed when
+one is absent. Each brokered turn pins both `CODEX_HOME` and `HOME` to its
+private credential home, which contains no operator project trust table, while
+the session override layer pins the governed runtime settings. Together these
+neutralize project-level `.codex/config.toml` configuration. Candidate
+`AGENTS.md` instruction injection from the governed working directory remains
+enabled by design; it is candidate input, not a Codex configuration layer.
+
 Run the suite with `uv sync --group dev` followed by
-`.venv/bin/python -m pytest -q`. The dev group pins `claude-agent-sdk==0.2.152`
-and `openai-codex==0.147.0`, so the original SDK assertions are unconditional.
+`.venv/bin/python -m pytest -q`. The dev group pins `claude-agent-sdk==0.2.152`,
+`openai-codex==0.154.0`, and `openai-codex-cli-bin==0.154.0`, so SDK and Codex
+worker-version assertions are unconditional. Live settings additionally name
+the exact Claude, Codex, and Cursor executable paths.
 
 `RUNTIME_REGISTRY` adds the deterministic `fake` runner; the legacy
 `NATIVE_RUNTIME_REGISTRY` still lists only Claude, Codex and Cursor. A fake

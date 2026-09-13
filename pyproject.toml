@@ -8,13 +8,14 @@ dynamic = ["version"]
 dependencies = []
 
 [project.optional-dependencies]
-claude = ["claude-agent-sdk>=0.2.151"]
-codex = ["openai-codex>=0.147.0"]
+claude = ["claude-agent-sdk==0.2.152"]
+codex = ["openai-codex==0.154.0", "openai-codex-cli-bin==0.154.0"]
 acp = ["agent-client-protocol>=0.12"]
 guardian = ["PyYAML>=6"]
 
 [project.scripts]
 loopzero = "loopzero.cli:main"
+loopzero-credential-seal = "loopzero.credential_seal:main"
 
 [project.urls]
 Repository = "https://github.com/feder-positronics/loop-zero"
@@ -37,7 +38,8 @@ include = ["src/loopzero", "core/VERSION", "README.md", "pyproject.toml"]
 dev = [
     "claude-agent-sdk==0.2.152",
     "hatchling>=1.25",
-    "openai-codex==0.147.0",
+    "openai-codex==0.154.0",
+    "openai-codex-cli-bin==0.154.0",
     "pytest>=8",
     "PyYAML>=6",
 ]

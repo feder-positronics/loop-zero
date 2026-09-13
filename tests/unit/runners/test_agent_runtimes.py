@@ -185,6 +185,14 @@ def codex_request(tmp_path: Path, *, read_only: bool = True) -> object:
     )
 
 
+def _fake_brokered_codex_auth(tmp_path: Path):
+    home = tmp_path / "private-codex-home"
+    home.mkdir(exist_ok=True)
+    auth_path = home / "auth.json"
+    auth_path.write_text("{}", encoding="utf-8")
+    return None, {"CODEX_HOME": str(home)}, auth_path
+
+
 def test_contracts_are_immutable_and_exclude_prompt_from_repr(tmp_path: Path) -> None:
     runtime_request = request(tmp_path)
 
@@ -1818,15 +1826,16 @@ def test_claude_sdk_forwards_promotional_credit_mode(tmp_path: Path) -> None:
     assert result.commercial_mode is contracts.RuntimeCommercialMode.PROMOTIONAL_CREDIT
 
 
-def test_claude_sdk_maps_vendor_cost_to_estimated_status(tmp_path: Path) -> None:
+def test_claude_sdk_uses_pinned_token_price_instead_of_vendor_cost(tmp_path: Path) -> None:
     def run_process(command, **kwargs):
         del command, kwargs
         return process.ProcessResult(
             returncode=0,
-            stdout=(
-                '{"type":"result","status":"completed",'
-                '"terminal_reason":"completed","total_cost_usd":0.42}\n'
-            ),
+                stdout=(
+                    '{"type":"result","status":"completed",'
+                    '"terminal_reason":"completed","total_cost_usd":0.42,'
+                    '"usage":{"input_tokens":1,"output_tokens":1}}\n'
+                ),
             stderr="",
             duration_s=0.01,
             timed_out=False,
@@ -1836,7 +1845,7 @@ def test_claude_sdk_maps_vendor_cost_to_estimated_status(tmp_path: Path) -> None
         claude_request(tmp_path)
     )
 
-    assert result.cost_usd == 0.42
+    assert result.cost_usd == 0.00009
     assert result.cost_status is contracts.RuntimeCostStatus.ESTIMATED
 
 
@@ -2193,6 +2202,118 @@ def test_selected_claude_sdk_bundle_supports_fable_5_1_without_model_launch(
     assert result.returncode == 0
     assert result.stdout == '{"type":"readiness","status":"ready"}\n'
     assert result.stderr == ""
+
+
+def test_selected_explicit_claude_cli_supports_fable_5_1_without_model_launch(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    explicit_cli = tmp_path / "runtime" / "bin" / "claude"
+    explicit_cli.parent.mkdir(parents=True)
+    explicit_cli.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
+    explicit_cli.chmod(0o755)
+    runtime_request = replace(
+        claude_request(tmp_path),
+        requested_model="claude-fable-5-1",
+        tooling_root=repo_root,
+    )
+
+    with RuntimeSettings(
+        env_prefix="INTELFLO",
+        toolchain_interpreter=Path(sys.executable),
+        claude_cli_path=explicit_cli,
+    ).use():
+        result = run_cli_unsandboxed(
+            claude.build_sdk_bridge_command(repo_root),
+            cwd=tmp_path,
+            input_text=claude._sdk_model_readiness_payload(runtime_request),
+            timeout_s=5,
+            env=claude.filtered_claude_environment(),
+        )
+
+    assert result.returncode == 0
+    assert result.stdout == '{"type":"readiness","status":"ready"}\n'
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_sdk_readiness_classifies_bridge_exec_failure_as_containment(
+    tmp_path: Path, vendor: str
+) -> None:
+    bridge_failure = process.ProcessResult(
+        returncode=127,
+        stdout="",
+        stderr="bwrap: execvp /checkout/.venv/bin/python: No such file or directory",
+        duration_s=0.01,
+        timed_out=False,
+    )
+    if vendor == "claude":
+        runtime_request = replace(
+            claude_request(tmp_path), requested_model="claude-fable-5-1"
+        )
+        adapter = claude.ClaudeAdapter(
+            run_probe=lambda *_args, **_kwargs: bridge_failure,
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/claude",
+        )
+    else:
+        runtime_request = codex_request(tmp_path)
+        adapter = codex.CodexAdapter(
+            run_probe=lambda command, **_kwargs: (
+                bridge_failure
+                if str(command[0]).endswith("python")
+                else _codex_auth_process_result()
+            ),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/codex",
+        )
+
+    readiness = adapter.probe_sdk(runtime_request)
+
+    assert readiness.ready is False
+    assert readiness.failure is contracts.ReadinessFailure.CONTAINMENT_FAILURE
+    assert readiness.repair == (
+        f"repair runtime containment so the {vendor.title()} SDK bridge can start"
+    )
+    assert "execvp" not in repr(readiness)
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_sdk_readiness_keeps_malformed_frame_as_protocol_failure(
+    tmp_path: Path, vendor: str
+) -> None:
+    malformed_frame = process.ProcessResult(
+        returncode=127,
+        stdout="not a readiness frame",
+        stderr="bwrap: execvp private target: Permission denied",
+        duration_s=0.01,
+        timed_out=False,
+    )
+    if vendor == "claude":
+        runtime_request = replace(
+            claude_request(tmp_path), requested_model="claude-fable-5-1"
+        )
+        adapter = claude.ClaudeAdapter(
+            run_probe=lambda *_args, **_kwargs: malformed_frame,
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/claude",
+        )
+    else:
+        runtime_request = codex_request(tmp_path)
+        adapter = codex.CodexAdapter(
+            run_probe=lambda command, **_kwargs: (
+                malformed_frame
+                if str(command[0]).endswith("python")
+                else _codex_auth_process_result()
+            ),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/codex",
+        )
+
+    readiness = adapter.probe_sdk(runtime_request)
+
+    assert readiness.failure is contracts.ReadinessFailure.PROTOCOL_INCOMPATIBLE
+    assert readiness.repair.startswith("repair the")
 
 
 def test_fable_5_1_sdk_probe_failure_never_selects_system_cli(
@@ -3666,7 +3787,7 @@ def test_codex_bridge_thread_kwargs_force_first_party_provider_and_deny_all(
 
     assert kwargs["model_provider"] == "openai"
     assert kwargs["service_tier"] == "default"
-    assert kwargs["ephemeral"] is True
+    assert kwargs["ephemeral"] is False
     assert kwargs["approval_mode"].value == "deny_all"
     assert kwargs["sandbox"].value == "read-only"
     assert turn_kwargs["service_tier"] == "default"
@@ -3812,15 +3933,14 @@ def test_codex_sdk_progress_maps_fake_stream_without_retaining_sensitive_content
         def thread_start(self, **_kwargs):
             return FakeThread()
 
-    @contextmanager
-    def fake_config_lock(_request):
-        path = tmp_path / "runtime.config.lock.toml"
-        path.write_text("version = 1\n", encoding="utf-8")
-        yield path
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", fake_config_lock)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda _codex: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
+    monkeypatch.setattr(
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
+    )
     reporter = _ProgressRecorder()
 
     sdk_bridge._run_codex(
@@ -3910,33 +4030,6 @@ def test_codex_completed_item_retention_is_constant_and_size_bounded() -> None:
         sdk_bridge._retain_codex_response_text(final_text, latest_text, oversized)
 
 
-def test_codex_bootstrap_thread_kwargs_replace_project_working_directory(
-    tmp_path: Path,
-) -> None:
-    import openai_codex
-    project = tmp_path / "project"
-    project.mkdir()
-    isolated = tmp_path / "isolated"
-    isolated.mkdir()
-    bridge_request = {
-        "vendor": "codex",
-        "prompt": "private prompt",
-        "cwd": str(project),
-        "requested_model": "gpt-5.6-sol",
-        "effort": "high",
-        "read_only": True,
-        "budget_usd": None,
-    }
-
-    kwargs = sdk_bridge._codex_bootstrap_thread_kwargs(
-        bridge_request,
-        isolated_cwd=isolated,
-    )
-
-    assert kwargs["cwd"] == str(isolated)
-    assert str(project) not in repr(kwargs)
-
-
 def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_account(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3948,14 +4041,17 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
     credential.write_text(json.dumps(_protected_codex_auth()), encoding="utf-8")
     read_fd = os.open(credential, os.O_RDONLY)
     monkeypatch.setenv(sdk_bridge.CODEX_AUTH_FD_ENV, str(read_fd))
-    invoked: list[object] = []
     observed_homes: list[Path] = []
+    observed_cwds: list[Path] = []
+    observed_overrides: list[tuple[str, ...]] = []
     account_calls: list[None] = []
     thread_calls: list[None] = []
 
     class FakeConfig:
         def __init__(self, **kwargs) -> None:
             self.env = kwargs["env"]
+            observed_cwds.append(Path(kwargs["cwd"]))
+            observed_overrides.append(kwargs["config_overrides"])
 
     class FakeAccountResponse:
         def model_dump(self) -> dict[str, object]:
@@ -3973,6 +4069,7 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
             assert json.loads((home / "auth.json").read_text(encoding="utf-8"))[
                 "tokens"
             ]
+            self._client = self
 
         def __enter__(self):
             return self
@@ -3984,18 +4081,18 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
             account_calls.append(None)
             return FakeAccountResponse()
 
+        def request(self, method, params, *, response_model):
+            assert method == "config/read"
+            assert params == {"cwd": str(tmp_path), "includeLayers": True}
+            fixture = Path(__file__).with_name("fixtures") / "codex_effective_config_0_154_0.json"
+            return response_model.model_validate(json.loads(fixture.read_text()))
+
         def thread_start(self, **_kwargs):
             thread_calls.append(None)
             raise AssertionError("readiness probe must not start a model thread")
 
-    @contextmanager
-    def fake_config_lock(request):
-        invoked.append(request)
-        yield tmp_path / "runtime.config.lock.toml"
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(openai_codex, "CodexConfig", FakeConfig)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", fake_config_lock)
     request = {
         "vendor": "codex-probe",
         "prompt": "",
@@ -4011,13 +4108,14 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
 
     sdk_bridge._probe_codex_app_server(request)
 
-    assert invoked == [request]
     assert account_calls == [None]
     assert thread_calls == []
     assert sdk_bridge.CODEX_AUTH_FD_ENV not in os.environ
     with pytest.raises(OSError):
         os.fstat(read_fd)
     assert observed_homes and not observed_homes[0].exists()
+    assert observed_cwds == observed_homes
+    assert observed_overrides == [sdk_bridge._codex_request_runtime_overrides(request)]
     assert capsys.readouterr().out == '{"type":"readiness","status":"ready"}\n'
 
 
@@ -4064,13 +4162,11 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
         def thread_start(self, **_kwargs):
             thread_calls.append(None)
 
-    @contextmanager
-    def fake_config_lock(_request):
-        yield tmp_path / "runtime.config.lock.toml"
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
     monkeypatch.setattr(openai_codex, "CodexConfig", FakeConfig)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", fake_config_lock)
+    monkeypatch.setattr(
+        sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None
+    )
 
     sdk_bridge._probe_codex_app_server(
         {
@@ -4095,6 +4191,100 @@ def test_codex_app_server_probe_rejects_non_chatgpt_account_without_a_turn(
     output = capsys.readouterr().out
     assert output == ('{"type":"readiness","status":"failed","failure":"bootstrap"}\n')
     assert "private@example.invalid" not in output
+
+
+def test_codex_0_154_recorded_readiness_protocol_fixture() -> None:
+    """Keep the no-turn SDK exchange aligned with the pinned 0.154 app-server."""
+    from openai_codex._initialize_metadata import validate_initialize_metadata
+    from openai_codex.generated.v2_all import ConfigReadResponse, GetAccountResponse
+    from openai_codex.models import InitializeResponse
+
+    fixture = (
+        Path(__file__).with_name("fixtures") / "codex_app_server_0_154_0.jsonl"
+    )
+    frames = [json.loads(line) for line in fixture.read_text().splitlines()]
+
+    assert [
+        frame["message"].get("method")
+        for frame in frames
+        if frame["direction"] == "client"
+    ] == ["initialize", "initialized", "config/read", "account/read"]
+    assert all(
+        frame["message"].get("method") not in {"thread/start", "turn/start"}
+        for frame in frames
+        if frame["direction"] == "client"
+    )
+    initialize = InitializeResponse.model_validate(frames[1]["message"]["result"])
+    normalized = validate_initialize_metadata(initialize)
+    assert normalized.serverInfo is not None
+    assert normalized.serverInfo.version.split()[0] == "0.154.0"
+    effective = ConfigReadResponse.model_validate(frames[4]["message"]["result"])
+    assert effective.config.mcp_servers == {}
+    assert effective.config.hooks["SessionStart"] == []
+    account = GetAccountResponse.model_validate(frames[6]["message"]["result"])
+    assert account.account is None
+    assert account.requires_openai_auth is True
+
+
+def test_codex_effective_config_rejects_merged_stray_mcp_fixture(
+    tmp_path: Path,
+) -> None:
+    from openai_codex.generated.v2_all import ConfigReadResponse
+
+    fixture = (
+        Path(__file__).with_name("fixtures")
+        / "codex_effective_config_stray_mcp_0_154_0.json"
+    )
+    response = ConfigReadResponse.model_validate(
+        json.loads(fixture.read_text(encoding="utf-8"))
+    )
+    calls: list[tuple[str, object]] = []
+
+    class FakeClient:
+        def request(self, method, params, *, response_model):
+            calls.append((method, params))
+            return response_model.model_validate(response.model_dump(mode="json"))
+
+    fake_codex = type("FakeCodex", (), {"_client": FakeClient()})()
+    request = {
+        "vendor": "codex",
+        "prompt": "private prompt",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-sol",
+        "effort": "high",
+        "read_only": True,
+        "budget_usd": None,
+        "commercial_mode": "subscription-only",
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+    }
+
+    with pytest.raises(RuntimeError, match="unavailable"):
+        sdk_bridge._enforce_codex_effective_config(fake_codex, request)
+
+    assert calls == [
+        ("config/read", {"cwd": str(tmp_path), "includeLayers": True})
+    ]
+
+
+def test_codex_effective_config_refusal_is_a_typed_unavailable_result(
+    tmp_path: Path,
+) -> None:
+    result = codex.CodexAdapter(
+        run_process=lambda *_args, **_kwargs: process.ProcessResult(
+            returncode=1,
+            stdout='{"type":"error","reason":"unavailable"}\n',
+            stderr="",
+            duration_s=0.1,
+            timed_out=False,
+        )
+    )._run_sdk(codex_request(tmp_path))
+
+    assert result.status is contracts.RuntimeStatus.SUBSCRIPTION_UNAVAILABLE
+    assert result.terminal_reason is contracts.TerminalReason.SUBSCRIPTION_UNAVAILABLE
+    assert result.diagnostics == (
+        "Codex SDK effective configuration was unavailable",
+    )
 
 
 def _codex_auth_process_result() -> object:
@@ -4307,6 +4497,34 @@ def test_codex_protected_credential_keeps_sdk_failure_when_cli_is_forbidden(
     assert readiness.repair == "restore the repository openai-codex tooling dependency"
 
 
+def test_codex_protected_prelaunch_failure_stops_before_cli_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    credential = tmp_path / "auth.json"
+    credential.write_text(json.dumps(_protected_codex_auth()))
+    descriptor = os.open(credential, os.O_RDONLY)
+    monkeypatch.setenv(codex.CODEX_AUTH_FD_ENV, str(descriptor))
+    cli_readiness = MagicMock(side_effect=AssertionError("CLI fallback was consulted"))
+    adapter = codex.CodexAdapter(sdk_available=lambda *_args: False)
+    monkeypatch.setattr(adapter, "_cli_launch_readiness", cli_readiness)
+    try:
+        result = adapter.run(codex_request(tmp_path))
+    finally:
+        os.close(descriptor)
+
+    cli_readiness.assert_not_called()
+    assert result.transport == codex.CODEX_SDK_TRANSPORT
+    assert result.status is contracts.RuntimeStatus.SUBSCRIPTION_UNAVAILABLE
+    assert result.diagnostics == (
+        "restore the repository openai-codex tooling dependency",
+    )
+    assert [attempt.transport for attempt in result.transport_attempts] == [
+        codex.CODEX_SDK_TRANSPORT
+    ]
+    assert result.transport_attempts[0].failure_class == "sdk-unavailable"
+    assert result.transport_attempts[0].selected_next is False
+
+
 def test_codex_protected_credential_never_falls_back_to_cli(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -4348,9 +4566,8 @@ def test_codex_protected_credential_never_falls_back_to_cli(
     assert result.terminal_reason is contracts.TerminalReason.STARTUP_FAILURE
     assert [attempt.transport for attempt in result.transport_attempts] == [
         codex.CODEX_SDK_TRANSPORT,
-        codex.CODEX_CLI_TRANSPORT,
     ]
-    assert result.transport_attempts[1].failure_class == "eligibility"
+    assert result.transport_attempts[0].selected_next is False
     assert len(launches) == 1
     assert launches[0][0].endswith("/bin/python")
     assert all("exec" not in command for command in launches)
@@ -5381,7 +5598,7 @@ def test_bridge_reporter_stops_and_joins_on_every_terminal_path(
     )
     monkeypatch.setattr(sdk_bridge, "_read_request", lambda: {"vendor": "claude"})
     monkeypatch.setattr(sdk_bridge, "_run", fake_run)
-    monkeypatch.setattr(sdk_bridge, "_error_frame", lambda _reason: None)
+    monkeypatch.setattr(sdk_bridge, "_error_frame", lambda _reason, _exc=None: None)
 
     assert asyncio.run(sdk_bridge.main()) == expected_returncode
     assert reporter.closed is True
@@ -6699,7 +6916,10 @@ def test_cursor_run_workspace_is_inside_documented_settings_root(
     worktree = tmp_path / "worktree"
     tooling_root.mkdir()
     worktree.mkdir()
-    settings = RuntimeSettings(tooling_root=tooling_root)
+    settings = RuntimeSettings(
+        tooling_root=tooling_root,
+        state_root=str(tmp_path / "state"),
+    )
     workspace_root = settings.workspace_root(tooling_root)
     observed_workspace: Path | None = None
 
@@ -7084,24 +7304,25 @@ def command_completion_stream(monkeypatch, tmp_path):
         def thread_start(self, **kwargs):
             return FakeThread()
 
-    @contextmanager
-    def config_lock(_request):
-        yield tmp_path / "unused.config.lock.toml"
-
     monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
-    monkeypatch.setattr(sdk_bridge, "_codex_effective_config_lock", config_lock)
     monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *args: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
     monkeypatch.setattr(
-        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
     )
 
-    def replay(status="completed", exit_code=0, output="żółć", *, completed=True):
-        def item(state, code=None, text=None):
+    def replay(status="completed", exit_code=0, output="żółć", *, completed=True,
+               command="PRIVATE_COMMAND", actions=(), started=True,
+               completed_id="private-command-id", completed_thread="private-thread",
+               completed_turn="private-turn"):
+        def item(state, code=None, text=None, item_id="private-command-id"):
             return ThreadItem(
                 root=CommandExecutionThreadItem(
-                    id="private-command-id",
-                    command="PRIVATE_COMMAND",
-                    commandActions=[],
+                    id=item_id,
+                    command=command,
+                    commandActions=list(actions),
                     cwd="/PRIVATE_PATH",
                     status=state,
                     type="commandExecution",
@@ -7121,15 +7342,17 @@ def command_completion_stream(monkeypatch, tmp_path):
                 ),
             )
         ]
+        if not started:
+            events.clear()
         if completed:
             events.append(
                 Notification(
                     "item/completed",
                     ItemCompletedNotification(
-                        item=item(status, exit_code, output),
+                        item=item(status, exit_code, output, completed_id),
                         completedAtMs=2,
-                        threadId="private-thread",
-                        turnId="private-turn",
+                        threadId=completed_thread,
+                        turnId=completed_turn,
                     ),
                 )
             )
@@ -7569,6 +7792,927 @@ def test_command_completion_unknown_frame_priority(command_completion_stream):
     assert len(result.diagnostics) == codex.MAX_DIAGNOSTICS
     assert result.status is contracts.RuntimeStatus.COMPLETED
     assert result.structured_output == {"ok": True}
+
+
+# --- SDK bridge failure diagnostics (nightly conformance round 10) ---
+
+
+def test_sanitized_bridge_failure_redacts_secrets_and_rejects_hostile_shapes() -> None:
+    failure = contracts.sanitized_bridge_failure(
+        {
+            "exception": "RuntimeError",
+            "message": (
+                "token sk-ant-oat01-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ "
+                "for owner@example.invalid with bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIx.sig"
+            ),
+        }
+    )
+
+    assert failure is not None
+    assert failure.startswith("RuntimeError: token <redacted> for <redacted>")
+    assert "sk-ant" not in failure
+    assert "example.invalid" not in failure
+    assert "eyJ" not in failure
+    assert contracts.sanitized_bridge_failure({"exception": "bad name!"}) is None
+    assert contracts.sanitized_bridge_failure({"message": "no class"}) is None
+    assert contracts.sanitized_bridge_failure("RuntimeError") is None
+    long = contracts.sanitized_bridge_failure(
+        {"exception": "ValueError", "message": "x" * 5_000}
+    )
+    assert long is not None
+    assert len(long) <= len("ValueError: ") + contracts.MAX_BRIDGE_FAILURE_CHARS
+    assert contracts.sanitized_bridge_text("line\x00break") is None
+
+
+def test_bridge_error_frame_rejects_unowned_chained_cause_messages(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    try:
+        try:
+            raise FileNotFoundError("auth.json for sk-proj-ABCDEFGHIJKLMNOP is missing")
+        except FileNotFoundError as cause:
+            raise RuntimeError("startup") from cause
+    except RuntimeError as exc:
+        sdk_bridge._error_frame("startup", exc)
+    frame = json.loads(capsys.readouterr().out.strip())
+
+    assert frame["reason"] == "startup"
+    assert frame["diagnostics"] == {"exception": "FileNotFoundError"}
+    sdk_bridge._error_frame("protocol")
+    assert "diagnostics" not in json.loads(capsys.readouterr().out.strip())
+
+
+def test_bridge_sanitized_failure_keeps_bare_sentinel_when_no_cause_exists() -> None:
+    failure = sdk_bridge._sanitized_failure(RuntimeError("startup"))
+
+    assert failure == {"exception": "RuntimeError"}
+
+
+def test_bridge_owned_failure_messages_redact_paths_and_remain_bounded() -> None:
+    failure = sdk_bridge._sanitized_failure(
+        sdk_bridge.BridgeInputError(
+            "invalid file /home/operator/private/project/config.toml "
+            + "bounded detail " * 40
+        )
+    )
+
+    assert failure["exception"] == "BridgeInputError"
+    assert failure["message"].startswith("invalid file <redacted> ")
+    assert "/home/operator" not in failure["message"]
+    assert len(failure["message"]) == sdk_bridge.MAX_FAILURE_MESSAGE_CHARS
+
+
+@pytest.mark.parametrize(
+    ("exception_name", "parser_name"),
+    [
+        ("CodexError", "codex"),
+        ("TransportClosedError", "codex"),
+        ("CLIJSONDecodeError", "claude"),
+        ("ProcessError", "claude"),
+    ],
+)
+def test_vendor_sdk_exception_messages_never_reach_frames_or_diagnostics(
+    exception_name: str,
+    parser_name: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from claude_agent_sdk import CLIJSONDecodeError, ProcessError
+    from openai_codex import CodexError, TransportClosedError
+
+    private = "PRIVATE_STREAM_CONTENT /home/operator/secret/project.json"
+    exceptions = {
+        "CodexError": CodexError(f"Invalid JSON-RPC line: {private}"),
+        "TransportClosedError": TransportClosedError(
+            f"transport closed; stderr tail: {private}" + "z" * 2_000
+        ),
+        "CLIJSONDecodeError": CLIJSONDecodeError(
+            private, json.JSONDecodeError("private decode", private, 0)
+        ),
+        "ProcessError": ProcessError(
+            "Claude CLI failed", exit_code=1, stderr=private
+        ),
+    }
+    try:
+        raise exceptions[exception_name]
+    except Exception as cause:
+        sentinel = RuntimeError("startup")
+        sentinel.__cause__ = cause
+        sdk_bridge._error_frame("startup", sentinel)
+    output = capsys.readouterr().out
+    frame = json.loads(output)
+
+    assert frame["diagnostics"] == {"exception": exception_name}
+    assert private not in output
+    assert "/home/operator" not in output
+    parser = (
+        codex.parse_codex_stream
+        if parser_name == "codex"
+        else claude.parse_claude_stream
+    )
+    parsed = parser(output)
+    assert private not in repr(parsed.diagnostics)
+    assert "/home/operator" not in repr(parsed.diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("parser", "prefix"),
+    [
+        (claude.parse_claude_stream, "Claude SDK failure: "),
+        (codex.parse_codex_stream, "Codex SDK failure: "),
+    ],
+)
+def test_native_error_frame_diagnostics_are_normalized_and_bounded(
+    parser, prefix
+) -> None:
+    parsed = parser(
+        json.dumps(
+            {
+                "type": "error",
+                "reason": "startup",
+                "diagnostics": {
+                    "exception": "CodexTurnErrorNotification",
+                    "message": "refresh failed for owner@example.invalid",
+                },
+            }
+        )
+    )
+
+    assert parsed.terminal_reason is contracts.TerminalReason.STARTUP_FAILURE
+    assert (
+        f"{prefix}CodexTurnErrorNotification: refresh failed for <redacted>"
+        in parsed.diagnostics
+    )
+    hostile = parser(
+        json.dumps(
+            {
+                "type": "error",
+                "reason": "startup",
+                "diagnostics": {"exception": "../evil", "message": "x"},
+            }
+        )
+    )
+    assert not any(item.startswith(prefix) for item in hostile.diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("parser", "subtype", "prefix"),
+    [
+        (claude.parse_claude_stream, "api_retry", "Claude API retry: "),
+        (codex.parse_codex_stream, "error_retry", "Codex API retry: "),
+    ],
+)
+def test_native_retry_events_keep_only_the_latest_sanitized_reason(
+    parser, subtype, prefix
+) -> None:
+    lines = [
+        json.dumps(
+            {
+                "type": "event",
+                "kind": "system",
+                "subtype": subtype,
+                "semantic": False,
+                "detail": f"attempt {attempt}/10: Connection error for owner@example.invalid",
+            }
+        )
+        for attempt in (1, 2)
+    ]
+    lines.append(json.dumps({"type": "error", "reason": "protocol"}))
+    parsed = parser("\n".join(lines))
+
+    retries = [item for item in parsed.diagnostics if item.startswith(prefix)]
+    assert retries == [f"{prefix}attempt 2/10: Connection error for <redacted>"]
+    assert parsed.terminal_reason is contracts.TerminalReason.PROTOCOL_FAILURE
+
+
+def test_claude_timeout_diagnostics_retain_latest_retry_reason_from_partial_stream() -> None:
+    stream = "\n".join(
+        [
+            json.dumps({"type": "event", "kind": "system", "subtype": "init"}),
+            json.dumps(
+                {
+                    "type": "event",
+                    "kind": "system",
+                    "subtype": "api_retry",
+                    "detail": "attempt 3/10: status 529: Overloaded",
+                }
+            ),
+            '{"type":"event","kind":"system","subtype":"api_re',
+        ]
+    )
+
+    assert claude._timeout_diagnostics(stream) == (
+        "Claude API retry: attempt 3/10: status 529: Overloaded",
+    )
+
+
+def test_claude_api_retry_detail_is_bounded_and_redacted() -> None:
+    detail = sdk_bridge._claude_api_retry_detail(
+        {
+            "attempt": 2,
+            "max_attempts": 10,
+            "error_status": 401,
+            "error": "  invalid token sk-ant-oat01-" + "a" * 48 + "  rejected ",
+        }
+    )
+
+    assert detail == "attempt 2/10: status 401: invalid token <redacted> rejected"
+    assert sdk_bridge._claude_api_retry_detail({"attempt": True}) is None
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_signalled_bridge_without_terminal_frame_is_a_transport_disconnect(
+    tmp_path: Path, vendor: str
+) -> None:
+    calls: list[list[str]] = []
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "event", "kind": "system", "subtype": "init"}),
+            json.dumps(
+                {
+                    "type": "event",
+                    "kind": "system",
+                    "subtype": "api_retry" if vendor == "claude" else "error_retry",
+                    "detail": "attempt 1/5: stream dropped",
+                }
+            ),
+        ]
+    ) + "\n"
+
+    def run_process(command, **_kwargs):
+        calls.append(list(command))
+        return process.ProcessResult(
+            returncode=-15,
+            stdout=stdout,
+            stderr="",
+            duration_s=1.1,
+            timed_out=False,
+        )
+
+    if vendor == "claude":
+        adapter = claude.ClaudeAdapter(
+            run_process=run_process,
+            run_probe=lambda *args, **kwargs: _auth_process_result(),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/claude",
+        )
+        result = adapter.run(claude_request(tmp_path))
+        prefix = "Claude"
+    else:
+        adapter = codex.CodexAdapter(
+            run_process=run_process,
+            run_probe=lambda *args, **kwargs: _codex_auth_process_result(),
+            sdk_available=lambda *_args: True,
+            which=lambda _name: "/usr/bin/codex",
+        )
+        result = adapter.run(codex_request(tmp_path))
+        prefix = "Codex"
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.TRANSPORT_DISCONNECT
+    assert result.returncode == -15
+    assert result.diagnostics[0] == f"{prefix} SDK bridge was disconnected"
+    assert f"{prefix} API retry: attempt 1/5: stream dropped" in result.diagnostics
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+@pytest.mark.parametrize(
+    "stream",
+    [
+        "{invalid-json\n",
+        "[]\n",
+        "x" * (contracts.MAX_PROTOCOL_LINE_BYTES + 1) + "\n",
+        json.dumps(
+            {
+                "type": "result",
+                "status": "invalid",
+                "terminal_reason": "completed",
+            }
+        )
+        + "\n",
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "result",
+                        "status": "completed",
+                        "terminal_reason": "completed",
+                        "structured_output": {"ok": True},
+                    }
+                ),
+                json.dumps(
+                    {"type": "event", "kind": "system", "subtype": "late"}
+                ),
+            ]
+        )
+        + "\n",
+    ],
+    ids=[
+        "invalid-json",
+        "non-object",
+        "oversized-frame",
+        "invalid-terminal-schema",
+        "frame-after-terminal",
+    ],
+)
+def test_signalled_bridge_malformed_protocol_is_not_masked_as_disconnect(
+    tmp_path: Path, vendor: str, stream: str
+) -> None:
+    outcome = process.ProcessResult(
+        returncode=-15,
+        stdout=stream,
+        stderr="",
+        duration_s=1.1,
+        timed_out=False,
+    )
+    if vendor == "claude":
+        result = claude.ClaudeAdapter(
+            run_process=lambda *_args, **_kwargs: outcome
+        )._run_sdk(claude_request(tmp_path))
+        prefix = "Claude"
+    else:
+        result = codex.CodexAdapter(
+            run_process=lambda *_args, **_kwargs: outcome
+        )._run_sdk(codex_request(tmp_path))
+        prefix = "Codex"
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.PROTOCOL_FAILURE
+    assert result.returncode == -15
+    assert result.diagnostics == (f"{prefix} SDK bridge emitted malformed protocol",)
+
+
+def test_codex_protected_fallback_carries_sanitized_sdk_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential = tmp_path / "auth.json"
+    credential.write_text(json.dumps(_protected_codex_auth()))
+    fd = os.open(credential, os.O_RDONLY)
+    monkeypatch.setenv(codex.CODEX_AUTH_FD_ENV, str(fd))
+    stdout = "\n".join(
+        [
+            json.dumps({"type": "event", "kind": "system", "subtype": "thread_started"}),
+            json.dumps(
+                {
+                    "type": "error",
+                    "reason": "protocol",
+                    "diagnostics": {
+                        "exception": "CodexTurnErrorNotification",
+                        "message": "Your access token could not be refreshed",
+                    },
+                }
+            ),
+        ]
+    ) + "\n"
+    calls: list[list[str]] = []
+
+    def run_process(command, **_kwargs):
+        calls.append(list(command))
+        return process.ProcessResult(
+            returncode=1, stdout=stdout, stderr="", duration_s=2.5, timed_out=False
+        )
+
+    def run_probe(*_args, **_kwargs):
+        return process.ProcessResult(
+            returncode=0,
+            stdout='{"type":"readiness","status":"ready"}\n',
+            stderr="",
+            duration_s=0.01,
+            timed_out=False,
+        )
+
+    adapter = codex.CodexAdapter(
+        run_process=run_process,
+        run_probe=run_probe,
+        sdk_available=lambda *_args: True,
+        which=lambda _name: "/usr/bin/codex",
+    )
+    try:
+        result = adapter.run(codex_request(tmp_path))
+    finally:
+        os.close(fd)
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.PROTOCOL_FAILURE
+    assert result.diagnostics[0] == "Codex SDK transport failed"
+    assert (
+        "Codex SDK failure: CodexTurnErrorNotification: "
+        "Your access token could not be refreshed"
+    ) in result.diagnostics
+    assert len(calls) == 1
+
+
+def test_claude_request_deadline_shorter_than_compat_probe_times_out(
+    tmp_path: Path,
+) -> None:
+    calls: list[list[str]] = []
+
+    probe_timeouts: list[float] = []
+
+    def run_probe(command, **kwargs):
+        if "bridge" in " ".join(str(part) for part in command):
+            probe_timeouts.append(kwargs["timeout_s"])
+            return process.ProcessResult(
+                returncode=None, stdout="", stderr="", duration_s=0.05, timed_out=True
+            )
+        return _auth_process_result()
+
+    def run_process(command, **_kwargs):
+        calls.append(list(command))
+        raise AssertionError("no run may start after the deadline elapsed")
+
+    adapter = claude.ClaudeAdapter(
+        run_process=run_process,
+        run_probe=run_probe,
+        sdk_available=lambda *_args: True,
+        which=lambda _name: "/usr/bin/claude",
+    )
+    request = replace(
+        claude_request(tmp_path), requested_model="claude-fable-5-1", timeout_s=0.05
+    )
+    result = adapter.run(request)
+
+    assert result.status is contracts.RuntimeStatus.TIMED_OUT
+    assert result.terminal_reason is contracts.TerminalReason.TIMEOUT
+    assert result.diagnostics == (
+        "Claude request deadline elapsed during SDK readiness",
+    )
+    assert calls == []
+    assert probe_timeouts == [pytest.approx(0.05)]
+    readiness = adapter.probe_sdk(replace(request, timeout_s=30))
+    assert probe_timeouts[-1] == pytest.approx(claude.SDK_IMPORT_TIMEOUT_S)
+    assert readiness.failure is contracts.ReadinessFailure.PROTOCOL_INCOMPATIBLE
+
+
+def test_codex_bridge_streams_through_retried_errors_and_fails_terminal_ones(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import openai_codex
+    from openai_codex.generated.v2_all import (
+        AgentMessageThreadItem,
+        ErrorNotification,
+        ItemCompletedNotification,
+        ThreadItem,
+        Turn,
+        TurnCompletedNotification,
+        TurnError,
+    )
+    from openai_codex.models import Notification
+
+    def error(message: str, *, will_retry: bool) -> Notification:
+        return Notification(
+            "error",
+            ErrorNotification(
+                error=TurnError(message=message),
+                threadId="private-thread",
+                turnId="private-turn",
+                willRetry=will_retry,
+            ),
+        )
+
+    message_item = ThreadItem(
+        root=AgentMessageThreadItem(
+            id="private-message-id",
+            text=json.dumps({"ok": True}),
+            phase="final_answer",
+            type="agentMessage",
+        )
+    )
+    events: list[Notification] = []
+
+    class FakeStream(list):
+        def close(self) -> None:
+            return None
+
+    class FakeTurn:
+        id = "private-turn"
+
+        def stream(self):
+            return FakeStream(events)
+
+    class FakeThread:
+        id = "private-thread"
+
+        def turn(self, *_args, **_kwargs):
+            return FakeTurn()
+
+    class FakeCodex:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def thread_start(self, **_kwargs):
+            return FakeThread()
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
+    monkeypatch.setattr(
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
+    )
+    request = {
+        "vendor": "codex",
+        "prompt": "private prompt",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-sol",
+        "effort": "high",
+        "read_only": True,
+        "budget_usd": None,
+        "commercial_mode": "subscription-only",
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+    }
+
+    events[:] = [
+        error(
+            "response_stream_disconnected: Reconnecting... 2/5 owner@example.invalid",
+            will_retry=True,
+        ),
+        Notification(
+            "item/completed",
+            ItemCompletedNotification(
+                completedAtMs=2,
+                item=message_item,
+                threadId="private-thread",
+                turnId="private-turn",
+            ),
+        ),
+        Notification(
+            "turn/completed",
+            TurnCompletedNotification(
+                threadId="private-thread",
+                turn=Turn(id="private-turn", items=[], status="completed"),
+            ),
+        ),
+    ]
+    sdk_bridge._run_codex(request)
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    retry = [frame for frame in frames if frame.get("subtype") == "error_retry"]
+    assert len(retry) == 1
+    assert retry[0]["semantic"] is False
+    assert retry[0]["detail"] == (
+        "response_stream_disconnected: Reconnecting... 2/5 <redacted>"
+    )
+    assert frames[-1]["status"] == "completed"
+    assert frames[-1]["structured_output"] == {"ok": True}
+
+    events[:] = [
+        error(
+            "Your access token could not be refreshed at /home/operator/.codex/auth.json",
+            will_retry=False,
+        )
+    ]
+    with pytest.raises(RuntimeError, match="protocol") as failure:
+        sdk_bridge._run_codex(request)
+    assert isinstance(failure.value.__cause__, sdk_bridge.CodexTurnErrorNotification)
+    assert sdk_bridge._sanitized_failure(failure.value) == {
+        "exception": "CodexTurnErrorNotification",
+        "message": "Your access token could not be refreshed at <redacted>",
+    }
+
+    events[:] = [
+        Notification(
+            "turn/completed",
+            TurnCompletedNotification(
+                threadId="private-thread",
+                turn=Turn(
+                    id="private-turn",
+                    items=[],
+                    status="failed",
+                    error=TurnError(
+                        message=(
+                            "rate limited for owner@example.invalid at "
+                            "/home/operator/project/output.json"
+                        )
+                    ),
+                ),
+            ),
+        ),
+    ]
+    sdk_bridge._run_codex(request)
+    frames = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert frames[-1]["status"] == "failed"
+    assert frames[-1]["diagnostics"] == {
+        "exception": "CodexTurnFailed",
+        "message": "failed: rate limited for <redacted> at <redacted>",
+    }
+    parsed = codex.parse_codex_stream(json.dumps(frames[-1]))
+    assert (
+        "Codex SDK failure: CodexTurnFailed: failed: rate limited for <redacted> at "
+        "<redacted>"
+    ) in parsed.diagnostics
+    assert "/home/operator" not in repr(parsed.diagnostics)
+
+
+def test_unbrokered_codex_sdk_turn_fails_before_launch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    import openai_codex
+
+    launches: list[None] = []
+
+    class FakeCodex:
+        def __init__(self, _config) -> None:
+            launches.append(None)
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(
+        sdk_bridge, "_materialize_codex_subscription_auth", lambda: (None, {}, None)
+    )
+
+    with pytest.raises(RuntimeError, match="startup"):
+        sdk_bridge._run_codex(
+            {
+                "vendor": "codex",
+                "prompt": "private prompt",
+                "cwd": str(tmp_path),
+                "requested_model": "gpt-5.6-sol",
+                "effort": "high",
+                "read_only": True,
+                "budget_usd": None,
+                "commercial_mode": "subscription-only",
+                "output_schema": {"type": "object"},
+                "read_roots": [str(tmp_path.resolve())],
+            }
+        )
+
+    assert launches == []
+
+
+def test_brokered_codex_turn_uses_private_home_and_runtime_overrides(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import openai_codex
+    from openai_codex.generated.v2_all import Turn, TurnCompletedNotification
+    from openai_codex.models import Notification
+
+    observed: list[object] = []
+
+    class FakeStream(list):
+        def close(self) -> None:
+            return None
+
+    class FakeTurn:
+        id = "private-turn"
+
+        def stream(self):
+            return FakeStream(
+                [
+                    Notification(
+                        "turn/completed",
+                        TurnCompletedNotification(
+                            threadId="private-thread",
+                            turn=Turn(id="private-turn", items=[], status="failed"),
+                        ),
+                    )
+                ]
+            )
+
+    class FakeThread:
+        id = "private-thread"
+
+        def turn(self, *_args, **_kwargs):
+            return FakeTurn()
+
+    class FakeCodex:
+        def __init__(self, config) -> None:
+            observed.append(config)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def thread_start(self, **_kwargs):
+            return FakeThread()
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_chatgpt_login", lambda *_args: None)
+    monkeypatch.setattr(sdk_bridge, "_enforce_codex_effective_config", lambda *_args: None)
+    operator_codex_home = str(tmp_path / "operator-codex-home")
+    operator_home = str(tmp_path / "operator-home")
+    monkeypatch.setenv("CODEX_HOME", operator_codex_home)
+    monkeypatch.setenv("HOME", operator_home)
+    monkeypatch.setattr(
+        sdk_bridge,
+        "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
+    )
+    sdk_bridge._run_codex(
+        {
+            "vendor": "codex",
+            "prompt": "private prompt",
+            "cwd": str(tmp_path),
+            "requested_model": "gpt-5.6-sol",
+            "effort": "high",
+            "read_only": True,
+            "budget_usd": None,
+            "commercial_mode": "subscription-only",
+            "output_schema": {"type": "object"},
+            "read_roots": [str(tmp_path.resolve())],
+        }
+    )
+    capsys.readouterr()
+
+    assert len(observed) == 1
+    private_home = str(tmp_path / "private-codex-home")
+    assert observed[0].env["CODEX_HOME"] == private_home
+    assert observed[0].env["HOME"] == private_home
+    assert operator_codex_home not in observed[0].env.values()
+    assert operator_home not in observed[0].env.values()
+    overrides = tuple(observed[0].config_overrides)
+    assert overrides == (
+        *sdk_bridge.codex_runtime_overrides(),
+        'model="gpt-5.6-sol"',
+        'model_reasoning_effort="high"',
+        'sandbox_mode="read-only"',
+        'approval_policy="never"',
+    )
+    assert not any("config_lockfile" in item for item in overrides)
+    assert not hasattr(sdk_bridge, "_codex_effective_config_lock")
+    payload = {
+        "vendor": "codex-lock",
+        "prompt": "private prompt",
+        "cwd": str(tmp_path),
+        "requested_model": "gpt-5.6-sol",
+        "effort": "high",
+        "read_only": True,
+        "budget_usd": None,
+        "output_schema": {"type": "object"},
+        "read_roots": [str(tmp_path.resolve())],
+    }
+    with pytest.raises(sdk_bridge.BridgeInputError, match="vendor is invalid"):
+        sdk_bridge._validate_request_payload(payload)
+    with pytest.raises(sdk_bridge.BridgeInputError, match="config lock target"):
+        sdk_bridge._validate_request_payload(
+            {
+                **payload,
+                "vendor": "codex",
+                "config_lock_target": str(tmp_path / "x.config.lock.toml"),
+            }
+        )
+
+
+@pytest.mark.parametrize("mode", ["probe", "turn"])
+@pytest.mark.parametrize("mutation", [
+    {"mcp_servers": {"hostile": {"command": "/bin/false"}}},
+    {"hooks": {"SessionStart": [{"hooks": [{"command": "/bin/false"}]}]}},
+    {"hooks": None},
+    {"mcp_servers": None},
+    {"model": "other"},
+    {"model_provider": "other"},
+    {"model_reasoning_effort": "low"},
+    {"service_tier": "fast"},
+    {"sandbox_mode": "danger-full-access"},
+    {"approval_policy": "on-request"},
+    {"sandbox_workspace_write": {"network_access": True}},
+    {"approvals_reviewer": "guardian_subagent"},
+    {"review_model": "other"},
+    {"model_providers": {"openai": {"base_url": "https://invalid.test"}}},
+    None,
+])
+def test_codex_effective_config_refusal_precedes_account_and_thread(
+    monkeypatch, tmp_path, capsys, mode, mutation
+):
+    import openai_codex
+
+    fixture = Path(__file__).with_name("fixtures") / "codex_effective_config_0_154_0.json"
+    payload = json.loads(fixture.read_text())
+    if mutation is not None:
+        payload["config"].update(mutation)
+    calls = []
+
+    class FakeCodex:
+        def __init__(self, config):
+            self._client = self
+
+        def __enter__(self):
+            calls.append("initialize")
+            return self
+
+        def __exit__(self, *_args):
+            calls.append("close")
+
+        def request(self, method, params, *, response_model):
+            calls.append(method)
+            if mutation is None:
+                raise ValueError("unreadable configuration")
+            return response_model.model_validate(payload)
+
+        def account(self, **_kwargs):
+            calls.append("account")
+            raise AssertionError("account must not be used")
+
+        def thread_start(self, **_kwargs):
+            calls.append("thread")
+            raise AssertionError("thread must not start")
+
+    monkeypatch.setattr(openai_codex, "Codex", FakeCodex)
+    monkeypatch.setattr(
+        sdk_bridge, "_materialize_codex_subscription_auth",
+        lambda: _fake_brokered_codex_auth(tmp_path),
+    )
+    request = dict(vendor="codex", prompt="private prompt", cwd=str(tmp_path),
+                   requested_model="gpt-5.6-sol", effort="high", read_only=True,
+                   budget_usd=None, commercial_mode="subscription-only",
+                   output_schema={"type": "object"}, read_roots=[str(tmp_path)])
+    if mode == "probe":
+        sdk_bridge._probe_codex_app_server(request)
+        assert json.loads(capsys.readouterr().out) == {
+            "type": "readiness", "status": "failed", "failure": "bootstrap"
+        }
+    else:
+        with pytest.raises(RuntimeError, match="unavailable"):
+            sdk_bridge._run_codex(request)
+    assert calls == ["initialize", "config/read", "close"]
+
+
+@pytest.mark.parametrize("path,output,exit_code,denied", [
+    ("/etc/shadow", "cat: /etc/shadow: Permission denied", 1, True),
+    ("/etc/shadow", "cat: /etc/shadow: Operation not permitted", 1, True),
+    ("/etc/shadow", "cat: /etc/shadow: No such file or directory", 1, False),
+    ("/etc/shadow", "cat: /etc/other: Permission denied", 1, False),
+    ("/etc/other", "cat: /etc/shadow: Permission denied", 1, False),
+    ("/etc/shadow", "cat: /etc/shadow: Permission denied", 0, False),
+    ("/etc/shadow", "private file contents", 0, False),
+])
+def test_codex_command_denial_requires_attempted_read_and_matching_tool_error(
+    capsys, path, output, exit_code, denied
+):
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+
+    item = CommandExecutionThreadItem.model_validate({
+        "id": "test", "type": "commandExecution", "command": "cat /etc/shadow",
+        "cwd": "/tmp", "status": "completed", "exitCode": exit_code,
+        "aggregatedOutput": output,
+        "commandActions": [{"type": "read", "command": "cat /etc/shadow",
+                            "name": "cat", "path": path}],
+    })
+    sdk_bridge._codex_command_completion(item, started_read=("test", "cat /etc/shadow"))
+    stream = capsys.readouterr().out
+    assert output not in stream
+    assert "private command" not in stream
+    result = codex.parse_codex_stream(stream + json.dumps({
+        "type": "result", "status": "completed", "terminal_reason": "completed",
+        "output": "done",
+    }) + "\n")
+    assert any(event.subtype == "denied:/etc/shadow" for event in result.events) is denied
+    assert result.diagnostics[0].startswith("Codex command completed:")
+
+
+@pytest.mark.parametrize("mutation,denied", [
+    ({}, True),
+    ({"started": False}, False),
+    ({"actions": []}, False),
+    ({"completed_id": "other-item"}, False),
+    ({"completed_thread": "other-thread"}, False),
+    ({"completed_turn": "other-turn"}, False),
+    ({"exit_code": 0}, False),
+    ({"status": "declined"}, False),
+    ({"output": "cat: /etc/other: Permission denied"}, False),
+    ({"output": "error: unexpected argument '--/etc/shadow: Permission denied' found"}, False),
+    ({"command": "false && cat /etc/shadow"}, False),
+    ({"command": "cat /etc/shadow --'/etc/shadow: Permission denied'"}, False),
+    ({"command": "printf 'cat: /etc/shadow: Permission denied'; false && cat /etc/shadow"}, False),
+])
+def test_codex_denial_binds_sdk_started_read_completion_and_output(
+    command_completion_stream, mutation, denied
+):
+    arguments = dict(
+        command="/bin/bash -lc 'cat /etc/shadow'",
+        actions=[{"type": "read", "command": "cat /etc/shadow", "name": "shadow", "path": "/etc/shadow"}],
+        exit_code=1, output="cat: /etc/shadow: Permission denied",
+    )
+    arguments.update(mutation)
+    stream = command_completion_stream(**arguments)
+    parsed = codex.parse_codex_stream(stream)
+    evidence = [event for event in parsed.events if event.subtype == "denied:/etc/shadow"]
+    assert bool(evidence) is denied
+    if denied:
+        assert evidence[0].item_id == "private-command-id"
+    assert "cat: /etc/shadow: Permission denied" not in stream
+
+
+@pytest.mark.parametrize("source", ["userShell", "agent"])
+def test_codex_native_option_error_cannot_manufacture_denial(capsys, source):
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+
+    fixture = Path(__file__).with_name("fixtures") / "codex_shadow_option_error_0_154_0.json"
+    payload = json.loads(fixture.read_text())
+    payload["source"] = source
+    item = CommandExecutionThreadItem.model_validate(payload)
+    sdk_bridge._codex_command_completion(
+        item, started_read=(item.id, item.command_actions[0].root.command)
+    )
+    assert "denied:/etc/shadow" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("broker", [claude, codex], ids=["claude", "codex"])

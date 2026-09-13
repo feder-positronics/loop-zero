@@ -88,9 +88,30 @@ def _write_credential(path: Path, payload: dict) -> None:
 
 
 def _runtime_snapshot(payload: dict) -> dict:
-    snapshot = json.loads(json.dumps(payload))
-    snapshot["tokens"]["refresh_token"] = snapshot["tokens"]["access_token"]
-    return snapshot
+    tokens = payload["tokens"]
+    return {
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "access_token": tokens["access_token"],
+            "id_token": tokens["id_token"],
+            "refresh_token": tokens["access_token"],
+            "account_id": tokens["account_id"],
+        },
+        "last_refresh": payload["last_refresh"],
+    }
+
+
+def test_codex_snapshot_drops_unrecognized_credential_fields() -> None:
+    payload = _credential(expires_at_s=3_000)
+    payload["future_secret"] = "must-not-reach-worker"
+    payload["tokens"]["future_refresh"] = "must-not-reach-worker"
+    validated = codex_credential._validate_payload(json.dumps(payload).encode())
+
+    snapshot = codex_credential._sandbox_snapshot_payload(validated)
+
+    assert b"must-not-reach-worker" not in snapshot
+    assert json.loads(snapshot) == _runtime_snapshot(payload)
 
 
 def test_fresh_codex_credential_is_snapshotted_without_refresh(
@@ -112,6 +133,26 @@ def test_fresh_codex_credential_is_snapshotted_without_refresh(
         snapshot = json.loads(os.pread(descriptor, 1024 * 1024, 0))
         assert snapshot == _runtime_snapshot(payload)
         assert snapshot["tokens"]["refresh_token"] != "refresh"
+
+
+def test_expiring_access_only_codex_credential_is_cleanly_unavailable(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / ".codex" / "auth.json"
+    payload = _credential(expires_at_s=1_100)
+    payload["tokens"]["refresh_token"] = payload["tokens"]["access_token"]
+    _write_credential(credential, payload)
+
+    with pytest.raises(codex_credential.CodexCredentialUnavailable):
+        with codex_credential.codex_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+            run_refresh=lambda *_args, **_kwargs: pytest.fail(
+                "access-only credentials must never refresh"
+            ),
+        ):
+            pass
 
 
 def test_near_expiry_codex_credential_refreshes_and_persists_rotated_token(
@@ -525,3 +566,20 @@ def test_codex_refresh_wrapper_binds_sdk_venv_bridge_and_workspace(
         for index in range(len(actual_argv) - 2)
     ]
     assert not actual_spec.private_tmpdir.exists()
+
+
+def test_codex_snapshot_carries_last_refresh_so_app_server_uses_the_access_token() -> None:
+    payload = _credential(expires_at_s=3_000)
+    validated = codex_credential._validate_payload(json.dumps(payload).encode())
+
+    snapshot = json.loads(codex_credential._sandbox_snapshot_payload(validated))
+
+    assert snapshot["last_refresh"] == "2026-08-31T00:00:00Z"
+    assert snapshot["tokens"]["refresh_token"] == snapshot["tokens"]["access_token"]
+
+    del payload["last_refresh"]
+    validated = codex_credential._validate_payload(json.dumps(payload).encode())
+    stamped = json.loads(codex_credential._sandbox_snapshot_payload(validated))
+    assert isinstance(stamped["last_refresh"], str)
+    assert stamped["last_refresh"].endswith("Z")
+    assert set(stamped) == {"auth_mode", "OPENAI_API_KEY", "tokens", "last_refresh"}

@@ -11,6 +11,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -23,6 +24,7 @@ from .contract import (
     MAX_PROTOCOL_LINE_BYTES,
     MAX_STRUCTURED_OUTPUT_BYTES,
     ReadinessFailure,
+    RuntimeCostStatus,
     RuntimeEvent,
     RuntimeHandle,
     RuntimeProgressCallback,
@@ -35,11 +37,15 @@ from .contract import (
     SubscriptionEligibility,
     TerminalReason,
     is_valid_resume_session_id,
+    sanitized_bridge_failure,
+    sanitized_bridge_text,
 )
+from .pricing import estimated_cost_usd
 from .process import (
     ProcessHandle,
     ProcessResult,
     SandboxWrapper,
+    bridge_process_could_not_start,
     cancel_cli,
     filtered_child_environment,
     isolated_python_import_available,
@@ -141,9 +147,16 @@ CODEX_BLOCKED_ENV_VARS = frozenset(
 class CodexProtocolError(ValueError):
     """Codex emitted malformed or incomplete normalized protocol output."""
 
-    def __init__(self, message: str, *, semantic_event: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        semantic_event: bool = False,
+        incomplete_stream: bool = False,
+    ) -> None:
         super().__init__(message)
         self.semantic_event = semantic_event
+        self.incomplete_stream = incomplete_stream
 
 
 @dataclass(frozen=True, slots=True)
@@ -256,7 +269,7 @@ def map_codex_effort(effort: str) -> str:
 
 def build_codex_bootstrap_command(export_dir: Path) -> list[str]:
     """Build a local-only CLI command that exports authoritative defaults."""
-    command = ["codex"]
+    command = [get_settings().cli("codex", "codex")]
     for override in codex_bootstrap_overrides(export_dir):
         command.extend(("-c", override))
     command.extend(("debug", "prompt-input", "config lock bootstrap"))
@@ -284,7 +297,7 @@ def build_codex_command(
     )
     effort = map_codex_effort(request.effort)
     command = [
-        "codex",
+        get_settings().cli("codex", "codex"),
         "-c",
         codex_config_lock_override(config_lock),
     ]
@@ -647,9 +660,16 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                     "Codex event semantic marker was invalid",
                     semantic_event=semantic_seen,
                 )
-            event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
+            item_id = _bounded_string(raw.get("item_id"), "item_id")
+            if kind == "tool" and subtype == "denied:/etc/shadow" and item_id is None:
+                continue
+            event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic, item_id=item_id)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
+            if kind == "system" and subtype == "error_retry":
+                _retain_api_retry_diagnostic(
+                    diagnostics, raw.get("detail"), MAX_DIAGNOSTICS
+                )
             event_session_id = _bounded_string(raw.get("session_id"), "session_id")
             if event_session_id is not None:
                 session_id = event_session_id
@@ -698,6 +718,11 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                     semantic=True,
                 ),
             )
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None:
+                _retain_priority_diagnostic(
+                    diagnostics, f"Codex SDK failure: {failure}", MAX_DIAGNOSTICS
+                )
             semantic_seen = True
             continue
 
@@ -707,17 +732,23 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                 "startup",
                 "protocol",
                 "disconnect",
+                "unavailable",
             }:
                 raise CodexProtocolError(
                     "Codex error frame was unknown",
                     semantic_event=semantic_seen,
                 )
             terminal = (
-                RuntimeStatus.FAILED,
+                (
+                    RuntimeStatus.SUBSCRIPTION_UNAVAILABLE
+                    if error_reason == "unavailable"
+                    else RuntimeStatus.FAILED
+                ),
                 {
                     "startup": TerminalReason.STARTUP_FAILURE,
                     "protocol": TerminalReason.PROTOCOL_FAILURE,
                     "disconnect": TerminalReason.TRANSPORT_DISCONNECT,
+                    "unavailable": TerminalReason.SUBSCRIPTION_UNAVAILABLE,
                 }[error_reason],
             )
             _retain_priority_diagnostic(
@@ -726,9 +757,15 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                     "startup": "Codex SDK startup failed",
                     "protocol": "Codex SDK protocol failed",
                     "disconnect": "Codex SDK transport disconnected",
+                    "unavailable": "Codex SDK effective configuration was unavailable",
                 }[error_reason],
                 MAX_DIAGNOSTICS,
             )
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None:
+                _retain_priority_diagnostic(
+                    diagnostics, f"Codex SDK failure: {failure}", MAX_DIAGNOSTICS
+                )
             continue
 
         _retain_priority_diagnostic(
@@ -744,6 +781,7 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
         raise CodexProtocolError(
             missing_terminal_diagnostic,
             semantic_event=semantic_seen,
+            incomplete_stream=True,
         )
 
     return ParsedCodexStream(
@@ -820,6 +858,24 @@ def _command_completion_diagnostic(frame: Mapping[str, object]) -> str | None:
     )
 
 
+API_RETRY_DIAGNOSTIC_PREFIX = "Codex API retry: "
+
+
+def _retain_api_retry_diagnostic(
+    diagnostics: list[str], detail: object, limit: int
+) -> None:
+    """Keep only the latest sanitized app-server retry reason within the bound."""
+    text = sanitized_bridge_text(detail)
+    if text is None:
+        return
+    diagnostic = f"{API_RETRY_DIAGNOSTIC_PREFIX}{text}"
+    for index, existing in enumerate(diagnostics):
+        if existing.startswith(API_RETRY_DIAGNOSTIC_PREFIX):
+            diagnostics[index] = diagnostic
+            return
+    _retain_priority_diagnostic(diagnostics, diagnostic, limit)
+
+
 def _retain_priority_diagnostic(diagnostics: list[str], diagnostic: str, limit: int) -> None:
     """Fixed runtime warnings displace command outcomes, never other warnings."""
     if len(diagnostics) >= limit:
@@ -844,6 +900,16 @@ def _retain_command_completion(diagnostics: list[str], frame: Mapping[str, objec
                     break
 
 
+def _bridge_killed_by_signal(outcome: ProcessResult) -> bool:
+    """An externally signalled bridge without a terminal frame was disconnected."""
+    return (
+        outcome.returncode is not None
+        and outcome.returncode < 0
+        and not outcome.cancelled
+        and not outcome.timed_out
+    )
+
+
 def _timeout_diagnostics(stream: str) -> tuple[str, ...]:
     """Retain bounded diagnostics only; buffered frames confer no result authority."""
     if len(stream) > MAX_BRIDGE_LINE_BYTES:
@@ -863,6 +929,15 @@ def _timeout_diagnostics(stream: str) -> tuple[str, ...]:
                 continue
             if raw.get("type") == "event" and raw.get("kind") == "command_completion":
                 _retain_command_completion(diagnostics, raw, MAX_DIAGNOSTICS - 1)
+                continue
+            if (
+                raw.get("type") == "event"
+                and raw.get("kind") == "system"
+                and raw.get("subtype") == "error_retry"
+            ):
+                _retain_api_retry_diagnostic(
+                    diagnostics, raw.get("detail"), MAX_DIAGNOSTICS - 1
+                )
                 continue
             if raw.get("type") != "error":
                 continue
@@ -901,6 +976,25 @@ class CodexAdapter:
         self._which = which
         self._settings = get_settings()
 
+    def _auth_status_command(self) -> list[str]:
+        return [self._settings.cli("codex", "codex"), "login", "status"]
+
+    @staticmethod
+    def _parse_cli_version(output: str) -> str:
+        match = re.search(
+            r"^codex-cli (\d+\.\d+\.\d+)\b", output.strip()
+        )
+        if match is None:
+            raise CodexProtocolError("Codex CLI version output was invalid")
+        return match.group(1)
+
+    def _cli_available(self) -> bool:
+        path = self._settings.codex_cli_path
+        return (
+            path.is_file() and os.access(path, os.X_OK)
+            if path is not None else self._which("codex") is not None
+        )
+
     @staticmethod
     def _default_sdk_available(python: Path, cwd: Path) -> bool:
         del cwd
@@ -931,13 +1025,43 @@ class CodexAdapter:
                 failure=ReadinessFailure.SUBSCRIPTION_UNAVAILABLE,
                 repair="confirm the approved Codex ChatGPT subscription login path",
             )
-        if self._which("codex") is None:
+        if not self._cli_available():
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
                 failure=ReadinessFailure.EXECUTABLE_MISSING,
                 repair="install or restore the approved Codex CLI",
             )
+        pinned_path = self._settings.codex_cli_path
+        if pinned_path is not None:
+            try:
+                version_outcome = self._run_probe(
+                    [str(pinned_path), "--version"],
+                    cwd=request.cwd,
+                    input_text="",
+                    timeout_s=AUTH_STATUS_TIMEOUT_S,
+                    env=filtered_codex_environment(),
+                )
+                version = self._parse_cli_version(
+                    version_outcome.stdout or version_outcome.stderr
+                )
+            except (OSError, subprocess.TimeoutExpired, CodexProtocolError):
+                version_outcome = None
+                version = None
+            if (
+                version_outcome is None
+                or version_outcome.timed_out
+                or version_outcome.output_limited
+                or version_outcome.returncode != 0
+                or version != PINNED_CODEX_VERSION
+            ):
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.SDK_VERSION_MISMATCH,
+                    repair="restore the pinned Codex CLI version",
+                    transport=CODEX_SDK_TRANSPORT,
+                )
         raw_auth_fd = os.environ.get(get_settings().env_name("CODEX_AUTH_FD"))
         if raw_auth_fd is not None:
             try:
@@ -969,7 +1093,7 @@ class CodexAdapter:
             )
         try:
             outcome = self._run_probe(
-                AUTH_STATUS_COMMAND,
+                self._auth_status_command(),
                 cwd=request.cwd,
                 input_text="",
                 timeout_s=AUTH_STATUS_TIMEOUT_S,
@@ -1115,6 +1239,16 @@ class CodexAdapter:
                 repair="repair the isolated Codex app-server bootstrap",
                 transport=CODEX_SDK_TRANSPORT,
             )
+        if bridge_process_could_not_start(outcome):
+            return RuntimeReadiness(
+                ready=False,
+                eligibility=SubscriptionEligibility.UNAVAILABLE,
+                failure=ReadinessFailure.CONTAINMENT_FAILURE,
+                repair=(
+                    "repair runtime containment so the Codex SDK bridge can start"
+                ),
+                transport=CODEX_SDK_TRANSPORT,
+            )
         try:
             failure = parse_codex_sdk_readiness(outcome.stdout)
         except CodexProtocolError:
@@ -1236,6 +1370,22 @@ class CodexAdapter:
             if sdk_readiness.ready:
                 request = replace(request, transport=CODEX_SDK_TRANSPORT)
             else:
+                if os.environ.get(
+                    get_settings().env_name("CODEX_AUTH_FD")
+                ) is not None:
+                    # A protected snapshot is deliberately unusable by the CLI.
+                    # Preserve the app-server diagnosis and do not probe or
+                    # record a fallback that policy can never launch.
+                    sdk_request = replace(request, transport=CODEX_SDK_TRANSPORT)
+                    unavailable = self._unavailable(sdk_request, sdk_readiness)
+                    return replace(
+                        unavailable,
+                        transport_attempts=(
+                            self._readiness_attempt(
+                                sdk_request, sdk_readiness, selected_next=False
+                            ),
+                        ),
+                    )
                 fallback_request = replace(
                     request,
                     transport=CODEX_CLI_TRANSPORT,
@@ -1368,6 +1518,14 @@ class CodexAdapter:
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Codex CLI timed out",),
             )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Codex CLI was cancelled",),
+            )
         if outcome.output_limited:
             return self._result(
                 request,
@@ -1485,6 +1643,14 @@ class CodexAdapter:
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Codex SDK bridge timed out", *_timeout_diagnostics(outcome.stdout)),
             )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Codex SDK bridge was cancelled",),
+            )
         if outcome.output_limited:
             return self._result(
                 request,
@@ -1496,6 +1662,25 @@ class CodexAdapter:
         try:
             parsed = parse_codex_stream(outcome.stdout)
         except CodexProtocolError as exc:
+            if _bridge_killed_by_signal(outcome):
+                if exc.incomplete_stream:
+                    return self._result(
+                        request,
+                        outcome=outcome,
+                        status=RuntimeStatus.FAILED,
+                        reason=TerminalReason.TRANSPORT_DISCONNECT,
+                        diagnostics=(
+                            "Codex SDK bridge was disconnected",
+                            *_timeout_diagnostics(outcome.stdout),
+                        ),
+                    )
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.PROTOCOL_FAILURE,
+                    diagnostics=("Codex SDK bridge emitted malformed protocol",),
+                )
             if request.read_only and not exc.semantic_event:
                 return self._run_read_only_fallback(
                     request,
@@ -1516,6 +1701,18 @@ class CodexAdapter:
                 diagnostics=("Codex SDK bridge emitted malformed protocol",),
             )
         if parsed.status is None or parsed.terminal_reason is None:
+            if _bridge_killed_by_signal(outcome):
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.TRANSPORT_DISCONNECT,
+                    events=parsed.events,
+                    diagnostics=(
+                        "Codex SDK bridge was disconnected",
+                        *parsed.diagnostics,
+                    ),
+                )
             if request.read_only and not parsed.semantic_event:
                 return self._run_read_only_fallback(
                     request,
@@ -1545,6 +1742,7 @@ class CodexAdapter:
                 reason=parsed.terminal_reason,
                 duration_s=outcome.duration_s,
                 progress_diagnostic=outcome.progress_diagnostic,
+                sdk_diagnostics=parsed.diagnostics,
             )
         status = parsed.status
         reason = parsed.terminal_reason
@@ -1576,6 +1774,7 @@ class CodexAdapter:
         reason: TerminalReason,
         duration_s: float | None = None,
         progress_diagnostic: bool = False,
+        sdk_diagnostics: tuple[str, ...] = (),
     ) -> RuntimeResult:
         def retain_progress_diagnostic(result: RuntimeResult) -> RuntimeResult:
             if (
@@ -1589,10 +1788,46 @@ class CodexAdapter:
             )
             return replace(result, diagnostics=tuple(diagnostics))
 
+        # Sanitized SDK bridge diagnostics explain why the preferred transport
+        # failed; keep them behind the fixed transport diagnostic.
+        preferred_diagnostics = tuple(
+            item for item in sdk_diagnostics
+            if item.startswith(("Codex SDK failure:", "Codex SDK "))
+        )[: MAX_DIAGNOSTICS - 1]
+
         fallback_request = replace(
             request,
             transport=CODEX_CLI_TRANSPORT,
         )
+        if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
+            preferred = RuntimeTransportAttempt(
+                transport=request.transport,
+                requested_model=request.requested_model,
+                phase="run",
+                status=RuntimeStatus.FAILED.value,
+                terminal_reason=reason.value,
+                failure_class=(
+                    "startup"
+                    if reason is TerminalReason.STARTUP_FAILURE
+                    else "protocol"
+                ),
+                duration_s=duration_s,
+                semantic=False,
+                selected_next=False,
+            )
+            original = self._failure(
+                request,
+                status=RuntimeStatus.FAILED,
+                reason=reason,
+                diagnostics=("Codex SDK transport failed", *preferred_diagnostics),
+            )
+            return retain_progress_diagnostic(
+                replace(
+                    original,
+                    duration_s=duration_s,
+                    transport_attempts=(preferred,),
+                )
+            )
         readiness = self._cli_launch_readiness(fallback_request)
         preferred = RuntimeTransportAttempt(
             transport=request.transport,
@@ -1609,23 +1844,6 @@ class CodexAdapter:
         )
         if not readiness.ready:
             unavailable = self._unavailable(fallback_request, readiness)
-            if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
-                original = self._failure(
-                    request,
-                    status=RuntimeStatus.FAILED,
-                    reason=reason,
-                    diagnostics=("Codex SDK transport failed",),
-                )
-                return retain_progress_diagnostic(
-                    replace(
-                        original,
-                        duration_s=duration_s,
-                        transport_attempts=(
-                            preferred,
-                            *unavailable.transport_attempts,
-                        ),
-                    )
-                )
             return retain_progress_diagnostic(
                 replace(
                     unavailable,
@@ -1741,6 +1959,18 @@ class CodexAdapter:
         structured_output: dict[str, object] | None = None,
     ) -> RuntimeResult:
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
+        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        budget = get_settings().budget
+        measured_tokens = usage.output_tokens if usage is not None else None
+        if budget is not None and (
+            (measured_tokens is not None and measured_tokens > budget.max_tokens)
+            or (normalized_cost is not None and normalized_cost > budget.max_usd)
+        ):
+            status = RuntimeStatus.FAILED
+            reason = TerminalReason.BUDGET_EXHAUSTED
+            bounded_diagnostics = ["Codex normalized budget was exhausted"]
+            final_output = None
+            structured_output = None
         if outcome is not None and outcome.progress_diagnostic:
             _retain_priority_diagnostic(
                 bounded_diagnostics,
@@ -1758,7 +1988,12 @@ class CodexAdapter:
             session_id=session_id,
             request_id=request_id,
             usage=usage,
-            cost_usd=cost_usd,
+            cost_usd=normalized_cost,
+            cost_status=(
+                RuntimeCostStatus.ESTIMATED
+                if normalized_cost is not None
+                else RuntimeCostStatus.UNKNOWN
+            ),
             eligibility=request.eligibility,
             fallback_from=request.fallback_from,
             events=events,
@@ -1886,14 +2121,38 @@ def _validate_payload(payload: bytes) -> _ValidatedCredential:
 
 
 def _sandbox_snapshot_payload(credential: _ValidatedCredential) -> bytes:
-    """Remove the durable refresh capability from a runtime snapshot."""
+    """Allowlist runtime fields and remove the durable refresh capability."""
     decoded = json.loads(credential.payload)
     tokens = decoded["tokens"]
     assert isinstance(tokens, dict)
     access_token = tokens["access_token"]
     assert isinstance(access_token, str)
-    tokens["refresh_token"] = access_token
-    return json.dumps(decoded, separators=(",", ":")).encode("utf-8")
+    # Codex 0.154 treats a missing last_refresh as stale and refreshes before
+    # its first backend call; with the refresh capability removed that refresh
+    # can only fail.  Carry the validated source's timestamp (or the seal
+    # time) so the access token is used for its remaining lifetime instead.
+    last_refresh = decoded.get("last_refresh")
+    if not isinstance(last_refresh, str) or not last_refresh:
+        last_refresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    snapshot = {
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": None,
+        "tokens": {
+            "access_token": access_token,
+            "id_token": tokens["id_token"],
+            "refresh_token": access_token,
+            "account_id": tokens["account_id"],
+        },
+        "last_refresh": last_refresh,
+    }
+    return json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
+
+
+def _is_access_only_credential(credential: _ValidatedCredential) -> bool:
+    decoded = json.loads(credential.payload)
+    tokens = decoded["tokens"]
+    assert isinstance(tokens, dict)
+    return tokens.get("refresh_token") == tokens.get("access_token")
 
 
 def _read_credential(path: Path) -> _ValidatedCredential:
@@ -2195,6 +2454,10 @@ def codex_subscription_credential(
         horizon_s = now_s + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
         credential = _read_credential(path)
         if credential.expires_at_s <= horizon_s:
+            if _is_access_only_credential(credential):
+                raise CodexCredentialUnavailable(
+                    "Codex access-only credential is unavailable for the requested run"
+                )
             refreshed = _refresh_credential(
                 credential,
                 horizon_s=horizon_s,
@@ -2224,10 +2487,16 @@ def codex_subscription_credential(
 import json
 from pathlib import Path
 
-PINNED_CODEX_VERSION = "0.147.0"
+PINNED_CODEX_VERSION = "0.154.0"
 MAX_CONFIG_LOCK_BYTES = 512 * 1024
 
 _DISABLED_FEATURES = (
+    "background_paginated_rollout_migration",
+    "mcp_2026_07_28",
+    "memories",
+    "mentions_v2",
+    "remote_control",
+    "windows_sandbox_service",
     "apps",
     "auth_elicitation",
     "browser_use",
@@ -2255,7 +2524,7 @@ _DISABLED_FEATURES = (
 
 
 def codex_runtime_overrides() -> tuple[str, ...]:
-    """Build the closed highest-precedence runtime configuration layer."""
+    """Build restrictive static overrides; the bridge attests merged config."""
     fixed = (
         'model_provider="openai"',
         'service_tier="default"',
@@ -2271,11 +2540,20 @@ def codex_runtime_overrides() -> tuple[str, ...]:
         "include_collaboration_mode_instructions=false",
         "features.code_mode_host=true",
     )
-    return (*fixed, *(f"features.{name}=false" for name in _DISABLED_FEATURES))
+    budget = get_settings().budget
+    budget_overrides = (
+        (f"output_token_limit={budget.max_tokens}",)
+        if budget is not None else ()
+    )
+    return (
+        *fixed,
+        *budget_overrides,
+        *(f"features.{name}=false" for name in _DISABLED_FEATURES),
+    )
 
 
 def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
-    """Build a closed config layer used only to export an effective lock."""
+    """Build restrictive config used only to export an effective lock."""
     return (
         f"debug.config_lockfile.export_dir={json.dumps(str(export_dir))}",
         *codex_runtime_overrides(),

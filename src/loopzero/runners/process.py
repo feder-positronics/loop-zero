@@ -204,6 +204,31 @@ def _private_state_root() -> Path:
     return root
 
 
+def private_session_home() -> Path | None:
+    """Validate the optional caller-owned session home below private state.
+
+    The live conformance suite owns this directory across two adapter
+    launches.  Ordinary callers leave it unset and retain per-launch state.
+    """
+    configured = get_settings().session_home
+    if configured is None:
+        return None
+    try:
+        directory = configured.resolve(strict=True)
+        metadata = directory.stat(follow_symlinks=False)
+    except OSError as exc:
+        raise ProcessGroupError("runtime session home is unavailable") from exc
+    if (
+        directory.is_symlink()
+        or not stat.S_ISDIR(metadata.st_mode)
+        or metadata.st_uid != os.getuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o700
+        or directory.parent != _private_state_root()
+    ):
+        raise ProcessGroupError("runtime session home is unsafe")
+    return directory
+
+
 @contextmanager
 def private_temporary_directory(kind: str):
     """Create and scrub one random 0700 directory below the private state root.
@@ -257,6 +282,7 @@ class ProcessLaunchIdentity:
 
 
 ProcessLaunchCallback = Callable[[ProcessLaunchIdentity], None]
+ProcessHandleCallback = Callable[["ProcessHandle"], None]
 ProcessIdentityState = Literal["active", "gone", "unverifiable"]
 
 
@@ -278,8 +304,31 @@ class ProcessResult:
     stderr: str = field(repr=False)
     duration_s: float
     timed_out: bool
+    cancelled: bool = False
     output_limited: bool = False
     progress_diagnostic: bool = False
+
+
+_BRIDGE_START_ERROR_MARKERS = (
+    "execvp",
+    "enoent",
+    "eacces",
+    "no such file or directory",
+    "permission denied",
+    "operation not permitted",
+)
+
+
+def bridge_process_could_not_start(outcome: ProcessResult) -> bool:
+    """Recognize a wrapper/exec failure before a bridge can emit a frame."""
+    return (
+        outcome.returncode != 0
+        and not outcome.stdout.strip()
+        and any(
+            marker in outcome.stderr.lower()
+            for marker in _BRIDGE_START_ERROR_MARKERS
+        )
+    )
 
 
 def _launch_identity_prerequisites() -> tuple[str, int]:
@@ -552,6 +601,7 @@ def launch_cli(
     pass_fds: Sequence[int] = (),
     progress_fd: int | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    on_handle: ProcessHandleCallback | None = None,
     private_mounts: Sequence[Path] = (),
     private_tmpdir: Path | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
@@ -588,10 +638,14 @@ def launch_cli(
             raise ProcessGroupError("sandboxed runtime private tmpdir is unsafe") from exc
         if not resolved_tmpdir.is_dir() or resolved_tmpdir.parent != _private_state_root():
             raise ProcessGroupError("sandboxed runtime private tmpdir is unsafe")
+        resolved_mounts = tuple(private_mounts)
+        session_home = private_session_home()
+        if session_home is not None and session_home not in resolved_mounts:
+            resolved_mounts = (*resolved_mounts, session_home)
         launch_spec = LaunchSpec(
             argv=tuple(command),
             cwd=cwd,
-            private_mounts=tuple(private_mounts),
+            private_mounts=resolved_mounts,
             private_tmpdir=resolved_tmpdir,
         )
         launch_command = list(sandbox_wrapper(launch_spec))
@@ -640,6 +694,12 @@ def launch_cli(
             raise ProcessIdentityError(
                 "runtime launch identity could not be persisted"
             ) from exc
+    if on_handle is not None:
+        try:
+            on_handle(handle)
+        except BaseException:
+            cancel_cli(handle)
+            raise
     return handle
 
 
@@ -765,6 +825,7 @@ def _run_cli_with_private_tmpdir(
     max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
     on_progress: RuntimeProgressCallback | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    on_handle: ProcessHandleCallback | None = None,
     private_mounts: Sequence[Path] = (),
     private_tmpdir: Path | None,
     sandbox_wrapper: SandboxWrapper | None = None,
@@ -800,6 +861,7 @@ def _run_cli_with_private_tmpdir(
             pass_fds=inherited_fds,
             progress_fd=progress_write_fd,
             on_launch=on_launch,
+            on_handle=on_handle,
             private_mounts=private_mounts,
             private_tmpdir=private_tmpdir,
             sandbox_wrapper=sandbox_wrapper,
@@ -953,6 +1015,7 @@ def run_cli(
     max_stderr_bytes: int = DEFAULT_STDERR_LIMIT_BYTES,
     on_progress: RuntimeProgressCallback | None = None,
     on_launch: ProcessLaunchCallback | None = None,
+    on_handle: ProcessHandleCallback | None = None,
     private_mounts: Sequence[Path] = (),
     sandbox_wrapper: SandboxWrapper | None = None,
     unsandboxed: bool = False,
@@ -972,6 +1035,7 @@ def run_cli(
             max_stderr_bytes=max_stderr_bytes,
             on_progress=on_progress,
             on_launch=on_launch,
+            on_handle=on_handle,
             private_mounts=private_mounts,
             private_tmpdir=None,
             sandbox_wrapper=sandbox_wrapper,
@@ -991,6 +1055,7 @@ def run_cli(
             max_stderr_bytes=max_stderr_bytes,
             on_progress=on_progress,
             on_launch=on_launch,
+            on_handle=on_handle,
             private_mounts=private_mounts,
             private_tmpdir=private_tmpdir,
             sandbox_wrapper=sandbox_wrapper,

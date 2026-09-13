@@ -11,6 +11,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -34,11 +35,14 @@ from .contract import (
     SubscriptionEligibility,
     TerminalReason,
     is_valid_resume_session_id,
+    sanitized_bridge_failure,
+    sanitized_bridge_text,
 )
 from .process import (
     ProcessHandle,
     ProcessResult,
     SandboxWrapper,
+    bridge_process_could_not_start,
     cancel_cli,
     filtered_child_environment,
     isolated_python_import_available,
@@ -46,10 +50,12 @@ from .process import (
     private_temporary_directory,
     run_cli as default_run_cli,
 )
+from .pricing import estimated_cost_usd
 
 CLAUDE_SDK_TRANSPORT = "claude/agent-sdk"
 CLAUDE_CLI_TRANSPORT = "claude/cli"
 CLAUDE_AUTO_TRANSPORTS = frozenset({"claude", "claude/auto"})
+PINNED_CLAUDE_CLI_VERSION = "2.1.269"
 AUTH_STATUS_COMMAND = ["claude", "auth", "status", "--json"]
 AUTH_STATUS_TIMEOUT_S = 5.0
 SDK_IMPORT_TIMEOUT_S = 5.0
@@ -88,9 +94,16 @@ CLAUDE_BLOCKED_ENV_VARS = frozenset(
 class ClaudeProtocolError(ValueError):
     """Claude emitted malformed or incomplete normalized protocol output."""
 
-    def __init__(self, message: str, *, semantic_event: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        semantic_event: bool = False,
+        incomplete_stream: bool = False,
+    ) -> None:
         super().__init__(message)
         self.semantic_event = semantic_event
+        self.incomplete_stream = incomplete_stream
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,6 +151,14 @@ def filtered_claude_environment(
 def repository_root(tooling_root: Path) -> Path:
     """Normalize the injected toolchain root."""
     return get_settings().repository_root(tooling_root)
+
+
+def parse_claude_cli_version(output: str) -> str:
+    """Parse the bounded public version line from Claude's exact CLI path."""
+    match = re.search(r"^(\d+\.\d+\.\d+)\b", output.strip())
+    if match is None:
+        raise ClaudeProtocolError("Claude CLI version output was invalid")
+    return match.group(1)
 
 
 def repository_python(tooling_root: Path) -> Path:
@@ -200,7 +221,7 @@ def build_claude_command(request: RuntimeRequest) -> list[str]:
     ):
         raise ValueError("Claude resume_session_id is invalid")
     command = [
-        "claude",
+        get_settings().cli("claude", "claude"),
         "-p",
         "--model",
         request.requested_model,
@@ -222,8 +243,15 @@ def build_claude_command(request: RuntimeRequest) -> list[str]:
         '{"mcpServers":{}}',
         "--disable-slash-commands",
     ])
-    if request.budget_usd is not None:
-        command.extend(("--max-budget-usd", f"{request.budget_usd:.2f}"))
+    settings_budget = get_settings().budget
+    usd_ceiling = request.budget_usd
+    if settings_budget is not None:
+        usd_ceiling = min(
+            settings_budget.max_usd,
+            usd_ceiling if usd_ceiling is not None else settings_budget.max_usd,
+        )
+    if usd_ceiling is not None:
+        command.extend(("--max-budget-usd", f"{usd_ceiling:.2f}"))
     if request.read_only:
         if request.output_schema is None:
             raise ValueError("Claude runtime requires an output schema")
@@ -270,6 +298,69 @@ def _requires_sdk_transport(request: RuntimeRequest) -> bool:
 # Explicit alias keeps call sites readable while allowing fixtures to use the
 # transport-specific name.
 build_claude_cli_command = build_claude_command
+
+
+API_RETRY_DIAGNOSTIC_PREFIX = "Claude API retry: "
+
+
+def _retain_api_retry_diagnostic(diagnostics: list[str], detail: object) -> None:
+    """Keep only the latest sanitized CLI retry reason within the bound."""
+    text = sanitized_bridge_text(detail)
+    if text is None:
+        return
+    diagnostic = f"{API_RETRY_DIAGNOSTIC_PREFIX}{text}"
+    for index, existing in enumerate(diagnostics):
+        if existing.startswith(API_RETRY_DIAGNOSTIC_PREFIX):
+            diagnostics[index] = diagnostic
+            return
+    if len(diagnostics) < MAX_DIAGNOSTICS:
+        diagnostics.append(diagnostic)
+
+
+def _bridge_killed_by_signal(outcome: ProcessResult) -> bool:
+    """An externally signalled bridge without a terminal frame was disconnected."""
+    return (
+        outcome.returncode is not None
+        and outcome.returncode < 0
+        and not outcome.cancelled
+        and not outcome.timed_out
+    )
+
+
+def _timeout_diagnostics(stream: str) -> tuple[str, ...]:
+    """Retain bounded retry/failure diagnostics from a timed-out bridge stream.
+
+    Buffered frames confer no result authority; an interrupted final line is
+    never a complete frame.  Only the latest retry reason and any bridge
+    error-frame diagnostics are kept.
+    """
+    if len(stream) > MAX_BRIDGE_LINE_BYTES:
+        return ()
+    try:
+        if len(stream.encode("utf-8")) > MAX_BRIDGE_LINE_BYTES:
+            return ()
+    except UnicodeEncodeError:
+        return ()
+    diagnostics: list[str] = []
+    for line in stream.split("\n")[:-1]:
+        try:
+            raw = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        if (
+            raw.get("type") == "event"
+            and raw.get("kind") == "system"
+            and raw.get("subtype") == "api_retry"
+        ):
+            _retain_api_retry_diagnostic(diagnostics, raw.get("detail"))
+            continue
+        if raw.get("type") == "error":
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None and len(diagnostics) < MAX_DIAGNOSTICS - 1:
+                diagnostics.append(f"Claude SDK failure: {failure}")
+    return tuple(diagnostics[: MAX_DIAGNOSTICS - 1])
 
 
 def _bounded_string(
@@ -569,6 +660,8 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
             event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
+            if kind == "system" and subtype == "api_retry":
+                _retain_api_retry_diagnostic(diagnostics, raw.get("detail"))
             event_session_id = _bounded_string(raw.get("session_id"), "session_id")
             if event_session_id is not None:
                 session_id = event_session_id
@@ -759,6 +852,9 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                         "disconnect": "Claude SDK transport disconnected",
                     }[error_reason]
                 )
+            failure = sanitized_bridge_failure(raw.get("diagnostics"))
+            if failure is not None and len(diagnostics) < MAX_DIAGNOSTICS:
+                diagnostics.append(f"Claude SDK failure: {failure}")
             continue
 
         if len(diagnostics) < MAX_DIAGNOSTICS:
@@ -773,6 +869,7 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
         raise ClaudeProtocolError(
             missing_terminal_diagnostic,
             semantic_event=semantic_seen,
+            incomplete_stream=True,
         )
 
     return ParsedClaudeStream(
@@ -816,6 +913,16 @@ class ClaudeAdapter:
         self._which = which
         self._settings = get_settings()
 
+    def _auth_status_command(self) -> list[str]:
+        return [self._settings.cli("claude", "claude"), "auth", "status", "--json"]
+
+    def _cli_available(self) -> bool:
+        path = self._settings.claude_cli_path
+        return (
+            path.is_file() and os.access(path, os.X_OK)
+            if path is not None else self._which("claude") is not None
+        )
+
     @staticmethod
     def _default_sdk_available(python: Path, cwd: Path) -> bool:
         del cwd
@@ -846,16 +953,63 @@ class ClaudeAdapter:
                 failure=ReadinessFailure.SUBSCRIPTION_UNAVAILABLE,
                 repair="confirm the approved Claude subscription login path",
             )
-        if self._which("claude") is None:
+        if not self._cli_available():
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
                 failure=ReadinessFailure.EXECUTABLE_MISSING,
                 repair="install or restore the approved Claude CLI",
             )
+        pinned_path = self._settings.claude_cli_path
+        if pinned_path is not None:
+            try:
+                version_outcome = self._run_probe(
+                    [str(pinned_path), "--version"],
+                    cwd=request.cwd,
+                    input_text="",
+                    timeout_s=AUTH_STATUS_TIMEOUT_S,
+                    env=filtered_claude_environment(),
+                )
+                version = parse_claude_cli_version(
+                    version_outcome.stdout or version_outcome.stderr
+                )
+            except (OSError, subprocess.TimeoutExpired, ClaudeProtocolError):
+                version_outcome = None
+                version = None
+            if (
+                version_outcome is None
+                or version_outcome.timed_out
+                or version_outcome.output_limited
+                or version_outcome.returncode != 0
+                or version != PINNED_CLAUDE_CLI_VERSION
+            ):
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.SDK_VERSION_MISMATCH,
+                    repair="restore the pinned Claude CLI version",
+                )
+        raw_auth_fd = os.environ.get(get_settings().env_name("CLAUDE_AUTH_FD"))
+        if raw_auth_fd is not None:
+            try:
+                valid = protected_claude_credential_ready(int(raw_auth_fd))
+            except (ValueError, OSError, ClaudeCredentialError):
+                valid = False
+            if not valid:
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.AUTHENTICATION,
+                    repair="replace the invalid protected Claude credential",
+                )
+            return RuntimeReadiness(
+                ready=True,
+                eligibility=SubscriptionEligibility.APPROVED,
+                transport=CLAUDE_SDK_TRANSPORT,
+            )
         try:
             outcome = self._run_probe(
-                AUTH_STATUS_COMMAND,
+                self._auth_status_command(),
                 cwd=request.cwd,
                 input_text="",
                 timeout_s=AUTH_STATUS_TIMEOUT_S,
@@ -934,6 +1088,7 @@ class ClaudeAdapter:
                 repair="restore the repository Claude Agent SDK tooling dependency",
             )
         if request.requested_model in MODELS_REQUIRING_SDK_COMPATIBILITY_PROBE:
+            probe_timed_out = False
             try:
                 outcome = self._run_probe(
                     build_sdk_bridge_command(request.tooling_root or request.cwd),
@@ -942,14 +1097,39 @@ class ClaudeAdapter:
                     timeout_s=min(SDK_IMPORT_TIMEOUT_S, request.timeout_s),
                     env={**filtered_claude_environment(), **get_settings().child_environment()},
                 )
-            except (OSError, subprocess.TimeoutExpired):
+            except subprocess.TimeoutExpired:
                 outcome = None
+                probe_timed_out = True
+            except OSError:
+                outcome = None
+            if outcome is not None and outcome.timed_out:
+                probe_timed_out = True
+            if probe_timed_out and request.timeout_s < SDK_IMPORT_TIMEOUT_S:
+                # The request deadline, not the probe budget, elapsed: this is
+                # the request timing out rather than an incompatible SDK.
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.AMBIGUOUS,
+                    failure=ReadinessFailure.REQUEST_TIMEOUT,
+                    repair="allow more request time for the Claude SDK readiness probe",
+                    transport=CLAUDE_SDK_TRANSPORT,
+                )
             if outcome is None or outcome.timed_out or outcome.output_limited:
                 return RuntimeReadiness(
                     ready=False,
                     eligibility=SubscriptionEligibility.UNAVAILABLE,
                     failure=ReadinessFailure.PROTOCOL_INCOMPATIBLE,
                     repair="repair the governed Claude SDK compatibility probe",
+                    transport=CLAUDE_SDK_TRANSPORT,
+                )
+            if bridge_process_could_not_start(outcome):
+                return RuntimeReadiness(
+                    ready=False,
+                    eligibility=SubscriptionEligibility.UNAVAILABLE,
+                    failure=ReadinessFailure.CONTAINMENT_FAILURE,
+                    repair=(
+                        "repair runtime containment so the Claude SDK bridge can start"
+                    ),
                     transport=CLAUDE_SDK_TRANSPORT,
                 )
             try:
@@ -1036,6 +1216,15 @@ class ClaudeAdapter:
             if sdk_readiness.ready:
                 request = replace(request, transport=CLAUDE_SDK_TRANSPORT)
             else:
+                if sdk_readiness.failure is ReadinessFailure.REQUEST_TIMEOUT:
+                    return self._failure(
+                        request,
+                        status=RuntimeStatus.TIMED_OUT,
+                        reason=TerminalReason.TIMEOUT,
+                        diagnostics=(
+                            "Claude request deadline elapsed during SDK readiness",
+                        ),
+                    )
                 if (
                     _requires_sdk_transport(request)
                     or sdk_readiness.failure is ReadinessFailure.MODEL_UNSUPPORTED
@@ -1117,6 +1306,14 @@ class ClaudeAdapter:
                 status=RuntimeStatus.TIMED_OUT,
                 reason=TerminalReason.TIMEOUT,
                 diagnostics=("Claude CLI timed out",),
+            )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Claude CLI was cancelled",),
             )
         if outcome.output_limited:
             return self._result(
@@ -1244,7 +1441,18 @@ class ClaudeAdapter:
                 outcome=outcome,
                 status=RuntimeStatus.TIMED_OUT,
                 reason=TerminalReason.TIMEOUT,
-                diagnostics=("Claude SDK bridge timed out",),
+                diagnostics=(
+                    "Claude SDK bridge timed out",
+                    *_timeout_diagnostics(outcome.stdout),
+                ),
+            )
+        if outcome.cancelled:
+            return self._result(
+                request,
+                outcome=outcome,
+                status=RuntimeStatus.CANCELLED,
+                reason=TerminalReason.CANCELLED,
+                diagnostics=("Claude SDK bridge was cancelled",),
             )
         if outcome.output_limited:
             return self._result(
@@ -1257,6 +1465,25 @@ class ClaudeAdapter:
         try:
             parsed = parse_claude_stream(outcome.stdout)
         except ClaudeProtocolError as exc:
+            if _bridge_killed_by_signal(outcome):
+                if exc.incomplete_stream:
+                    return self._result(
+                        request,
+                        outcome=outcome,
+                        status=RuntimeStatus.FAILED,
+                        reason=TerminalReason.TRANSPORT_DISCONNECT,
+                        diagnostics=(
+                            "Claude SDK bridge was disconnected",
+                            *_timeout_diagnostics(outcome.stdout),
+                        ),
+                    )
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.PROTOCOL_FAILURE,
+                    diagnostics=("Claude SDK bridge emitted malformed protocol",),
+                )
             if (
                 request.read_only
                 and not _has_scoped_tools(request)
@@ -1281,6 +1508,18 @@ class ClaudeAdapter:
                 diagnostics=("Claude SDK bridge emitted malformed protocol",),
             )
         if parsed.status is None or parsed.terminal_reason is None:
+            if _bridge_killed_by_signal(outcome):
+                return self._result(
+                    request,
+                    outcome=outcome,
+                    status=RuntimeStatus.FAILED,
+                    reason=TerminalReason.TRANSPORT_DISCONNECT,
+                    events=parsed.events,
+                    diagnostics=(
+                        "Claude SDK bridge was disconnected",
+                        *parsed.diagnostics,
+                    ),
+                )
             if (
                 request.read_only
                 and not _has_scoped_tools(request)
@@ -1315,6 +1554,7 @@ class ClaudeAdapter:
                 reason=parsed.terminal_reason,
                 duration_s=outcome.duration_s,
                 progress_diagnostic=outcome.progress_diagnostic,
+                sdk_diagnostics=parsed.diagnostics,
             )
         status = parsed.status
         reason = parsed.terminal_reason
@@ -1350,6 +1590,7 @@ class ClaudeAdapter:
         reason: TerminalReason,
         duration_s: float | None = None,
         progress_diagnostic: bool = False,
+        sdk_diagnostics: tuple[str, ...] = (),
     ) -> RuntimeResult:
         def retain_progress_diagnostic(result: RuntimeResult) -> RuntimeResult:
             if (
@@ -1366,6 +1607,13 @@ class ClaudeAdapter:
                 ),
             )
 
+        # Sanitized SDK bridge diagnostics explain why the preferred transport
+        # failed; keep them behind the fixed transport diagnostic.
+        preferred_diagnostics = tuple(
+            item for item in sdk_diagnostics
+            if item.startswith(("Claude SDK ", API_RETRY_DIAGNOSTIC_PREFIX))
+        )[: MAX_DIAGNOSTICS - 1]
+
         if _requires_sdk_transport(request):
             return self._failure(
                 request,
@@ -1373,6 +1621,7 @@ class ClaudeAdapter:
                 reason=reason,
                 diagnostics=(
                     "configured Claude model requires the governed SDK transport",
+                    *preferred_diagnostics,
                 ),
             )
 
@@ -1381,7 +1630,10 @@ class ClaudeAdapter:
                 request,
                 status=RuntimeStatus.FAILED,
                 reason=reason,
-                diagnostics=("scoped Claude tools require the SDK transport",),
+                diagnostics=(
+                    "scoped Claude tools require the SDK transport",
+                    *preferred_diagnostics,
+                ),
             )
         fallback_request = replace(
             request,
@@ -1524,6 +1776,18 @@ class ClaudeAdapter:
         structured_output: dict[str, object] | None = None,
     ) -> RuntimeResult:
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
+        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        budget = get_settings().budget
+        measured_tokens = usage.output_tokens if usage is not None else None
+        if budget is not None and (
+            (measured_tokens is not None and measured_tokens > budget.max_tokens)
+            or (normalized_cost is not None and normalized_cost > budget.max_usd)
+        ):
+            status = RuntimeStatus.FAILED
+            reason = TerminalReason.BUDGET_EXHAUSTED
+            bounded_diagnostics = ["Claude normalized budget was exhausted"]
+            final_output = None
+            structured_output = None
         if (
             outcome is not None
             and outcome.progress_diagnostic
@@ -1541,10 +1805,10 @@ class ClaudeAdapter:
             session_id=session_id,
             request_id=request_id,
             usage=usage,
-            cost_usd=cost_usd,
+            cost_usd=normalized_cost,
             cost_status=(
                 RuntimeCostStatus.ESTIMATED
-                if cost_usd is not None
+                if normalized_cost is not None
                 else RuntimeCostStatus.UNKNOWN
             ),
             eligibility=request.eligibility,
@@ -1582,6 +1846,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import fcntl
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -1684,7 +1949,15 @@ def _validate_payload(payload: bytes, *, now_ms: int) -> _ValidatedCredential:
     refresh_expires_at_ms = _integer_milliseconds(
         oauth.get("refreshTokenExpiresAt"), name="refreshTokenExpiresAt"
     )
+    access_only = (
+        refresh_token == access_token
+        and refresh_expires_at_ms == expires_at_ms
+    )
     if refresh_expires_at_ms <= now_ms:
+        if access_only:
+            raise ClaudeCredentialUnavailable(
+                "Claude access-only credential is unavailable"
+            )
         raise ClaudeCredentialRevoked("Claude refresh credential has expired")
     raw_scopes = oauth.get("scopes")
     if (
@@ -2012,6 +2285,23 @@ def _resolve_claude_binary() -> Path:
     return resolved
 
 
+def _account_home() -> Path:
+    """Resolve native Claude state against the OS account, never ``$HOME``."""
+    try:
+        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (KeyError, OSError):
+        raise ClaudeCredentialUnavailable(
+            "Claude account home is unavailable"
+        ) from None
+    if not home.is_absolute() or home == Path("/"):
+        raise UnsafeClaudeCredential("Claude account home is unsafe")
+    return home
+
+
+def _default_credential_path() -> Path:
+    return _account_home() / ".claude" / ".credentials.json"
+
+
 @contextmanager
 def _oauth_subscription_credential(
     *,
@@ -2025,7 +2315,7 @@ def _oauth_subscription_credential(
     """Renew if needed, then lend one sealed snapshot for a provider command."""
     if requested_runtime_s <= 0:
         raise ValueError("requested_runtime_s must be positive")
-    path = credential_path or Path.home() / ".claude" / ".credentials.json"
+    path = credential_path or _default_credential_path()
     with _renewal_lock(path.parent / BROKER_LOCK_NAME):
         now_ms = int(clock() * 1000)
         horizon_ms = now_ms + int(
@@ -2035,6 +2325,14 @@ def _oauth_subscription_credential(
         refresh_attempts = 0
         refresh_binary = claude_binary
         while credential.expires_at_ms <= horizon_ms:
+            if (
+                credential.oauth.refresh_token == credential.oauth.access_token
+                and credential.oauth.refresh_expires_at_ms
+                == credential.oauth.expires_at_ms
+            ):
+                raise ClaudeCredentialUnavailable(
+                    "Claude access-only credential is unavailable for the requested run"
+                )
             if refresh_attempts >= MAX_REFRESH_ATTEMPTS:
                 raise ClaudeCredentialRefreshFailed(
                     "Claude credential changed during trusted refresh"
@@ -2080,8 +2378,18 @@ def claude_subscription_credential(
     run_status: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     claude_binary: Path | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
+    allow_token_fallback: bool = True,
 ) -> Iterator[int]:
     """Prefer renewable OAuth; otherwise lend a validated access-only token."""
+
+    if credential_path is not None:
+        token_descriptor = _explicit_token_snapshot(credential_path)
+        if token_descriptor is not None:
+            try:
+                yield token_descriptor
+            finally:
+                os.close(token_descriptor)
+            return
 
     with ExitStack() as stack:
         try:
@@ -2094,6 +2402,8 @@ def claude_subscription_credential(
                 sandbox_wrapper=sandbox_wrapper,
             ))
         except ClaudeCredentialError:
+            if not allow_token_fallback:
+                raise
             descriptor = token_snapshot()
             if descriptor is None:
                 raise
@@ -2109,13 +2419,49 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 import http.client
 import json
 import os
-import pwd
 import re
 from pathlib import Path
 
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 TOKEN_FILE_ENV = DEFAULT_SETTINGS.env_name("CLAUDE_TOKEN_FILE")
 TOKEN_PATTERN = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{40,512}")
+
+
+def _token_snapshot_payload(token: str, *, source: str) -> bytes:
+    return json.dumps(
+        {"claudeCodeOauthToken": token, "source": source}, separators=(",", ":")
+    ).encode()
+
+
+def _explicit_token_snapshot(path: Path) -> int | None:
+    """Recognize raw token files and already-sealed access-only token JSON."""
+    payload = _read_private_payload(path, single_link=True)
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        try:
+            token = payload.decode("ascii").removesuffix("\n")
+        except UnicodeDecodeError:
+            raise UnsafeClaudeCredential(
+                "Claude long-lived token is malformed"
+            ) from None
+        if TOKEN_PATTERN.fullmatch(token) is None:
+            raise UnsafeClaudeCredential("Claude long-lived token is malformed")
+        _validate_remote_token(token)
+        return _snapshot_descriptor(_token_snapshot_payload(token, source="token-file"))
+    if not isinstance(decoded, dict) or "claudeCodeOauthToken" not in decoded:
+        return None
+    if set(decoded) != {"claudeCodeOauthToken", "source"}:
+        raise UnsafeClaudeCredential("Claude token snapshot is invalid")
+    token = decoded["claudeCodeOauthToken"]
+    source = decoded.get("source")
+    if (
+        not isinstance(token, str)
+        or TOKEN_PATTERN.fullmatch(token) is None
+        or source not in {"token-env", "token-file", "token-file(default)"}
+    ):
+        raise UnsafeClaudeCredential("Claude token snapshot is invalid")
+    return _snapshot_descriptor(_token_snapshot_payload(token, source=source))
 
 
 def _validate_remote_token(token: str) -> None:
@@ -2165,6 +2511,7 @@ def _read_host_token_file(path: Path) -> bytes:
         raise UnsafeClaudeCredential("Claude token file path is invalid")
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     directory = os.open("/", flags)
+    current_directory = Path("/")
     try:
         for component in (*path.parts[1:-1], None):
             try:
@@ -2172,11 +2519,18 @@ def _read_host_token_file(path: Path) -> bytes:
             except FileNotFoundError:
                 pass
             else:
-                raise UnsafeClaudeCredential("Claude token file must be outside repositories")
+                # Name only the directory whose repository marker caused the
+                # rejection.  The credential filename and contents remain
+                # absent from diagnostics.
+                raise UnsafeClaudeCredential(
+                    "Claude token file must be outside repositories; "
+                    f"offending directory: {current_directory}"
+                )
             if component is not None:
                 child = os.open(component, flags, dir_fd=directory)
                 os.close(directory)
                 directory = child
+                current_directory /= component
         return _read_private_payload(
             Path(path.name), directory_fd=directory, single_link=True
         )
@@ -2190,14 +2544,7 @@ def _read_host_token_file(path: Path) -> bytes:
 
 def _default_token_path() -> Path:
     """Use the OS account state root, independent of desktop HOME/XDG state."""
-
-    try:
-        home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-    except (KeyError, OSError):
-        raise ClaudeCredentialUnavailable("Claude account home is unavailable") from None
-    if not home.is_absolute() or home == Path("/"):
-        raise UnsafeClaudeCredential("Claude account home is unsafe")
-    return get_settings().state_path(home) / "claude-token"
+    return get_settings().state_path(_account_home()) / "claude-token"
 
 
 def token_snapshot() -> int | None:
@@ -2227,9 +2574,7 @@ def token_snapshot() -> int | None:
     if TOKEN_PATTERN.fullmatch(token) is None:
         raise UnsafeClaudeCredential("Claude long-lived token is malformed")
     _validate_remote_token(token)
-    return _snapshot_descriptor(json.dumps(
-        {"claudeCodeOauthToken": token, "source": source}, separators=(",", ":")
-    ).encode())
+    return _snapshot_descriptor(_token_snapshot_payload(token, source=source))
 
 
 def _snapshot(fd: int) -> dict:
@@ -2267,4 +2612,31 @@ def protected_token_available() -> bool:
     try:
         return snapshot_token(int(os.environ[get_settings().env_name("CLAUDE_AUTH_FD")])) is not None
     except (KeyError, ValueError, OSError, ClaudeCredentialError):
+        return False
+
+
+def protected_claude_credential_ready(fd: int) -> bool:
+    """Validate either sealed access-only credential form used by the bridge."""
+    try:
+        decoded = _snapshot(fd)
+        if snapshot_token(fd) is not None:
+            return True
+        oauth = decoded.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return False
+        access_token = oauth.get("accessToken")
+        expiry = oauth.get("expiresAt")
+        scopes = oauth.get("scopes")
+        return (
+            isinstance(access_token, str)
+            and bool(access_token)
+            and oauth.get("refreshToken") == access_token
+            and isinstance(expiry, int)
+            and not isinstance(expiry, bool)
+            and oauth.get("refreshTokenExpiresAt") == expiry
+            and isinstance(scopes, list)
+            and REQUIRED_SCOPES.issubset(scopes)
+            and oauth.get("subscriptionType") in ELIGIBLE_SUBSCRIPTION_TYPES
+        )
+    except (OSError, ValueError, ClaudeCredentialError):
         return False

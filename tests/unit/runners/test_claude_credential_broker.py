@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -81,6 +82,54 @@ def test_fresh_credential_is_snapshotted_without_refresh(tmp_path: Path) -> None
 
     with pytest.raises(OSError):
         os.fstat(descriptor)
+
+
+def test_default_oauth_uses_account_home_and_accepts_current_extra_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    account_home = tmp_path / "account"
+    credential = account_home / ".claude" / ".credentials.json"
+    payload = _credential(expires_at_ms=2_000_000)
+    payload["claudeAiOauth"]["rateLimitTier"] = "default_claude_max_20x"
+    _write_credential(credential, payload)
+    monkeypatch.setattr(
+        claude_credential.pwd,
+        "getpwuid",
+        lambda _uid: type("Account", (), {"pw_dir": str(account_home)})(),
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "untrusted-home"))
+
+    with claude_credential.claude_subscription_credential(
+        requested_runtime_s=600,
+        clock=lambda: 1_000.0,
+        allow_token_fallback=False,
+    ) as descriptor:
+        assert claude_credential.snapshot_source(descriptor) == "oauth-file"
+        assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == (
+            _runtime_snapshot(payload)
+        )
+
+
+def test_expiring_access_only_credential_is_cleanly_unavailable(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / ".claude" / ".credentials.json"
+    payload = _credential(expires_at_ms=1_100_000, access_token="access-only")
+    oauth = payload["claudeAiOauth"]
+    oauth["refreshToken"] = oauth["accessToken"]
+    oauth["refreshTokenExpiresAt"] = oauth["expiresAt"]
+    _write_credential(credential, payload)
+
+    with pytest.raises(claude_credential.ClaudeCredentialUnavailable):
+        with claude_credential.claude_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+            run_status=lambda *_args, **_kwargs: pytest.fail(
+                "access-only credentials must never refresh"
+            ),
+        ):
+            pass
 
 
 def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
@@ -745,6 +794,31 @@ def test_refreshable_oauth_wins_over_token(token_root, monkeypatch, token_broker
         assert token_broker.snapshot_token(fd) is None
 
 
+def test_explicit_access_only_token_snapshot_never_enters_oauth_refresh(
+    token_root, monkeypatch, token_broker
+):
+    token = "sk-ant-oat01-" + "x" * 80
+    credential = token_root / "sealed.json"
+    credential.write_text(json.dumps({
+        "claudeCodeOauthToken": token,
+        "source": "token-file(default)",
+    }))
+    credential.chmod(0o600)
+    monkeypatch.setattr(
+        claude_credential,
+        "_oauth_subscription_credential",
+        lambda **_kwargs: pytest.fail("access-only token entered OAuth refresh"),
+    )
+
+    with claude_credential.claude_subscription_credential(
+        requested_runtime_s=600,
+        credential_path=credential,
+        allow_token_fallback=False,
+    ) as fd:
+        assert token_broker.snapshot_source(fd) == "token-file(default)"
+        assert token_broker.snapshot_token(fd) == token
+
+
 @pytest.mark.parametrize(
     "token",
     ["", "bad", "sk-ant-api03-" + "x" * 80, "sk-ant-oat01-" + "x" * 80 + "\nextra"],
@@ -888,6 +962,27 @@ def test_token_file_cannot_be_exposed_through_worktree_or_alias(
     monkeypatch.setenv("INTELFLO_CLAUDE_TOKEN_FILE", str(token_file))
     with pytest.raises(claude_credential.ClaudeCredentialError):
         token_broker.token_snapshot()
+
+
+def test_token_repository_error_names_offending_directory_not_token(
+    token_root, monkeypatch, token_broker
+):
+    offending = token_root / "unexpected-repository"
+    credential_directory = offending / "private" / "state"
+    credential_directory.mkdir(parents=True)
+    (offending / ".git").mkdir()
+    token_file = credential_directory / "never-name-this-token-file"
+    token_file.write_text("sk-ant-oat01-" + "x" * 80)
+    token_file.chmod(0o600)
+    monkeypatch.setenv("INTELFLO_CLAUDE_TOKEN_FILE", str(token_file))
+
+    with pytest.raises(
+        claude_credential.UnsafeClaudeCredential,
+        match=re.escape(f"offending directory: {offending}"),
+    ) as raised:
+        token_broker.token_snapshot()
+
+    assert token_file.name not in str(raised.value)
 
 
 @pytest.mark.parametrize("source", ["token-env", "token-file"])

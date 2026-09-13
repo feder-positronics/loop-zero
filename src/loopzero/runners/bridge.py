@@ -12,7 +12,6 @@ import math
 import os
 import re
 import shlex
-import shutil
 import sys
 import threading
 import time
@@ -62,16 +61,8 @@ from .contract import (
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
 
 
-def codex_bootstrap_overrides(export_dir: Path) -> tuple[str, ...]:
-    return _codex_isolation.codex_bootstrap_overrides(export_dir)
-
-
-def codex_config_lock_override(path: Path) -> str:
-    return _codex_isolation.codex_config_lock_override(path)
-
-
-def exported_codex_config_lock(export_dir: Path) -> Path:
-    return _codex_isolation.exported_codex_config_lock(export_dir)
+def codex_runtime_overrides() -> tuple[str, ...]:
+    return _codex_isolation.codex_runtime_overrides()
 
 
 if TYPE_CHECKING:
@@ -422,7 +413,48 @@ def _claude_stream_progress_phase(event: object) -> RuntimePhase:
     return _claude_stream_progress(event)[0]
 
 
-def _codex_command_completion(item: object) -> None:
+def _codex_shadow_read(item: object) -> tuple[str, str] | None:
+    """Recognize only a simple cat read, never best-effort parsed shell intent."""
+    item_id = getattr(item, "id", None)
+    if not isinstance(item_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item_id) is None:
+        return None
+    source = getattr(item, "source", None)
+    if getattr(source, "value", source) not in {"agent", "unifiedExecStartup"}:
+        return None
+    command = getattr(item, "command", None)
+    if not isinstance(command, str) or len(command) > 512:
+        return None
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if len(argv) == 3 and argv[0] in {"/bin/bash", "/usr/bin/bash", "/bin/sh"} and argv[1] in {"-c", "-lc"}:
+        command = argv[2]
+    # Exact syntax excludes options, redirects, substitutions, shell functions,
+    # and compound commands that could fail before opening the target file.
+    if command not in {
+        f"{cat} {operand}"
+        for cat in ("cat", "/bin/cat", "/usr/bin/cat")
+        for operand in ("/etc/shadow", "-- /etc/shadow")
+    }:
+        return None
+    actions = getattr(item, "command_actions", ())
+    if len(actions) != 1:
+        return None
+    action = getattr(actions[0], "root", actions[0])
+    path = getattr(action, "path", None)
+    if (
+        getattr(action, "type", None) != "read"
+        or getattr(path, "root", path) != "/etc/shadow"
+        or getattr(action, "command", None) != command
+    ):
+        return None
+    return item_id, command
+
+
+def _codex_command_completion(
+    item: object, *, started_read: tuple[str, str] | None = None
+) -> None:
     """Emit outcome metadata only; a completed command is not a model result."""
     status = getattr(item, "status", None)
     status = getattr(status, "value", status)
@@ -444,6 +476,28 @@ def _codex_command_completion(item: object) -> None:
         "type": "event", "kind": "command_completion", "semantic": False,
         "status": status, "exit_code": exit_code, "output_bytes": output_bytes,
     })
+    # Bind started action, completion and aggregated tool output to one SDK
+    # item. The commandActions field alone is only best-effort shell parsing.
+    completed_read = _codex_shadow_read(item)
+    if (
+        completed_read is not None
+        and started_read == completed_read
+        and status in {"completed", "failed"}
+        and exit_code is not None
+        and exit_code != 0
+        and output_bytes is not None
+        and any(
+            re.fullmatch(
+                r"(?:/usr/bin/|/bin/)?cat: (?:/etc/shadow|'/etc/shadow'): "
+                r"(?:Permission denied|Operation not permitted)", line
+            ) is not None
+            for line in output.splitlines()
+        )
+    ):
+        _event_frame(
+            kind="tool", subtype="denied:/etc/shadow", semantic=True,
+            item_id=completed_read[0],
+        )
 
 
 def _codex_tool_label(item_root: object) -> RuntimeToolLabel:
@@ -461,7 +515,7 @@ def _codex_tool_label(item_root: object) -> RuntimeToolLabel:
 class BridgeRequest(TypedDict):
     """Validated input accepted from the system-Python dispatcher."""
 
-    vendor: Literal["claude", "claude-probe", "codex", "codex-lock", "codex-probe"]
+    vendor: Literal["claude", "claude-probe", "codex", "codex-probe"]
     prompt: str
     cwd: str
     requested_model: str
@@ -472,7 +526,6 @@ class BridgeRequest(TypedDict):
     read_roots: list[str]
     evidence_read_roots: list[str]
     commercial_mode: Literal["subscription-only", "promotional-credit", "owner-paid"]
-    config_lock_target: NotRequired[str]
     visible_tools: NotRequired[list[str]]
     allowed_tools: NotRequired[list[str]]
     resume_session_id: NotRequired[str]
@@ -527,6 +580,65 @@ def _filtered_environment() -> dict[str, str]:
     return environment
 
 
+def _claude_subscription_environment() -> dict[str, str]:
+    """Consume a brokered access-only snapshot without exposing its descriptor."""
+    environment = _filtered_environment()
+    descriptor_name = get_settings().env_name("CLAUDE_AUTH_FD")
+    raw_fd = os.environ.pop(descriptor_name, None)
+    environment.pop(descriptor_name, None)
+    session_home = get_settings().session_home
+    if session_home is not None:
+        environment["HOME"] = str(session_home)
+    if raw_fd is None:
+        return environment
+    try:
+        fd = int(raw_fd)
+        metadata = os.fstat(fd)
+        if metadata.st_size <= 2 or metadata.st_size > 1024 * 1024:
+            raise BridgeInputError("provider credential descriptor is invalid")
+        payload = json.loads(os.pread(fd, metadata.st_size, 0))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise BridgeInputError("provider credential descriptor is invalid") from exc
+    finally:
+        try:
+            os.close(int(raw_fd))
+        except (OSError, ValueError):
+            pass
+    from .claude import ELIGIBLE_SUBSCRIPTION_TYPES, REQUIRED_SCOPES, TOKEN_PATTERN
+
+    token = payload.get("claudeCodeOauthToken") if isinstance(payload, dict) else None
+    if token is not None and (
+        not isinstance(token, str)
+        or TOKEN_PATTERN.fullmatch(token) is None
+        or payload.get("source")
+        not in {"token-env", "token-file", "token-file(default)"}
+    ):
+        raise BridgeInputError("provider credential descriptor is invalid")
+    if token is None and isinstance(payload, dict):
+        oauth = payload.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            raise BridgeInputError("provider credential descriptor is invalid")
+        token = oauth.get("accessToken")
+        expiry = oauth.get("expiresAt")
+        scopes = oauth.get("scopes")
+        if (
+            not isinstance(token, str)
+            or not token
+            or oauth.get("refreshToken") != token
+            or not isinstance(expiry, int)
+            or isinstance(expiry, bool)
+            or oauth.get("refreshTokenExpiresAt") != expiry
+            or not isinstance(scopes, list)
+            or not REQUIRED_SCOPES.issubset(scopes)
+            or oauth.get("subscriptionType") not in ELIGIBLE_SUBSCRIPTION_TYPES
+        ):
+            raise BridgeInputError("provider credential descriptor is invalid")
+    if not isinstance(token, str) or not token:
+        raise BridgeInputError("provider credential descriptor is invalid")
+    environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return environment
+
+
 def _materialize_codex_subscription_auth() -> (
     tuple[TemporaryDirectory[str] | None, dict[str, str], Path | None]
 ):
@@ -560,12 +672,52 @@ def _materialize_codex_subscription_auth() -> (
         raise BridgeInputError("provider credential is malformed") from exc
     if not isinstance(decoded, dict) or not decoded:
         raise BridgeInputError("provider credential is malformed")
-    directory = TemporaryDirectory(prefix=get_settings().temp_name("codex-auth"))
-    home = Path(directory.name)
+    configured_home = get_settings().session_home
+    directory = (
+        None
+        if configured_home is not None
+        else TemporaryDirectory(prefix=get_settings().temp_name("codex-auth"))
+    )
+    home = configured_home if configured_home is not None else Path(directory.name)
+    assert home is not None
     auth_path = home / "auth.json"
     auth_path.write_bytes(payload)
     auth_path.chmod(0o600)
     return directory, {"CODEX_HOME": str(home)}, auth_path
+
+
+@contextmanager
+def _codex_subscription_environment() -> Iterator[tuple[dict[str, str], Path | None]]:
+    """Materialize Codex auth and scrub it on every exit path."""
+    directory: TemporaryDirectory[str] | None = None
+    auth_path: Path | None = None
+    try:
+        directory, environment, auth_path = _materialize_codex_subscription_auth()
+        yield environment, auth_path
+    finally:
+        if auth_path is not None:
+            auth_path.unlink(missing_ok=True)
+        if directory is not None:
+            directory.cleanup()
+
+
+def _codex_sdk_environment(
+    auth_environment: Mapping[str, str], auth_path: Path | None
+) -> dict[str, str]:
+    """Build an SDK child environment rooted only in the brokered home."""
+    if auth_path is None:
+        raise RuntimeError("startup")
+    private_home = str(auth_path.parent)
+    environment = _filtered_environment()
+    environment.pop("CODEX_HOME", None)
+    environment.pop("HOME", None)
+    environment.update(auth_environment)
+    # Pin both lookup roots even if a malformed test seam supplied conflicting
+    # values. Codex uses CODEX_HOME directly and other child tooling may use
+    # HOME to derive configuration paths.
+    environment["CODEX_HOME"] = private_home
+    environment["HOME"] = private_home
+    return environment
 
 
 def _bounded_string_list(
@@ -728,7 +880,6 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         "claude",
         "claude-probe",
         "codex",
-        "codex-lock",
         "codex-probe",
     }:
         raise BridgeInputError("bridge request vendor is invalid")
@@ -750,26 +901,14 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         raise BridgeInputError("bridge request commercial_mode is invalid")
     if vendor_value != "claude" and commercial_mode != "subscription-only":
         raise BridgeInputError("bridge request commercial_mode is unexpected")
-    config_lock_target = payload.get("config_lock_target")
-    if vendor_value == "codex-lock":
-        if not isinstance(config_lock_target, str) or not config_lock_target:
-            raise BridgeInputError("bridge config lock target is invalid")
-        target = Path(config_lock_target)
-        if (
-            not target.is_absolute()
-            or not target.name.endswith(".config.lock.toml")
-            or not target.parent.is_dir()
-            or target.exists()
-        ):
-            raise BridgeInputError("bridge config lock target is invalid")
-    elif config_lock_target is not None:
+    if payload.get("config_lock_target") is not None:
         raise BridgeInputError("bridge config lock target is unexpected")
     output_schema = payload.get(
         "output_schema",
-        ({} if vendor_value in {"claude-probe", "codex-lock", "codex-probe"} else None),
+        ({} if vendor_value in {"claude-probe", "codex-probe"} else None),
     )
     if not isinstance(output_schema, dict) or (
-        vendor_value not in {"claude-probe", "codex-lock", "codex-probe"}
+        vendor_value not in {"claude-probe", "codex-probe"}
         and not output_schema
     ):
         raise BridgeInputError("bridge request output_schema is invalid")
@@ -782,7 +921,7 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
         "read_roots",
         (
             [cwd]
-            if vendor_value in {"claude-probe", "codex-lock", "codex-probe"}
+            if vendor_value in {"claude-probe", "codex-probe"}
             else None
         ),
     )
@@ -847,7 +986,7 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
     assert model is not None
     request: BridgeRequest = {
         "vendor": cast(
-            Literal["claude", "claude-probe", "codex", "codex-lock", "codex-probe"],
+            Literal["claude", "claude-probe", "codex", "codex-probe"],
             vendor_value,
         ),
         "prompt": prompt,
@@ -864,8 +1003,6 @@ def _validate_request_payload(payload: object) -> BridgeRequest:
             commercial_mode,
         ),
     }
-    if isinstance(config_lock_target, str):
-        request["config_lock_target"] = config_lock_target
     if resume_session_id is not None:
         request["resume_session_id"] = resume_session_id
     if vendor_value != "claude" and (
@@ -977,6 +1114,27 @@ def _model_from_usage(value: object) -> str | None:
     return _metadata(next(iter(value)))
 
 
+def _claude_api_retry_detail(data: Mapping[str, object]) -> str | None:
+    """Summarize a CLI api_retry system event without response bodies."""
+    parts: list[str] = []
+    attempt = data.get("attempt")
+    max_attempts = data.get("max_attempts")
+    if isinstance(attempt, int) and not isinstance(attempt, bool):
+        if isinstance(max_attempts, int) and not isinstance(max_attempts, bool):
+            parts.append(f"attempt {attempt}/{max_attempts}")
+        else:
+            parts.append(f"attempt {attempt}")
+    for key in ("error_status", "status"):
+        status = data.get(key)
+        if isinstance(status, int) and not isinstance(status, bool):
+            parts.append(f"status {status}")
+            break
+    error = data.get("error")
+    if isinstance(error, str) and error.strip():
+        parts.append(_sanitized_bridge_message(error))
+    return ": ".join(parts) if parts else None
+
+
 def _event_frame(
     *,
     kind: str,
@@ -985,6 +1143,8 @@ def _event_frame(
     effective_model: str | None = None,
     request_id: str | None = None,
     semantic: bool = False,
+    detail: str | None = None,
+    item_id: str | None = None,
 ) -> None:
     frame: dict[str, object] = {
         "type": "event",
@@ -993,12 +1153,16 @@ def _event_frame(
     }
     if subtype is not None:
         frame["subtype"] = subtype
+    if detail is not None:
+        frame["detail"] = detail[:MAX_METADATA_BYTES]
     if session_id is not None:
         frame["session_id"] = session_id
     if effective_model is not None:
         frame["effective_model"] = effective_model
     if request_id is not None:
         frame["request_id"] = request_id
+    if item_id is not None:
+        frame["item_id"] = item_id
     _write_frame(frame)
 
 
@@ -1407,10 +1571,19 @@ def _options(
             )
         ]
     }
+    budget = get_settings().budget
+    usd_ceiling = request["budget_usd"]
+    if budget is not None:
+        usd_ceiling = min(
+            budget.max_usd,
+            usd_ceiling if usd_ceiling is not None else budget.max_usd,
+        )
     return ClaudeAgentOptions(
         model=request["requested_model"],
         effort=request["effort"],
-        max_budget_usd=request["budget_usd"],
+        max_budget_usd=usd_ceiling,
+        max_turns=budget.max_turns if budget is not None else None,
+        task_budget={"total": budget.max_tokens} if budget is not None else None,
         cwd=request["cwd"],
         permission_mode="default",
         tools=visible_tools if explicit_scope else list(DEFAULT_READ_ONLY_TOOLS),
@@ -1424,7 +1597,7 @@ def _options(
         mcp_servers={},
         setting_sources=[],
         skills=[],
-        env=_filtered_environment(),
+        env=_claude_subscription_environment(),
         can_use_tool=permission_callback,
         hooks=hooks,
         include_partial_messages=False,
@@ -1432,6 +1605,7 @@ def _options(
         max_buffer_size=MAX_BRIDGE_LINE_BYTES,
         stderr=lambda _line: None,
         resume=request.get("resume_session_id"),
+        cli_path=get_settings().claude_cli_path,
     )
 
 
@@ -1456,11 +1630,63 @@ def _codex_sandbox(read_only: bool) -> "Sandbox":
     return Sandbox.read_only if read_only else Sandbox.workspace_write
 
 
+def _codex_sandbox_mode(request: BridgeRequest) -> str:
+    """Return the effective-config spelling of the pinned SDK sandbox."""
+    sandbox = _codex_sandbox(request["read_only"])
+    return "danger-full-access" if sandbox.value == "full-access" else sandbox.value
+
+
+def _codex_request_runtime_overrides(request: BridgeRequest) -> tuple[str, ...]:
+    """Pin request-specific settings in the app-server's effective config."""
+    return (
+        *codex_runtime_overrides(),
+        f"model={json.dumps(request['requested_model'])}",
+        f"model_reasoning_effort={json.dumps(_codex_effort(request['effort']).value)}",
+        f"sandbox_mode={json.dumps(_codex_sandbox_mode(request))}",
+        'approval_policy="never"',
+    )
+
+
+def _codex_effective_config_is_closed(
+    config: object, request: BridgeRequest
+) -> bool:
+    """Attest every effective key and leaf against the pinned allowlist."""
+    from ._codex_config import exact_config, expected_config
+
+    return exact_config(config, expected_config(_codex_request_runtime_overrides(request)))
+
+
+def _enforce_codex_effective_config(codex: object, request: BridgeRequest) -> None:
+    """Read and reject unsafe merged configuration before account or thread use."""
+    try:
+        from pydantic import BaseModel
+
+        # The generated Config model can discard unknown nested members. Keep
+        # raw JSON dictionaries so attestation sees every effective key.
+        class EffectiveConfigResponse(BaseModel):
+            config: dict[str, object]
+
+        client = getattr(codex, "_client")
+        response = client.request(
+            "config/read",
+            {"cwd": request["cwd"], "includeLayers": True},
+            response_model=EffectiveConfigResponse,
+        )
+        config = response.config
+    except Exception as exc:
+        raise RuntimeError("unavailable") from exc
+    if not _codex_effective_config_is_closed(config, request):
+        raise RuntimeError("unavailable")
+
+
 def _codex_thread_kwargs(request: BridgeRequest) -> CodexThreadKwargs:
     from openai_codex import ApprovalMode
 
     return {
-        "ephemeral": True,
+        # The SDK must persist the first thread for normalized resume.  Live
+        # conformance supplies a private suite-scoped CODEX_HOME that survives
+        # both bridge launches and is scrubbed when the suite ends.
+        "ephemeral": False,
         "model": request["requested_model"],
         "model_provider": CODEX_MODEL_PROVIDER,
         "service_tier": CODEX_SERVICE_TIER,
@@ -1470,15 +1696,20 @@ def _codex_thread_kwargs(request: BridgeRequest) -> CodexThreadKwargs:
     }
 
 
-def _codex_bootstrap_thread_kwargs(
+def _codex_start_or_resume_thread(
+    client: object,
     request: BridgeRequest,
-    *,
-    isolated_cwd: Path,
-) -> CodexThreadKwargs:
-    """Resolve bootstrap defaults without consulting project-local config."""
-    kwargs = _codex_thread_kwargs(request)
-    kwargs["cwd"] = str(isolated_cwd)
-    return kwargs
+    thread_kwargs: CodexThreadKwargs,
+) -> object:
+    """Select the SDK resume call while preserving the same persisted home."""
+    resume_session_id = request.get("resume_session_id")
+    if resume_session_id is None:
+        return client.thread_start(**thread_kwargs)  # type: ignore[attr-defined]
+    resumed_kwargs = dict(thread_kwargs)
+    resumed_kwargs.pop("ephemeral")
+    return client.thread_resume(  # type: ignore[attr-defined]
+        resume_session_id, **resumed_kwargs
+    )
 
 
 def _codex_turn_kwargs(request: BridgeRequest) -> CodexTurnKwargs:
@@ -1493,6 +1724,20 @@ def _codex_turn_kwargs(request: BridgeRequest) -> CodexTurnKwargs:
         "cwd": request["cwd"],
         "output_schema": cast("dict[str, JsonValue]", request["output_schema"]),
     }
+
+
+def _codex_budget_overrides() -> tuple[str, ...]:
+    budget = get_settings().budget
+    if budget is None:
+        return ()
+    # Codex exposes a single user turn through this bridge.  Its recognized
+    # output_token_limit is the native token-side bound for that turn.
+    return (f"output_token_limit={budget.max_tokens}",)
+
+
+def _codex_bin_kwargs() -> dict[str, str]:
+    path = get_settings().codex_cli_path
+    return {"codex_bin": str(path)} if path is not None else {}
 
 
 def _codex_account_type(account_response: object) -> str | None:
@@ -1531,6 +1776,35 @@ def _codex_usage_from_sdk(usage: object) -> dict[str, int] | None:
     return _usage_payload(payload)
 
 
+class CodexTurnErrorNotification(Exception):
+    """A Codex app-server error notification, described without raw bodies."""
+
+    def __init__(self, text: str, *, will_retry: bool) -> None:
+        super().__init__(f"{text} (will retry)" if will_retry else text)
+
+
+def _codex_turn_error_text(error: object) -> str:
+    message = getattr(error, "message", None)
+    parts: list[str] = []
+    info = getattr(error, "codex_error_info", None)
+    if info is not None:
+        dump = getattr(info, "model_dump", None)
+        try:
+            summary = dump() if callable(dump) else info
+        except Exception:  # pragma: no cover - defensive against SDK models
+            summary = None
+        if isinstance(summary, str):
+            parts.append(summary)
+        elif isinstance(summary, dict) and len(summary) == 1:
+            key, value = next(iter(summary.items()))
+            parts.append(key if value in (None, {}) else f"{key}={value!r}")
+        elif isinstance(summary, dict) and summary:
+            parts.append(",".join(sorted(str(key) for key in summary)))
+    if isinstance(message, str) and message.strip():
+        parts.append(" ".join(message.split()))
+    return ": ".join(parts) if parts else "codex error notification"
+
+
 def _enforce_codex_chatgpt_login(codex: object) -> None:
     account = getattr(codex, "account", None)
     if not callable(account):
@@ -1565,49 +1839,6 @@ def _retain_codex_response_text(
     return final_text, text
 
 
-@contextmanager
-def _codex_effective_config_lock(request: BridgeRequest) -> Iterator[Path]:
-    """Export a full lock from an empty Codex home without auth or a model turn."""
-    from openai_codex import Codex, CodexConfig
-
-    with TemporaryDirectory(prefix=get_settings().temp_name("codex-bootstrap")) as directory:
-        root = Path(directory)
-        codex_home = root / "home"
-        export_dir = root / "locks"
-        codex_home.mkdir(mode=0o700)
-        export_dir.mkdir(mode=0o700)
-        environment = _filtered_environment()
-        environment["CODEX_HOME"] = str(codex_home)
-        config = CodexConfig(
-            config_overrides=codex_bootstrap_overrides(export_dir),
-            cwd=str(root),
-            env=environment,
-        )
-        with Codex(config) as codex:
-            # Thread creation resolves defaults and writes the lock but makes no
-            # model request, so the isolated home needs no copied credential.
-            # Both process cwd and thread cwd must remain isolated: Codex also
-            # discovers project-level .codex configuration from thread cwd.
-            codex.thread_start(
-                **_codex_bootstrap_thread_kwargs(request, isolated_cwd=root)
-            )
-        yield exported_codex_config_lock(export_dir)
-
-
-def _export_codex_config_lock(request: BridgeRequest) -> None:
-    target = Path(request["config_lock_target"])
-    with _codex_effective_config_lock(request) as source:
-        shutil.copyfile(source, target)
-        target.chmod(0o600)
-    _write_frame(
-        {
-            "type": "result",
-            "status": "completed",
-            "terminal_reason": "completed",
-        }
-    )
-
-
 def _probe_claude_model_runtime(request: BridgeRequest) -> None:
     """Validate the SDK-selected bundled CLI without authentication or a turn."""
     try:
@@ -1620,15 +1851,26 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
         options = ClaudeAgentOptions(
             model=request["requested_model"],
             cwd=request["cwd"],
+            cli_path=get_settings().claude_cli_path,
         )
         transport = SubprocessCLITransport(prompt="", options=options)
-        selected = Path(transport._find_cli()).resolve(strict=True)
+        # connect() uses an explicit option verbatim and consults _find_cli()
+        # only when no path was configured.  Mirror that selection without
+        # spawning the CLI or starting a model thread.
+        selected_cli = transport._cli_path
+        if selected_cli is None:
+            selected_cli = transport._find_cli()
+        selected = Path(selected_cli).resolve(strict=True)
         bundled = (
             Path(__import__("claude_agent_sdk").__file__).resolve().parent
             / "_bundled"
             / ("claude.exe" if os.name == "nt" else "claude")
         ).resolve(strict=True)
-        if selected != bundled:
+        configured = get_settings().claude_cli_path
+        expected = (
+            configured.resolve(strict=True) if configured is not None else bundled
+        )
+        if selected != expected:
             raise RuntimeError("startup")
         version = tuple(int(part) for part in __cli_version__.split("."))
         if len(version) != 3:
@@ -1639,7 +1881,9 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
         )
         return
     minimum = CLAUDE_MODEL_MINIMUM_CLI_VERSION.get(request["requested_model"])
-    if minimum is not None and version < minimum:
+    # Explicit paths were attested through the parent's mandatory wrapper
+    # before this bridge launch.  The SDK constant applies only to its bundle.
+    if configured is None and minimum is not None and version < minimum:
         _write_frame(
             {"type": "readiness", "status": "failed", "failure": "model-unsupported"}
         )
@@ -1648,9 +1892,7 @@ def _probe_claude_model_runtime(request: BridgeRequest) -> None:
 
 
 def _probe_codex_app_server(request: BridgeRequest) -> None:
-    """Exercise pinned SDK bootstrap and ChatGPT account boundaries without a turn."""
-    auth_directory: TemporaryDirectory[str] | None = None
-    auth_path: Path | None = None
+    """Initialize the pinned app-server and read its account without a turn."""
     try:
         import openai_codex
 
@@ -1662,18 +1904,25 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
         from openai_codex import Codex, CodexConfig
 
         _strip_raw_api_from_process_env()
-        auth_directory, auth_environment, auth_path = (
-            _materialize_codex_subscription_auth()
-        )
-        with _codex_effective_config_lock(request) as config_lock:
-            codex_environment = _filtered_environment()
-            codex_environment.update(auth_environment)
+        with _codex_subscription_environment() as (auth_environment, auth_path):
+            codex_environment = _codex_sdk_environment(
+                auth_environment, auth_path
+            )
             config = CodexConfig(
-                config_overrides=(codex_config_lock_override(config_lock),),
-                cwd=request["cwd"],
+                **_codex_bin_kwargs(),
+                # Codex 0.154 initializes directly from the highest-precedence
+                # overrides.  The 0.147-era config-lock export was triggered by
+                # thread/start, is no longer part of the app-server protocol,
+                # and made a readiness check create a thread unnecessarily.
+                config_overrides=_codex_request_runtime_overrides(request),
+                # Account readiness is independent of a project.  Keeping both
+                # process cwd and CODEX_HOME in the private credential home
+                # prevents repository configuration discovery during initialize.
+                cwd=str(auth_path.parent),
                 env=codex_environment,
             )
             with Codex(config) as codex:
+                _enforce_codex_effective_config(codex, request)
                 _enforce_codex_chatgpt_login(codex)
                 if auth_path is not None:
                     auth_path.unlink(missing_ok=True)
@@ -1682,11 +1931,6 @@ def _probe_codex_app_server(request: BridgeRequest) -> None:
         # public probe contract retains only this fixed readiness class.
         _write_frame({"type": "readiness", "status": "failed", "failure": "bootstrap"})
         return
-    finally:
-        if auth_path is not None:
-            auth_path.unlink(missing_ok=True)
-        if auth_directory is not None:
-            auth_directory.cleanup()
     _write_frame({"type": "readiness", "status": "ready"})
 
 
@@ -1723,7 +1967,6 @@ def _run_codex(
     from openai_codex.models import Notification
 
     _strip_raw_api_from_process_env()
-    auth_directory, auth_environment, auth_path = _materialize_codex_subscription_auth()
     if openai_codex.__version__ != PINNED_CODEX_VERSION:
         raise RuntimeError("startup")
     saw_message = False
@@ -1738,6 +1981,7 @@ def _run_codex(
     final_response_text: str | None = None
     latest_response_text: str | None = None
     turn_failed = False
+    turn_failure: dict[str, str] | None = None
     tool_item_types = (
         CollabAgentToolCallThreadItem,
         CommandExecutionThreadItem,
@@ -1752,25 +1996,28 @@ def _run_codex(
         WebSearchThreadItem,
     )
 
-    with _codex_effective_config_lock(request) as config_lock:
-        codex_environment = _filtered_environment()
-        codex_environment.update(auth_environment)
+    with _codex_subscription_environment() as (auth_environment, auth_path):
+        # A turn is never allowed to fall back to the operator's Codex login or
+        # configuration. Login-status probing remains available without a
+        # descriptor, but the SDK turn itself requires brokered credentials.
+        codex_environment = _codex_sdk_environment(auth_environment, auth_path)
         config = CodexConfig(
-            config_overrides=(codex_config_lock_override(config_lock),),
+            **_codex_bin_kwargs(),
+            # Codex 0.154 removed the 0.147 debug.config_lockfile export. The
+            # restrictive overrides are therefore applied directly and the
+            # merged effective config is attested below before a thread exists.
+            # The private CODEX_HOME still holds no project trust entry.
+            config_overrides=_codex_request_runtime_overrides(request),
             cwd=request["cwd"],
             env=codex_environment,
         )
         with Codex(config) as codex:
+            _enforce_codex_effective_config(codex, request)
             _enforce_codex_chatgpt_login(codex)
             if auth_path is not None:
                 auth_path.unlink(missing_ok=True)
             thread_kwargs = _codex_thread_kwargs(request)
-            resume_session_id = request.get("resume_session_id")
-            if resume_session_id is None:
-                thread = codex.thread_start(**thread_kwargs)
-            else:
-                thread_kwargs.pop("ephemeral")
-                thread = codex.thread_resume(resume_session_id, **thread_kwargs)
+            thread = _codex_start_or_resume_thread(codex, request, thread_kwargs)
             session_id = _metadata(getattr(thread, "id", None))
             _event_frame(
                 kind="system",
@@ -1790,6 +2037,7 @@ def _run_codex(
                 semantic=False,
             )
             stream = turn.stream()
+            shadow_reads: dict[tuple[str, str, str], tuple[str, str]] = {}
             _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
             try:
                 for event in stream:
@@ -1836,6 +2084,10 @@ def _run_codex(
                         continue
                     if isinstance(payload, ItemStartedNotification):
                         item_root = payload.item.root
+                        if isinstance(item_root, CommandExecutionThreadItem):
+                            read = _codex_shadow_read(item_root)
+                            if read is not None and len(shadow_reads) < 128:
+                                shadow_reads[(payload.thread_id, payload.turn_id, item_root.id)] = read
                         if isinstance(item_root, tool_item_types):
                             _observe_progress(
                                 reporter,
@@ -1868,7 +2120,12 @@ def _run_codex(
                     if isinstance(payload, ItemCompletedNotification):
                         completed_root = payload.item.root
                         if isinstance(completed_root, CommandExecutionThreadItem):
-                            _codex_command_completion(completed_root)
+                            _codex_command_completion(
+                                completed_root,
+                                started_read=shadow_reads.pop(
+                                    (payload.thread_id, payload.turn_id, completed_root.id), None
+                                ),
+                            )
                         if isinstance(completed_root, tool_item_types):
                             _record_progress_activity(reporter)
                         else:
@@ -1932,7 +2189,24 @@ def _run_codex(
                         raise RuntimeError("protocol")
                     if isinstance(payload, ErrorNotification):
                         _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
-                        raise RuntimeError("protocol")
+                        error_text = _codex_turn_error_text(payload.error)
+                        if payload.will_retry is True:
+                            # The app-server reconnects transient stream
+                            # failures itself; the turn is still live.  Keep
+                            # a bounded, redacted reason and keep streaming.
+                            _event_frame(
+                                kind="system",
+                                subtype="error_retry",
+                                session_id=_metadata(payload.thread_id) or session_id,
+                                request_id=_metadata(payload.turn_id) or request_id,
+                                effective_model=effective_model,
+                                semantic=False,
+                                detail=_sanitized_bridge_message(error_text),
+                            )
+                            continue
+                        raise RuntimeError("protocol") from CodexTurnErrorNotification(
+                            error_text, will_retry=False
+                        )
                     if isinstance(payload, TurnCompletedNotification):
                         _observe_progress(reporter, RuntimePhase.RESULT_PACKAGING)
                         saw_terminal = True
@@ -1943,6 +2217,20 @@ def _run_codex(
                             payload.turn.status, "value", payload.turn.status
                         )
                         turn_failed = turn_status in {"failed", "interrupted"}
+                        if turn_failed:
+                            turn_error = getattr(payload.turn, "error", None)
+                            turn_failure_message = _sanitized_bridge_message(
+                                f"{turn_status}: "
+                                + (
+                                    _codex_turn_error_text(turn_error)
+                                    if turn_error is not None
+                                    else "no error detail"
+                                )
+                            )
+                            turn_failure = {
+                                "exception": "CodexTurnFailed",
+                                "message": turn_failure_message,
+                            }
                         break
             finally:
                 close_stream = getattr(stream, "close", None)
@@ -1980,9 +2268,9 @@ def _run_codex(
         frame["structured_output"] = structured_output
     if usage_payload is not None:
         frame["usage"] = usage_payload
+    if turn_failure is not None:
+        frame["diagnostics"] = turn_failure
     _write_frame(frame)
-    if auth_directory is not None:
-        auth_directory.cleanup()
 
 
 async def _run_claude(
@@ -2130,6 +2418,11 @@ async def _run_claude(
                 effective_model=effective_model,
                 request_id=request_id,
                 semantic=False,
+                detail=(
+                    _claude_api_retry_detail(data)
+                    if message.subtype == "api_retry"
+                    else None
+                ),
             )
             continue
         if isinstance(message, StreamEvent):
@@ -2274,9 +2567,6 @@ async def _run(
     if request["vendor"] == "claude-probe":
         await asyncio.to_thread(_probe_claude_model_runtime, request)
         return
-    if request["vendor"] == "codex-lock":
-        await asyncio.to_thread(_export_codex_config_lock, request)
-        return
     if request["vendor"] == "codex-probe":
         await asyncio.to_thread(_probe_codex_app_server, request)
         return
@@ -2286,10 +2576,69 @@ async def _run(
     await _run_claude(request, reporter=reporter)
 
 
-def _error_frame(reason: str) -> None:
-    if reason not in {"startup", "protocol", "disconnect"}:
+MAX_FAILURE_MESSAGE_CHARS = 200
+_SECRET_PATTERN = re.compile(
+    r"sk-[A-Za-z0-9_-]{8,}"
+    r"|eyJ[A-Za-z0-9_-]{16,}(?:\.[A-Za-z0-9_-]{4,})*"
+    r"|(?i:bearer)\s+[A-Za-z0-9._-]{8,}"
+    r"|[A-Za-z0-9_-]{40,}"
+    r"|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+)
+_FILESYSTEM_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9:/])(?:~|\.{1,2})?"
+    r"/(?:[^\s/]+/)*[^\s/]+"
+    r"|(?<![A-Za-z0-9])(?:[A-Za-z]:\\|\\\\)[^\s]+"
+)
+
+
+def _sanitized_bridge_message(message: str) -> str:
+    """Redact and bound an explicitly trusted bridge-owned message."""
+    sanitized = " ".join(message.split())
+    sanitized = _SECRET_PATTERN.sub("<redacted>", sanitized)
+    sanitized = _FILESYSTEM_PATH_PATTERN.sub("<redacted>", sanitized)
+    return sanitized[:MAX_FAILURE_MESSAGE_CHARS]
+
+
+def _sanitized_failure(exc: BaseException) -> dict[str, str]:
+    """Describe a startup failure without credential or account material.
+
+    Internal ``RuntimeError("startup")`` sentinels carry no detail of their
+    own, so the nearest chained cause is described instead. Messages are
+    retained only for explicitly enumerated bridge-owned exception classes;
+    vendor exceptions can embed raw stdout or stderr and expose only a class.
+    """
+    cause: BaseException = exc
+    seen: set[int] = set()
+    while (
+        isinstance(cause, RuntimeError)
+        and cause.args
+        and cause.args[0] in {"startup", "protocol", "disconnect"}
+        and id(cause) not in seen
+    ):
+        seen.add(id(cause))
+        nested = cause.__cause__ or cause.__context__
+        if nested is None:
+            break
+        cause = nested
+    failure = {"exception": type(cause).__name__}
+    if not isinstance(cause, (BridgeInputError, CodexTurnErrorNotification)):
+        return failure
+    try:
+        message = _sanitized_bridge_message(str(cause))
+    except Exception:  # pragma: no cover - defensive against exotic __str__
+        message = ""
+    if message:
+        failure["message"] = message
+    return failure
+
+
+def _error_frame(reason: str, exc: BaseException | None = None) -> None:
+    if reason not in {"startup", "protocol", "disconnect", "unavailable"}:
         reason = "protocol"
-    _write_frame({"type": "error", "reason": reason})
+    frame: dict[str, object] = {"type": "error", "reason": reason}
+    if exc is not None:
+        frame["diagnostics"] = _sanitized_failure(exc)
+    _write_frame(frame)
 
 
 async def main() -> int:
@@ -2307,12 +2656,13 @@ async def main() -> int:
             return 130
         except RuntimeError as exc:
             reason = exc.args[0] if exc.args else "protocol"
-            _error_frame(reason if isinstance(reason, str) else "protocol")
+            _error_frame(reason if isinstance(reason, str) else "protocol", exc)
             return 1
-        except Exception:
-            # Never print exception text: SDK errors can contain prompts, paths,
-            # account details, or vendor response bodies.
-            _error_frame("startup")
+        except Exception as exc:
+            # Never print raw exception text: SDK errors can contain prompts,
+            # paths, account details, or vendor response bodies.  Only the
+            # exception class and a redacted, bounded message are surfaced.
+            _error_frame("startup", exc)
             return 1
         return 0
     finally:
@@ -2336,7 +2686,11 @@ def codex_refresh() -> int:
         )
         environment = _filtered_environment()
         environment.update(auth_environment)
-        config = CodexConfig(env=environment)
+        config = CodexConfig(
+            **_codex_bin_kwargs(),
+            config_overrides=_codex_budget_overrides(),
+            env=environment,
+        )
         with Codex(config) as codex:
             response = codex.account(refresh_token=True)
         authenticated = response.account is not None
