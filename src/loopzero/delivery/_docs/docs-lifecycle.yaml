@@ -1,0 +1,371 @@
+{
+  "schema_version": "2.0.0",
+  "generated_at": "2026-03-10",
+  "description": "Docs lifecycle policy SSoT for metadata validation and archive eligibility. Active doc taxonomy excludes retired spec tombstones under docs/design/specs/ and archived legacy specs under docs/archive/specs/.",
+  "validation": {
+    "required_fields": [
+      "owner",
+      "last_updated",
+      "status",
+      "doc_type"
+    ],
+    "exclude_paths": [
+      "docs/archive/**",
+      "docs/templates/**",
+      "docs/design/specs/**"
+    ]
+  },
+  "freeze": {
+    "minimum_age_days": 14,
+    "unfreeze_marker": "<!-- docs-freeze: unfreeze -->",
+    "rules": [
+      {
+        "path": "docs/design/blueprints/completed/**",
+        "doc_type": "blueprint",
+        "statuses": [
+          "completed",
+          "superseded"
+        ]
+      },
+      {
+        "path": "docs/design/explorations/**",
+        "doc_type": "exploration",
+        "statuses": [
+          "graveyarded"
+        ]
+      }
+    ]
+  },
+  "graveyard": {
+    "minimum_age_days": 30,
+    "source_path": "docs/design/explorations",
+    "target_path": "docs/design/graveyard.md",
+    "eligible_statuses": [
+      "draft",
+      "completed",
+      "superseded"
+    ]
+  },
+  "archive": {
+    "manifest_output": "tmp/docs-archive-candidates.json",
+    "default_min_age_days": 30,
+    "tombstone_root": "docs/archive/historical",
+    "tombstone_prefix": "Archived: [historical copy]"
+  },
+  "statuses": {
+    "_comment": "Universal statuses are the shared non-learning vocabulary pool. Domain-specific statuses are opt-in for their owning type. Learning has a dedicated lifecycle.",
+    "universal": [
+      "draft",
+      "active",
+      "completed",
+      "archived",
+      "deprecated",
+      "superseded"
+    ],
+    "domain": {
+      "blueprint": [
+        "planned",
+        "gated"
+      ],
+      "exploration": [
+        "graveyarded"
+      ],
+      "adr": [
+        "proposed",
+        "accepted"
+      ],
+      "architecture": [
+        "accepted"
+      ]
+    },
+    "learning": [
+      "open",
+      "proposed",
+      "implemented",
+      "archived"
+    ]
+  },
+  "doc_types": {
+    "adr": {
+      "allowed_statuses": [
+        "proposed",
+        "accepted",
+        "superseded"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "always_reference"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "architecture": {
+      "allowed_statuses": [
+        "active",
+        "deprecated",
+        "accepted",
+        "superseded",
+        "completed",
+        "archived"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "living_reference"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "blueprint": {
+      "allowed_statuses": [
+        "planned",
+        "active",
+        "gated",
+        "completed",
+        "superseded"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/blueprints-digest.md",
+        "statuses": [
+          "completed"
+        ],
+        "exclude_if": [],
+        "blockers": [
+          "unresolved_followups"
+        ]
+      }
+    },
+    "bug_report": {
+      "allowed_statuses": [
+        "active",
+        "completed",
+        "archived"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/bug-reports-digest.md",
+        "statuses": [
+          "archived"
+        ],
+        "exclude_if": [
+          "active_reference"
+        ],
+        "blockers": [
+          "unresolved_bugs"
+        ]
+      }
+    },
+    "dossier": {
+      "allowed_statuses": [
+        "draft",
+        "active",
+        "superseded",
+        "archived"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "living_reference"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "exploration": {
+      "allowed_statuses": [
+        "draft",
+        "completed",
+        "archived",
+        "superseded",
+        "graveyarded"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/explorations-digest.md",
+        "statuses": [
+          "completed",
+          "archived"
+        ],
+        "exclude_if": [],
+        "blockers": []
+      }
+    },
+    "feature": {
+      "allowed_statuses": [
+        "active",
+        "deprecated"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "living_reference"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "guide": {
+      "allowed_statuses": [
+        "active",
+        "deprecated"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "living_reference"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "incident": {
+      "allowed_statuses": [
+        "active",
+        "completed",
+        "archived"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/incidents-digest.md",
+        "statuses": [
+          "archived",
+          "completed"
+        ],
+        "exclude_if": [],
+        "blockers": [
+          "unresolved_followups"
+        ]
+      }
+    },
+    "index": {
+      "allowed_statuses": [
+        "active"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "navigation_root"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "initiative": {
+      "allowed_statuses": [
+        "draft",
+        "active",
+        "completed",
+        "archived"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/blueprints-digest.md",
+        "statuses": [
+          "completed",
+          "archived"
+        ],
+        "exclude_if": [],
+        "blockers": []
+      }
+    },
+    "learning": {
+      "allowed_statuses": [
+        "open",
+        "proposed",
+        "implemented",
+        "archived"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/incidents-digest.md",
+        "statuses": [
+          "implemented",
+          "archived"
+        ],
+        "exclude_if": [],
+        "blockers": [
+          "unresolved_followups"
+        ]
+      }
+    },
+    "ops_report": {
+      "allowed_statuses": [
+        "active",
+        "completed",
+        "archived"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/reviews-digest.md",
+        "statuses": [
+          "archived",
+          "completed"
+        ],
+        "exclude_if": [],
+        "blockers": []
+      }
+    },
+    "runbook": {
+      "allowed_statuses": [
+        "active",
+        "deprecated"
+      ],
+      "archive": {
+        "eligible": true,
+        "digest": "docs/archive/runbooks-digest.md",
+        "statuses": [
+          "deprecated"
+        ],
+        "exclude_if": [
+          "operational_reference"
+        ],
+        "blockers": []
+      }
+    },
+    "scenario": {
+      "allowed_statuses": [
+        "draft",
+        "active",
+        "deprecated"
+      ],
+      "archive": {
+        "eligible": false,
+        "digest": null,
+        "exclude_if": [
+          "living_reference"
+        ],
+        "blockers": [
+          "never_delete_by_policy"
+        ]
+      }
+    },
+    "_removed": {
+      "_note": "spec was removed in V3 (2026-04-13). Existing specs migrated by function: research/options \u2192 exploration, implementation plan \u2192 blueprint. Behavior contracts \u2192 blueprint or ADR."
+    }
+  },
+  "generated_artifacts": {
+    "description": "One-off generated HTML snapshots (briefings, explainers, grill surveys, reports) are not lifecycle docs; delete after their consumption window and record removals in the ledger.",
+    "paths": [
+      "docs/reports/",
+      "docs/explainers/"
+    ],
+    "ledger": "docs/archive/artifacts-digest.md",
+    "retention_days": 30
+  }
+}

@@ -1,0 +1,719 @@
+diff --git a/.agents/rules/review-gate.md b/.agents/rules/review-gate.md
+index d43a76f00..e18573510 100644
+--- a/.agents/rules/review-gate.md
++++ b/.agents/rules/review-gate.md
+@@ -205,7 +205,7 @@ The security gate (step 7) activates when the diff includes files matching any o
+ 
+ **Non-triggers** (security gate skipped): pure styling/CSS, test-only changes, docs-only changes, lint/formatting fixes, `refine-code` refactors with no behavior change, new service files without auth/external surface, response-model-only schema changes, router diffs that don't touch auth or add endpoints, dependency version bumps, edits inside an existing server action that don't touch auth/session/tokens/external calls.
+ 
+-Trigger scope is yield-governed: `make additive-score` prints each gate's yield vs threshold; below threshold at sufficient runs ⇒ narrow at the next `skill-health` pass; a real regression slipping through ⇒ widen back. Narrowings: #752 (2026-06, 5% yield — blanket triggers removed); 2026-07-10 (5% @ 37 runs — server-action edits and dependency version bumps de-triggered as above).
++Trigger scope is yield-governed: `make additive-score` prints each gate's yield vs threshold; below threshold at sufficient runs ⇒ narrow at the next `skill-health` pass; a real regression slipping through ⇒ widen back. Narrowings: #752 (2026-06, 5% yield — blanket triggers removed); 2026-07-10 (5% @ 37 runs — server-action edits and dependency version bumps de-triggered as above); #4015 (2026-09-02, 0/513 completed trust verifications carried a Makefile-borne finding — Makefile moved from name-only to hunk-content classification: dependency-install, deploy/privilege, and trusted-execution recipe changes still trigger; argument/telemetry plumbing passes; unparseable/renamed/binary rows fail closed).
+ The 2026-07-11 D-20 reconciliation removed the blanket `execute-blueprint`
+ final-acceptance override after repeated below-floor verdicts. Blueprint work
+ now follows the same path-based security triggers; any real escaped regression
+diff --git a/.cursor/rules/review-gate.mdc b/.cursor/rules/review-gate.mdc
+index a939512d0..22c86b187 100644
+--- a/.cursor/rules/review-gate.mdc
++++ b/.cursor/rules/review-gate.mdc
+@@ -207,7 +207,7 @@ The security gate (step 7) activates when the diff includes files matching any o
+ 
+ **Non-triggers** (security gate skipped): pure styling/CSS, test-only changes, docs-only changes, lint/formatting fixes, `refine-code` refactors with no behavior change, new service files without auth/external surface, response-model-only schema changes, router diffs that don't touch auth or add endpoints, dependency version bumps, edits inside an existing server action that don't touch auth/session/tokens/external calls.
+ 
+-Trigger scope is yield-governed: `make additive-score` prints each gate's yield vs threshold; below threshold at sufficient runs ⇒ narrow at the next `skill-health` pass; a real regression slipping through ⇒ widen back. Narrowings: #752 (2026-06, 5% yield — blanket triggers removed); 2026-07-10 (5% @ 37 runs — server-action edits and dependency version bumps de-triggered as above).
++Trigger scope is yield-governed: `make additive-score` prints each gate's yield vs threshold; below threshold at sufficient runs ⇒ narrow at the next `skill-health` pass; a real regression slipping through ⇒ widen back. Narrowings: #752 (2026-06, 5% yield — blanket triggers removed); 2026-07-10 (5% @ 37 runs — server-action edits and dependency version bumps de-triggered as above); #4015 (2026-09-02, 0/513 completed trust verifications carried a Makefile-borne finding — Makefile moved from name-only to hunk-content classification: dependency-install, deploy/privilege, and trusted-execution recipe changes still trigger; argument/telemetry plumbing passes; unparseable/renamed/binary rows fail closed).
+ The 2026-07-11 D-20 reconciliation removed the blanket `execute-blueprint`
+ final-acceptance override after repeated below-floor verdicts. Blueprint work
+ now follows the same path-based security triggers; any real escaped regression
+diff --git a/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py b/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
+index 9ca42c538..b6e8800ac 100644
+--- a/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
++++ b/fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py
+@@ -1917,3 +1917,229 @@ def test_recovery_preserves_an_uncommitted_append_tail_before_truncation(
+     assert tail
+     assert manifest["tail_sha256"] == hashlib.sha256(tail).hexdigest()
+     assert manifest["original_size"] == manifest["protected_size"] + len(tail)
++
++
++def test_authentication_projection_memoizes_exact_history(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    projection._authentication_cache.clear()
++    calls = {"count": 0}
++    real = projection._authenticate_coordinator_record_ids_uncached
++
++    def counting(records):
++        calls["count"] += 1
++        return real(records)
++
++    monkeypatch.setattr(
++        projection, "_authenticate_coordinator_record_ids_uncached", counting
++    )
++    history: list[dict[str, object]] = [{"task_id": "t1"}, {"task_id": "t2"}]
++    first = projection._authenticated_coordinator_record_ids(history)
++    second = projection._authenticated_coordinator_record_ids(list(history))
++    assert first is second
++    assert calls["count"] == 1
++    history.append({"task_id": "t3"})
++    projection._authenticated_coordinator_record_ids(history)
++    assert calls["count"] == 2
++    equal_content_clone = [dict(record) for record in history]
++    projection._authenticated_coordinator_record_ids(equal_content_clone)
++    assert calls["count"] == 3
++    projection._authentication_cache.clear()
++
++
++def test_authentication_cache_distinguishes_view_trust_fields() -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    projection._authentication_cache.clear()
++    record: dict[str, object] = {"task_id": "t1"}
++    plain = projection._authenticated_coordinator_record_ids([record])
++    trusted_view = projection.AuthorityRecordView(
++        [record], trusted_retained_ids=(id(record),)
++    )
++    trusted = projection._authenticated_coordinator_record_ids(trusted_view)
++    assert id(record) not in plain
++    assert id(record) in trusted
++    projection._authentication_cache.clear()
++
++
++def test_authentication_cache_survives_filtered_view_derivations(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    projection._authentication_cache.clear()
++    calls = {"count": 0}
++    real = projection._authenticate_coordinator_record_ids_uncached
++
++    def counting(records):
++        calls["count"] += 1
++        return real(records)
++
++    monkeypatch.setattr(
++        projection, "_authenticate_coordinator_record_ids_uncached", counting
++    )
++    record: dict[str, object] = {"task_id": "t1"}
++    prefix = {"scheme": "coordinator-ledger-prefix-v3", "record_count": 1}
++    base_view = projection.AuthorityRecordView([record], checkpoint_prefix=prefix)
++    first_derived = base_view.filtered([record])
++    second_derived = base_view.filtered([record])
++    assert first_derived.checkpoint_prefix is not second_derived.checkpoint_prefix
++    first = projection._authenticated_coordinator_record_ids(first_derived)
++    second = projection._authenticated_coordinator_record_ids(second_derived)
++    assert first is second
++    assert calls["count"] == 1
++    projection._authentication_cache.clear()
++
++
++def test_view_init_drops_foreign_trust_ids() -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    record: dict[str, object] = {"task_id": "t1"}
++    foreign: dict[str, object] = {"task_id": "other"}
++    view = projection.AuthorityRecordView(
++        [record],
++        trusted_retained_ids=(id(record), id(foreign)),
++        trusted_checkpoint_id=id(foreign),
++    )
++    assert view.trusted_retained_ids == frozenset({id(record)})
++    assert view.trusted_checkpoint_id is None
++
++
++def test_authentication_cache_key_binds_accumulator_head() -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    ledger = sys.modules["dispatch_ledger"]
++    record: dict[str, object] = {"task_id": "t1"}
++    head_one = ledger.LedgerAccumulatorV3.initial(
++        ledger_id="ab" * 16, repository_binding="cd" * 32
++    )
++    head_two = ledger.LedgerAccumulatorV3.initial(
++        ledger_id="ef" * 16, repository_binding="cd" * 32
++    )
++    view_one = projection.AuthorityRecordView([record], accumulator_head=head_one)
++    view_two = projection.AuthorityRecordView([record], accumulator_head=head_two)
++    assert projection._authentication_cache_key(
++        view_one
++    ) != projection._authentication_cache_key(view_two)
++
++
++def test_authentication_cache_eviction_preserves_other_entries(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    projection._authentication_cache.clear()
++    calls = {"count": 0}
++    real = projection._authenticate_coordinator_record_ids_uncached
++
++    def counting(records):
++        calls["count"] += 1
++        return real(records)
++
++    monkeypatch.setattr(
++        projection, "_authenticate_coordinator_record_ids_uncached", counting
++    )
++    limit = projection._AUTHENTICATION_CACHE_LIMIT
++    histories = [[{"task_id": f"t{n}"}] for n in range(limit + 1)]
++    results = [
++        projection._authenticated_coordinator_record_ids(history)
++        for history in histories
++    ]
++    assert calls["count"] == limit + 1
++    assert len(projection._authentication_cache) == limit
++    # Overflow evicted only the oldest entry: the newest `limit` histories
++    # are still served from cache with their own correct results.
++    for history, result in zip(histories[1:], results[1:], strict=True):
++        assert projection._authenticated_coordinator_record_ids(history) is result
++    assert calls["count"] == limit + 1
++    # The evicted oldest history recomputes rather than serving a stale entry.
++    projection._authenticated_coordinator_record_ids(histories[0])
++    assert calls["count"] == limit + 2
++    projection._authentication_cache.clear()
++
++
++def test_operational_verification_failure_is_not_cached(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    authority = sys.modules["dispatch_authority"]
++    projection._authentication_cache.clear()
++    record: dict[str, object] = {
++        "task_id": "t1",
++        "terminal_authority_proof": {"authority_kind": "coordinator", "scheme": "x"},
++    }
++    calls = {"count": 0}
++
++    def transient(*args, **kwargs):
++        calls["count"] += 1
++        raise projection.TerminalAuthorityOperationalError("Ed25519 timed out")
++
++    monkeypatch.setattr(projection, "verify_terminal_authority", transient)
++    history = [record]
++    first = projection._authenticated_coordinator_record_ids(history)
++    second = projection._authenticated_coordinator_record_ids(history)
++    assert first == frozenset() and second == frozenset()
++    # The transient rejection is recomputed, never served from cache.
++    assert calls["count"] == 2
++    assert len(projection._authentication_cache) == 0
++
++    def durable(*args, **kwargs):
++        calls["count"] += 1
++        raise projection.TerminalAuthorityError("invalid proof")
++
++    monkeypatch.setattr(projection, "verify_terminal_authority", durable)
++    third = projection._authenticated_coordinator_record_ids(history)
++    fourth = projection._authenticated_coordinator_record_ids(history)
++    assert third is fourth
++    # The durable invalid-proof rejection is cached after one computation.
++    assert calls["count"] == 3
++    projection._authentication_cache.clear()
++
++
++def test_real_signature_verification_timeout_raises_operational_error(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    import subprocess as _subprocess
++
++    def timing_out(*args, **kwargs):
++        raise _subprocess.TimeoutExpired(cmd="openssl", timeout=10.0)
++
++    monkeypatch.setattr(dispatch_authority.subprocess, "run", timing_out)
++    dispatch_authority._signature_is_valid.cache_clear()
++    with pytest.raises(dispatch_authority.TerminalAuthorityOperationalError):
++        dispatch_authority._signature_is_valid(b"key", b"sig", b"payload")
++    with pytest.raises(dispatch_authority.TerminalAuthorityOperationalError):
++        dispatch_authority._run_openssl(["pkey"], input_bytes=b"")
++    dispatch_authority._signature_is_valid.cache_clear()
++
++
++def test_transient_key_derivation_failure_propagates_and_is_not_cached(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    projection = sys.modules["dispatch_authority_projection"]
++    # Bind to the exact module namespace the projection's verify function
++    # executes in (module reloads by sibling test files create duplicates).
++    authority_globals = projection.verify_terminal_authority.__globals__
++    operational_error = authority_globals["TerminalAuthorityOperationalError"]
++    projection._authentication_cache.clear()
++
++    def transient_key(*args, **kwargs):
++        raise operational_error("provider timeout")
++
++    monkeypatch.setitem(
++        authority_globals, "_trusted_coordinator_public_key", transient_key
++    )
++    record: dict[str, object] = {
++        "task_id": "t1",
++        "terminal_authority_proof": {
++            "scheme": authority_globals["COORDINATOR_AUTHORITY_SCHEME"],
++            "authority_kind": "coordinator",
++            "public_key": "QUJD",
++            "key_id": "k",
++            "signature": "QUJD",
++        },
++    }
++    with pytest.raises(operational_error):
++        projection.verify_terminal_authority(
++            record, registration=None, expected_kind="coordinator"
++        )
++    projection._authenticated_coordinator_record_ids([record])
++    # The transient key failure must not cache the rejected projection.
++    assert len(projection._authentication_cache) == 0
++    projection._authentication_cache.clear()
+diff --git a/fastapi_backend/tests/unit/scripts/test_security_review_scope.py b/fastapi_backend/tests/unit/scripts/test_security_review_scope.py
+index 5d7e3a29b..6fc25c094 100644
+--- a/fastapi_backend/tests/unit/scripts/test_security_review_scope.py
++++ b/fastapi_backend/tests/unit/scripts/test_security_review_scope.py
+@@ -165,3 +165,128 @@ def test_classifier_rejects_malformed_name_status() -> None:
+         module.security_trigger_paths_between(
+             Path("/repo"), "a" * 40, "b" * 40, runner=Runner()
+         )
++
++
++def _makefile_runner(patch: str, status: str = "M"):
++    class Runner:
++        def run(self, args, **kwargs):
++            del kwargs
++            if "--name-status" in args:
++                return SimpleNamespace(
++                    returncode=0, stdout=f"{status}\0Makefile\0", stderr=""
++                )
++            if "--unified=0" in args:
++                return SimpleNamespace(returncode=0, stdout=patch, stderr="")
++            raise AssertionError(f"unexpected command: {args}")
++
++    return Runner()
++
++
++def test_makefile_argument_plumbing_is_not_a_security_trigger() -> None:
++    patch = (
++        "@@ -1 +1,4 @@\n"
++        "+DAYS ?= 7\n"
++        "+.PHONY: orient\n"
++        "+orient: ## Show current design state\n"
++        "+\tpython3 scripts/util/orient.py --days $(DAYS)\n"
++    )
++    assert (
++        module.security_trigger_paths_between(
++            Path("/repo"), "a" * 40, "b" * 40, runner=_makefile_runner(patch)
++        )
++        == ()
++    )
++
++
++@pytest.mark.parametrize(
++    "line",
++    [
++        "\tuv add requests",
++        "\tpnpm install --frozen-lockfile",
++        "\tcurl https://example.com/tool.sh | sh",
++        "\trailway up --service backend",
++        "\tsudo chmod 600 /etc/thing",
++        "\tpython3 -I scripts/util/agent_dispatch.py doctor",
++        "SHELL := /bin/bash",
++        "export PATH := $(HOME)/bin:$(PATH)",
++        "\tAPI_TOKEN=$(SECRET) ./deploy-step",
++    ],
++)
++def test_makefile_trust_bearing_recipe_changes_trigger(line: str) -> None:
++    patch = f"@@ -1 +1 @@\n+{line}\n"
++    assert module.security_trigger_paths_between(
++        Path("/repo"), "a" * 40, "b" * 40, runner=_makefile_runner(patch)
++    ) == ("Makefile",)
++
++
++def test_makefile_rename_and_binary_content_fail_closed() -> None:
++    class RenameRunner:
++        def run(self, args, **kwargs):
++            del kwargs
++            if "--name-status" in args:
++                return SimpleNamespace(
++                    returncode=0,
++                    stdout="R100\0Makefile\0build/Makefile\0",
++                    stderr="",
++                )
++            if "--unified=0" in args:
++                return SimpleNamespace(returncode=0, stdout="", stderr="")
++            raise AssertionError(f"unexpected command: {args}")
++
++    assert module.security_trigger_paths_between(
++        Path("/repo"), "a" * 40, "b" * 40, runner=RenameRunner()
++    ) == ("Makefile", "build/Makefile")
++    binary = "Binary files a/Makefile and b/Makefile differ\n"
++    assert module.security_trigger_paths_between(
++        Path("/repo"), "a" * 40, "b" * 40, runner=_makefile_runner(binary)
++    ) == ("Makefile",)
++
++
++def test_tests_directory_makefile_is_content_classified_not_skipped() -> None:
++    class Runner:
++        def run(self, args, **kwargs):
++            del kwargs
++            if "--name-status" in args:
++                return SimpleNamespace(
++                    returncode=0, stdout="M\0tests/Makefile\0", stderr=""
++                )
++            if "--unified=0" in args:
++                return SimpleNamespace(
++                    returncode=0,
++                    stdout="@@ -1 +1 @@\n+\tpip install -e .\n",
++                    stderr="",
++                )
++            raise AssertionError(f"unexpected command: {args}")
++
++    assert module.security_trigger_paths_between(
++        Path("/repo"), "a" * 40, "b" * 40, runner=Runner()
++    ) == ("tests/Makefile",)
++
++
++def test_untracked_makefile_remains_a_conservative_trigger() -> None:
++    assert module.untracked_security_trigger_paths(
++        ["Makefile", "tools/Makefile", "docs/notes.md"]
++    ) == ("Makefile", "tools/Makefile")
++
++
++def test_makefile_edit_inside_trusted_target_triggers_via_hunk_context() -> None:
++    patch = (
++        "@@ -100,0 +101 @@ guardian-dispatch: ## Launch the guardian dispatcher\n"
++        "+\tpython3 scripts/util/run.py --extra-step\n"
++    )
++    assert module.security_trigger_paths_between(
++        Path("/repo"), "a" * 40, "b" * 40, runner=_makefile_runner(patch)
++    ) == ("Makefile",)
++
++
++def test_makefile_benign_target_hunk_context_does_not_trigger() -> None:
++    patch = (
++        "@@ -50,0 +51 @@ orient: ## Show current design state\n"
++        "+\tpython3 scripts/util/orient.py --days $(DAYS)\n"
++    )
++    assert (
++        module.security_trigger_paths_between(
++            Path("/repo"), "a" * 40, "b" * 40, runner=_makefile_runner(patch)
++        )
++        == ()
++    )
+diff --git a/scripts/util/dispatch_authority.py b/scripts/util/dispatch_authority.py
+index 8362a5d50..838ea1413 100644
+--- a/scripts/util/dispatch_authority.py
++++ b/scripts/util/dispatch_authority.py
+@@ -55,6 +55,15 @@ class TerminalAuthorityError(RuntimeError):
+     """A terminal record has no valid dispatcher/coordinator authority proof."""
+ 
+ 
++class TerminalAuthorityOperationalError(TerminalAuthorityError):
++    """The verification provider failed transiently; the proof was not judged.
++
++    Consumers that skip or reject records on TerminalAuthorityError must not
++    treat this subclass as durable evidence of an invalid proof (for example,
++    by caching the rejection).
++    """
++
++
+ @lru_cache(maxsize=1)
+ def _openssl() -> Path:
+     try:
+@@ -81,7 +90,9 @@ def _run_openssl(
+             timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
+         )
+     except subprocess.TimeoutExpired as exc:
+-        raise TerminalAuthorityError("Ed25519 authority operation timed out") from exc
++        raise TerminalAuthorityOperationalError(
++            "Ed25519 authority operation timed out"
++        ) from exc
+     if completed.returncode != 0:
+         raise TerminalAuthorityError("Ed25519 authority operation failed")
+     return completed.stdout
+@@ -852,7 +863,7 @@ def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) ->
+                 timeout=AUTHORITY_PROVIDER_TIMEOUT_S,
+             )
+         except subprocess.TimeoutExpired as exc:
+-            raise TerminalAuthorityError(
++            raise TerminalAuthorityOperationalError(
+                 "legacy coordinator verification timed out"
+             ) from exc
+         if completed.returncode == 0:
+@@ -862,7 +873,12 @@ def _legacy_coordinator_signature_is_valid(signature: bytes, payload: bytes) ->
+             and completed.stderr.startswith(b"Signature verification failed:")
+         ):
+             return False
+-        raise TerminalAuthorityError("legacy coordinator verification provider failed")
++        # Anything other than success or a documented signature mismatch is a
++        # provider/runtime failure: the proof was not judged, so the rejection
++        # must stay retryable and uncacheable.
++        raise TerminalAuthorityOperationalError(
++            "legacy coordinator verification provider failed"
++        )
+ 
+ 
+ def verify_legacy_coordinator_authority(record: Mapping[str, object]) -> None:
+@@ -961,7 +977,7 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) ->
+                 except subprocess.TimeoutExpired as exc:
+                     # Exceptions are not retained by lru_cache. A transient
+                     # provider stall must retry rather than poison this proof.
+-                    raise TerminalAuthorityError(
++                    raise TerminalAuthorityOperationalError(
+                         "terminal authority provider timed out"
+                     ) from exc
+                 if completed.returncode == 0:
+@@ -971,7 +987,9 @@ def _signature_is_valid(public_key: bytes, signature: bytes, payload: bytes) ->
+                 # Only OpenSSL's documented verification-mismatch result is
+                 # durable invalidity. Provider/runtime failures must remain
+                 # retryable and therefore must not enter the LRU cache.
+-                raise TerminalAuthorityError("terminal authority provider failed")
++                raise TerminalAuthorityOperationalError(
++                    "terminal authority provider failed"
++                )
+ 
+             return _with_read_descriptor(signature, verify_signature)
+ 
+@@ -1000,6 +1018,10 @@ def verify_terminal_authority(
+         public_key = _decode(proof.get("public_key"), label="public key", maximum=2048)
+         try:
+             trusted_public_key = _trusted_coordinator_public_key()
++        except TerminalAuthorityOperationalError as exc:
++            raise TerminalAuthorityOperationalError(
++                "coordinator authority key is unavailable"
++            ) from exc
+         except TerminalAuthorityError as exc:
+             raise TerminalAuthorityError(
+                 "coordinator authority key is unavailable"
+diff --git a/scripts/util/dispatch_authority_projection.py b/scripts/util/dispatch_authority_projection.py
+index 6707915d1..6857c7578 100644
+--- a/scripts/util/dispatch_authority_projection.py
++++ b/scripts/util/dispatch_authority_projection.py
+@@ -24,6 +24,7 @@ from dispatch_authority import (
+     COORDINATOR_AUTHORITY_SCHEME,
+     LEGACY_COORDINATOR_AUTHORITY_SCHEME,
+     TerminalAuthorityError,
++    TerminalAuthorityOperationalError,
+     verify_legacy_coordinator_authority,
+     verify_terminal_authority,
+ )
+@@ -440,8 +441,14 @@ class AuthorityRecordView(list[dict[str, object]]):
+         accumulator_head: authority_ledger.LedgerAccumulatorV3 | None = None,
+     ) -> None:
+         super().__init__(records)
+-        self.trusted_checkpoint_id = trusted_checkpoint_id
+-        self.trusted_retained_ids = frozenset(trusted_retained_ids)
++        # Trust fields are ids of contained records at every construction
++        # site; enforce that structurally so a foreign id can never survive
++        # into a view (and, downstream, into an authentication cache entry).
++        contained = {id(record) for record in self}
++        self.trusted_checkpoint_id = (
++            trusted_checkpoint_id if trusted_checkpoint_id in contained else None
++        )
++        self.trusted_retained_ids = frozenset(trusted_retained_ids) & contained
+         self.checkpoint_prefix = (
+             dict(checkpoint_prefix) if checkpoint_prefix is not None else None
+         )
+@@ -471,11 +478,90 @@ def _authority_record_list(
+     return copied
+ 
+ 
++# One CLI invocation recomputes the identical authentication projection many
++# times over the same loaded history (measured: 18 calls / 92.5s in one
++# delivery-control status on the legacy stream, #4016). The projection is
++# deterministic over the exact record objects, their order, and the view's
++# trust fields, so memoize on those identities. Entries hold strong references
++# to the authenticated records, so a cached object id can never be recycled by
++# a different object; appending to a history changes the key and therefore
++# self-invalidates. In-place mutation of an already-authenticated record is
++# outside the append-only authority contract.
++_AUTHENTICATION_CACHE_LIMIT = 8
++_authentication_cache: dict[
++    tuple[object, ...], tuple[object, frozenset[int]]
++] = {}
++
++
++def _authentication_cache_key(
++    records: Sequence[dict[str, object]],
++) -> tuple[object, ...]:
++    if isinstance(records, AuthorityRecordView):
++        # The prefix dict is rebuilt by every filtered() derivation, so key it
++        # by canonical content, not identity; identity keys made checkpoint-
++        # backed (v3) histories miss on every derived view. The accumulator
++        # head participates for the same reason even though the current
++        # prefix-match path list-slices views before reaching its v3 branch.
++        prefix = records.checkpoint_prefix
++        try:
++            prefix_key: object = (
++                None
++                if prefix is None
++                else json.dumps(prefix, sort_keys=True, separators=(",", ":"))
++            )
++        except (TypeError, ValueError):
++            prefix_key = object()  # unique: never matches, always recomputes
++        head = records.accumulator_head
++        head_key = (
++            None
++            if head is None
++            else (
++                head.ledger_id,
++                head.repository_binding,
++                head.record_count,
++                head.records_sha256,
++            )
++        )
++        return (
++            tuple(map(id, records)),
++            records.trusted_checkpoint_id,
++            records.trusted_retained_ids,
++            prefix_key,
++            head_key,
++        )
++    return (tuple(map(id, records)), None, frozenset(), None, None)
++
++
+ def _authenticated_coordinator_record_ids(
+     records: Sequence[dict[str, object]],
+ ) -> frozenset[int]:
++    """Authenticate coordinator rows, memoized per exact loaded history."""
++    key = _authentication_cache_key(records)
++    cached = _authentication_cache.get(key)
++    if cached is not None:
++        return cached[1]
++    result, operational_failure = _authenticate_coordinator_record_ids_uncached(
++        records
++    )
++    if operational_failure:
++        # A transient provider failure (for example an Ed25519 timeout) means
++        # some proofs were skipped without being judged; never cache that
++        # partial projection as if it were a durable rejection.
++        return result
++    if len(_authentication_cache) >= _AUTHENTICATION_CACHE_LIMIT:
++        # Evict the oldest entry (insertion order); each entry pins only its
++        # own values, so partial eviction cannot unpin another entry's ids.
++        _authentication_cache.pop(next(iter(_authentication_cache)))
++    _authentication_cache[key] = ((tuple(records), records), result)
++    return result
++
++
++def _authenticate_coordinator_record_ids_uncached(
++    records: Sequence[dict[str, object]],
++) -> tuple[frozenset[int], bool]:
+     """Authenticate coordinator rows with an ordered host-authority cutover."""
+     accepted: set[int] = set()
++    operational_failure = False
+     pending_host: set[int] = set()
+     cutover_seen = False
+     host_authority_active = False
+@@ -501,7 +587,9 @@ def _authenticated_coordinator_record_ids(
+                 verify_terminal_authority(
+                     record, registration=None, expected_kind="coordinator"
+                 )
+-        except TerminalAuthorityError:
++        except TerminalAuthorityError as exc:
++            if isinstance(exc, TerminalAuthorityOperationalError):
++                operational_failure = True
+             if cutover_attempt:
+                 cutover_seen = True
+                 pending_host.clear()
+@@ -535,7 +623,7 @@ def _authenticated_coordinator_record_ids(
+             pending_host.add(id(record))
+         elif not host_proof:
+             accepted.add(id(record))
+-    return frozenset(accepted)
++    return frozenset(accepted), operational_failure
+ 
+ 
+ def authenticated_coordinator_record_ids(
+diff --git a/scripts/util/security_review_scope.py b/scripts/util/security_review_scope.py
+index 0009c2e23..82040978b 100644
+--- a/scripts/util/security_review_scope.py
++++ b/scripts/util/security_review_scope.py
+@@ -27,7 +27,6 @@ _SECURITY_CONFIGURATION_FILENAMES = {
+     ".yarnrc",
+     "bun.lock",
+     "bun.lockb",
+-    "makefile",
+     "package-lock.json",
+     "package.json",
+     "pipfile",
+@@ -65,6 +64,23 @@ _UNTRACKED_EXECUTABLE_SUFFIXES = (
+     ".tsx",
+     ".zsh",
+ )
++# Makefiles are classified by changed-hunk content, not by name (#4015):
++# 0/513 completed trust verifications ever produced a Makefile-carried finding,
++# so only dependency-install, deploy/privilege, and trusted-execution recipe
++# changes trigger; argument/telemetry plumbing passes. Unparseable, binary,
++# renamed, or type-changed makefile rows fail closed.
++_MAKEFILE_TRUST_CHANGE = re.compile(
++    r"\b(?:uv|pip3?|pipx|pnpm|npm|yarn|apt(?:-get)?|brew)\b[^\n]*"
++    r"\b(?:install|add|sync|update|upgrade)\b"
++    r"|\b(?:curl|wget)\b"
++    r"|\b(?:railway|vercel|deploy|publish|release|docker|sudo|chmod|chown|ssh|scp)\b"
++    r"|^\s*(?:override\s+)?(?:SHELL|\.SHELLFLAGS|PATH)\s*[:+?!]?="
++    r"|^\s*(?:un)?export\s"
++    r"|agent_dispatch|pr_closeout|pr_publish|pr_merge_gate|final_ci_gate"
++    r"|guardian|job\.sh|commit-auto-fix|pre-commit|\bhooks?\b"
++    r"|python3?\s+-I\b|/usr/bin/",
++    re.IGNORECASE | re.MULTILINE,
++)
+ _SECURITY_CHANGE = re.compile(
+     r"auth|credential|secret|session|token|api[_-]?key|https?://|"
+     r"@(?:\w+\.)?(?:get|post|put|patch|delete)\b|Depends\(|"
+@@ -115,6 +131,10 @@ def _security_configuration_path(path: str) -> bool:
+     )
+ 
+ 
++def _makefile_path(path: str) -> bool:
++    return path.lower().rsplit("/", maxsplit=1)[-1] == "makefile"
++
++
+ def required_review_sections(paths: tuple[str, ...]) -> tuple[str, ...]:
+     """Return the closed terminal-review section set for canonical paths."""
+     return ("code", "security") if paths else ("code",)
+@@ -125,7 +145,9 @@ def untracked_security_trigger_paths(paths: list[str]) -> tuple[str, ...]:
+     triggered: set[str] = set()
+     for path in paths:
+         lower = path.lower()
+-        configuration_path = _security_configuration_path(path)
++        configuration_path = _security_configuration_path(path) or _makefile_path(
++            path
++        )
+         if any(
+             marker in f"/{lower}"
+             for marker in ("/tests/", "/__tests__/", ".test.", ".spec.")
+@@ -198,10 +220,11 @@ def security_trigger_paths_between(
+             "package.json",
+             "pyproject.toml",
+         }
++        makefile_path = _makefile_path(path)
+         if _security_configuration_path(path) and not dependency_manifest:
+             triggered.add(path)
+             continue
+-        if any(
++        if not makefile_path and any(
+             marker in f"/{lower}"
+             for marker in ("/tests/", "/__tests__/", ".test.", ".spec.")
+         ):
+@@ -225,6 +248,29 @@ def security_trigger_paths_between(
+             for line in patch.splitlines()
+             if line[:1] in {"+", "-"} and not line.startswith(("+++", "---"))
+         )
++        if makefile_path:
++            # Zero-context hunks omit the enclosing recipe, so a benign-looking
++            # command appended inside a trust-bearing target would otherwise
++            # escape. Git's hunk headers carry the nearest column-0 line (the
++            # owning target for tab-indented recipe edits); classify that
++            # context with the same trust patterns.
++            hunk_context = "\n".join(
++                context
++                for line in patch.splitlines()
++                if line.startswith("@@")
++                and len(parts := line.split("@@")) >= 3
++                and (context := parts[2].strip())
++            )
++            if (
++                not status.startswith(("A", "M", "D"))
++                or "Binary files " in patch
++                or _MAKEFILE_TRUST_CHANGE.search(changed_lines)
++                or _SECURITY_CHANGE.search(changed_lines)
++                or _MAKEFILE_TRUST_CHANGE.search(hunk_context)
++                or _SECURITY_CHANGE.search(hunk_context)
++            ):
++                triggered.add(path)
++            continue
+         python_security_change = path.endswith(".py") and (
+             _OWNERSHIP_CHANGE.search(changed_lines)
+             or _SECURITY_CHANGE.search(changed_lines)

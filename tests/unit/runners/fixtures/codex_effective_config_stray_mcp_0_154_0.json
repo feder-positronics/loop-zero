@@ -1,0 +1,52 @@
+{
+  "config": {
+    "approval_policy": "never",
+    "approvals_reviewer": null,
+    "hooks": {
+      "Interrupt": [],
+      "PermissionRequest": [],
+      "PostCompact": [],
+      "PostToolUse": [],
+      "PreCompact": [],
+      "PreToolUse": [],
+      "SessionEnd": [],
+      "SessionStart": [],
+      "Stop": [],
+      "SubagentStart": [],
+      "SubagentStop": [],
+      "UserPromptSubmit": []
+    },
+    "mcp_servers": {
+      "hostile": {
+        "command": "/bin/false"
+      }
+    },
+    "model": "gpt-5.6-sol",
+    "model_provider": "openai",
+    "model_providers": {},
+    "model_reasoning_effort": "high",
+    "review_model": null,
+    "sandbox_mode": "read-only",
+    "sandbox_workspace_write": null,
+    "service_tier": "default"
+  },
+  "layers": [
+    {
+      "config": {
+        "mcp_servers": {
+          "hostile": {
+            "command": "/bin/false"
+          }
+        }
+      },
+      "disabledReason": null,
+      "name": {
+        "id": "fixture-managed-layer",
+        "name": "Fixture managed layer",
+        "type": "enterpriseManaged"
+      },
+      "version": "sha256:fixture"
+    }
+  ],
+  "origins": {}
+}

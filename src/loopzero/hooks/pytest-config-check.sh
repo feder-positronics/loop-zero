@@ -1,0 +1,40 @@
+#!/bin/bash
+# Validate pytest configuration
+# Ensures pytest_plugins is only defined in root conftest.py (pytest 8.x requirement)
+set -e
+
+if [ -n "${LOOPZERO_PYTEST_ROOT:-}" ]; then
+    pytest_root="$LOOPZERO_PYTEST_ROOT"
+elif [ "${LOOPZERO_ENV_PREFIX:-LOOPZERO}" = "INTELFLO" ]; then
+    pytest_root="fastapi_backend"
+else
+    echo "LOOPZERO_PYTEST_ROOT is required for this consumer." >&2
+    exit 1
+fi
+cd "$pytest_root"
+
+echo "🔍 Checking pytest configuration..."
+
+# Check for pytest_plugins declarations (not comments) in subdirectory conftest files
+# Match actual assignment: pytest_plugins = [...] or pytest_plugins=[...]
+if find tests -mindepth 2 -name "conftest.py" -exec grep -E "^[[:space:]]*pytest_plugins[[:space:]]*=" {} + | grep -q .; then
+    echo "❌ ERROR: pytest_plugins declaration found in subdirectory conftest files"
+    echo ""
+    echo "pytest_plugins must only be defined in root conftest.py (pytest 8.x requirement)"
+    echo ""
+    echo "Found in:"
+    find tests -mindepth 2 -name "conftest.py" -exec grep -l -E "^[[:space:]]*pytest_plugins[[:space:]]*=" {} \;
+    echo ""
+    echo "Move pytest_plugins declarations to: the consumer root conftest.py"
+    exit 1
+fi
+
+# Quick pytest collection check (unit tests only — catches conftest import errors fast)
+if ! "${LOOPZERO_PYTHON:-python3}" -m pytest --collect-only -q "${LOOPZERO_PYTEST_LANE:-tests/unit/}" > /dev/null 2>&1; then
+    echo "❌ ERROR: Pytest test collection failed"
+    echo ""
+    echo "Run: cd $pytest_root && uv run pytest --collect-only"
+    exit 1
+fi
+
+echo "✅ Pytest configuration valid"

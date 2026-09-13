@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="explain HTML render mode (skill test run)">
+<meta name="render-date" content="2026-05-15">
+<title>From push-all to search-first — IntelFlo pipeline migration</title>
+<style>
+:root {
+  --font-body: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --measure: 68ch;
+  --space-1: 0.5rem;
+  --space-2: 1rem;
+  --space-3: 1.5rem;
+  --space-4: 2rem;
+  --space-5: 3rem;
+  --radius: 0.5rem;
+  --border: 1px solid #e2e5ea;
+  --color-bg: #fafafb;
+  --color-surface: #ffffff;
+  --color-text: #15192a;
+  --color-muted: #5d6577;
+  --color-accent: #2057a8;
+  --color-accent-soft: #eaf1fa;
+  --color-known: #1e6e3a;
+  --color-likely: #6b7a2f;
+  --color-uncertain: #b67400;
+  --color-speculative: #a23434;
+  --color-old: #a23434;
+  --color-new: #1e6e3a;
+  --grid: rgba(21, 25, 42, 0.035);
+  --shadow-card: 0 1px 2px rgba(21, 25, 42, 0.04), 0 1px 3px rgba(21, 25, 42, 0.05);
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+body {
+  font-family: var(--font-body);
+  font-size: clamp(1rem, 0.95rem + 0.25vw, 1.0625rem);
+  line-height: 1.65;
+  color: var(--color-text);
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 32px 32px,
+    var(--color-bg);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a { color: var(--color-accent); }
+
+a:focus-visible, button:focus-visible, summary:focus-visible, details:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-bg), 0 0 0 5px var(--color-accent);
+  border-radius: 3px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  background: var(--color-accent);
+  color: #fff;
+  padding: var(--space-1) var(--space-2);
+  z-index: 100;
+}
+.skip-link:focus { left: 0; }
+
+header.hero {
+  background: var(--color-surface);
+  border-bottom: var(--border);
+  padding: var(--space-5) var(--space-3) var(--space-4);
+  position: relative;
+}
+header.hero::after {
+  content: "";
+  position: absolute;
+  left: 0; right: 0; bottom: -1px;
+  height: 3px;
+  background: linear-gradient(90deg, var(--color-accent), transparent 60%);
+}
+
+header.hero .eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  margin: 0 0 var(--space-2) 0;
+}
+
+header.hero h1 {
+  font-size: clamp(1.5rem, 1.2rem + 1.5vw, 2.25rem);
+  line-height: 1.2;
+  margin: 0 0 var(--space-2) 0;
+  max-width: var(--measure);
+}
+
+header.hero .orientation {
+  font-size: 1.1rem;
+  color: var(--color-muted);
+  margin: 0;
+  max-width: var(--measure);
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: var(--space-4);
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-3);
+}
+
+nav.toc {
+  position: sticky;
+  top: var(--space-2);
+  align-self: start;
+  font-size: 0.95rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+nav.toc h2 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-muted);
+  margin: 0 0 var(--space-1) 0;
+}
+
+nav.toc ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+nav.toc li {
+  margin: 0;
+  padding: 0.25rem 0;
+  border-left: 3px solid transparent;
+  padding-left: var(--space-1);
+}
+
+nav.toc a {
+  text-decoration: none;
+  color: var(--color-text);
+}
+
+nav.toc a:hover { text-decoration: underline; }
+
+main { min-width: 0; }
+
+section[id] {
+  scroll-margin-top: var(--space-3);
+  padding: var(--space-4) 0;
+  border-bottom: var(--border);
+}
+
+section[id]:last-of-type { border-bottom: none; }
+
+section h2 {
+  font-size: 1.4rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  margin: 0 0 var(--space-2) 0;
+  position: relative;
+  padding-left: var(--space-2);
+}
+section h2::before {
+  content: "";
+  position: absolute;
+  left: 0; top: 0.2em; bottom: 0.2em;
+  width: 3px;
+  background: var(--color-accent);
+  border-radius: 2px;
+}
+
+section h3 {
+  font-size: 1.15rem;
+  margin: var(--space-3) 0 var(--space-1) 0;
+}
+
+p, ul, ol { max-width: var(--measure); }
+
+details {
+  border: var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-1) var(--space-2);
+  margin: var(--space-2) 0;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.15s ease;
+}
+details:hover { box-shadow: 0 1px 2px rgba(21,25,42,0.05), 0 4px 12px rgba(21,25,42,0.06); }
+details + details { margin-top: var(--space-1); }
+
+details summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: var(--space-1) 0;
+  list-style: revert;
+}
+
+details[open] summary { margin-bottom: var(--space-1); }
+
+table.matrix {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 100%;
+  font-size: 0.95rem;
+  margin: var(--space-2) 0;
+}
+
+table.matrix th, table.matrix td {
+  border: var(--border);
+  padding: var(--space-1) var(--space-2);
+  text-align: left;
+  vertical-align: top;
+}
+
+table.matrix th {
+  background: var(--color-surface);
+  font-weight: 600;
+}
+
+table.matrix tr.recommended td { background: #f0f7f0; }
+
+figure {
+  margin: var(--space-3) 0;
+  padding: var(--space-3) var(--space-2) var(--space-2);
+  border: var(--border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-card);
+}
+
+figure svg { width: 100%; height: auto; display: block; }
+
+figcaption {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+  margin-top: var(--space-1);
+  text-align: center;
+}
+
+.uncertainty {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  margin-right: var(--space-1);
+}
+
+.uncertainty.known { background: #e7f3ec; color: var(--color-known); }
+.uncertainty.likely { background: #f3f5e7; color: var(--color-likely); }
+.uncertainty.uncertain { background: #faf2dd; color: var(--color-uncertain); }
+.uncertainty.speculative { background: #f8e6e6; color: var(--color-speculative); }
+
+dl.glossary dt {
+  font-weight: 600;
+  margin-top: var(--space-2);
+}
+dl.glossary dd { margin: 0 0 var(--space-1) var(--space-2); }
+
+ol.sources li { margin-bottom: var(--space-1); }
+
+.callout {
+  background: #faf2dd;
+  border-left: 4px solid var(--color-uncertain);
+  padding: var(--space-2);
+  border-radius: var(--radius);
+  margin: var(--space-2) 0;
+  font-size: 0.95rem;
+}
+
+.takeaway {
+  background: var(--color-accent-soft);
+  border-left: 4px solid var(--color-accent);
+  padding: var(--space-3) var(--space-3);
+  border-radius: var(--radius);
+  margin: var(--space-4) 0 var(--space-3);
+  font-size: 1.05rem;
+  line-height: 1.5;
+  box-shadow: var(--shadow-card);
+}
+
+.takeaway strong { color: var(--color-accent); font-family: var(--font-mono); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.14em; display: block; margin-bottom: var(--space-1); }
+
+footer.meta {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: var(--space-3);
+  font-size: 0.85rem;
+  color: var(--color-muted);
+  border-top: var(--border);
+}
+
+@media (max-width: 720px) {
+  .shell { grid-template-columns: 1fr; }
+  nav.toc { position: static; max-height: none; }
+}
+
+@media print {
+  nav.toc, .skip-link, .no-print { display: none !important; }
+  .shell { display: block; }
+  details { border: none; padding: 0; }
+  details[open] > summary, details > summary { font-weight: 700; }
+  details > *:not(summary) { display: block !important; }
+  section[id] { break-inside: avoid; page-break-inside: avoid; }
+  figure { break-inside: avoid; page-break-inside: avoid; }
+  a[href]::after { content: " (" attr(href) ")"; font-size: 0.85em; color: var(--color-muted); }
+  body { font-size: 11pt; background: #fff; }
+}
+
+@page { margin: 18mm; }
+</style>
+</head>
+<body>
+
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="hero">
+  <p class="eyebrow">IntelFlo · Architecture · Decision rationale</p>
+  <h1>From push-all to search-first: IntelFlo's pipeline migration</h1>
+  <p class="orientation">We're shifting from a pipeline that pushes every datafeed item into a user's inbox, to a model where users search the state of the knowledge on demand — while feeds keep dropping new content into the inbox only for the alerts and sources users have explicitly registered.</p>
+</header>
+
+<div class="shell">
+
+<nav class="toc" aria-label="Table of contents">
+  <h2>On this page</h2>
+  <ol>
+    <li><a href="#section-01-decision">The decision</a></li>
+    <li><a href="#section-02-mental-model">Two mental models</a></li>
+    <li><a href="#section-03-options">Three options considered</a></li>
+    <li><a href="#section-04-tradeoffs">Trade-offs</a></li>
+    <li><a href="#section-05-recommendation">Recommendation</a></li>
+    <li><a href="#section-06-risks">Risks and uncertainty</a></li>
+    <li><a href="#section-07-open">Open questions</a></li>
+    <li><a href="#section-08-glossary">Glossary</a></li>
+    <li><a href="#section-09-sources">Sources &amp; references</a></li>
+  </ol>
+</nav>
+
+<main id="main">
+
+<div class="callout no-print">
+  <strong>Reader note —</strong> This is a reconstructed decision rationale produced as a test of the <code>explain</code> HTML render mode. Treat specific architectural claims as <em>Likely / Uncertain</em> unless the in-repo canonical docs confirm them. Verify before circulating externally.
+</div>
+
+<section id="section-01-decision">
+  <h2>The decision</h2>
+  <p>Migrate IntelFlo's content pipeline from a <strong>push-all-to-inbox</strong> model to a <strong>search-first</strong> model in which:</p>
+  <ul>
+    <li>The primary surface for "what do we know about X?" is a query against a unified search layer that spans both the internal IntelFlo archive and external sources (e.g., OpenAlex, PubMed).</li>
+    <li>Datafeeds still deliver new content to the inbox — but only items that match a user's <strong>registered alerts</strong> (saved searches) or come from <strong>registered sources</strong> (feed subscriptions). All new content is still indexed so search can find it later; only registered matches reach the inbox.</li>
+    <li>The inbox becomes scoped to what the user explicitly asked for — alerts and source subscriptions — rather than the default firehose.</li>
+  </ul>
+</section>
+
+<section id="section-02-mental-model">
+  <h2>Two mental models</h2>
+
+  <details open>
+    <summary>Core idea</summary>
+    <p>In the old model, the system <strong>pushes</strong> everything it finds and the user filters from a firehose. In the new model, the user <strong>pulls</strong> what they need via search, while the inbox is reduced to the targeted alerts and source subscriptions the user has registered.</p>
+  </details>
+
+  <details>
+    <summary>Mechanism — old: push-all-to-inbox</summary>
+    <ol>
+      <li>Datafeed publishes new items (RSS, API, scheduled crawl).</li>
+      <li>Pipeline normalizes, enriches, indexes.</li>
+      <li>Every matched item lands in the user's inbox.</li>
+      <li>User triages: read, save, dismiss, ignore.</li>
+      <li>"State of the knowledge on topic X" is implicit in the inbox stream — never queried directly.</li>
+    </ol>
+  </details>
+
+  <details>
+    <summary>Mechanism — new: search-first</summary>
+    <ol>
+      <li>User issues a query: "what do we know about topic X?"</li>
+      <li>Search layer queries both <strong>internal archive</strong> and <strong>external sources</strong> in one pass.</li>
+      <li>Results are ranked, deduplicated, and presented with provenance and uncertainty labels.</li>
+      <li>Datafeeds keep running. All new content is indexed so the search layer can find it later.</li>
+      <li>New items also land in the user's <strong>inbox</strong> — but only if they match a registered alert (saved search) or come from a registered source subscription. Everything else is searchable but not pushed.</li>
+    </ol>
+  </details>
+
+  <figure>
+    <svg role="img" aria-labelledby="fig-01-title fig-01-desc" viewBox="0 0 800 280">
+      <title id="fig-01-title">Push-all-to-inbox model (current)</title>
+      <desc id="fig-01-desc">Multiple datafeeds flow into a single pipeline which dumps all content into a user inbox. The user filters from a firehose.</desc>
+      <rect x="20" y="40" width="120" height="40" rx="6" fill="#fff" stroke="#a83838"/>
+      <text x="80" y="65" text-anchor="middle" font-family="system-ui" font-size="14">Datafeed A</text>
+      <rect x="20" y="120" width="120" height="40" rx="6" fill="#fff" stroke="#a83838"/>
+      <text x="80" y="145" text-anchor="middle" font-family="system-ui" font-size="14">Datafeed B</text>
+      <rect x="20" y="200" width="120" height="40" rx="6" fill="#fff" stroke="#a83838"/>
+      <text x="80" y="225" text-anchor="middle" font-family="system-ui" font-size="14">Datafeed C</text>
+      <line x1="140" y1="60" x2="280" y2="140" stroke="#a83838" stroke-width="1.5"/>
+      <line x1="140" y1="140" x2="280" y2="140" stroke="#a83838" stroke-width="1.5"/>
+      <line x1="140" y1="220" x2="280" y2="140" stroke="#a83838" stroke-width="1.5"/>
+      <rect x="280" y="115" width="160" height="50" rx="6" fill="#fff" stroke="#a83838"/>
+      <text x="360" y="145" text-anchor="middle" font-family="system-ui" font-size="14">Push pipeline</text>
+      <line x1="440" y1="140" x2="540" y2="140" stroke="#a83838" stroke-width="1.5" marker-end="url(#arrow-red)"/>
+      <rect x="540" y="100" width="180" height="80" rx="6" fill="#f8e6e6" stroke="#a83838"/>
+      <text x="630" y="135" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="600">Inbox</text>
+      <text x="630" y="155" text-anchor="middle" font-family="system-ui" font-size="12" fill="#5b6478">(firehose)</text>
+      <text x="630" y="170" text-anchor="middle" font-family="system-ui" font-size="11" fill="#a83838">user filters everything</text>
+      <defs>
+        <marker id="arrow-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L9,3 z" fill="#a83838"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption>Figure 1 · Push-all-to-inbox model (current). Every datafeed item reaches the user; relevance is the user's problem.</figcaption>
+  </figure>
+
+  <figure>
+    <svg role="img" aria-labelledby="fig-02-title fig-02-desc" viewBox="0 0 820 360">
+      <title id="fig-02-title">Search-first model (proposed, corrected)</title>
+      <desc id="fig-02-desc">User query hits a search layer over internal archive plus external sources. Datafeeds still index everything for search and also drop new content into the inbox when it matches the user's registered alerts and source subscriptions.</desc>
+      <rect x="20" y="20" width="120" height="40" rx="6" fill="#fff" stroke="#1e5fb3"/>
+      <text x="80" y="45" text-anchor="middle" font-family="system-ui" font-size="14">User query</text>
+      <line x1="140" y1="40" x2="260" y2="40" stroke="#1e5fb3" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+      <rect x="260" y="15" width="200" height="60" rx="6" fill="#fff" stroke="#1e7a3d"/>
+      <text x="360" y="40" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="600">Search layer</text>
+      <text x="360" y="58" text-anchor="middle" font-family="system-ui" font-size="11" fill="#5b6478">internal + external</text>
+      <line x1="460" y1="40" x2="600" y2="40" stroke="#1e5fb3" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+      <rect x="600" y="15" width="180" height="60" rx="6" fill="#e7f3ec" stroke="#1e7a3d"/>
+      <text x="690" y="40" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="600">Ranked results</text>
+      <text x="690" y="58" text-anchor="middle" font-family="system-ui" font-size="11" fill="#5b6478">+ provenance</text>
+      <rect x="160" y="130" width="160" height="40" rx="6" fill="#fff" stroke="#1e7a3d"/>
+      <text x="240" y="155" text-anchor="middle" font-family="system-ui" font-size="13">Internal archive</text>
+      <rect x="440" y="130" width="160" height="40" rx="6" fill="#fff" stroke="#1e7a3d"/>
+      <text x="520" y="155" text-anchor="middle" font-family="system-ui" font-size="13">External (OpenAlex…)</text>
+      <line x1="240" y1="130" x2="330" y2="75" stroke="#1e7a3d" stroke-width="1.5"/>
+      <line x1="520" y1="130" x2="390" y2="75" stroke="#1e7a3d" stroke-width="1.5"/>
+      <rect x="20" y="250" width="120" height="40" rx="6" fill="#fff" stroke="#5b6478"/>
+      <text x="80" y="275" text-anchor="middle" font-family="system-ui" font-size="14">Datafeeds</text>
+      <path d="M 80 250 C 80 210 80 180 160 165" stroke="#1e7a3d" stroke-width="1.5" fill="none" marker-end="url(#arrow-green)"/>
+      <text x="105" y="215" font-family="system-ui" font-size="11" fill="#5b6478">index</text>
+      <rect x="280" y="250" width="220" height="40" rx="6" fill="#fff" stroke="#1e5fb3"/>
+      <text x="390" y="268" text-anchor="middle" font-family="system-ui" font-size="13" font-weight="600">Alert + source filter</text>
+      <text x="390" y="283" text-anchor="middle" font-family="system-ui" font-size="11" fill="#5b6478">match registered alerts / sources</text>
+      <line x1="140" y1="270" x2="280" y2="270" stroke="#1e5fb3" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+      <rect x="600" y="240" width="200" height="60" rx="6" fill="#eaf2fa" stroke="#1e5fb3"/>
+      <text x="700" y="265" text-anchor="middle" font-family="system-ui" font-size="14" font-weight="600">Inbox</text>
+      <text x="700" y="283" text-anchor="middle" font-family="system-ui" font-size="11" fill="#5b6478">(scoped, no firehose)</text>
+      <line x1="500" y1="270" x2="600" y2="270" stroke="#1e5fb3" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+      <defs>
+        <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L9,3 z" fill="#1e5fb3"/>
+        </marker>
+        <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L9,3 z" fill="#1e7a3d"/>
+        </marker>
+      </defs>
+    </svg>
+    <figcaption>Figure 2 · Search-first model (proposed). The user pulls answers via search. Datafeeds index everything for search; they also drop new items into the inbox, but only when the content matches a registered alert (saved search) or a registered source subscription.</figcaption>
+  </figure>
+</section>
+
+<section id="section-03-options">
+  <h2>Three options considered</h2>
+  <table class="matrix">
+    <thead>
+      <tr>
+        <th style="width: 14%">Option</th>
+        <th>What it is</th>
+        <th>Best for</th>
+        <th>Failure mode</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><strong>A. Status quo</strong></td>
+        <td>Keep push-all-to-inbox. Improve filtering and triage UX.</td>
+        <td>Users who want to be alerted to everything.</td>
+        <td>Attention overload; "state of the knowledge" stays implicit and hard to query.</td>
+      </tr>
+      <tr>
+        <td><strong>B. Pure search</strong></td>
+        <td>Drop the inbox. Everything is on-demand search.</td>
+        <td>Power users with clear queries already in mind.</td>
+        <td>Users miss genuinely-new important content; no proactive surface.</td>
+      </tr>
+      <tr class="recommended">
+        <td><strong>C. Hybrid (recommended)</strong></td>
+        <td>Search is primary. Feeds signal updates and trigger reindex. Inbox becomes an opt-in, opinionated notification surface for explicit subscriptions.</td>
+        <td>The realistic mix: people both query <em>and</em> want to be told when something material changes — but only for things they care about.</td>
+        <td>Two surfaces to maintain; trust-ranking complexity (the #198 problem) becomes load-bearing.</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="section-04-tradeoffs">
+  <h2>Trade-offs</h2>
+  <details open>
+    <summary>Coverage vs. relevance</summary>
+    <p>Push-all maximizes coverage at the cost of relevance. Search-first maximizes relevance at the cost of "you didn't ask, so we didn't show you."</p>
+  </details>
+  <details>
+    <summary>Latency</summary>
+    <p>Push pre-indexes everything; user reads from a primed inbox. Search-first runs queries on demand — latency must be tight, or perceived value drops fast.</p>
+  </details>
+  <details>
+    <summary>Discoverability of new content</summary>
+    <p>Push surfaces new items by default. Search-first relies on the user having <em>registered</em> what they care about — alerts (saved searches) and source subscriptions — so the inbox can still surface "what's new" for those targeted slices. Anything outside the registered set is searchable but not pushed.</p>
+  </details>
+  <details>
+    <summary>Trust ranking</summary>
+    <p>Push lets the user rank as they go. Search-first must rank at query time across heterogeneous sources (internal vs. OpenAlex vs. PubMed vs. user-curated archive). This is the load-bearing hard problem; the recent #198 reopen elevated it explicitly.</p>
+  </details>
+  <details>
+    <summary>Migration cost</summary>
+    <p>Existing inbox content, existing pipelines, existing user workflows. Cannot flip overnight without losing institutional memory or breaking habits.</p>
+  </details>
+</section>
+
+<section id="section-05-recommendation">
+  <h2>Recommendation</h2>
+  <p><strong>Adopt Option C — hybrid, search-first.</strong> Reasoning:</p>
+  <ol>
+    <li><strong>The "state of the knowledge" question is the actual product.</strong> Users want to know what's known about a topic; an inbox is a poor surface for that question. Making search primary aligns the system with the dominant user job.</li>
+    <li><strong>Feeds keep delivering to the inbox — but only for what the user explicitly asked for.</strong> Registered alerts (saved searches) and source subscriptions still flow to the inbox; everything else is indexed for search but not pushed. The firehose is gone; the targeted delivery survives.</li>
+    <li><strong>The hybrid preserves a proactive surface.</strong> Users who want "tell me when X happens" register an alert; users who want "follow these specific sources" subscribe. The inbox surfaces those — and only those — instead of everything that crosses the pipeline.</li>
+    <li><strong>The architectural cost is concentrated in trust ranking</strong> — which is already a reopened blocker (#198). Investing there pays off regardless of which option we pick.</li>
+  </ol>
+</section>
+
+<section id="section-06-risks">
+  <h2>Risks and uncertainty</h2>
+
+  <p><span class="uncertainty known">Known</span> Trust ranking across internal + external sources is hard and is already a reopened blocker (issue #198 plus children #488–#491: API scope, trust ranking, enrichment ladder, vectorization tiering).</p>
+
+  <p><span class="uncertainty known">Known</span> OpenAlex external usage must stay within the free tier; this bounds the enrichment ladder.</p>
+
+  <p><span class="uncertainty likely">Likely</span> Search latency will need a target SLA (e.g., &lt;1s p95) for the model to feel right. Without it, users may default back to the inbox they remember.</p>
+
+  <p><span class="uncertainty likely">Likely</span> Onboarding to "what to register" — alerts and source subscriptions — becomes a load-bearing UX moment. If users don't know what to register, the inbox underdelivers and they drift back to wanting the firehose.</p>
+
+  <p><span class="uncertainty uncertain">Uncertain</span> The migration sequencing — which pipelines and feeds flip first, what happens to existing inbox content during the transition, how existing implicit subscriptions are mapped to explicit registered alerts and sources.</p>
+
+  <p><span class="uncertainty uncertain">Uncertain</span> Whether the existing push pipeline can be reshaped into the dual-path model (index for search + scoped delivery for registrations) or whether a parallel system runs during transition.</p>
+
+  <p><span class="uncertainty speculative">Speculative</span> Long-term, the search-first model may make agent-driven synthesis (the substrate + agents + steering-UI vision) easier, because agents read from the same search layer that users do. Compositional value, not yet validated.</p>
+</section>
+
+<section id="section-07-open">
+  <h2>Open questions</h2>
+  <ol>
+    <li>What's the latency target (p95) for a search query that spans internal archive + external sources?</li>
+    <li>How does an inbox subscription map to a notification rule in the new model?</li>
+    <li>Can the existing push pipeline be reshaped into the dual-path model (always index for search; scoped delivery only for registered alerts/sources), or does the delivery path need a parallel build during transition?</li>
+    <li>What's the rollout sequence — per-feed, per-user, per-cohort?</li>
+    <li>How is "freshness" surfaced in search results (sort order, visual marker, separate "what's new" view)?</li>
+    <li>Does trust ranking ship before, during, or after the surface flip?</li>
+  </ol>
+</section>
+
+<section id="section-08-glossary">
+  <h2>Glossary</h2>
+  <dl class="glossary">
+    <dt id="term-datafeed">Datafeed</dt>
+    <dd>A source of upstream content (RSS, API, scheduled crawl). In the new model, datafeeds continue to deliver — but only items that match a registered alert or come from a registered source. All new content is also indexed so search can find it later.</dd>
+    <dt id="term-inbox">Inbox</dt>
+    <dd>The per-user firehose surface in the current model. In the new model, the inbox is scoped to registered alerts (saved searches) and registered source subscriptions — the user gets only what they explicitly asked for.</dd>
+    <dt id="term-alert">Registered alert</dt>
+    <dd>A saved search the user has chosen to be notified about. When a datafeed item matches the alert, it lands in the user's inbox.</dd>
+    <dt id="term-source-subscription">Registered source</dt>
+    <dd>A feed (or other upstream source) the user has explicitly subscribed to. New items from that source land in the inbox; items from unsubscribed sources do not.</dd>
+    <dt id="term-search-layer">Search layer</dt>
+    <dd>The unified query surface that spans the internal IntelFlo archive and external sources (OpenAlex, PubMed, etc.) in one pass.</dd>
+    <dt id="term-trust-ranking">Trust ranking</dt>
+    <dd>The ordering of heterogeneous results (internal archive items, peer-reviewed papers, preprints, blog posts) by relevance and credibility. The load-bearing hard problem of the search-first model.</dd>
+    <dt id="term-substrate">Substrate</dt>
+    <dd>IntelFlo's deterministic data layer — the indexed, normalized, archived content. Distinct from agent-driven synthesis on top.</dd>
+  </dl>
+</section>
+
+<section id="section-09-sources">
+  <h2>Sources &amp; references</h2>
+  <ol class="sources">
+    <li id="cite-01">IntelFlo project memory — agent-substrate vision (substrate + agents + steering UI). Internal.</li>
+    <li id="cite-02">IntelFlo issue #198 — section retrieval architectural reopens; children #488 (API scope), #489 (trust ranking), #490 (enrichment ladder), #491 (vectorization tiering).</li>
+    <li id="cite-03">IntelFlo agent-substrate-platform initiative — decision log for substrate &amp; agent boundaries. Internal.</li>
+    <li id="cite-04">OpenAlex free-tier policy — bounds external enrichment design. <span class="uncertainty known">Known</span></li>
+  </ol>
+</section>
+
+<aside class="takeaway">
+  <strong>Takeaway —</strong> Stop pushing everything; let users pull what they need via search — and let feeds deliver only what users explicitly registered for (alerts + source subscriptions). The firehose is gone; the targeted delivery survives. The hard work moves to trust ranking, which we were going to have to do anyway.
+</aside>
+
+</main>
+
+</div>
+
+<footer class="meta">
+  <p>Generated by <code>explain</code> HTML render mode · render-date 2026-05-15 · skill test run · verify architectural claims against canonical in-repo docs before circulating externally.</p>
+</footer>
+
+<script>
+(function(){
+  // TOC active state
+  var sections = document.querySelectorAll('main section[id]');
+  var tocLinks = document.querySelectorAll('nav.toc a[href^="#"]');
+  function setActive() {
+    var fromTop = window.scrollY + 80;
+    var current = null;
+    sections.forEach(function(s){
+      if (s.offsetTop <= fromTop) current = s.id;
+    });
+    tocLinks.forEach(function(a){
+      var match = current && a.getAttribute('href') === '#' + current;
+      a.parentElement.style.borderLeftColor = match ? 'var(--color-accent)' : 'transparent';
+      a.parentElement.style.fontWeight = match ? '600' : '400';
+    });
+  }
+  if (sections.length) {
+    window.addEventListener('scroll', setActive, { passive: true });
+    setActive();
+  }
+})();
+</script>
+
+</body>
+</html>

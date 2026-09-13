@@ -1,0 +1,36 @@
+{
+  "base_sha": "79738b944247e11688a01adb31c340e550f159c8",
+  "head_sha": "7f2e0b7639829a01260593d61651350b24c50a18",
+  "changed_paths": [
+    "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+    "scripts/util/dispatch_authority_store.py"
+  ],
+  "base_tree": [
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "b6e8800acb3420936835a97a0a5aef8ff48bf496"
+    },
+    {
+      "path": "scripts/util/dispatch_authority_store.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "277b73717c1eccd3d5ce43c35a18acaf5cb87608"
+    }
+  ],
+  "head_tree": [
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_authority_ledger_runtime.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "70886b38f67182387d3c0d93d61b823b157c587b"
+    },
+    {
+      "path": "scripts/util/dispatch_authority_store.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "9de1a7b52376e09e69b024ee6cbc59db44effcee"
+    }
+  ]
+}

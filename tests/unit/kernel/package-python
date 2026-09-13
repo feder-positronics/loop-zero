@@ -1,0 +1,8 @@
+#!/bin/sh
+# Test-only installed-package shim. Pin subprocess imports to this worktree's
+# src tree while preserving the selected interpreter and hostile-path cleanup
+# exercised by job.sh.
+set -eu
+test_root="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+export PYTHONPATH="$test_root/src"
+exec "$LOOPZERO_TEST_PYTHON" "$@"

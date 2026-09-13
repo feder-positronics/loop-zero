@@ -1,0 +1,36 @@
+{
+  "base_sha": "546561379ff41ca1a1cc25b9432d9b57aa388e03",
+  "head_sha": "79738b944247e11688a01adb31c340e550f159c8",
+  "changed_paths": [
+    "fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py",
+    "scripts/util/delivery_pipeline.py"
+  ],
+  "base_tree": [
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "da277e0058e15af17cba44eb6ece83f36738ed0f"
+    },
+    {
+      "path": "scripts/util/delivery_pipeline.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "4ca790dcabc38a2c8ceddb391bab025550e90a88"
+    }
+  ],
+  "head_tree": [
+    {
+      "path": "fastapi_backend/tests/unit/scripts/test_delivery_pipeline.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "c88b31560eb5e08e52a113743bb72e2cf5cb5c1f"
+    },
+    {
+      "path": "scripts/util/delivery_pipeline.py",
+      "mode": "100644",
+      "type": "blob",
+      "oid": "2af926c592744c8c5864bebe19c9c1a2740b7611"
+    }
+  ]
+}
