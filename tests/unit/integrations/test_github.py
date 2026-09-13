@@ -271,6 +271,7 @@ _PROCESS_CALL_ALLOWLIST = {
     "kernel/events.py": "Reads Git metadata for append-only event identity.",
     "kernel/git_config_security.py": "Parses canonical Git configuration.",
     "kernel/gitscope.py": "Implements the trusted Git command boundary.",
+    "kernel/job_control.py": "Owns and reaps the job supervisor's already-sandboxed command group.",
     "kernel/jobs.py": "Observes and controls governed worker processes.",
     "kernel/liveness.py": "Collects bounded process-liveness evidence.",
     "kernel/patch_identity.py": "Computes patch identity through trusted Git.",
