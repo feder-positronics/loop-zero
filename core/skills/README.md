@@ -7,6 +7,8 @@ canonical `<skills_dir>/README.md`, renders skills into `[package].skills_dir`,
 and records exact managed paths, types, digests, directories, and mirrors in
 `.loopzero/skills-manifest.json`.
 
+{{skill_tokens.readme_consumer_catalogue}}
+
 ## Template configuration
 
 Package and toolchain tokens use the `package.<name>` and
@@ -22,6 +24,10 @@ Product-skill dependencies use `[skill_routes]`, mapping a route key such as
 renders as “route unavailable in this consumer” and never links to a missing
 skill. Substitution is literal and single-pass. Unknown, malformed, nested, or
 unresolved tokens are errors; values may not contain managed markers.
+
+| Token under `[skill_tokens]` | Default | Value |
+| --- | --- | --- |
+| `readme_consumer_catalogue` | `""` | A single-line Markdown link, such as `[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)`, or empty. An empty value omits the paragraph. Managed markers and control characters are forbidden. |
 
 ### Consumer compatibility profiles
 
