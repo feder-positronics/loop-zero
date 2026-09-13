@@ -3,7 +3,7 @@ name: review
 description: Independently assess a frozen patch against acceptance and local requirements, reporting actionable defects and their severity.
 ---
 
-Read [the shared contract](../../CONTRACT.md). Confirm repository, base and
+Read [the shared contract]({{package.core_contract}}). Confirm repository, base and
 candidate identity and inspect the exact diff plus the relevant surrounding
 code and acceptance evidence. Remain read-only. Report concrete defects with
 severity, location, failure condition and practical impact; separate uncertainty

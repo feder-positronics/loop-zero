@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Push-all → search-first — Bento Grid</title>
+<style>
+:root {
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --display: "Inter", system-ui, -apple-system, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --bg: #f4f5f8;
+  --tile-1: #ffffff;
+  --tile-2: #f8e9ff;
+  --tile-3: #e4f3ff;
+  --tile-4: #fff4dc;
+  --tile-5: #e7f7eb;
+  --tile-6: #ffe9e4;
+  --ink: #15172a;
+  --text-soft: #4a4d63;
+  --muted: #767a92;
+  --border: rgba(21, 23, 42, 0.08);
+  --accent: #6d3bff;
+  --accent-deep: #4a18d6;
+  --known: #0e8049;
+  --likely: #7a6c1a;
+  --uncertain: #c47a00;
+  --speculative: #b03b3b;
+  --shadow-sm: 0 1px 2px rgba(21,23,42,0.04);
+  --shadow-md: 0 4px 16px rgba(21,23,42,0.06), 0 1px 2px rgba(21,23,42,0.04);
+  --shadow-lg: 0 12px 40px rgba(21,23,42,0.08), 0 2px 6px rgba(21,23,42,0.05);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *,*::before,*::after { transition-duration: 0.01ms !important; } }
+
+body {
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--bg);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+}
+
+.skip-link { position: absolute; left: -9999px; }
+.skip-link:focus { left: 1rem; top: 1rem; background: var(--accent); color: #fff; padding: 0.5rem 1rem; z-index: 10; border-radius: 6px; }
+
+a { color: var(--accent-deep); }
+a:focus-visible, summary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  border-radius: 6px;
+}
+
+.bento {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 5rem;
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 0.85rem;
+}
+@media (max-width: 900px) {
+  .bento { grid-template-columns: repeat(2, 1fr); }
+}
+
+.tile {
+  background: var(--tile-1);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 1.75rem;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.tile:hover { box-shadow: var(--shadow-md); transform: translateY(-1px); }
+
+.tile-hero {
+  grid-column: span 6;
+  background: linear-gradient(135deg, var(--ink) 0%, #2b1d6e 100%);
+  color: #fff;
+  padding: 2.5rem 2.25rem;
+  position: relative;
+}
+.tile-hero::before, .tile-hero::after {
+  content: "";
+  position: absolute;
+  width: 280px;
+  height: 280px;
+  border-radius: 50%;
+  filter: blur(60px);
+  opacity: 0.4;
+}
+.tile-hero::before { background: var(--accent); top: -80px; right: -60px; }
+.tile-hero::after { background: #ff5fa4; bottom: -100px; left: 30%; opacity: 0.25; }
+
+.tile-hero .eyebrow {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.7);
+  margin: 0 0 1rem 0;
+  position: relative;
+}
+.tile-hero h1 {
+  font-family: var(--display);
+  font-size: clamp(2rem, 1.5rem + 2.4vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+  margin: 0 0 1rem 0;
+  max-width: 18ch;
+  position: relative;
+}
+.tile-hero h1 em { font-style: normal; background: linear-gradient(135deg, var(--accent), #ff5fa4); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.tile-hero .orientation {
+  font-size: 1.05rem;
+  line-height: 1.5;
+  color: rgba(255,255,255,0.82);
+  max-width: 52ch;
+  margin: 0;
+  position: relative;
+}
+
+.tile-decision { grid-column: span 3; background: var(--tile-2); }
+.tile-status { grid-column: span 3; background: var(--tile-3); }
+.tile-diagram { grid-column: span 6; padding: 1.75rem 1.75rem 1.25rem; }
+.tile-options { grid-column: span 4; }
+.tile-risks { grid-column: span 2; background: var(--tile-4); }
+.tile-glossary { grid-column: span 3; background: var(--tile-5); }
+.tile-takeaway { grid-column: span 3; background: var(--ink); color: #fff; }
+@media (max-width: 900px) {
+  .tile-hero, .tile-decision, .tile-status, .tile-diagram, .tile-options, .tile-risks, .tile-glossary, .tile-takeaway { grid-column: span 2; }
+}
+
+.tile h2 {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+  color: var(--muted);
+  margin: 0 0 0.75rem 0;
+  font-weight: 600;
+}
+.tile-takeaway h2 { color: rgba(255,255,255,0.7); }
+
+.tile h3 {
+  font-family: var(--display);
+  font-size: 1.5rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  margin: 0 0 0.6rem 0;
+}
+
+.tile p {
+  margin: 0 0 0.65rem 0;
+  font-size: 0.92rem;
+  color: var(--text-soft);
+  line-height: 1.5;
+}
+.tile p:last-child { margin-bottom: 0; }
+
+.tile-decision h3 { color: var(--ink); }
+.tile-status .big {
+  font-family: var(--display);
+  font-size: 2.5rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1;
+  color: var(--ink);
+  margin: 0.25rem 0;
+}
+.tile-status .sub { font-size: 0.82rem; color: var(--muted); margin-top: 0.4rem; }
+
+figure { margin: 0; }
+figure svg { width: 100%; height: auto; display: block; }
+figcaption {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  color: var(--muted);
+  margin-top: 0.85rem;
+  letter-spacing: 0.04em;
+  text-align: center;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+table th, table td {
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table th {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  font-weight: 600;
+}
+tr:last-child td { border-bottom: none; }
+tr.recommended td { background: rgba(109, 59, 255, 0.08); font-weight: 500; }
+tr.recommended td:first-child::before { content: "★ "; color: var(--accent); }
+
+.risk-list { list-style: none; padding: 0; margin: 0; }
+.risk-list li { margin-bottom: 0.5rem; font-size: 0.88rem; }
+.badge {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  margin-right: 0.4rem;
+  background: rgba(255,255,255,0.6);
+  border: 1px solid currentColor;
+}
+.badge.known { color: var(--known); }
+.badge.likely { color: var(--likely); }
+.badge.uncertain { color: var(--uncertain); }
+.badge.speculative { color: var(--speculative); }
+
+.tile-glossary dl { margin: 0; }
+.tile-glossary dt {
+  font-weight: 600;
+  font-size: 0.88rem;
+  margin-top: 0.5rem;
+  color: var(--ink);
+}
+.tile-glossary dd { margin: 0.1rem 0 0 0; color: var(--text-soft); font-size: 0.82rem; }
+
+.tile-takeaway h3 {
+  color: #fff;
+  font-size: 1.35rem;
+  line-height: 1.3;
+  margin-bottom: 0;
+}
+.tile-takeaway h3 em {
+  font-style: normal;
+  background: linear-gradient(135deg, var(--accent), #ff5fa4);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@media print {
+  body { background: #fff; }
+  .bento { display: block; }
+  .tile { box-shadow: none; border: 1px solid #888; margin-bottom: 0.5rem; background: #fff !important; color: #000 !important; page-break-inside: avoid; }
+  .tile-hero { background: #fff !important; color: #000 !important; }
+  .tile-hero::before, .tile-hero::after { display: none; }
+  .tile-hero h1, .tile-takeaway h3 { color: #000 !important; }
+  .tile-hero h1 em, .tile-takeaway h3 em { color: #000 !important; -webkit-text-fill-color: #000; }
+}
+@page { margin: 14mm; }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<div class="bento" id="main">
+
+  <div class="tile tile-hero">
+    <p class="eyebrow">IntelFlo · Architecture · 15 May 2026</p>
+    <h1>Push-all → <em>search-first</em>.</h1>
+    <p class="orientation">Shift from a pipeline that pushes every datafeed item into a user's inbox, to a model where users search the state of the knowledge on demand — while feeds keep dropping new content into the inbox only for registered alerts and sources.</p>
+  </div>
+
+  <div class="tile tile-decision">
+    <h2>Decision</h2>
+    <h3>Hybrid · Option C</h3>
+    <p>Search becomes primary. Inbox scoped to <strong>registered alerts</strong> (saved searches) and <strong>registered sources</strong> (feed subscriptions). Everything else is indexed for search but not pushed.</p>
+  </div>
+
+  <div class="tile tile-status">
+    <h2>Status</h2>
+    <div class="big">Proposed</div>
+    <div class="sub">Awaiting trust-ranking unblock (#198)</div>
+  </div>
+
+  <div class="tile tile-diagram">
+    <h2>Proposed model</h2>
+    <figure>
+      <svg role="img" aria-labelledby="f2t f2d" viewBox="0 0 820 360">
+        <title id="f2t">Search-first with scoped delivery</title>
+        <desc id="f2d">User query → search layer → results. Datafeeds index everything; alert/source filter delivers to inbox only matches.</desc>
+        <g fill="#fff" stroke="#6d3bff" stroke-width="1.5">
+          <rect x="20" y="20" width="120" height="40" rx="10"/>
+          <rect x="260" y="10" width="200" height="60" rx="10" fill="#f8e9ff"/>
+          <rect x="600" y="10" width="180" height="60" rx="10" fill="#f8e9ff"/>
+          <rect x="280" y="250" width="220" height="40" rx="10"/>
+          <rect x="600" y="240" width="200" height="60" rx="10" fill="#f8e9ff"/>
+        </g>
+        <g fill="#fff" stroke="#0e8049" stroke-width="1.5">
+          <rect x="160" y="130" width="160" height="40" rx="10"/>
+          <rect x="440" y="130" width="160" height="40" rx="10"/>
+        </g>
+        <g fill="#fff" stroke="#767a92" stroke-width="1.5">
+          <rect x="20" y="250" width="120" height="40" rx="10"/>
+        </g>
+        <g font-family="Inter, sans-serif" font-size="13" fill="#15172a">
+          <text x="80" y="45" text-anchor="middle" font-weight="600">User query</text>
+          <text x="360" y="34" text-anchor="middle" font-weight="700">Search layer</text>
+          <text x="360" y="54" text-anchor="middle" font-size="11" fill="#767a92">internal + external</text>
+          <text x="690" y="34" text-anchor="middle" font-weight="700">Ranked results</text>
+          <text x="690" y="54" text-anchor="middle" font-size="11" fill="#767a92">+ provenance</text>
+          <text x="240" y="155" text-anchor="middle">Internal archive</text>
+          <text x="520" y="155" text-anchor="middle">External · OpenAlex</text>
+          <text x="80" y="275" text-anchor="middle" font-weight="600">Datafeeds</text>
+          <text x="390" y="267" text-anchor="middle" font-weight="700" font-size="12">Alert + source filter</text>
+          <text x="390" y="283" text-anchor="middle" font-size="10" fill="#767a92">registered targets</text>
+          <text x="700" y="265" text-anchor="middle" font-weight="700">Inbox</text>
+          <text x="700" y="283" text-anchor="middle" font-size="10" fill="#767a92">scoped · no firehose</text>
+        </g>
+        <g stroke="#6d3bff" stroke-width="1.5" fill="none">
+          <path d="M140 40 L260 40" marker-end="url(#bt)"/>
+          <path d="M460 40 L600 40" marker-end="url(#bt)"/>
+          <path d="M140 270 L280 270" marker-end="url(#bt)"/>
+          <path d="M500 270 L600 270" marker-end="url(#bt)"/>
+        </g>
+        <g stroke="#0e8049" stroke-width="1.5" fill="none">
+          <path d="M240 130 L330 75"/>
+          <path d="M520 130 L390 75"/>
+          <path d="M80 250 C 80 200 80 180 160 165" marker-end="url(#btg)"/>
+        </g>
+        <text x="100" y="220" font-family="ui-monospace, monospace" font-size="10" fill="#767a92">index</text>
+        <defs>
+          <marker id="bt" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#6d3bff"/></marker>
+          <marker id="btg" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#0e8049"/></marker>
+        </defs>
+      </svg>
+      <figcaption>Search is primary · inbox surfaces only registered matches</figcaption>
+    </figure>
+  </div>
+
+  <div class="tile tile-options">
+    <h2>Options</h2>
+    <table>
+      <thead><tr><th>Option</th><th>Shape</th><th>Failure mode</th></tr></thead>
+      <tbody>
+        <tr><td><strong>A.</strong> Status quo</td><td>Keep push</td><td>Attention overload</td></tr>
+        <tr><td><strong>B.</strong> Pure search</td><td>Drop inbox</td><td>Missed updates</td></tr>
+        <tr class="recommended"><td><strong>C.</strong> Hybrid</td><td>Search primary; inbox scoped</td><td>Trust ranking</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="tile tile-risks">
+    <h2>Risk profile</h2>
+    <ul class="risk-list">
+      <li><span class="badge known">K</span> Trust ranking blocker</li>
+      <li><span class="badge likely">L</span> Registration UX</li>
+      <li><span class="badge uncertain">U</span> Migration sequencing</li>
+      <li><span class="badge speculative">S</span> Agent-synthesis layer</li>
+    </ul>
+  </div>
+
+  <div class="tile tile-glossary">
+    <h2>Vocabulary</h2>
+    <dl>
+      <dt>Registered alert</dt><dd>Saved search · matches → inbox</dd>
+      <dt>Registered source</dt><dd>Subscribed feed · new items → inbox</dd>
+      <dt>Search layer</dt><dd>Unified internal + external query</dd>
+      <dt>Trust ranking</dt><dd>The hard problem</dd>
+    </dl>
+  </div>
+
+  <div class="tile tile-takeaway">
+    <h2>Takeaway</h2>
+    <h3>Stop pushing everything. Let users <em>pull</em> what they need — and let feeds deliver only what they've registered for.</h3>
+  </div>
+
+</div>
+
+</body>
+</html>

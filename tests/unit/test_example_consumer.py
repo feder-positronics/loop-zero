@@ -33,11 +33,16 @@ def test_example_consumer_end_to_end(tmp_path: Path, capsys):
         ["--root", str(root), "policy", "lint", "--base-ref", "refs/heads/main"]
     ) == 0
     assert cli.main(["--root", str(root), "sync", "--check"]) == 1
+    product_skill = root / ".cursor/skills/example-product/SKILL.md"
+    product_before = product_skill.read_bytes()
     assert cli.main(["--root", str(root), "sync"]) == 0
     assert cli.main(["--root", str(root), "sync", "--check"]) == 0
     assert cli.main(["--root", str(root), "status"]) == 0
     text = (root / "AGENTS.md").read_text(encoding="utf-8")
     assert text.startswith("# Example consumer") and "adapters/codex.md" in text
+    assert product_skill.read_bytes() == product_before
+    assert (root / ".agents/skills/example-product").is_symlink()
+    assert (root / ".cursor/skills/tdd/SKILL.md").is_file()
     capsys.readouterr()
 
 

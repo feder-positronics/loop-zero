@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
-from .authority import _ARCHIVE_VALIDATOR
+from .authority import _archive_validator
 from ..kernel.authority import TerminalAuthorityError, verify_terminal_authority
 from ..kernel.gitscope import DispatchError
 
@@ -203,7 +203,7 @@ def archived_supersession_deposits(
             or not isinstance(previous, Mapping)
             or current.get("ref") != previous.get("ref")
             or current == previous
-            or not _ARCHIVE_VALIDATOR.get()(
+            or not _archive_validator()(
                 record.get("uncarryable_delta_authority"),
                 predecessor_task_id=str(task_id),
                 predecessor_snapshot_sha=str(terminal.get("snapshot_sha")),

@@ -52,6 +52,8 @@ state_root = "~/.local/state/loopzero"
 contract = "{contract}"
 epoch = 1
 sandbox = "bwrap"
+skills_dir = ".cursor/skills"
+skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]
 
 [checks]
 required = []
@@ -145,15 +147,18 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     profile = load_profile(Path(args.root))
-    if args.check:
+    if args.check or args.dry_run:
         drift = sync_module.check(profile)
         if drift:
-            print("drift:", file=sys.stderr)
+            stream = sys.stderr if args.check else sys.stdout
+            print("drift:" if args.check else "would update:", file=stream)
             for path in drift:
-                print(f"  {path}", file=sys.stderr)
-            print("run `loopzero sync` and commit the result", file=sys.stderr)
-            return 1
-        print("wiring matches workflow.toml")
+                print(f"  {path}", file=stream)
+            if args.check:
+                print("run `loopzero sync` and commit the result", file=sys.stderr)
+                return 1
+            return 0
+        print("wiring matches workflow.toml" if args.check else "no changes")
         return 0
     changed = sync_module.write(profile)
     for path in changed:
@@ -278,6 +283,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--check",
         action="store_true",
         help="report drift without changing generated targets; exit 1 on drift",
+    )
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show generated drift without writing; always exit 0 when rendering succeeds",
     )
     p.set_defaults(func=cmd_sync)
 

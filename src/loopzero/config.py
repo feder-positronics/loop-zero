@@ -61,6 +61,18 @@ TOOLCHAIN_KEYS = frozenset(
         "closeout_snapshot_path",
         "closeout_temp_prefix",
         "closeout_trust_floor_path",
+        # Skills renderer tokens (A5).
+        "backend_dir",
+        "frontend_dir",
+        "scripts_dir",
+        "scripts_root",
+        "python",
+        "system_python",
+        "uv",
+        "pnpm",
+        "pytest",
+        "vitest",
+        "commands",
     }
 )
 ROUTING_KEYS = frozenset(
@@ -102,6 +114,76 @@ GITHUB_KEYS = frozenset(
         "token_environment",
     }
 )
+_SKILL_ROUTE_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+SKILL_ROUTE_KEYS = {
+    "audit_surface",
+    "design_handoff",
+    "design_mockup",
+    "execute_blueprint",
+    "fix_ui_bug",
+    "fortify_roadmap",
+    "frontier_roadmap",
+    "generate_parser_rules",
+    "implement_backend",
+    "implement_frontend",
+}
+SKILL_TOKEN_KEYS = {
+    "base_branch",
+    "coherence_owner",
+    "commit_backend_hook_behavior",
+    "commit_dependency_preflight",
+    "commit_hook_chain",
+    "commit_mirror_paths",
+    "debug_environment",
+    "doctrine_d2",
+    "doctrine_d14",
+    "doctrine_d16",
+    "doctrine_d18",
+    "doctrine_d21",
+    "legacy_delivery_contract",
+}
+SKILL_COMMAND_KEYS = {
+    "audit_graph",
+    "audit_graph_backend",
+    "audit_graph_frontend",
+    "audit_python_coverage",
+    "audit_python_dead_code",
+    "backlog",
+    "backlog_delegation",
+    "check_skills",
+    "ci_mirror_check",
+    "claims_check",
+    "db_test_start",
+    "delivery_status",
+    "docs_archive_candidates",
+    "docs_audit",
+    "docs_verify",
+    "gates_verify",
+    "health",
+    "health_backend",
+    "health_frontend",
+    "infra_start",
+    "learnings_status",
+    "metabolism_status",
+    "meters_snapshot",
+    "openapi_export",
+    "openapi_generate",
+    "orient",
+    "phase_stats",
+    "product_pulse",
+    "reentry",
+    "reentry_coverage",
+    "reflection_digest",
+    "skill_stats",
+    "test_agent_tooling",
+    "test_backend",
+    "test_backend_precommit",
+    "test_backend_slow",
+    "test_backend_unit",
+    "weekly_issue",
+    "worktree_claims",
+    "worktree_setup",
+}
 
 
 class ConfigError(ValueError):
@@ -243,6 +325,12 @@ class Profile:
     contract: str = CONTRACT_ID
     epoch: int = 1
     sandbox: str = "bwrap"
+    skills_dir: Path = Path(".cursor/skills")
+    skill_mirrors: tuple[Path, ...] = (
+        Path(".agents/skills"),
+        Path(".agent/skills"),
+        Path(".claude/skills"),
+    )
     toolchain: dict[str, Any] = field(default_factory=dict)
     aliases: dict[str, Alias] = field(default_factory=dict)
     tiers: dict[str, Tier] = field(default_factory=dict)
@@ -387,6 +475,43 @@ def _reject_unsafe_rendered_string(value: Any, where: str, problems: list[str]) 
     return valid
 
 
+def _reject_unsafe_skill_token(value: Any, where: str, problems: list[str]) -> bool:
+    """Validate explicit prose tokens while permitting intentional newlines."""
+    if not isinstance(value, str):
+        return False
+    valid = True
+    if any(
+        unicodedata.category(character) == "Cc" and character != "\n"
+        for character in value
+    ):
+        problems.append(f"{where}: control characters other than newline are forbidden")
+        valid = False
+    if any(marker in value for marker in MANAGED_MARKER_TOKENS):
+        problems.append(f"{where}: managed-block marker text is forbidden")
+        valid = False
+    if "{{" in value or "}}" in value:
+        problems.append(f"{where}: nested skill template tokens are forbidden")
+        valid = False
+    return valid
+
+
+def _repository_relative_path(
+    value: Any, where: str, problems: list[str]
+) -> Path | None:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or Path(value).is_absolute()
+        or not Path(value).parts
+        or ".." in Path(value).parts
+    ):
+        problems.append(f"{where}: must be a nonempty repository-relative path without traversal")
+        return None
+    if not _reject_unsafe_rendered_string(value, where, problems):
+        return None
+    return Path(value)
+
+
 def _hooks(data: dict[str, Any], where: str, problems: list[str]) -> dict[str, tuple[str, ...]]:
     """Validate hooks identically for candidate and committed base policy."""
     hooks: dict[str, tuple[str, ...]] = {}
@@ -479,9 +604,9 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     env_prefix = package.get("env_prefix", "INTELFLO")
     if not isinstance(env_prefix, str) or not _PREFIX_RE.match(env_prefix):
         problems.append("[package].env_prefix: must match [A-Z][A-Z0-9_]*")
-    audit_root = package.get("audit_root", ".audit")
-    if not isinstance(audit_root, str) or Path(audit_root).is_absolute():
-        problems.append("[package].audit_root: must be a relative path")
+    audit_root = _repository_relative_path(
+        package.get("audit_root", ".audit"), "[package].audit_root", problems
+    )
     state_root_explicit = "state_root" in package
     state_root = package.get("state_root", "~/.local/state/intelflo")
     if not isinstance(state_root, str) or not state_root:
@@ -495,6 +620,77 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     sandbox = package.get("sandbox", "bwrap")
     if sandbox not in SANDBOXES:
         problems.append(f"[package].sandbox: must be one of {', '.join(SANDBOXES)}")
+
+    skills_dir = _repository_relative_path(
+        package.get("skills_dir", ".cursor/skills"), "[package].skills_dir", problems
+    )
+    mirror_values = package.get(
+        "skill_mirrors", [".agents/skills", ".agent/skills", ".claude/skills"]
+    )
+    skill_mirrors: list[Path] = []
+    if not isinstance(mirror_values, list):
+        problems.append("[package].skill_mirrors: must be a list of repository-relative paths")
+    else:
+        for index, value in enumerate(mirror_values):
+            mirror = _repository_relative_path(
+                value, f"[package].skill_mirrors[{index}]", problems
+            )
+            if mirror is not None:
+                skill_mirrors.append(mirror)
+        if len(set(skill_mirrors)) != len(skill_mirrors):
+            problems.append("[package].skill_mirrors: paths must be unique")
+        if skills_dir is not None and skills_dir in skill_mirrors:
+            problems.append("[package].skill_mirrors: canonical skills_dir cannot be a mirror")
+
+    for key in (
+        "product_name",
+        "primary_env",
+        "docs_root",
+        "rules_root",
+        "constraints_file",
+        "delivery_guide",
+        "skills_readme",
+        "docs_dir",
+        "weekly_issue_workflow",
+        "openapi_document",
+        "commit_identity",
+        "frontend_full_env",
+        "suppressions_file",
+        "core_contract",
+        "core_handoff",
+    ):
+        if key in package:
+            value = package[key]
+            if not isinstance(value, str) or not value:
+                problems.append(f"[package].{key}: must be a nonempty string")
+            else:
+                _reject_unsafe_rendered_string(value, f"[package].{key}", problems)
+
+    skill_tokens = data.get("skill_tokens", {})
+    if not isinstance(skill_tokens, dict):
+        problems.append("[skill_tokens]: must be a table")
+        skill_tokens = {}
+    else:
+        for name, value in skill_tokens.items():
+            where = f"[skill_tokens].{name}"
+            if name not in SKILL_TOKEN_KEYS:
+                problems.append(f"{where}: unknown token")
+            if not isinstance(value, str) or not value:
+                problems.append(f"{where}: must be a nonempty string")
+            else:
+                _reject_unsafe_skill_token(value, where, problems)
+
+    skill_routes = data.get("skill_routes", {})
+    if not isinstance(skill_routes, dict):
+        problems.append("[skill_routes]: must be a table")
+        skill_routes = {}
+    else:
+        for name, value in skill_routes.items():
+            where = f"[skill_routes].{name}"
+            if name not in SKILL_ROUTE_KEYS:
+                problems.append(f"{where}: unknown product-skill route")
+            if not isinstance(value, str) or not _SKILL_ROUTE_RE.fullmatch(value):
+                problems.append(f"{where}: must be a canonical skill directory name")
 
     toolchain = data.get("toolchain", {})
     if not isinstance(toolchain, dict):
@@ -530,6 +726,38 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         prefix = toolchain["closeout_temp_prefix"]
         if not isinstance(prefix, str) or not prefix or "/" in prefix:
             problems.append("[toolchain].closeout_temp_prefix: must be a nonempty filename prefix")
+    for key in (
+        "backend_dir",
+        "frontend_dir",
+        "scripts_dir",
+        "scripts_root",
+        "python",
+        "system_python",
+        "uv",
+        "pnpm",
+        "pytest",
+        "vitest",
+    ):
+        if key in toolchain:
+            value = toolchain[key]
+            if not isinstance(value, str) or not value:
+                problems.append(f"[toolchain].{key}: must be a nonempty string")
+            else:
+                _reject_unsafe_rendered_string(value, f"[toolchain].{key}", problems)
+    skill_commands = toolchain.get("commands", {})
+    if not isinstance(skill_commands, dict):
+        problems.append("[toolchain].commands: must be a table")
+    else:
+        for name, value in skill_commands.items():
+            where = f"[toolchain.commands].{name}"
+            if not isinstance(name, str) or not _ALIAS_RE.match(name.replace("_", "-")):
+                problems.append(f"{where}: command names must use lowercase letters, digits, '_' or '-'")
+            if not isinstance(value, str) or not value:
+                problems.append(f"{where}: must be a nonempty string")
+            else:
+                _reject_unsafe_rendered_string(value, where, problems)
+            if name not in SKILL_COMMAND_KEYS:
+                problems.append(f"{where}: unknown skill command token")
 
     routing = data.get("routing", {})
     aliases: dict[str, Alias] = {}
@@ -920,12 +1148,14 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         profiles=tuple(profiles),
         checks=checks,
         env_prefix=env_prefix,
-        audit_root=Path(audit_root),
+        audit_root=audit_root or Path(".audit"),
         state_root=state_root,
         state_root_explicit=state_root_explicit,
         contract=contract,
         epoch=epoch,
         sandbox=sandbox,
+        skills_dir=skills_dir or Path(".cursor/skills"),
+        skill_mirrors=tuple(skill_mirrors),
         toolchain={
             "interpreter": "fastapi_backend/.venv/bin/python",
             "shared_artifacts": [

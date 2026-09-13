@@ -20,21 +20,30 @@ from contextvars import ContextVar
 from ..config import Profile
 
 
-_TOOLCHAIN: ContextVar[dict[str, object]] = ContextVar(
-    "acceptance_grammar_toolchain", default={}
+_TOOLCHAIN: ContextVar[dict[str, object] | None] = ContextVar(
+    "acceptance_grammar_toolchain", default=None
 )
+_DEFAULT_TOOLCHAIN: dict[str, object] = {}
 
 
 def configure(profile: Profile) -> None:
-    _TOOLCHAIN.set(dict(profile.toolchain))
+    global _DEFAULT_TOOLCHAIN
+    configured = dict(profile.toolchain)
+    _DEFAULT_TOOLCHAIN = configured
+    _TOOLCHAIN.set(configured)
+
+
+def _toolchain() -> dict[str, object]:
+    configured = _TOOLCHAIN.get()
+    return configured if configured is not None else _DEFAULT_TOOLCHAIN
 
 
 def _db_make_targets() -> frozenset[str]:
-    return frozenset(str(value) for value in _TOOLCHAIN.get().get("db_targets", ()))
+    return frozenset(str(value) for value in _toolchain().get("db_targets", ()))
 
 
 def _db_lock_path() -> str:
-    return str(_TOOLCHAIN.get().get("db_lock", "/tmp/loopzero-testdb.lock"))
+    return str(_toolchain().get("db_lock", "/tmp/loopzero-testdb.lock"))
 
 
 def pin_pnpm_commands(commands: Sequence[str]) -> list[str]:

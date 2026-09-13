@@ -29,6 +29,10 @@ def exact_intelflo_security_policy():
 
 
 def test_required_review_sections_follow_trigger_paths() -> None:
+    module.configure(
+        security_patterns=module._DEFAULT_SECURITY_PATTERNS,
+        required_sections=("code", "security"),
+    )
     assert module.required_review_sections(()) == ("code",)
     assert module.required_review_sections(("app/config.py",)) == (
         "code",

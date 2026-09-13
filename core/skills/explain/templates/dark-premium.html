@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Push-all → search-first — Dark Premium</title>
+<style>
+:root {
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --bg: #0a0d14;
+  --bg-elev-1: #11151f;
+  --bg-elev-2: #161b27;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --text: #e7ebf3;
+  --text-soft: #aeb4c2;
+  --muted: #7a808f;
+  --accent: #38bdf8;
+  --accent-deep: #0ea5e9;
+  --accent-glow: rgba(56, 189, 248, 0.18);
+  --known: #4ade80;
+  --likely: #c0b95a;
+  --uncertain: #f59e0b;
+  --speculative: #f87171;
+  --grid: rgba(255, 255, 255, 0.025);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; color-scheme: dark; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *,*::before,*::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; } }
+
+body {
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.6;
+  color: var(--text);
+  background:
+    radial-gradient(ellipse 800px 400px at 50% 0%, var(--accent-glow) 0%, transparent 60%),
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 28px 28px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 28px 28px,
+    var(--bg);
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+.skip-link { position: absolute; left: -9999px; }
+.skip-link:focus { left: 1rem; top: 1rem; background: var(--accent); color: var(--bg); padding: 0.5rem 1rem; z-index: 10; border-radius: 4px; font-weight: 600; }
+
+a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color 0.15s ease; }
+a:hover { border-bottom-color: var(--accent); }
+a:focus-visible, summary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent), 0 0 24px var(--accent-glow);
+  border-radius: 4px;
+}
+
+.shell {
+  max-width: 920px;
+  margin: 0 auto;
+  padding: 3rem 1.5rem 5rem;
+}
+
+header.hero {
+  background: linear-gradient(180deg, var(--bg-elev-1) 0%, var(--bg-elev-2) 100%);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 2.25rem 2rem;
+  margin-bottom: 2.5rem;
+  position: relative;
+  overflow: hidden;
+  backdrop-filter: blur(20px);
+}
+header.hero::before {
+  content: "";
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+.meta-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 1.25rem;
+}
+.meta-row .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px var(--accent-glow); }
+.meta-row .sep { color: var(--border-strong); }
+
+h1 {
+  font-size: clamp(1.6rem, 1.3rem + 1.4vw, 2.2rem);
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin: 0 0 0.85rem 0;
+  background: linear-gradient(180deg, var(--text) 0%, var(--text-soft) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.orientation {
+  font-size: 1.05rem;
+  color: var(--text-soft);
+  margin: 0;
+  line-height: 1.55;
+  max-width: 64ch;
+}
+
+section { margin: 2.5rem 0; }
+
+h2 {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  margin: 0 0 1rem 0;
+  display: flex; align-items: center; gap: 0.5rem;
+}
+h2::before { content: ""; width: 4px; height: 4px; background: var(--accent); border-radius: 50%; box-shadow: 0 0 6px var(--accent-glow); }
+
+p { margin: 0 0 1rem 0; max-width: 72ch; color: var(--text-soft); }
+
+code, kbd {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  background: var(--bg-elev-2);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  color: var(--accent);
+}
+
+.card {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  margin: 1rem 0;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.card:hover { border-color: var(--border-strong); background: var(--bg-elev-2); }
+.card .label {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  display: block;
+}
+.card p { color: var(--text); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+  margin: 1rem 0;
+  background: var(--bg-elev-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+table th, table td {
+  text-align: left;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table th {
+  background: var(--bg-elev-2);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--muted);
+  font-weight: 600;
+}
+table td { color: var(--text-soft); }
+tr:last-child td { border-bottom: none; }
+tr.recommended td { background: rgba(56, 189, 248, 0.06); color: var(--text); }
+tr.recommended td:first-child::before { content: "★ "; color: var(--accent); }
+
+figure {
+  background: var(--bg-elev-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  margin: 1.5rem 0;
+}
+figure svg { width: 100%; height: auto; display: block; }
+figcaption {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-top: 0.85rem;
+  letter-spacing: 0.04em;
+}
+figcaption::before { content: "fig — "; color: var(--accent); font-weight: 600; }
+
+.badge {
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  margin-right: 0.5rem;
+  background: var(--bg-elev-2);
+  border: 1px solid currentColor;
+  display: inline-block;
+  vertical-align: middle;
+}
+.badge.known { color: var(--known); }
+.badge.likely { color: var(--likely); }
+.badge.uncertain { color: var(--uncertain); }
+.badge.speculative { color: var(--speculative); }
+
+.takeaway {
+  background: linear-gradient(135deg, var(--bg-elev-1) 0%, var(--bg-elev-2) 100%);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 12px;
+  padding: 1.75rem 2rem;
+  margin: 3rem 0 0 0;
+  position: relative;
+  box-shadow: 0 0 40px rgba(56, 189, 248, 0.08);
+}
+.takeaway::before {
+  content: "Takeaway";
+  position: absolute;
+  top: -10px; left: 1.5rem;
+  background: var(--bg);
+  padding: 0 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+  font-weight: 600;
+}
+.takeaway p { margin: 0; color: var(--text); font-size: 1rem; line-height: 1.55; }
+.takeaway em { color: var(--accent); font-style: normal; font-weight: 500; }
+
+dl dt {
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--accent);
+  margin-top: 0.85rem;
+}
+dl dd { margin: 0.15rem 0 0 0; color: var(--text-soft); font-size: 0.95rem; }
+
+@media print {
+  body { background: #fff; color: #000; color-scheme: light; }
+  header.hero, table, .card, figure, .takeaway { background: #fff; color: #000; border-color: #888; box-shadow: none; }
+  .card p, table td, p, dl dd, h1, .orientation { color: #000; }
+  .takeaway::before { background: #fff; }
+}
+@page { margin: 18mm; }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<div class="shell">
+
+<header class="hero">
+  <div class="meta-row">
+    <span class="dot"></span>
+    <span>intelflo / architecture</span>
+    <span class="sep">·</span>
+    <span>decision rationale</span>
+    <span class="sep">·</span>
+    <span>2026-05-15</span>
+  </div>
+  <h1>Push-all → search-first</h1>
+  <p class="orientation">Shift the content pipeline from a model that pushes every datafeed item into a user's inbox, to a model where users <code>search()</code> the state of the knowledge on demand — while feeds keep dropping new content into the inbox only for registered alerts and sources.</p>
+</header>
+
+<main id="main">
+
+<section>
+  <h2>Decision</h2>
+  <div class="card">
+    <span class="label">tl;dr</span>
+    <p>Search becomes the primary surface for "what do we know about X?". Datafeeds still deliver — but only matched content for registered alerts (saved searches) and registered sources (feed subscriptions). Everything is still indexed for search.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Proposed model</h2>
+  <figure>
+    <svg role="img" aria-labelledby="f2t f2d" viewBox="0 0 820 360">
+      <title id="f2t">Search-first with scoped delivery</title>
+      <desc id="f2d">User query → search layer → results. Datafeeds index everything; alert/source filter delivers to inbox only matches.</desc>
+      <g fill="none" stroke="#38bdf8" stroke-width="1.5">
+        <rect x="20" y="20" width="120" height="40" rx="6"/>
+        <rect x="260" y="10" width="200" height="60" rx="6" fill="rgba(56,189,248,0.08)"/>
+        <rect x="600" y="10" width="180" height="60" rx="6" fill="rgba(56,189,248,0.08)"/>
+        <rect x="280" y="250" width="220" height="40" rx="6"/>
+        <rect x="600" y="240" width="200" height="60" rx="6" fill="rgba(56,189,248,0.08)"/>
+      </g>
+      <g fill="none" stroke="#4ade80" stroke-width="1.5">
+        <rect x="160" y="130" width="160" height="40" rx="6"/>
+        <rect x="440" y="130" width="160" height="40" rx="6"/>
+      </g>
+      <g fill="none" stroke="#7a808f" stroke-width="1.5">
+        <rect x="20" y="250" width="120" height="40" rx="6"/>
+      </g>
+      <g font-family="Inter, sans-serif" font-size="13" fill="#e7ebf3">
+        <text x="80" y="45" text-anchor="middle" font-weight="500">User query</text>
+        <text x="360" y="34" text-anchor="middle" font-weight="600">Search layer</text>
+        <text x="360" y="54" text-anchor="middle" font-size="11" fill="#7a808f">internal + external</text>
+        <text x="690" y="34" text-anchor="middle" font-weight="600">Ranked results</text>
+        <text x="690" y="54" text-anchor="middle" font-size="11" fill="#7a808f">+ provenance</text>
+        <text x="240" y="155" text-anchor="middle" font-size="12">Internal archive</text>
+        <text x="520" y="155" text-anchor="middle" font-size="12">External · OpenAlex</text>
+        <text x="80" y="275" text-anchor="middle" font-weight="500">Datafeeds</text>
+        <text x="390" y="267" text-anchor="middle" font-weight="600" font-size="12">Alert + source filter</text>
+        <text x="390" y="283" text-anchor="middle" font-size="10" fill="#7a808f">match registered targets</text>
+        <text x="700" y="265" text-anchor="middle" font-weight="600">Inbox</text>
+        <text x="700" y="283" text-anchor="middle" font-size="10" fill="#7a808f">scoped · no firehose</text>
+      </g>
+      <g stroke="#38bdf8" stroke-width="1.5" fill="none">
+        <path d="M140 40 L260 40" marker-end="url(#md)"/>
+        <path d="M460 40 L600 40" marker-end="url(#md)"/>
+        <path d="M140 270 L280 270" marker-end="url(#md)"/>
+        <path d="M500 270 L600 270" marker-end="url(#md)"/>
+      </g>
+      <g stroke="#4ade80" stroke-width="1.5" fill="none">
+        <path d="M240 130 L330 75"/>
+        <path d="M520 130 L390 75"/>
+        <path d="M80 250 C 80 200 80 180 160 165" marker-end="url(#mdg)"/>
+      </g>
+      <text x="100" y="220" font-family="JetBrains Mono, monospace" font-size="10" fill="#7a808f">index</text>
+      <defs>
+        <marker id="md" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#38bdf8"/></marker>
+        <marker id="mdg" markerWidth="9" markerHeight="9" refX="8" refY="3" orient="auto"><path d="M0,0 L0,6 L8,3 z" fill="#4ade80"/></marker>
+      </defs>
+    </svg>
+    <figcaption>Search is the primary surface. The inbox surfaces only content the user has explicitly registered for.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>Options</h2>
+  <table>
+    <thead><tr><th>Option</th><th>Shape</th><th>Failure mode</th></tr></thead>
+    <tbody>
+      <tr><td><code>A · status_quo</code></td><td>keep push; improve filtering</td><td>attention overload</td></tr>
+      <tr><td><code>B · pure_search</code></td><td>drop inbox entirely</td><td>missed material updates</td></tr>
+      <tr class="recommended"><td><code>C · hybrid</code></td><td>search primary; inbox scoped to registrations</td><td>trust ranking is load-bearing</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Risks &amp; uncertainty</h2>
+  <p><span class="badge known">Known</span> Trust ranking already a reopened blocker (#198 + #488–#491).</p>
+  <p><span class="badge likely">Likely</span> Onboarding to "what to register" becomes the load-bearing UX moment.</p>
+  <p><span class="badge uncertain">Uncertain</span> Migration sequencing; handling existing inbox content.</p>
+  <p><span class="badge speculative">Speculative</span> Shared search layer enables future agent-driven synthesis.</p>
+</section>
+
+<section>
+  <h2>Glossary</h2>
+  <dl>
+    <dt>registered_alert</dt><dd>saved search the user wants notified; matches → inbox</dd>
+    <dt>registered_source</dt><dd>feed the user subscribed to; new items → inbox</dd>
+    <dt>search_layer</dt><dd>unified query surface over <code>internal_archive</code> + <code>external</code></dd>
+    <dt>trust_ranking</dt><dd>ordering of heterogeneous results; load-bearing</dd>
+  </dl>
+</section>
+
+<div class="takeaway">
+  <p>Stop pushing everything; let users <em>pull</em> what they need via search — and let feeds deliver only what users explicitly registered for. The firehose is gone; the targeted delivery survives. The hard work moves to trust ranking — which was already on the path.</p>
+</div>
+
+</main>
+
+</div>
+
+</body>
+</html>

@@ -20,30 +20,38 @@ REVIEW_CHAIN_RECEIPT_SCHEMA = "ReviewChainReceiptV1"
 REVIEW_CHAIN_ADVISORY_RECEIPT_SCHEMA = "ReviewChainAdvisoryReceiptV1"
 REVIEW_CHAIN_SECTIONS = ("code", "security")
 _PROFILE: ContextVar[Profile | None] = ContextVar("review_chain_profile", default=None)
+_DEFAULT_PROFILE: Profile | None = None
 
 
 def configure(profile: Profile) -> None:
+    global _DEFAULT_PROFILE
+    _DEFAULT_PROFILE = profile
     _PROFILE.set(profile)
 
 
 def _required_sections() -> tuple[str, ...]:
-    profile = _PROFILE.get()
+    profile = _PROFILE.get() or _DEFAULT_PROFILE
     if profile is None:
         return REVIEW_CHAIN_SECTIONS
     if not profile.required_sections:
         raise ReviewChainError("review chain requires configured required sections")
-    return profile.required_sections
+    return tuple(
+        section for section in dict.fromkeys(profile.required_sections)
+        if section != "security"
+    )
 
 
 def _required_for_paths(paths: Sequence[str]) -> tuple[str, ...]:
     configured = _required_sections()
-    return configured if paths else tuple(section for section in configured if section != "security")
+    if paths and "security" not in configured:
+        return (*configured, "security")
+    return configured
 
 
 def enforce_review_budget(*, completed_reviews: int, completed_delta_reviews: int,
                           requested: str) -> None:
     """Enforce the contract cap; consumer configuration may only narrow it."""
-    profile = _PROFILE.get()
+    profile = _PROFILE.get() or _DEFAULT_PROFILE
     if profile is None:
         raise ReviewChainError("review chain requires configured review budget")
     full_limit = min(profile.max_reviews_per_pr, 1)
@@ -113,8 +121,8 @@ def review_finding_lens(payload: Mapping[str, object], finding_id: str) -> str:
         or not isinstance(required, list)
         or not isinstance(sections, Mapping)
         or required not in (
-            list(_required_sections()),
-            [section for section in _required_sections() if section != "security"],
+            list(_required_for_paths(())),
+            list(_required_for_paths(("security-trigger",))),
         )
         or set(sections) != set(required)
     ):

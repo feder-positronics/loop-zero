@@ -47,21 +47,28 @@ from ..kernel.sandbox import environment as sandbox_environment
 from ..kernel.worktree_lease import worktree_lease
 
 _PROFILE: ContextVar[Profile | None] = ContextVar("review_evidence_profile", default=None)
+_DEFAULT_PROFILE: Profile | None = None
 
 
 def configure(profile: Profile) -> None:
+    global _DEFAULT_PROFILE
+    _DEFAULT_PROFILE = profile
     _PROFILE.set(profile)
 
 
+def _profile() -> Profile | None:
+    return _PROFILE.get() or _DEFAULT_PROFILE
+
+
 def _audit_root(repo: Path) -> Path:
-    profile = _PROFILE.get()
+    profile = _profile()
     if profile is None:
         raise DispatchError("review evidence requires a configured profile")
     return repo.resolve() / profile.audit_root
 
 
 def _ref_namespaces() -> tuple[str, str]:
-    profile = _PROFILE.get()
+    profile = _profile()
     if profile is None:
         raise DispatchError("review evidence requires a configured profile")
     return (

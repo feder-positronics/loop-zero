@@ -45,14 +45,18 @@ class RoutingSettings:
 
 
 _SETTINGS: ContextVar[RoutingSettings | None] = ContextVar("routing_settings", default=None)
+_DEFAULT_SETTINGS: RoutingSettings | None = None
 
 
 def configure(profile: Profile) -> None:
-    _SETTINGS.set(RoutingSettings.from_profile(profile))
+    global _DEFAULT_SETTINGS
+    configured = RoutingSettings.from_profile(profile)
+    _DEFAULT_SETTINGS = configured
+    _SETTINGS.set(configured)
 
 
 def settings() -> RoutingSettings:
-    value = _SETTINGS.get()
+    value = _SETTINGS.get() or _DEFAULT_SETTINGS
     if value is None:
         raise DispatchError("review routing requires a configured Profile")
     return value

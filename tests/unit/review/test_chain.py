@@ -124,10 +124,14 @@ def test_required_sections_reuse_the_shared_scope_policy(monkeypatch) -> None:
 
     task = {
         **_task(security=True),
-        "required_sections": ["code", "shared-policy"],
+        "required_sections": ["code", "shared-policy", "security"],
     }
 
-    assert module.validate_review_chain_task(task) == ("code", "shared-policy")
+    assert module.validate_review_chain_task(task) == (
+        "code",
+        "shared-policy",
+        "security",
+    )
     module.configure(
         SimpleNamespace(
             required_sections=("code", "security"),
