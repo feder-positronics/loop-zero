@@ -660,7 +660,10 @@ def parse_codex_stream(stream: str) -> ParsedCodexStream:
                     "Codex event semantic marker was invalid",
                     semantic_event=semantic_seen,
                 )
-            event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
+            item_id = _bounded_string(raw.get("item_id"), "item_id")
+            if kind == "tool" and subtype == "denied:/etc/shadow" and item_id is None:
+                continue
+            event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic, item_id=item_id)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
             if kind == "system" and subtype == "error_retry":

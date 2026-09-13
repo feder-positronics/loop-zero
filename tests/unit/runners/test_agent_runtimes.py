@@ -7313,13 +7313,16 @@ def command_completion_stream(monkeypatch, tmp_path):
         lambda: _fake_brokered_codex_auth(tmp_path),
     )
 
-    def replay(status="completed", exit_code=0, output="żółć", *, completed=True):
-        def item(state, code=None, text=None):
+    def replay(status="completed", exit_code=0, output="żółć", *, completed=True,
+               command="PRIVATE_COMMAND", actions=(), started=True,
+               completed_id="private-command-id", completed_thread="private-thread",
+               completed_turn="private-turn"):
+        def item(state, code=None, text=None, item_id="private-command-id"):
             return ThreadItem(
                 root=CommandExecutionThreadItem(
-                    id="private-command-id",
-                    command="PRIVATE_COMMAND",
-                    commandActions=[],
+                    id=item_id,
+                    command=command,
+                    commandActions=list(actions),
                     cwd="/PRIVATE_PATH",
                     status=state,
                     type="commandExecution",
@@ -7339,15 +7342,17 @@ def command_completion_stream(monkeypatch, tmp_path):
                 ),
             )
         ]
+        if not started:
+            events.clear()
         if completed:
             events.append(
                 Notification(
                     "item/completed",
                     ItemCompletedNotification(
-                        item=item(status, exit_code, output),
+                        item=item(status, exit_code, output, completed_id),
                         completedAtMs=2,
-                        threadId="private-thread",
-                        turnId="private-turn",
+                        threadId=completed_thread,
+                        turnId=completed_turn,
                     ),
                 )
             )
@@ -8645,13 +8650,13 @@ def test_codex_command_denial_requires_attempted_read_and_matching_tool_error(
     from openai_codex.generated.v2_all import CommandExecutionThreadItem
 
     item = CommandExecutionThreadItem.model_validate({
-        "id": "test", "type": "commandExecution", "command": "private command",
+        "id": "test", "type": "commandExecution", "command": "cat /etc/shadow",
         "cwd": "/tmp", "status": "completed", "exitCode": exit_code,
         "aggregatedOutput": output,
-        "commandActions": [{"type": "read", "command": "private command",
+        "commandActions": [{"type": "read", "command": "cat /etc/shadow",
                             "name": "cat", "path": path}],
     })
-    sdk_bridge._codex_command_completion(item)
+    sdk_bridge._codex_command_completion(item, started_read=("test", "cat /etc/shadow"))
     stream = capsys.readouterr().out
     assert output not in stream
     assert "private command" not in stream
@@ -8661,3 +8666,50 @@ def test_codex_command_denial_requires_attempted_read_and_matching_tool_error(
     }) + "\n")
     assert any(event.subtype == "denied:/etc/shadow" for event in result.events) is denied
     assert result.diagnostics[0].startswith("Codex command completed:")
+
+
+@pytest.mark.parametrize("mutation,denied", [
+    ({}, True),
+    ({"started": False}, False),
+    ({"actions": []}, False),
+    ({"completed_id": "other-item"}, False),
+    ({"completed_thread": "other-thread"}, False),
+    ({"completed_turn": "other-turn"}, False),
+    ({"exit_code": 0}, False),
+    ({"status": "declined"}, False),
+    ({"output": "cat: /etc/other: Permission denied"}, False),
+    ({"output": "error: unexpected argument '--/etc/shadow: Permission denied' found"}, False),
+    ({"command": "false && cat /etc/shadow"}, False),
+    ({"command": "cat /etc/shadow --'/etc/shadow: Permission denied'"}, False),
+    ({"command": "printf 'cat: /etc/shadow: Permission denied'; false && cat /etc/shadow"}, False),
+])
+def test_codex_denial_binds_sdk_started_read_completion_and_output(
+    command_completion_stream, mutation, denied
+):
+    arguments = dict(
+        command="/bin/bash -lc 'cat /etc/shadow'",
+        actions=[{"type": "read", "command": "cat /etc/shadow", "name": "shadow", "path": "/etc/shadow"}],
+        exit_code=1, output="cat: /etc/shadow: Permission denied",
+    )
+    arguments.update(mutation)
+    stream = command_completion_stream(**arguments)
+    parsed = codex.parse_codex_stream(stream)
+    evidence = [event for event in parsed.events if event.subtype == "denied:/etc/shadow"]
+    assert bool(evidence) is denied
+    if denied:
+        assert evidence[0].item_id == "private-command-id"
+    assert "cat: /etc/shadow: Permission denied" not in stream
+
+
+@pytest.mark.parametrize("source", ["userShell", "agent"])
+def test_codex_native_option_error_cannot_manufacture_denial(capsys, source):
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+
+    fixture = Path(__file__).with_name("fixtures") / "codex_shadow_option_error_0_154_0.json"
+    payload = json.loads(fixture.read_text())
+    payload["source"] = source
+    item = CommandExecutionThreadItem.model_validate(payload)
+    sdk_bridge._codex_command_completion(
+        item, started_read=(item.id, item.command_actions[0].root.command)
+    )
+    assert "denied:/etc/shadow" not in capsys.readouterr().out

@@ -555,9 +555,13 @@ def _probe_with_credential(
 
 
 def _scenario_prompt(vendor: str, scenario: str) -> str:
-    del vendor
     prompt = f"loopzero-live-{scenario}: return only a JSON object with ok=true."
     if scenario == "permission-denial":
+        if vendor == "codex":
+            return (
+                f"loopzero-live-{scenario}: run exactly /usr/bin/cat -- /etc/shadow "
+                "using the command tool, then return ok=true."
+            )
         return (
             f"loopzero-live-{scenario}: use a file-read tool on /etc/shadow, "
             "then return ok=true."
@@ -1144,6 +1148,11 @@ def test_live_runtime_contract(
                 }
                 if vendor == "codex" and scenario == "permission-denial":
                     record["observed_tool_outcomes"] = _observed_tool_outcomes(result)
+                    record["denial_item_ids"] = [
+                        event.item_id for event in result.events
+                        if event.kind == "tool" and event.subtype == "denied:/etc/shadow"
+                        and event.item_id is not None
+                    ]
                 if unsupported_reason is not None:
                     record["status"] = "unsupported"
                     record["reason"] = unsupported_reason

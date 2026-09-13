@@ -862,11 +862,13 @@ def test_live_wrapper_binds_resolver_target_after_private_run_tmpfs(
 
 @pytest.mark.parametrize("denied,tool_observed", [(True, True), (False, True), (False, False)])
 def test_codex_permission_scenario_launches_and_records_evidence_and_cost(
-    monkeypatch, tmp_path, denied, tool_observed
+    monkeypatch, tmp_path, capsys, denied, tool_observed
 ) -> None:
     from contextlib import nullcontext
     from dataclasses import replace
     from types import SimpleNamespace
+    from openai_codex.generated.v2_all import CommandExecutionThreadItem
+    from loopzero.runners import bridge, codex
 
     executable = tmp_path / "codex"
     executable.touch()
@@ -886,9 +888,29 @@ def test_codex_permission_scenario_launches_and_records_evidence_and_cost(
     ))
     monkeypatch.setattr(live.RUNTIME_REGISTRY, "create", lambda *_args, **_kwargs: SimpleNamespace(cancel=lambda: None))
     launches = []
+    if tool_observed:
+        # Negative case has the exact denial text and nonzero exit, but no
+        # read action. Exercise the producer and parser before harness recording.
+        item = CommandExecutionThreadItem.model_validate({
+            "id": "read-item", "type": "commandExecution", "cwd": str(tmp_path),
+            "command": "cat /etc/shadow" if denied else "printf 'cat: /etc/shadow: Permission denied'; false",
+            "commandActions": [{"type": "read", "command": "cat /etc/shadow",
+                                "name": "shadow", "path": "/etc/shadow"}] if denied else [],
+            "status": "failed", "exitCode": 1,
+            "aggregatedOutput": "cat: /etc/shadow: Permission denied",
+        })
+        bridge._codex_command_completion(item, started_read=bridge._codex_shadow_read(item))
+    stream = capsys.readouterr().out + json.dumps({
+        "type": "result", "status": "completed", "terminal_reason": "completed",
+        "output": '{"ok":true}',
+    }) + "\n"
+    parsed = codex.parse_codex_stream(stream)
+    evidence = [event for event in parsed.events if event.subtype == "denied:/etc/shadow"]
+    assert bool(evidence) is denied
+    if denied:
+        assert evidence[0].item_id == "read-item"
     result = replace(_permission_result(
-        events=(RuntimeEvent(kind="tool", subtype="denied:/etc/shadow"),) if denied else (),
-        diagnostics=("Codex command completed: status=completed; exit_code=1; observed_output_bytes=42",) if tool_observed else (),
+        events=parsed.events, diagnostics=parsed.diagnostics,
     ), cost_usd=0.01)
 
     def run(_vendor, _adapter, request, **_kwargs):
@@ -901,6 +923,7 @@ def test_codex_permission_scenario_launches_and_records_evidence_and_cost(
     assert "/etc/shadow" in launches[0].prompt
     record = json.loads(output.read_text())["scenarios"][0]
     assert record["outcome"] == ("passed" if denied else "unsupported")
+    assert record["denial_item_ids"] == (["read-item"] if denied else [])
     assert record["accounting"] == "known"
     assert record["charged_cost_usd"] == 0.01
     assert record["known_cost_usd"] == 0.01

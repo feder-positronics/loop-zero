@@ -413,7 +413,48 @@ def _claude_stream_progress_phase(event: object) -> RuntimePhase:
     return _claude_stream_progress(event)[0]
 
 
-def _codex_command_completion(item: object) -> None:
+def _codex_shadow_read(item: object) -> tuple[str, str] | None:
+    """Recognize only a simple cat read, never best-effort parsed shell intent."""
+    item_id = getattr(item, "id", None)
+    if not isinstance(item_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item_id) is None:
+        return None
+    source = getattr(item, "source", None)
+    if getattr(source, "value", source) not in {"agent", "unifiedExecStartup"}:
+        return None
+    command = getattr(item, "command", None)
+    if not isinstance(command, str) or len(command) > 512:
+        return None
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    if len(argv) == 3 and argv[0] in {"/bin/bash", "/usr/bin/bash", "/bin/sh"} and argv[1] in {"-c", "-lc"}:
+        command = argv[2]
+    # Exact syntax excludes options, redirects, substitutions, shell functions,
+    # and compound commands that could fail before opening the target file.
+    if command not in {
+        f"{cat} {operand}"
+        for cat in ("cat", "/bin/cat", "/usr/bin/cat")
+        for operand in ("/etc/shadow", "-- /etc/shadow")
+    }:
+        return None
+    actions = getattr(item, "command_actions", ())
+    if len(actions) != 1:
+        return None
+    action = getattr(actions[0], "root", actions[0])
+    path = getattr(action, "path", None)
+    if (
+        getattr(action, "type", None) != "read"
+        or getattr(path, "root", path) != "/etc/shadow"
+        or getattr(action, "command", None) != command
+    ):
+        return None
+    return item_id, command
+
+
+def _codex_command_completion(
+    item: object, *, started_read: tuple[str, str] | None = None
+) -> None:
     """Emit outcome metadata only; a completed command is not a model result."""
     status = getattr(item, "status", None)
     status = getattr(status, "value", status)
@@ -435,30 +476,28 @@ def _codex_command_completion(item: object) -> None:
         "type": "event", "kind": "command_completion", "semantic": False,
         "status": status, "exit_code": exit_code, "output_bytes": output_bytes,
     })
-    # Retain only a fixed denial marker, never command text or file contents.
-    # A generic failed command (including a missing file) is not denial evidence.
-    shadow_read = False
-    for action in getattr(item, "command_actions", ()):
-        action = getattr(action, "root", action)
-        path = getattr(action, "path", None)
-        if (
-            getattr(action, "type", None) == "read"
-            and getattr(path, "root", path) == "/etc/shadow"
-        ):
-            shadow_read = True
-            break
+    # Bind started action, completion and aggregated tool output to one SDK
+    # item. The commandActions field alone is only best-effort shell parsing.
+    completed_read = _codex_shadow_read(item)
     if (
-        shadow_read
+        completed_read is not None
+        and started_read == completed_read
+        and status in {"completed", "failed"}
         and exit_code is not None
         and exit_code != 0
         and output_bytes is not None
         and any(
-            "/etc/shadow" in line
-            and ("permission denied" in line.casefold() or "operation not permitted" in line.casefold())
+            re.fullmatch(
+                r"(?:/usr/bin/|/bin/)?cat: (?:/etc/shadow|'/etc/shadow'): "
+                r"(?:Permission denied|Operation not permitted)", line
+            ) is not None
             for line in output.splitlines()
         )
     ):
-        _event_frame(kind="tool", subtype="denied:/etc/shadow", semantic=True)
+        _event_frame(
+            kind="tool", subtype="denied:/etc/shadow", semantic=True,
+            item_id=completed_read[0],
+        )
 
 
 def _codex_tool_label(item_root: object) -> RuntimeToolLabel:
@@ -1105,6 +1144,7 @@ def _event_frame(
     request_id: str | None = None,
     semantic: bool = False,
     detail: str | None = None,
+    item_id: str | None = None,
 ) -> None:
     frame: dict[str, object] = {
         "type": "event",
@@ -1121,6 +1161,8 @@ def _event_frame(
         frame["effective_model"] = effective_model
     if request_id is not None:
         frame["request_id"] = request_id
+    if item_id is not None:
+        frame["item_id"] = item_id
     _write_frame(frame)
 
 
@@ -1995,6 +2037,7 @@ def _run_codex(
                 semantic=False,
             )
             stream = turn.stream()
+            shadow_reads: dict[tuple[str, str, str], tuple[str, str]] = {}
             _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
             try:
                 for event in stream:
@@ -2041,6 +2084,10 @@ def _run_codex(
                         continue
                     if isinstance(payload, ItemStartedNotification):
                         item_root = payload.item.root
+                        if isinstance(item_root, CommandExecutionThreadItem):
+                            read = _codex_shadow_read(item_root)
+                            if read is not None and len(shadow_reads) < 128:
+                                shadow_reads[(payload.thread_id, payload.turn_id, item_root.id)] = read
                         if isinstance(item_root, tool_item_types):
                             _observe_progress(
                                 reporter,
@@ -2073,7 +2120,12 @@ def _run_codex(
                     if isinstance(payload, ItemCompletedNotification):
                         completed_root = payload.item.root
                         if isinstance(completed_root, CommandExecutionThreadItem):
-                            _codex_command_completion(completed_root)
+                            _codex_command_completion(
+                                completed_root,
+                                started_read=shadow_reads.pop(
+                                    (payload.thread_id, payload.turn_id, completed_root.id), None
+                                ),
+                            )
                         if isinstance(completed_root, tool_item_types):
                             _record_progress_activity(reporter)
                         else:

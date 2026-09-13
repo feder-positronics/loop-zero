@@ -71,9 +71,12 @@ The Codex access-only snapshot keeps the source's `last_refresh`
 timestamp because `0.154.0` treats a missing timestamp as stale and would
 otherwise attempt the refresh the snapshot deliberately cannot perform.  Codex
 permission-denial always launches: it passes only with observed denial evidence
-for the attempted read (a sandbox tool error or denial counter). An otherwise
-valid turn without that evidence is recorded as `unsupported`, with its reason,
-observed command outcomes, and charged cost.  SDK
+from a simple `/etc/shadow` read whose SDK started action and nonzero completion
+share an item ID and whose tool output contains the matching complete denial
+line. Ambiguous shell syntax, option errors, and denial text without the read
+action yield no evidence. An otherwise valid turn without that evidence is
+recorded as `unsupported`, with its reason, observed command outcomes, and
+charged cost; accepted evidence also records the SDK item ID.  SDK
 bridge error frames carry a sanitized `diagnostics` object (exception class and
 a redacted, bounded message) that the normalized result surfaces as
 `<Vendor> SDK failure: ...`; CLI retry events surface as

@@ -342,6 +342,7 @@ class RuntimeEvent:
     kind: str
     subtype: str | None = None
     semantic: bool = False
+    item_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
