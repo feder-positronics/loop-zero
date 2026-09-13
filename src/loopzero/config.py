@@ -690,8 +690,17 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                             f"{where}: must be a single-line Markdown link to a "
                             "repository-relative path or empty"
                         )
-                    elif value and "//" in value:
-                        problems.append(f"{where}: link target must not use a scheme")
+                    elif value:
+                        target = value.rsplit("(", 1)[1].rstrip(")")
+                        segments = target.split("/")
+                        leading = 0
+                        while leading < len(segments) and segments[leading] == "..":
+                            leading += 1
+                        if "//" in value or ".." in segments[leading:]:
+                            problems.append(
+                                f"{where}: link target must not use a scheme or traverse "
+                                "beyond leading parent segments"
+                            )
             elif not isinstance(value, str) or not value:
                 problems.append(f"{where}: must be a nonempty string")
             else:
