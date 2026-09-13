@@ -2488,6 +2488,12 @@ PINNED_CODEX_VERSION = "0.154.0"
 MAX_CONFIG_LOCK_BYTES = 512 * 1024
 
 _DISABLED_FEATURES = (
+    "background_paginated_rollout_migration",
+    "mcp_2026_07_28",
+    "memories",
+    "mentions_v2",
+    "remote_control",
+    "windows_sandbox_service",
     "apps",
     "auth_elicitation",
     "browser_use",

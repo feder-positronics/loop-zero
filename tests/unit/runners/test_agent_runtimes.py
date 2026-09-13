@@ -4084,26 +4084,8 @@ def test_codex_app_server_probe_consumes_protected_auth_and_checks_chatgpt_accou
         def request(self, method, params, *, response_model):
             assert method == "config/read"
             assert params == {"cwd": str(tmp_path), "includeLayers": True}
-            return response_model.model_validate(
-                {
-                    "config": {
-                        "approval_policy": "never",
-                        "approvals_reviewer": None,
-                        "hooks": {"SessionStart": [], "PreToolUse": []},
-                        "mcp_servers": {},
-                        "model": "gpt-5.6-sol",
-                        "model_provider": "openai",
-                        "model_providers": {},
-                        "model_reasoning_effort": "high",
-                        "review_model": None,
-                        "sandbox_mode": "read-only",
-                        "sandbox_workspace_write": None,
-                        "service_tier": "default",
-                    },
-                    "layers": [],
-                    "origins": {},
-                }
-            )
+            fixture = Path(__file__).with_name("fixtures") / "codex_effective_config_0_154_0.json"
+            return response_model.model_validate(json.loads(fixture.read_text()))
 
         def thread_start(self, **_kwargs):
             thread_calls.append(None)
@@ -4261,8 +4243,7 @@ def test_codex_effective_config_rejects_merged_stray_mcp_fixture(
     class FakeClient:
         def request(self, method, params, *, response_model):
             calls.append((method, params))
-            assert response_model is ConfigReadResponse
-            return response
+            return response_model.model_validate(response.model_dump(mode="json"))
 
     fake_codex = type("FakeCodex", (), {"_client": FakeClient()})()
     request = {
@@ -8598,8 +8579,8 @@ def test_codex_effective_config_refusal_precedes_account_and_thread(
 ):
     import openai_codex
 
-    fixture = Path(__file__).with_name("fixtures") / "codex_app_server_0_154_0.jsonl"
-    payload = json.loads(fixture.read_text().splitlines()[4])["message"]["result"]
+    fixture = Path(__file__).with_name("fixtures") / "codex_effective_config_0_154_0.json"
+    payload = json.loads(fixture.read_text())
     if mutation is not None:
         payload["config"].update(mutation)
     calls = []

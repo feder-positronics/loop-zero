@@ -1605,63 +1605,32 @@ def _codex_request_runtime_overrides(request: BridgeRequest) -> tuple[str, ...]:
     )
 
 
-def _codex_hooks_are_empty(value: object) -> bool:
-    """Accept the pinned hook skeleton only when it contains no handlers."""
-    if not isinstance(value, Mapping):
-        return False
-    for handlers in value.values():
-        if isinstance(handlers, Mapping):
-            if not _codex_hooks_are_empty(handlers):
-                return False
-        elif not isinstance(handlers, list) or handlers:
-            return False
-    return True
-
-
 def _codex_effective_config_is_closed(
     config: object, request: BridgeRequest
 ) -> bool:
-    """Validate the executable settings returned by pinned ``config/read``."""
-    if not isinstance(config, Mapping):
-        return False
-    mcp_servers = config.get("mcp_servers")
-    if not isinstance(mcp_servers, Mapping) or mcp_servers:
-        return False
-    if not _codex_hooks_are_empty(config.get("hooks")):
-        return False
-    pins = {
-        "model": request["requested_model"],
-        "model_provider": CODEX_MODEL_PROVIDER,
-        "model_reasoning_effort": _codex_effort(request["effort"]).value,
-        "service_tier": CODEX_SERVICE_TIER,
-        "sandbox_mode": _codex_sandbox_mode(request),
-        "approval_policy": "never",
-    }
-    if any(config.get(name) != expected for name, expected in pins.items()):
-        return False
-    # These adjacent settings are not part of the pinned thread/turn policy;
-    # a merged lower-layer table or reviewer would widen that policy.
-    return (
-        config.get("sandbox_workspace_write") is None
-        and config.get("approvals_reviewer") is None
-        and config.get("review_model") is None
-        and config.get("model_providers") in (None, {})
-    )
+    """Attest every effective key and leaf against the pinned allowlist."""
+    from ._codex_config import exact_config, expected_config
+
+    return exact_config(config, expected_config(_codex_request_runtime_overrides(request)))
 
 
 def _enforce_codex_effective_config(codex: object, request: BridgeRequest) -> None:
     """Read and reject unsafe merged configuration before account or thread use."""
     try:
-        from openai_codex.generated.v2_all import ConfigReadResponse
+        from pydantic import BaseModel
+
+        # The generated Config model can discard unknown nested members. Keep
+        # raw JSON dictionaries so attestation sees every effective key.
+        class EffectiveConfigResponse(BaseModel):
+            config: dict[str, object]
 
         client = getattr(codex, "_client")
         response = client.request(
             "config/read",
             {"cwd": request["cwd"], "includeLayers": True},
-            response_model=ConfigReadResponse,
+            response_model=EffectiveConfigResponse,
         )
-        config_model = getattr(response, "config")
-        config = config_model.model_dump(mode="json")
+        config = response.config
     except Exception as exc:
         raise RuntimeError("unavailable") from exc
     if not _codex_effective_config_is_closed(config, request):
