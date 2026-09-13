@@ -323,7 +323,7 @@ def test_delivery_run_for_another_pr_is_rejected_and_keeps_finding_live(
 def test_fake_merge_sha_has_no_expiry_api(tmp_path):
     _configure(tmp_path)
     findings.capture_finding_records(tmp_path, request=_request(17))
-    finding_log = tmp_path / ".audit" / "findings" / "2026-09-12.jsonl"
+    (finding_log,) = (tmp_path / ".audit" / "findings").glob("*.jsonl")
     finding_log.write_text(
         finding_log.read_text(encoding="utf-8")
         + json.dumps({"type": "pr-merged", "pr": 17, "merge_sha": "a" * 40})
