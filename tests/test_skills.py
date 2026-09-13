@@ -297,6 +297,25 @@ def test_intelflo_governance_render_is_byte_identical(tmp_path: Path) -> None:
                 assert (consumer / ".cursor" / "skills" / name / relative).read_bytes() == source.read_bytes()
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        '[x](docs/a.md)<img src=x onerror=alert(1)>',
+        '[<b>x</b>](docs/a.md)',
+        '[x](javascript:alert(1))',
+        '[x](https://evil.example/a.md)',
+        '[x](docs/../../../etc/passwd)',
+        '[x](docs/a.md) trailing',
+    ],
+)
+def test_readme_consumer_catalogue_rejects_html_schemes_and_traversal(consumer: Path, value: str) -> None:
+    """The catalogue token is a plain relative Markdown link, never HTML or a URL."""
+    with (consumer / "workflow.toml").open("a", encoding="utf-8") as workflow:
+        workflow.write("\n[skill_tokens]\nreadme_consumer_catalogue = " + json.dumps(value) + "\n")
+    with pytest.raises(config.ConfigError):
+        config.load_profile(consumer)
+
+
 @pytest.mark.parametrize("link", [None, "", "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)"])
 def test_readme_consumer_catalogue_renders_exactly(consumer: Path, link: str | None) -> None:
     if link is not None:

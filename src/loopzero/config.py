@@ -680,10 +680,18 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 if not isinstance(value, str):
                     problems.append(f"{where}: must be a string")
                 elif _reject_unsafe_rendered_string(value, where, problems):
+                    # Link text: printable characters without brackets or angle
+                    # brackets; target: a repository-relative path made of a
+                    # safe character set (no scheme, no HTML, no traversal).
                     if value and not re.fullmatch(
-                        r"\[[^\[\]\r\n\u0085\u2028\u2029]+\]\([^\s()]+\)", value
+                        r"\[[A-Za-z0-9 ,.:;'&/_\-]+\]\((?:\.\./)*[A-Za-z0-9._/\-]+\)", value
                     ):
-                        problems.append(f"{where}: must be a single-line Markdown link or empty")
+                        problems.append(
+                            f"{where}: must be a single-line Markdown link to a "
+                            "repository-relative path or empty"
+                        )
+                    elif value and ("//" in value or "/../" in value.split("(", 1)[1]):
+                        problems.append(f"{where}: link target must not traverse or use a scheme")
             elif not isinstance(value, str) or not value:
                 problems.append(f"{where}: must be a nonempty string")
             else:
