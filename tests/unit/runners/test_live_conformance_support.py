@@ -14,6 +14,7 @@ from conftest import REPO
 from loopzero.runners.settings import RuntimeBudget, RuntimeSettings
 from loopzero.runners.contract import (
     RuntimeCapabilityProfile,
+    RuntimeCostSource,
     RuntimeCostStatus,
     RuntimeEvent,
     RuntimeResult,
@@ -295,6 +296,41 @@ def test_non_killed_exception_without_usage_increases_aggregate(
     assert aggregate == 0.125 + expected
     assert accounting == expected_accounting
     assert unaccounted == 1
+
+
+@pytest.mark.parametrize(
+    "source", [RuntimeCostSource.VENDOR, RuntimeCostSource.ESTIMATED]
+)
+def test_live_accounting_accepts_only_explicit_known_cost_sources(source) -> None:
+    budget = RuntimeBudget(max_tokens=32_768, max_turns=2, max_usd=0.25)
+
+    charge, accounting, unaccounted = live._account_invocations(
+        "claude",
+        "success",
+        [0.01],
+        budget,
+        cost_sources=[source],
+    )
+
+    assert (charge, accounting, unaccounted) == (0.01, "known", 0)
+
+
+def test_live_accounting_treats_numeric_unknown_source_as_unaccounted() -> None:
+    budget = RuntimeBudget(max_tokens=32_768, max_turns=2, max_usd=0.25)
+
+    charge, accounting, unaccounted = live._account_invocations(
+        "claude",
+        "success",
+        [0.01],
+        budget,
+        cost_sources=[RuntimeCostSource.UNKNOWN],
+    )
+
+    assert (charge, accounting, unaccounted) == (
+        0.25,
+        "conservative-vendor-cap",
+        1,
+    )
 
 
 def test_codex_killed_charge_includes_conservative_prompt_input() -> None:
@@ -690,6 +726,7 @@ def test_live_result_json_includes_sdk_fallback_readiness_diagnostics(
     )
     serialized = json.loads(output.read_text())["scenarios"][0]["result"]
 
+    assert serialized["cost_source"] == "unknown"
     assert serialized["diagnostics"] == ["safe CLI diagnostic"]
     assert serialized["transport_attempts"] == [
         {
@@ -911,7 +948,7 @@ def test_codex_permission_scenario_launches_and_records_evidence_and_cost(
         assert evidence[0].item_id == "read-item"
     result = replace(_permission_result(
         events=parsed.events, diagnostics=parsed.diagnostics,
-    ), cost_usd=0.01)
+    ), cost_usd=0.01, cost_source=RuntimeCostSource.ESTIMATED)
 
     def run(_vendor, _adapter, request, **_kwargs):
         launches.append(request)

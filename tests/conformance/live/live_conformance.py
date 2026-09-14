@@ -29,6 +29,7 @@ from loopzero.runners import claude, codex, cursor
 from loopzero.runners.contract import (
     RuntimeCapabilityProfile,
     RuntimeAdapter,
+    RuntimeCostSource,
     RuntimeRequest,
     RuntimeResult,
     RuntimeStatus,
@@ -37,7 +38,7 @@ from loopzero.runners.contract import (
 )
 from loopzero.runners.process import LaunchSpec, ProcessResult, run_cli
 from loopzero.runners.process import private_temporary_directory
-from loopzero.runners.pricing import MODEL_PRICES, estimated_cost_usd
+from loopzero.runners.pricing import MODEL_PRICES, resolved_cost_usd
 from loopzero.runners.registry import RUNTIME_REGISTRY
 from loopzero.runners.settings import get_settings
 
@@ -301,6 +302,7 @@ class RealProcess:
         self.vendor = vendor
         self.scenario = scenario
         self.metered_cost: float | None = None
+        self.metered_cost_source = RuntimeCostSource.UNKNOWN
         self.cancel = None
         self._fault_timer: threading.Timer | None = None
         self.scenario_started = False
@@ -376,11 +378,14 @@ class RealProcess:
                     "codex": codex.parse_codex_stream,
                     "cursor": cursor.parse_cursor_stream,
                 }[self.vendor](outcome.stdout)
-                self.metered_cost = estimated_cost_usd(
-                    MODELS[self.vendor], parsed.usage
+                self.metered_cost, self.metered_cost_source = resolved_cost_usd(
+                    MODELS[self.vendor],
+                    parsed.usage,
+                    getattr(parsed, "cost_usd", None),
                 )
             except (ValueError, AttributeError):
                 self.metered_cost = None
+                self.metered_cost_source = RuntimeCostSource.UNKNOWN
         if is_scenario_run and self.scenario == "malformed-output":
             outcome = replace(outcome, stdout=outcome.stdout + "\n{malformed-live-frame")
         if is_scenario_run:
@@ -612,6 +617,7 @@ def _normalized(result: RuntimeResult) -> dict[str, object]:
         "usage": usage,
         "cost_usd": result.cost_usd,
         "cost_status": result.cost_status.value,
+        "cost_source": result.cost_source.value,
         "returncode": result.returncode,
         "duration_s": result.duration_s,
         "diagnostics": list(result.diagnostics),
@@ -837,20 +843,26 @@ def _accounted_cost(
     observed: float | None,
     budget: RuntimeBudget,
     *,
+    cost_source: RuntimeCostSource = RuntimeCostSource.UNKNOWN,
     prompt_bytes: int = 0,
 ) -> tuple[float | None, str]:
     conservative = _vendor_cap_charge(
         vendor, budget, prompt_bytes=prompt_bytes
     )
+    known_cost = (
+        observed
+        if cost_source in {RuntimeCostSource.VENDOR, RuntimeCostSource.ESTIMATED}
+        else None
+    )
     if scenario in KILLED_SCENARIOS:
-        charge = max(conservative, observed or 0.0)
+        charge = max(conservative, known_cost or 0.0)
         return charge, (
             "fixed-conservative-killed-charge"
             if vendor == "cursor"
             else "conservative-vendor-cap"
         )
-    if observed is not None:
-        return observed, "known"
+    if known_cost is not None:
+        return known_cost, "known"
     return conservative, (
         "fixed-conservative-charge"
         if vendor == "cursor"
@@ -864,19 +876,32 @@ def _account_invocations(
     observed_costs: list[float | None],
     budget: RuntimeBudget,
     *,
+    cost_sources: list[RuntimeCostSource] | None = None,
     prompt_bytes: int = 0,
 ) -> tuple[float, str, int]:
+    sources = (
+        cost_sources
+        if cost_sources is not None
+        else [RuntimeCostSource.UNKNOWN] * len(observed_costs)
+    )
+    if len(sources) != len(observed_costs):
+        raise ValueError("cost source count must match invocation count")
     accounted = [
         _accounted_cost(
             vendor,
             scenario,
             observed,
             budget,
+            cost_source=source,
             prompt_bytes=prompt_bytes,
         )
-        for observed in observed_costs
+        for observed, source in zip(observed_costs, sources, strict=True)
     ]
-    unaccounted = sum(observed is None for observed in observed_costs)
+    unaccounted = sum(
+        observed is None
+        or source not in {RuntimeCostSource.VENDOR, RuntimeCostSource.ESTIMATED}
+        for observed, source in zip(observed_costs, sources, strict=True)
+    )
     charge = sum(item[0] for item in accounted if item[0] is not None)
     if all(item[1] == "known" for item in accounted):
         accounting = "known"
@@ -1079,9 +1104,11 @@ def test_live_runtime_contract(
             accounting = "unknown"
             observed_cost: float | None = None
             invocation_costs: list[float | None] = []
+            invocation_sources: list[RuntimeCostSource] = []
             result: RuntimeResult | None = None
             try:
                 invocation_costs.append(None)
+                invocation_sources.append(RuntimeCostSource.UNKNOWN)
                 result = _run_with_credential(
                     vendor,
                     adapter,
@@ -1090,11 +1117,15 @@ def test_live_runtime_contract(
                     settings=scenario_settings,
                     wrapper=wrapper,
                 )
-                observed_cost = (
-                    result.cost_usd
-                    if result.cost_usd is not None
-                    else runner.metered_cost
-                )
+                if result.cost_source in {
+                    RuntimeCostSource.VENDOR,
+                    RuntimeCostSource.ESTIMATED,
+                }:
+                    observed_cost = result.cost_usd
+                    invocation_sources[-1] = result.cost_source
+                else:
+                    observed_cost = runner.metered_cost
+                    invocation_sources[-1] = runner.metered_cost_source
                 invocation_costs[-1] = observed_cost
                 if scenario == "restart-resume" and result.session_id is not None:
                     resumed_adapter = RUNTIME_REGISTRY.create(
@@ -1102,6 +1133,7 @@ def test_live_runtime_contract(
                         **({"sdk_available": lambda *_: True} if vendor in {"claude", "codex"} else {}),
                     )
                     invocation_costs.append(None)
+                    invocation_sources.append(RuntimeCostSource.UNKNOWN)
                     resumed = _run_with_credential(
                         vendor,
                         resumed_adapter,
@@ -1116,7 +1148,15 @@ def test_live_runtime_contract(
                         settings=scenario_settings,
                         wrapper=wrapper,
                     )
-                    resumed_cost = resumed.cost_usd if resumed.cost_usd is not None else runner.metered_cost
+                    if resumed.cost_source in {
+                        RuntimeCostSource.VENDOR,
+                        RuntimeCostSource.ESTIMATED,
+                    }:
+                        resumed_cost = resumed.cost_usd
+                        invocation_sources[-1] = resumed.cost_source
+                    else:
+                        resumed_cost = runner.metered_cost
+                        invocation_sources[-1] = runner.metered_cost_source
                     invocation_costs[-1] = resumed_cost
                     original_session_id = result.session_id
                     result = resumed
@@ -1130,6 +1170,7 @@ def test_live_runtime_contract(
                     scenario,
                     invocation_costs,
                     scenario_budget,
+                    cost_sources=invocation_sources,
                     prompt_bytes=prompt_bytes,
                 )
                 charged_cost += scenario_charge
@@ -1144,6 +1185,7 @@ def test_live_runtime_contract(
                     "outcome": "unsupported" if unsupported_reason else "passed",
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
+                    "cost_sources": [source.value for source in invocation_sources],
                     "result": _normalized(result),
                 }
                 if vendor == "codex" and scenario == "permission-denial":
@@ -1168,6 +1210,7 @@ def test_live_runtime_contract(
                             scenario,
                             started_costs,
                             scenario_budget,
+                            cost_sources=invocation_sources[:runner.scenario_invocations],
                             prompt_bytes=prompt_bytes,
                         )
                     )
@@ -1180,6 +1223,10 @@ def test_live_runtime_contract(
                     "failure_class": type(exc).__name__,
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
+                    "cost_sources": [
+                        source.value
+                        for source in invocation_sources[:runner.scenario_invocations]
+                    ],
                 }
                 if result is not None:
                     # Contract assertion failures must not erase the bounded
