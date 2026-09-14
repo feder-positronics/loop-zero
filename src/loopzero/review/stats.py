@@ -305,7 +305,11 @@ def _collect(records: Sequence[Mapping[str, object]]) -> list[_Attempt]:
                 attempt.failure_class = _string(record.get("failure_class") or outcome)
             attempt.elapsed_seconds = _numeric(record.get("elapsed_seconds"))
             attempt.token_count = _tokens(record)
-            attempt.cost = _numeric(record.get("api_equivalent_usd"))
+            attempt.cost = (
+                _numeric(record.get("api_equivalent_usd"))
+                if record.get("cost_source") in {"vendor", "estimated"}
+                else None
+            )
             attempt.timestamp = _record_timestamp(record) or attempt.timestamp
             continue
 
@@ -502,7 +506,7 @@ def review_stats(
         attempts = [
             attempt
             for attempt in attempts
-            if attempt.timestamp is not None and attempt.timestamp >= cutoff
+            if attempt.timestamp is None or attempt.timestamp >= cutoff
         ]
     selected_prs: set[str] | None = None
     if last_merged is not None:

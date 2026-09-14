@@ -95,13 +95,24 @@ def _governed_records_with_review_state(
     records: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
     """Merge telemetry-policy rows with separately versioned D29 authority."""
-    selected = {
-        id(record)
-        for record in (
-            *current_telemetry(records),
-            *authenticated_review_state_records(records),
-        )
+    review_state = authenticated_review_state_records(records)
+    reservation_ids = {
+        record.get("reservation_id")
+        for record in review_state
+        if record.get("type") == "review-slot-reservation-v1"
+        and isinstance(record.get("reservation_id"), str)
     }
+    selected = {id(record) for record in (*current_telemetry(records), *review_state)}
+    # Review observations are versioned separately from the authority they
+    # describe. Once a reservation is authenticated, keep every joined launch
+    # and outcome across telemetry-schema rotations so compaction cannot leave
+    # that reservation's historical accounting orphaned.
+    selected.update(
+        id(record)
+        for record in records
+        if record.get("type") in {"review-launch-v1", "review-launch-outcome-v1"}
+        and record.get("reservation_id") in reservation_ids
+    )
     return [record for record in records if id(record) in selected]
 
 

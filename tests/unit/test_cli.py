@@ -186,6 +186,34 @@ def test_review_stats_cli_json_and_human_shapes(tmp_path: Path, capsys, monkeypa
     assert "median / p95 per PR" in output
 
 
+def test_review_stats_human_output_escapes_and_bounds_ledger_labels(
+    tmp_path: Path, capsys, monkeypatch
+):
+    from loopzero.kernel import authority_store
+
+    hostile = "engine\n\x1b[31m" + "x" * 300
+    monkeypatch.setattr(
+        authority_store,
+        "load_records",
+        lambda root, days: [
+            {
+                "type": "attempt-start",
+                "task_id": "review",
+                "attempt_index": 0,
+                "run_id": "run",
+                "work_unit_id": "code-review",
+                "review_intent": hostile,
+                "engine": hostile,
+            }
+        ],
+    )
+    assert run("--root", str(tmp_path), "review-stats") == 0
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "engine\\n\\u001b[31m" in output
+    assert "x" * 121 not in output
+
+
 def test_hook_commands_reject_shell_syntax_and_inherited_path(
     consumer: Path, capsys, tmp_path: Path, monkeypatch
 ):

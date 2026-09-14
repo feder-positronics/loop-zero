@@ -391,25 +391,36 @@ class ReviewLaunchV1:
 
 
 def billing_mode_for_credential_kind(kind: str | None) -> BillingMode:
-    """Classify only a sealed credential kind; absent/unknown evidence stays unknown."""
+    """Classify billing only when the credential evidence determines the mode."""
+    if isinstance(kind, str) and kind.startswith("sk-ant-oat01-"):
+        return "subscription"
+    if isinstance(kind, str) and kind.startswith("sk-ant-api"):
+        return "metered"
     if kind in {
         "oauth",
         "oauth-file",
         "subscription",
         "claude-oauth",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "token-env",
+        "token-file",
+        "token-file(default)",
         "codex-auth-file",
         "codex-oauth",
+        "chatgpt",
+        "chatgpt-login",
         "cursor-auth-file",
         "cursor-login",
+        "cursor-browser-login",
     }:
         return "subscription"
     if kind in {
         "api-key",
-        "console",
         "metered",
-        "token-env",
-        "token-file",
-        "token-file(default)",
+        "anthropic-api-key",
+        "openai-api-key",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
     }:
         return "metered"
     return "unknown"
@@ -467,6 +478,8 @@ class ReviewLaunchOutcomeV1:
             raise ReviewTelemetryError("review cost source is invalid")
         if self.api_equivalent_usd is None and self.cost_source != "unknown":
             raise ReviewTelemetryError("missing review cost must have unknown source")
+        if self.api_equivalent_usd is not None and self.cost_source == "unknown":
+            raise ReviewTelemetryError("numeric review cost must have a known source")
         if self.billing_mode not in {"subscription", "metered", "unknown"}:
             raise ReviewTelemetryError("review billing mode is invalid")
         if self.failure_class is not None and (

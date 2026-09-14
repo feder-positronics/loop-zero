@@ -39,6 +39,7 @@ BlockedCode = Literal[
     "retries-exhausted",
     "oversized-delta",
     "reservation-conflict",
+    "invalid-launch-label",
 ]
 RequestedReview = Literal["review", "delta"]
 LaunchReason = Literal[
@@ -220,15 +221,6 @@ def admit_review(
         )
     task_id = task.get("task_id")
     idempotency_key = task.get("idempotency_key")
-    forbidden_labels = {
-        name for name in ("launch_reason", "review_launch_reason") if name in task
-    }
-    if forbidden_labels:
-        return _blocked(
-            "reservation-conflict",
-            "review launch reasons are package-derived, not caller labels",
-            fields=sorted(forbidden_labels),
-        )
     if (
         not isinstance(task_id, str)
         or not task_id
@@ -236,6 +228,15 @@ def admit_review(
         or not idempotency_key
     ):
         return _blocked("missing-evidence", "task_id and idempotency_key are required")
+    forbidden_labels = {
+        name for name in ("launch_reason", "review_launch_reason") if name in task
+    }
+    if forbidden_labels:
+        return _blocked(
+            "invalid-launch-label",
+            "review launch reasons are package-derived, not caller labels",
+            fields=sorted(forbidden_labels),
+        )
     try:
         supplied_changed = (
             None
@@ -587,6 +588,5 @@ __all__ = [
     "Carry",
     "LaunchReason",
     "Reserved",
-    "_launch_reasons",
     "admit_review",
 ]

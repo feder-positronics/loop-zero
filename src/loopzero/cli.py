@@ -343,8 +343,9 @@ def cmd_review_stats(args: argparse.Namespace) -> int:
                 if row["api_equivalent_usd"] is not None
                 else "unknown"
             )
+            safe_name = _bounded_human_label(name)
             print(
-                f"{name}: starts={row['starts']} terminals={row['terminals']} "
+                f"{safe_name}: starts={row['starts']} terminals={row['terminals']} "
                 f"verdicts={row['verdicts']} failures={row['failures']} "
                 f"minutes={row['minutes'] if row['minutes'] is not None else 'unknown'} "
                 f"API-equivalent USD={row_cost}"
@@ -359,6 +360,12 @@ def cmd_review_stats(args: argparse.Namespace) -> int:
             f"unknown={row['unknown']}"
         )
     return 0
+
+
+def _bounded_human_label(value: object, *, limit: int = 120) -> str:
+    """Escape and bound a ledger-supplied label before writing a terminal."""
+    encoded = json.dumps(str(value), ensure_ascii=True)[1:-1]
+    return encoded if len(encoded) <= limit else encoded[: limit - 3] + "..."
 
 
 def build_parser() -> argparse.ArgumentParser:

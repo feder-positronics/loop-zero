@@ -5,12 +5,13 @@ import pytest
 
 from loopzero.kernel import authority_store
 from loopzero.kernel.review_state import ReviewSlotReservation, ReviewSlotSettlement
-from loopzero.review.admission import Reserved, _launch_reasons
+from loopzero.review.admission import Reserved
 from loopzero.review.stats import review_stats
 from loopzero.review.telemetry import (
     ReviewLaunchOutcomeV1,
     ReviewLaunchV1,
     ReviewTelemetryError,
+    billing_mode_for_credential_kind,
 )
 from loopzero.review.trust_claims import Invalidation
 from loopzero.runners.contract import (
@@ -24,30 +25,38 @@ from loopzero.runners.contract import (
 
 
 @pytest.mark.parametrize(
-    ("family", "slot", "transition", "security", "retry", "expected"),
+    ("kind", "expected"),
     [
-        ("delivery", "primary", "initial", False, False, "initial"),
-        ("delivery", "delta", "substantive", False, False, "bounded-delta"),
-        ("delivery", "primary", "supersession", False, False, "supersession"),
-        ("trust", "primary", "initial", False, False, "trust-verification"),
-        ("trust", "delta", "substantive", False, False, "trust-delta"),
-        ("delivery", "primary", "initial", True, False, "security-path"),
-        ("delivery", "primary", "owner-requested", False, False, "owner-requested"),
-        ("delivery", "primary", "initial", False, True, "infrastructure-retry"),
+        ("oauth-file", "subscription"),
+        ("oauth", "subscription"),
+        ("subscription", "subscription"),
+        ("claude-oauth", "subscription"),
+        ("CLAUDE_CODE_OAUTH_TOKEN", "subscription"),
+        ("sk-ant-oat01-" + "x" * 80, "subscription"),
+        ("token-env", "subscription"),
+        ("token-file", "subscription"),
+        ("token-file(default)", "subscription"),
+        ("codex-auth-file", "subscription"),
+        ("codex-oauth", "subscription"),
+        ("chatgpt", "subscription"),
+        ("chatgpt-login", "subscription"),
+        ("cursor-auth-file", "subscription"),
+        ("cursor-login", "subscription"),
+        ("cursor-browser-login", "subscription"),
+        ("ANTHROPIC_API_KEY", "metered"),
+        ("anthropic-api-key", "metered"),
+        ("sk-ant-api03-" + "x" * 80, "metered"),
+        ("OPENAI_API_KEY", "metered"),
+        ("openai-api-key", "metered"),
+        ("api-key", "metered"),
+        ("metered", "metered"),
+        ("console", "unknown"),
+        ("bearer-token", "unknown"),
+        (None, "unknown"),
     ],
 )
-def test_every_launch_reason_is_derived(
-    family, slot, transition, security, retry, expected
-):
-    primary, secondary = _launch_reasons(
-        family=family,
-        slot_kind=slot,
-        transition_kind=transition,
-        security_triggered=security,
-        infrastructure_retry=retry,
-    )
-    assert primary == expected
-    assert primary not in secondary
+def test_billing_mode_is_derived_only_from_credential_evidence(kind, expected):
+    assert billing_mode_for_credential_kind(kind) == expected
 
 
 def _reserved(*, caller_label=False):
@@ -160,8 +169,18 @@ def test_unknown_cost_and_credential_kind_never_become_zero():
     assert totals.known_api_equivalent_usd == 0
     assert totals.cost_unknown == 1
 
+    malformed = {**outcome, "api_equivalent_usd": 0.0}
+    with pytest.raises(ReviewTelemetryError, match="known source"):
+        ReviewLaunchOutcomeV1.from_mapping(malformed)
+    malformed_totals = review_stats([launch.to_dict(), malformed]).totals
+    assert malformed_totals.api_equivalent_usd is None
+    assert malformed_totals.known_api_equivalent_usd == 0
+    assert malformed_totals.cost_unknown == 1
 
-def test_review_observations_survive_with_reservations_during_compaction():
+
+def test_review_observations_survive_with_reservations_during_compaction(
+    monkeypatch,
+):
     launch = ReviewLaunchV1.from_admission(
         _reserved(), attempt_id="a1", admitted_at="2026-09-14T10:00:00Z"
     ).to_dict()
@@ -172,6 +191,27 @@ def test_review_observations_survive_with_reservations_during_compaction():
         "terminal_at": "2026-09-14T10:00:01Z",
     }
     reservation = _reserved().slot.to_dict()
+    launch["schema_version"] = "telemetry-before-review-stats"
+    outcome["schema_version"] = "telemetry-before-review-stats"
     rows = [reservation, launch, outcome]
-    retained = authority_store._retention_live_record_ids(rows)
-    assert {id(row) for row in rows} <= retained
+    monkeypatch.setattr(
+        authority_store,
+        "_authenticated_coordinator_record_ids",
+        lambda records: frozenset(map(id, records)),
+    )
+    monkeypatch.setattr(
+        authority_store,
+        "delivery_controller_records",
+        lambda records: [],
+    )
+    from loopzero.kernel import authority_projection
+
+    monkeypatch.setattr(
+        authority_projection,
+        "_authenticated_coordinator_record_ids",
+        lambda records: frozenset(map(id, records)),
+    )
+    retained = authority_store.retained_authority_projection(rows)
+    assert reservation in retained
+    assert launch in retained
+    assert outcome in retained

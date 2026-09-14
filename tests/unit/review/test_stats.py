@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from loopzero.kernel.authority_store import retained_authority_projection_once
+from loopzero.kernel import authority_projection, authority_store
+from loopzero.kernel.policy import (
+    DISPATCH_POLICY_VERSION,
+    RUNTIME_CONTRACT_VERSION,
+    TELEMETRY_SCHEMA_VERSION,
+)
+from loopzero.review import admission, authority as review_authority
 from loopzero.review.stats import review_stats
 
 
@@ -155,30 +161,129 @@ def test_2026_09_14_measurement_golden_shape(measurement_ledger):
     assert selected == golden
 
 
-def test_pre_release_ledger_uses_unrecorded_and_unknown_not_zero():
+def test_pre_release_ledger_admits_and_projects_as_unrecorded(tmp_path, monkeypatch):
+    metadata = {
+        "schema_version": TELEMETRY_SCHEMA_VERSION,
+        "policy_version": DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
+    }
+    patch = {
+        "schema_version": "patch-identity-v1",
+        "base_sha": "0" * 40,
+        "base_tree_sha": "1" * 40,
+        "candidate_sha": "2" * 40,
+        "candidate_tree_sha": "3" * 40,
+        "diff_format": "git-binary-full-index-no-renames-v1",
+        "diff_sha256": "4" * 64,
+        "patch_id_verbatim": "5" * 40,
+    }
     rows = [
         {
+            **metadata,
             "type": "attempt-start",
             "task_id": "old-review",
             "attempt_index": 0,
             "run_id": "old-run",
-            "review_intent": "delivery-code-review",
+            "work_unit_id": "code-review",
         },
         {
+            **metadata,
             "type": "attempt-terminal",
             "task_id": "old-review",
             "attempt_index": 0,
             "run_id": "old-run",
-            "review_intent": "delivery-code-review",
+            "work_unit_id": "code-review",
+            "review_lens": "code",
+            "repository_binding": "repo",
+            "snapshot_tree_sha": patch["candidate_tree_sha"],
+            "patch_identity": patch,
             "status": "completed",
             "reason": "legacy-terminal-label",
         },
+        {
+            **metadata,
+            "type": "verdict",
+            "task_id": "old-review",
+            "run_id": "old-run",
+            "work_unit_id": "code-review",
+            "verdict": "pass",
+        },
     ]
-    assert retained_authority_projection_once(rows) == rows
-    result = review_stats(rows).to_dict()
+    terminal = rows[1]
+    verdict = rows[2]
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_accepted_review_terminals",
+        lambda records: {"old-review": terminal},
+    )
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_authenticated_verdicts",
+        lambda records, **kwargs: {"old-review": verdict},
+    )
+    monkeypatch.setattr(
+        review_authority, "authenticated_review_verdict", lambda *args: "pass"
+    )
+    monkeypatch.setattr(
+        admission,
+        "tree_diff_paths",
+        lambda repository, source, target: ((), patch["diff_sha256"]),
+    )
+    monkeypatch.setattr(
+        admission,
+        "security_trigger_paths_between",
+        lambda repository, source, target: (),
+    )
+    monkeypatch.setattr(authority_store, "delivery_controller_records", lambda rows: [])
+
+    with authority_store.authority_ledger_lock(tmp_path):
+        admitted = admission.admit_review(
+            tmp_path,
+            rows,
+            repository_binding="repo",
+            task={
+                "task_id": "adopted-review",
+                "idempotency_key": "adopted-review",
+                "review_intent": "delivery-code-review",
+            },
+            current_source_identity={"head": patch["candidate_sha"]},
+            current_tree_sha=patch["candidate_tree_sha"],
+            patch_identity=patch,
+            required_sections=("code",),
+            equivalence_proof=None,
+            format_only_proof=None,
+            requested="review",
+            changed_paths=None,
+            security_trigger_paths=(),
+        )
+    assert isinstance(admitted, admission.Carry)
+
+    retained = authority_store.retained_authority_projection(
+        rows, active_run_ids={"old-run"}
+    )
+    result = review_stats(retained).to_dict()
     assert result["per_pr"].keys() == {"unrecorded"}
+    assert result["per_intent"].keys() == {"unrecorded"}
     assert result["per_reason"].keys() == {"unrecorded"}
     assert result["per_engine"].keys() == {"unrecorded"}
+    assert result["totals"]["source_identity_unrecorded"] == 1
+    assert result["totals"]["patch_identity_unrecorded"] == 1
+    assert result["totals"]["manifest_identity_unrecorded"] == 1
     assert result["totals"]["claim_counts_unrecorded"] == 1
     assert result["totals"]["api_equivalent_usd"] is None
     assert result["totals"]["cost_unknown"] == 1
+
+
+def test_since_keeps_attempts_with_unrecorded_timestamps():
+    rows = [
+        {
+            "type": "attempt-start",
+            "task_id": "undated-review",
+            "attempt_index": 0,
+            "run_id": "undated-run",
+            "work_unit_id": "code-review",
+        }
+    ]
+    result = review_stats(rows, since="2026-09-14T00:00:00Z")
+    assert result.totals.starts == 1
+    assert result.per_pr["unrecorded"].starts == 1
