@@ -22,6 +22,7 @@ from .contract import (
     MAX_PROTOCOL_LINE_BYTES,
     MAX_STRUCTURED_OUTPUT_BYTES,
     ReadinessFailure,
+    RuntimeCostSource,
     RuntimeCostStatus,
     RuntimeEvent,
     RuntimeHandle,
@@ -50,7 +51,7 @@ from .process import (
     private_temporary_directory,
     run_cli as default_run_cli,
 )
-from .pricing import estimated_cost_usd
+from .pricing import normalized_vendor_cost_usd, resolved_cost_usd
 
 CLAUDE_SDK_TRANSPORT = "claude/agent-sdk"
 CLAUDE_CLI_TRANSPORT = "claude/cli"
@@ -586,15 +587,7 @@ def _terminal_from_frame(
         frame.get("usage"),
         frame.get("model_usage", frame.get("modelUsage")),
     )
-    raw_cost = frame.get("total_cost_usd")
-    cost_usd = (
-        float(raw_cost)
-        if isinstance(raw_cost, (int, float))
-        and not isinstance(raw_cost, bool)
-        and math.isfinite(raw_cost)
-        and 0 <= raw_cost <= 1_000_000
-        else None
-    )
+    cost_usd = normalized_vendor_cost_usd(frame.get("total_cost_usd"))
     return status, reason, output, structured_output, usage, cost_usd
 
 
@@ -1776,7 +1769,9 @@ class ClaudeAdapter:
         structured_output: dict[str, object] | None = None,
     ) -> RuntimeResult:
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
-        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        normalized_cost, cost_source = resolved_cost_usd(
+            request.requested_model, usage, cost_usd
+        )
         budget = get_settings().budget
         measured_tokens = usage.output_tokens if usage is not None else None
         if budget is not None and (
@@ -1807,10 +1802,13 @@ class ClaudeAdapter:
             usage=usage,
             cost_usd=normalized_cost,
             cost_status=(
-                RuntimeCostStatus.ESTIMATED
-                if normalized_cost is not None
+                RuntimeCostStatus.OBSERVED
+                if cost_source is RuntimeCostSource.VENDOR
+                else RuntimeCostStatus.ESTIMATED
+                if cost_source is RuntimeCostSource.ESTIMATED
                 else RuntimeCostStatus.UNKNOWN
             ),
+            cost_source=cost_source,
             eligibility=request.eligibility,
             commercial_mode=request.commercial_mode,
             fallback_from=request.fallback_from,

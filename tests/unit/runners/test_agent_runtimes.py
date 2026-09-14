@@ -16,7 +16,7 @@ from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
-from loopzero.runners.settings import RuntimeSettings
+from loopzero.runners.settings import RuntimeBudget, RuntimeSettings
 
 
 def load_package() -> (
@@ -468,11 +468,13 @@ def test_runtime_contract_keeps_schema_and_structured_result_private(
         attempt_id="attempt-claude",
         structured_output={"summary": "private result"},
         cost_status=contracts.RuntimeCostStatus.ESTIMATED,
+        cost_source=contracts.RuntimeCostSource.ESTIMATED,
     )
 
     assert "properties" not in repr(runtime_request)
     assert "private result" not in repr(result)
     assert result.cost_status is contracts.RuntimeCostStatus.ESTIMATED
+    assert result.cost_source is contracts.RuntimeCostSource.ESTIMATED
 
 
 def test_process_result_excludes_vendor_output_from_repr() -> None:
@@ -1091,6 +1093,7 @@ def test_claude_sdk_recovers_result_accepted_before_budget_terminal(
     assert terminal["structured_output"] == governed_output
     assert terminal["subtype"] == "error_max_budget_usd"
     assert terminal["total_cost_usd"] == 5.1
+    assert terminal["cost_source"] == "vendor"
     assert all("private budget error" not in json.dumps(frame) for frame in frames)
 
 
@@ -1826,7 +1829,7 @@ def test_claude_sdk_forwards_promotional_credit_mode(tmp_path: Path) -> None:
     assert result.commercial_mode is contracts.RuntimeCommercialMode.PROMOTIONAL_CREDIT
 
 
-def test_claude_sdk_uses_pinned_token_price_instead_of_vendor_cost(tmp_path: Path) -> None:
+def test_claude_sdk_prefers_exact_vendor_cost_over_token_estimate(tmp_path: Path) -> None:
     def run_process(command, **kwargs):
         del command, kwargs
         return process.ProcessResult(
@@ -1845,8 +1848,9 @@ def test_claude_sdk_uses_pinned_token_price_instead_of_vendor_cost(tmp_path: Pat
         claude_request(tmp_path)
     )
 
-    assert result.cost_usd == 0.00009
-    assert result.cost_status is contracts.RuntimeCostStatus.ESTIMATED
+    assert result.cost_usd == 0.42
+    assert result.cost_status is contracts.RuntimeCostStatus.OBSERVED
+    assert result.cost_source is contracts.RuntimeCostSource.VENDOR
 
 
 def test_claude_sdk_maps_absent_vendor_cost_to_unknown_status(tmp_path: Path) -> None:
@@ -1869,6 +1873,87 @@ def test_claude_sdk_maps_absent_vendor_cost_to_unknown_status(tmp_path: Path) ->
 
     assert result.cost_usd is None
     assert result.cost_status is contracts.RuntimeCostStatus.UNKNOWN
+    assert result.cost_source is contracts.RuntimeCostSource.UNKNOWN
+
+
+@pytest.mark.parametrize("vendor_cost", [0.25, 10.01, 0.25])
+def test_claude_preserves_intelflo_vendor_cost_shapes_for_unpriced_model(
+    tmp_path: Path,
+    vendor_cost: float,
+) -> None:
+    runtime_request = replace(
+        claude_request(tmp_path),
+        requested_model="consumer-routed-unpriced-model",
+    )
+    result = claude.ClaudeAdapter()._result(
+        runtime_request,
+        status=contracts.RuntimeStatus.COMPLETED,
+        reason=contracts.TerminalReason.COMPLETED,
+        cost_usd=vendor_cost,
+    )
+
+    assert result.cost_usd == vendor_cost
+    assert result.cost_source is contracts.RuntimeCostSource.VENDOR
+
+
+def test_claude_uses_estimate_when_vendor_cost_is_absent(tmp_path: Path) -> None:
+    usage = contracts.RuntimeUsage(input_tokens=1, output_tokens=1)
+    result = claude.ClaudeAdapter()._result(
+        claude_request(tmp_path),
+        status=contracts.RuntimeStatus.COMPLETED,
+        reason=contracts.TerminalReason.COMPLETED,
+        usage=usage,
+    )
+
+    assert result.cost_usd == 0.00009
+    assert result.cost_source is contracts.RuntimeCostSource.ESTIMATED
+
+
+def test_vendor_cost_above_normalized_budget_is_budget_exhausted(
+    tmp_path: Path,
+) -> None:
+    settings = RuntimeSettings(
+        budget=RuntimeBudget(max_tokens=100, max_turns=1, max_usd=10.0)
+    )
+    with settings.use():
+        adapter = claude.ClaudeAdapter()
+        result = adapter._result(
+            replace(
+                claude_request(tmp_path),
+                requested_model="consumer-routed-unpriced-model",
+            ),
+            status=contracts.RuntimeStatus.COMPLETED,
+            reason=contracts.TerminalReason.COMPLETED,
+            cost_usd=10.01,
+            final_output="must be discarded",
+        )
+
+    assert result.status is contracts.RuntimeStatus.FAILED
+    assert result.terminal_reason is contracts.TerminalReason.BUDGET_EXHAUSTED
+    assert result.cost_usd == 10.01
+    assert result.cost_source is contracts.RuntimeCostSource.VENDOR
+    assert result.final_output is None
+
+
+def test_codex_preserves_protocol_vendor_cost_for_unpriced_model(
+    tmp_path: Path,
+) -> None:
+    parsed = codex.parse_codex_stream(
+        '{"type":"result","status":"completed",'
+        '"terminal_reason":"completed","total_cost_usd":0.25}\n'
+    )
+    result = codex.CodexAdapter()._result(
+        replace(
+            codex_request(tmp_path),
+            requested_model="consumer-routed-unpriced-model",
+        ),
+        status=parsed.status,
+        reason=parsed.terminal_reason,
+        cost_usd=parsed.cost_usd,
+    )
+
+    assert result.cost_usd == 0.25
+    assert result.cost_source is contracts.RuntimeCostSource.VENDOR
 
 
 def test_claude_cli_preserves_accepted_result_on_nonzero_budget_exit(
@@ -6639,7 +6724,7 @@ def test_cursor_stream_extracts_terminal_metadata_without_payload_telemetry() ->
                 '{"type":"future-event","detail":"unknown fields are tolerated"}',
                 '{"type":"result","subtype":"success","is_error":false,'
                 '"result":"secret final answer","session_id":"session-1",'
-                '"request_id":"request-1"}',
+                '"request_id":"request-1","total_cost_usd":0.25}',
             ]
         )
     )
@@ -6648,6 +6733,7 @@ def test_cursor_stream_extracts_terminal_metadata_without_payload_telemetry() ->
     assert parsed.effective_model == "Cursor Auto"
     assert parsed.request_id == "request-1"
     assert parsed.status is contracts.RuntimeStatus.COMPLETED
+    assert parsed.cost_usd == 0.25
     assert [(event.kind, event.subtype) for event in parsed.events] == [
         ("system", "init"),
         ("tool_call", "completed"),
@@ -6907,6 +6993,41 @@ def test_cursor_adapter_keeps_governed_output_out_of_result_repr(
     assert command[command.index("--workspace") + 1] == str(isolated_cwd)
     assert command[command.index("--add-dir") + 1] == str(tmp_path)
     assert str(tmp_path) in input_text
+
+
+def test_cursor_prefers_protocol_vendor_cost_over_token_estimate(
+    tmp_path: Path,
+) -> None:
+    def run_success(*args, **kwargs):
+        del args, kwargs
+        return process.ProcessResult(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "done",
+                    "total_cost_usd": 0.25,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                }
+            ),
+            stderr="",
+            duration_s=0.01,
+            timed_out=False,
+        )
+
+    result = cursor.CursorAdapter(
+        run_cli=run_success,
+        run_probe=_cursor_auth_probe,
+        which=lambda _name: "/usr/bin/cursor-agent",
+    ).run(
+        replace(request(tmp_path), requested_model="cursor-grok-4.6-high")
+    )
+
+    assert result.cost_usd == 0.25
+    assert result.cost_status is contracts.RuntimeCostStatus.OBSERVED
+    assert result.cost_source is contracts.RuntimeCostSource.VENDOR
 
 
 def test_cursor_run_workspace_is_inside_documented_settings_root(

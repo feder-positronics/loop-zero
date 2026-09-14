@@ -87,6 +87,8 @@ def _run_fake_scenario(scenario, tmp_path):
     elif scenario is Scenario.PERMISSION_DENIAL:
         expected_events += (PERMISSION,)
     assert outcome.events == expected_events
+    assert outcome.cost_usd is None
+    assert outcome.cost_source.value == "unknown"
     assert [item.sequence for item in progress] == list(range(1, len(progress) + 1))
     assert "private prompt" not in repr(outcome)
 
@@ -339,3 +341,5 @@ def test_selected_adapter_protocol_scenario(vendor, scenario, tmp_path, monkeypa
         expected_kinds.append("result")
         assert [event.kind for event in result.events] == expected_kinds
     assert "private prompt" not in repr(result)
+    assert result.cost_usd is None
+    assert result.cost_source.value == "unknown"

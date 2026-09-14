@@ -161,9 +161,12 @@ this output cap; input and cache counters are used for price reporting, not
 miscompared with an output-only limit.  There is no separate total-token cap.
 
 Reporting uses the frozen [`2026-09-12 price table`](src/loopzero/runners/pricing.py),
-not a live lookup. A completed turn with zero output tokens, including one
+not a live lookup. A bounded vendor-reported cost takes precedence and is
+reported with source `vendor`; otherwise complete usage for a priced model is
+reported with source `estimated`. A completed turn with zero output tokens, including one
 that reports positive input, and incomplete usage remain unknown rather than
-priced. Every started invocation that ends without known usage is charged
+priced and retains source `unknown`. Every started invocation with an unknown
+cost source is charged
 Claude's native per-run USD cap, Codex's output cap plus a conservative
 estimate of one input token per prompt byte, or a fixed USD 0.10 for Cursor,
 whose pinned CLI exposes no native cost/token cap. Such invocations count
@@ -176,7 +179,8 @@ resume argument/SDK option for every vendor; actual provider resume behavior
 is verified only by the nightly job's normalized artifact. Cursor success and
 restart/resume are recorded as `unsupported` because the pinned CLI cannot
 enforce `output_schema`; free-text JSON is never treated as a pass. Each job
-uploads only normalized fields and separates known from conservative charges.
+uploads only normalized fields, reports each cost source, and separates known
+from conservative charges.
 
 Gate A-G2 means two consecutive **scheduled** UTC nights on the default branch
 are green for all three runtime jobs. Both nights must have artifacts showing

@@ -17,8 +17,10 @@ explicit pinned executable and broker-readable credential path, then name the
 file on the pytest command line.  The GitHub workflow is the reference launch:
 it supplies the required nested bubblewrap wrapper, an external private state
 root and suite-scoped resume home, hard scenario timeouts, normalized JSON
-output, and conservative aggregate spend control. Every started invocation
-without known usage is charged Claude's USD cap, Codex's output cap plus a
+output, and conservative aggregate spend control. The artifact records each
+normalized result's cost source and the sources used for scenario accounting.
+Only `vendor` and `estimated` sources count as accounted. Every started invocation
+with an `unknown` source is charged Claude's USD cap, Codex's output cap plus a
 one-token-per-prompt-byte input estimate, or Cursor's fixed USD 0.10 amount. A
 suite stops after three killed or three unaccounted runs by default. Cursor
 schema-dependent success and resume evidence is explicitly unsupported rather
