@@ -318,6 +318,20 @@ def test_carried_claim_preserves_verifier_binding_and_names_prior_receipt():
     assert binding.carried_from == prior.receipt_digest
 
 
+def test_composition_rejects_a_different_previous_receipt_for_carried_claims():
+    raw = manifest(
+        {"text": "changed", "paths": ["src/auth.py"]},
+        {"text": "carried", "paths": ["src/db.py"]},
+    )
+    prior = legacy(raw)
+    current = normalize_manifest(raw)
+    task = task_for(prior, current, changed=["src/auth.py"])
+    assert task is not None
+    unrelated = legacy(raw, source="unrelated", digest="d" * 64)
+    with pytest.raises(TrustClaimError, match="carried binding"):
+        compose_claim_verdict(unrelated, task, fresh(task))
+
+
 @pytest.mark.parametrize(
     "override",
     [

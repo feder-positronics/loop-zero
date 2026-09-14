@@ -916,6 +916,15 @@ def stage_trust_claim_evidence(
             selected = allowed
     else:
         selected = tuple(evidence_paths)
+    declared_inventory = (
+        task.get("evidence_inventory") if isinstance(task, Mapping) else None
+    )
+    if declared_inventory is not None and (
+        not isinstance(declared_inventory, (list, tuple))
+        or not all(isinstance(path, str) for path in declared_inventory)
+        or not set(declared_inventory) <= set(allowed)
+    ):
+        raise DispatchError("trust-claim evidence inventory exceeds task scope")
     if (
         not all(isinstance(path, str) for path in selected)
         or len(selected) != len(set(selected))

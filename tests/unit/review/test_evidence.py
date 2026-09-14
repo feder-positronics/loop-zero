@@ -114,3 +114,12 @@ def test_trust_claim_evidence_stages_only_invalidated_and_changed_paths(configur
             task=task,
             evidence_paths=["outside.py"],
         )
+    forged = {**task.to_dict(), "evidence_inventory": ["outside.py"]}
+    with pytest.raises(DispatchError, match="exceeds task scope"):
+        evidence.stage_trust_claim_evidence(
+            worktree=configured,
+            primary_repo=configured,
+            task_id="forged-inventory",
+            task=forged,
+            evidence_paths=["covered.py"],
+        )

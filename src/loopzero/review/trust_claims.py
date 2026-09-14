@@ -668,6 +668,13 @@ class TrustClaimTaskV1:
         expected_digests = (previous.receipt_digest,) if carried and previous else ()
         if task.carried_receipt_digests != expected_digests:
             raise TrustClaimError("trust claim carried receipt binding is invalid")
+        expected_retirements = (
+            set(previous.claims) - set(claim_set.by_id)
+            if previous is not None
+            else set()
+        )
+        if set(task.retirements) != expected_retirements:
+            raise TrustClaimError("trust claim retirements are invalid")
         return task
 
 
@@ -839,6 +846,11 @@ def compose_claim_verdict(
         raise TrustClaimError("claim task is not bound to its normalized claim set")
     if previous is not None and not previous.digest_is_valid():
         raise TrustClaimError("previous trust claim receipt digest is invalid")
+    if task._carried_claims and (
+        previous is None
+        or task.carried_receipt_digests != (previous.receipt_digest,)
+    ):
+        raise TrustClaimError("previous receipt does not match the carried binding")
     fresh = _validated_fresh_results(task, fresh_results)
     claims: dict[str, ClaimVerdict] = {}
     for identity, binding in task._carried_claims.items():
