@@ -123,3 +123,69 @@ def test_trust_claim_evidence_stages_only_invalidated_and_changed_paths(configur
             task=forged,
             evidence_paths=["covered.py"],
         )
+
+
+@pytest.mark.parametrize(
+    "changed,expected_states",
+    [
+        (["deleted.py"], {"worktree/deleted.py": "absent"}),
+        (
+            ["old-name.py", "new-name.py"],
+            {
+                "worktree/old-name.py": "absent",
+                "worktree/new-name.py": "present",
+            },
+        ),
+    ],
+    ids=["deletion", "rename-source-and-destination"],
+)
+def test_trust_claim_evidence_records_paths_missing_at_current_tree_as_absent(
+    configured, changed, expected_states
+):
+    (configured / "new-name.py").write_text("renamed", encoding="utf-8")
+    task = {"invalidated_claims": [], "changed_paths": changed}
+    snapshot = evidence.stage_trust_claim_evidence(
+        worktree=configured,
+        primary_repo=configured,
+        task_id="missing-trust-evidence",
+        task=task,
+    )
+    states = {
+        entry["origin"]: entry.get("state", "present")
+        for entry in snapshot.manifest
+    }
+    assert states == expected_states
+    evidence.verify_evidence_snapshot(snapshot)
+
+
+def test_trust_claim_evidence_expands_a_covered_directory(configured):
+    covered = configured / "src" / "auth"
+    covered.mkdir(parents=True)
+    (covered / "login.py").write_text("login", encoding="utf-8")
+    task = {
+        "invalidated_claims": [
+            {"text": "auth", "paths": ["src/auth"]}
+        ],
+        "changed_paths": ["src/auth/login.py"],
+    }
+    snapshot = evidence.stage_trust_claim_evidence(
+        worktree=configured,
+        primary_repo=configured,
+        task_id="directory-trust-evidence",
+        task=task,
+    )
+    assert [entry["origin"] for entry in snapshot.manifest] == [
+        "worktree/src/auth/login.py"
+    ]
+
+
+def test_trust_claim_evidence_allows_an_empty_manifest_only_inventory(configured):
+    snapshot = evidence.stage_trust_claim_evidence(
+        worktree=configured,
+        primary_repo=configured,
+        task_id="empty-manifest-only",
+        task={"invalidated_claims": [], "changed_paths": []},
+    )
+    assert snapshot.files == ()
+    assert snapshot.manifest == ()
+    evidence.verify_evidence_snapshot(snapshot)
