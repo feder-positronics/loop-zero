@@ -48,14 +48,21 @@ def _required_for_paths(paths: Sequence[str]) -> tuple[str, ...]:
     return configured
 
 
-def enforce_review_budget(*, completed_reviews: int, completed_delta_reviews: int,
-                          requested: str) -> None:
-    """Enforce the contract cap; consumer configuration may only narrow it."""
+def enforce_review_budget(
+    *,
+    completed_reviews: int,
+    completed_delta_reviews: int,
+    requested: str,
+    generation: str,
+) -> None:
+    """Enforce one generation's cap; consumer configuration may only narrow."""
     profile = _PROFILE.get() or _DEFAULT_PROFILE
     if profile is None:
         raise ReviewChainError("review chain requires configured review budget")
     full_limit = min(profile.max_reviews_per_pr, 1)
     delta_limit = min(profile.max_delta_reviews, 1)
+    if not isinstance(generation, str) or not generation.startswith("cg_"):
+        raise ReviewChainError("review budget requires a content generation")
     if type(completed_reviews) is not int or type(completed_delta_reviews) is not int:
         raise ReviewChainError("review budget counters must be integers")
     if completed_reviews < 0 or completed_delta_reviews < 0:

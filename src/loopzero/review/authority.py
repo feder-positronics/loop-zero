@@ -64,6 +64,7 @@ from .findings import (
     replay_finding_capture,
 )
 from ..kernel.sandbox import environment as sandbox_environment
+from ..runners.contract import ReviewOutcome
 from .chain import (
     review_chain_receipt_reasons,
     review_record_lens as review_gate_lens,
@@ -73,6 +74,115 @@ DELTA_CUMULATIVE_LINE_CAP = 300
 DELTA_REVIEW_PATCH_MAX_BYTES = 225_000
 CONTROL_TYPE = "delivery-control"
 _ARCHIVE_VALIDATOR: ContextVar[Callable[..., bool] | None]
+
+
+def _terminal_verdict(terminal: Mapping[str, object]) -> str | None:
+    """Return a verdict only when the terminal carries authenticated evidence."""
+    accepted = terminal.get("accepted_verdict")
+    if accepted in {"pass", "fail"} and terminal.get(
+        "review_acceptance_verified"
+    ) is True:
+        return cast(str, accepted)
+    explicit = terminal.get("authenticated_verdict")
+    if isinstance(explicit, Mapping):
+        value = explicit.get("verdict")
+        if value in {"pass", "fail"} and explicit.get("authenticated") is True:
+            return cast(str, value)
+    if terminal.get("verdict_authenticated") is True and explicit in {
+        "pass",
+        "fail",
+    }:
+        return cast(str, explicit)
+    verification = terminal.get("verification_verdict")
+    if verification in {"pass", "fail"} and terminal.get("status") == "completed":
+        return cast(str, verification)
+    receipt = terminal.get("review_chain_receipt")
+    if isinstance(receipt, Mapping):
+        required = receipt.get("required_sections")
+        sections = receipt.get("sections")
+        if (
+            isinstance(required, list)
+            and required
+            and isinstance(sections, Mapping)
+            and set(required) == set(sections)
+            and all(
+                isinstance(sections.get(section), Mapping)
+                and sections[section].get("completion") == "completed"
+                and sections[section].get("verdict") in {"clean", "findings"}
+                for section in required
+            )
+        ):
+            return "fail" if any(
+                sections[section].get("verdict") == "findings"
+                for section in required
+            ) else "pass"
+    return None
+
+
+def classify_review_outcome(terminal: object) -> ReviewOutcome:
+    """Map one authenticated terminal's closed semantics to slot accounting.
+
+    Cryptographic record/reference authentication is performed by the caller's
+    authority projection (and again by ``settle_review_slot``).  This function
+    fails closed for malformed, contradictory, or unknown semantic values.
+    """
+    if not isinstance(terminal, Mapping):
+        return ReviewOutcome.UNRESOLVED
+    proof = terminal.get("terminal_authority_proof")
+    if proof is not None and not isinstance(proof, Mapping):
+        return ReviewOutcome.UNRESOLVED
+    status = terminal.get("status")
+    reason = terminal.get("terminal_reason")
+    failure = terminal.get("failure_class")
+    verdict = _terminal_verdict(terminal)
+    verification = terminal.get("verification_verdict")
+
+    if verification == "inconclusive":
+        return ReviewOutcome.RELEASED
+    if status == "completed" and verdict is not None:
+        return ReviewOutcome.CONSUMED
+    if reason == "model-result" or failure == "model-result":
+        return (
+            ReviewOutcome.CONSUMED
+            if verdict is not None
+            else ReviewOutcome.RELEASED
+        )
+    if reason == "budget-exhausted-after-result":
+        return (
+            ReviewOutcome.CONSUMED
+            if verdict is not None
+            else ReviewOutcome.UNRESOLVED
+        )
+    if reason == "budget-exhausted" or failure in {"budget-kill", "budget"}:
+        return (
+            ReviewOutcome.CONSUMED
+            if verdict is not None
+            else ReviewOutcome.RELEASED
+        )
+    released_reasons = {
+        "timeout",
+        "transport-disconnect",
+        "malformed-event",
+        "missing-terminal-event",
+        "startup-failure",
+        "protocol-failure",
+        "subscription-unavailable",
+        "cancelled",
+        "commercial-boundary",
+    }
+    released_failures = {
+        "verified-limit",
+        "output-limit",
+        "engine-output",
+        "engine-output-failure",
+        "operator-terminated",
+        "transport-disconnect",
+        "protocol-failure",
+        "packaging-failure",
+    }
+    if reason in released_reasons or failure in released_failures:
+        return ReviewOutcome.RELEASED
+    return ReviewOutcome.UNRESOLVED
 
 
 def uncarryable_delta_authority_is_valid(

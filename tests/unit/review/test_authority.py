@@ -1,5 +1,6 @@
 from loopzero.kernel import authority as kernel_authority, authority_store, seams
 from loopzero.review import authority
+from loopzero.runners.contract import ReviewOutcome
 import copy
 import pytest
 
@@ -146,3 +147,59 @@ def test_archived_review_witness_rejects_identity_or_signature_damage(damage):
 
     with pytest.raises(authority.DispatchError):
         authority.validate_archived_review_witness(damaged, anchor)
+
+
+@pytest.mark.parametrize(
+    ("terminal", "expected"),
+    [
+        (
+            {
+                "status": "completed",
+                "review_acceptance_verified": True,
+                "accepted_verdict": "pass",
+            },
+            ReviewOutcome.CONSUMED,
+        ),
+        (
+            {
+                "status": "failed",
+                "terminal_reason": "model-result",
+                "review_acceptance_verified": True,
+                "accepted_verdict": "fail",
+            },
+            ReviewOutcome.CONSUMED,
+        ),
+        (
+            {"status": "failed", "terminal_reason": "model-result"},
+            ReviewOutcome.RELEASED,
+        ),
+        (
+            {"status": "failed", "terminal_reason": "transport-disconnect"},
+            ReviewOutcome.RELEASED,
+        ),
+        (
+            {"status": "failed", "terminal_reason": "budget-exhausted"},
+            ReviewOutcome.RELEASED,
+        ),
+        (
+            {
+                "status": "failed",
+                "terminal_reason": "budget-exhausted-after-result",
+                "review_acceptance_verified": True,
+                "accepted_verdict": "pass",
+            },
+            ReviewOutcome.CONSUMED,
+        ),
+        (
+            {"status": "completed", "verification_verdict": "inconclusive"},
+            ReviewOutcome.RELEASED,
+        ),
+        ({"status": "forged", "terminal_reason": "invented"}, ReviewOutcome.UNRESOLVED),
+        (
+            {"status": "failed", "terminal_authority_proof": "forged"},
+            ReviewOutcome.UNRESOLVED,
+        ),
+    ],
+)
+def test_review_outcome_classification(terminal, expected):
+    assert authority.classify_review_outcome(terminal) is expected

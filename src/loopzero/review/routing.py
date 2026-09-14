@@ -319,6 +319,10 @@ def validate_retry_policy(
     alias: str,
     effort: str,
     retry_args: object | None = None,
+    lineage: str | None = None,
+    generation: str | None = None,
+    family: str | None = None,
+    slot_kind: str | None = None,
 ) -> int:
     """Enforce the routing-owned one-step escalation graph.
 
@@ -338,10 +342,55 @@ def validate_retry_policy(
     ):
         raise DispatchError(f"task_id {task_id!r} already exists")
     outcomes = authenticated_retry_outcomes(records)
+
+    obligation_values = (lineage, generation, family, slot_kind)
+    if any(value is not None for value in obligation_values) and not all(
+        isinstance(value, str) and value for value in obligation_values
+    ):
+        raise DispatchError("review retry obligation is incomplete")
+
+    def obligation_field(record: Mapping[str, object], *names: str) -> object:
+        contract = record.get("task_contract")
+        for name in names:
+            value = record.get(name)
+            if value is None and isinstance(contract, Mapping):
+                value = contract.get(name)
+            if value is not None:
+                return value
+        return None
+
+    obligation_enabled = bool(all(obligation_values))
+    if obligation_enabled:
+        obligation_attempts = [
+            record
+            for record in outcomes
+            if obligation_field(record, "review_lineage_id", "lineage_id") == lineage
+            and obligation_field(record, "review_generation_id", "generation_id")
+            == generation
+            and obligation_field(record, "review_family", "family") == family
+            and obligation_field(record, "review_slot_kind", "slot_kind") == slot_kind
+        ]
+        if len(obligation_attempts) >= 2:
+            raise DispatchError("review obligation retry budget exhausted")
+        if obligation_attempts:
+            from .authority import classify_review_outcome
+            from ..runners.contract import ReviewOutcome
+
+            if classify_review_outcome(obligation_attempts[-1]) is not (
+                ReviewOutcome.RELEASED
+            ):
+                raise DispatchError(
+                    "review obligation is not released for infrastructure retry"
+                )
+    else:
+        obligation_attempts = []
     attempts: list[dict[str, object]] = []
     seen: set[str] = set()
-    for record in reversed(outcomes):
-        if str(record.get("work_unit_id") or record.get("task_id")) != work_unit_id:
+    candidate_outcomes = obligation_attempts if obligation_enabled else outcomes
+    for record in reversed(candidate_outcomes):
+        if not obligation_enabled and str(
+            record.get("work_unit_id") or record.get("task_id")
+        ) != work_unit_id:
             continue
         prior_task_id = str(record.get("task_id"))
         if prior_task_id in seen:
@@ -361,8 +410,12 @@ def validate_retry_policy(
             )
     numbers = [
         value
-        for record in outcomes
-        if str(record.get("work_unit_id") or record.get("task_id")) == work_unit_id
+        for record in candidate_outcomes
+        if (
+            obligation_enabled
+            or str(record.get("work_unit_id") or record.get("task_id"))
+            == work_unit_id
+        )
         and type(value := record.get("unit_attempt_number")) is int
     ]
     return max(numbers, default=0) + 1
