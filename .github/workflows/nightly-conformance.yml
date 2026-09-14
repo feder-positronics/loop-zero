@@ -166,13 +166,43 @@ jobs:
           PYTHON_BIN=$(readlink -f "$(uv python find 3.13)")
           PYTHON_INSTALL_ROOT=${PYTHON_BIN%/bin/*}
           test "$PYTHON_INSTALL_ROOT" != "$PYTHON_BIN"
+          PYTHON_ALIAS_LAYOUT=()
+          PYTHON_ALIAS_PATHS=()
           for interpreter in "$ROOT"/.venv/bin/python*; do
             if [ -L "$interpreter" ]; then
-              target=$(readlink -f "$interpreter")
-              case "$target" in
+              raw_target=$(readlink "$interpreter")
+              case "$raw_target" in
+                /*) ;;
+                *) raw_target=$(dirname "$interpreter")/"$raw_target" ;;
+              esac
+              resolved_target=$(readlink -f "$raw_target")
+              case "$resolved_target" in
                 "$PYTHON_INSTALL_ROOT"/*) ;;
                 *) echo "venv interpreter escapes uv install root" >&2; exit 1 ;;
               esac
+              dir=$(dirname "$raw_target")
+              while [ "$dir" != "$ACCOUNT_HOME" ]; do
+                case "$dir" in
+                  "$ACCOUNT_HOME"/*) ;;
+                  *) break ;;
+                esac
+                if [ -L "$dir" ]; then
+                  seen=false
+                  for known in "${PYTHON_ALIAS_PATHS[@]}"; do
+                    if [ "$known" = "$dir" ]; then
+                      seen=true
+                      break
+                    fi
+                  done
+                  if [ "$seen" = false ]; then
+                    PYTHON_ALIAS_LAYOUT+=(--symlink "$(readlink "$dir")" "$dir")
+                    PYTHON_ALIAS_PATHS+=("$dir")
+                  fi
+                fi
+                next=$(dirname "$dir")
+                test "$next" != "$dir"
+                dir="$next"
+              done
             fi
           done
           PYTHON_ROOT_LAYOUT=()
@@ -205,6 +235,7 @@ jobs:
             --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
             --ro-bind "$ROOT/.venv" /tmp/venv \
             --perms 0700 --tmpfs "$ACCOUNT_HOME" "${PYTHON_ROOT_LAYOUT[@]}" \
+            "${PYTHON_ALIAS_LAYOUT[@]}" \
             --ro-bind "$PYTHON_INSTALL_ROOT" "$PYTHON_INSTALL_ROOT" \
             --ro-bind "$LOOPZERO_LIVE_RUNTIME_ROOT" /opt/runtime \
             --bind "$RESULTS" /tmp/results \
