@@ -110,6 +110,14 @@ class RuntimeCostStatus(StrEnum):
     OBSERVED = "observed"
 
 
+class RuntimeCostSource(StrEnum):
+    """Provenance of the normalized runtime cost value."""
+
+    VENDOR = "vendor"
+    ESTIMATED = "estimated"
+    UNKNOWN = "unknown"
+
+
 class RuntimeCommercialMode(StrEnum):
     """Owner-authorized commercial boundary for one native invocation."""
 
@@ -380,6 +388,7 @@ class RuntimeResult:
     usage: RuntimeUsage | None = None
     cost_usd: float | None = None
     cost_status: RuntimeCostStatus = RuntimeCostStatus.UNKNOWN
+    cost_source: RuntimeCostSource = RuntimeCostSource.UNKNOWN
     eligibility: SubscriptionEligibility = SubscriptionEligibility.AMBIGUOUS
     commercial_mode: RuntimeCommercialMode = RuntimeCommercialMode.SUBSCRIPTION_ONLY
     fallback_from: str | None = None

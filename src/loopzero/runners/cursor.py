@@ -18,6 +18,7 @@ from typing import Any
 from .contract import (
     MAX_STRUCTURED_OUTPUT_BYTES,
     ReadinessFailure,
+    RuntimeCostSource,
     RuntimeCostStatus,
     RuntimeEvent,
     RuntimeHandle,
@@ -31,7 +32,7 @@ from .contract import (
     TerminalReason,
     is_valid_resume_session_id,
 )
-from .pricing import estimated_cost_usd
+from .pricing import normalized_vendor_cost_usd, resolved_cost_usd
 from .process import (
     ProcessHandle,
     ProcessResult,
@@ -137,6 +138,7 @@ class ParsedCursorStream:
     effective_model: str | None
     request_id: str | None
     usage: RuntimeUsage | None
+    cost_usd: float | None
     events: tuple[RuntimeEvent, ...]
     final_output: str = field(repr=False)
 
@@ -356,6 +358,7 @@ def parse_cursor_stream(stream: str) -> ParsedCursorStream:
     request_id: str | None = None
     final_output: str | None = None
     usage: RuntimeUsage | None = None
+    cost_usd: float | None = None
     terminal: tuple[RuntimeStatus, TerminalReason] | None = None
     saw_event = False
 
@@ -397,6 +400,7 @@ def parse_cursor_stream(stream: str) -> ParsedCursorStream:
             raise CursorStreamError(CursorParserCause.TERMINAL_INCOMPLETE)
         request_id = _optional_string(raw_event, CursorParserField.REQUEST_ID)
         usage = _cursor_usage(raw_event)
+        cost_usd = normalized_vendor_cost_usd(raw_event.get("total_cost_usd"))
         final_output = _required_final_output(raw_event)
         if subtype_value == "success" and raw_event["is_error"] is False:
             terminal = (RuntimeStatus.COMPLETED, TerminalReason.COMPLETED)
@@ -416,6 +420,7 @@ def parse_cursor_stream(stream: str) -> ParsedCursorStream:
         effective_model=effective_model,
         request_id=request_id,
         usage=usage,
+        cost_usd=cost_usd,
         events=tuple(events),
         final_output=final_output,
     )
@@ -678,6 +683,7 @@ class CursorAdapter:
             effective_model=parsed.effective_model,
             request_id=parsed.request_id,
             usage=parsed.usage,
+            cost_usd=parsed.cost_usd,
             events=parsed.events,
             final_output=parsed.final_output,
         )
@@ -693,11 +699,14 @@ class CursorAdapter:
         effective_model: str | None = None,
         request_id: str | None = None,
         usage: RuntimeUsage | None = None,
+        cost_usd: float | None = None,
         events: tuple[RuntimeEvent, ...] = (),
         diagnostics: tuple[str, ...] = (),
         final_output: str | None = None,
     ) -> RuntimeResult:
-        normalized_cost = estimated_cost_usd(request.requested_model, usage)
+        normalized_cost, cost_source = resolved_cost_usd(
+            request.requested_model, usage, cost_usd
+        )
         budget = get_settings().budget
         measured_tokens = usage.output_tokens if usage is not None else None
         if budget is not None and (
@@ -721,10 +730,13 @@ class CursorAdapter:
             usage=usage,
             cost_usd=normalized_cost,
             cost_status=(
-                RuntimeCostStatus.ESTIMATED
-                if normalized_cost is not None
+                RuntimeCostStatus.OBSERVED
+                if cost_source is RuntimeCostSource.VENDOR
+                else RuntimeCostStatus.ESTIMATED
+                if cost_source is RuntimeCostSource.ESTIMATED
                 else RuntimeCostStatus.UNKNOWN
             ),
+            cost_source=cost_source,
             eligibility=request.eligibility,
             fallback_from=request.fallback_from,
             events=events,

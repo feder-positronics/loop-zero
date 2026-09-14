@@ -9,11 +9,13 @@ All values are USD per million tokens.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from types import MappingProxyType
 
-from .contract import RuntimeUsage
+from .contract import RuntimeCostSource, RuntimeUsage
 
 PRICE_TABLE_VERSION = "2026-09-12"
+MAX_VENDOR_COST_USD = 1_000_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +70,33 @@ def estimated_cost_usd(model: str, usage: RuntimeUsage | None) -> float | None:
     return round(total, 9)
 
 
+def normalized_vendor_cost_usd(value: object) -> float | None:
+    """Accept only finite, non-boolean vendor costs inside the sanity bound."""
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_VENDOR_COST_USD
+        and math.isfinite(value)
+    ):
+        return float(value)
+    return None
+
+
+def resolved_cost_usd(
+    model: str,
+    usage: RuntimeUsage | None,
+    vendor_cost_usd: object,
+) -> tuple[float | None, RuntimeCostSource]:
+    """Prefer bounded vendor cost, then complete pinned-price evidence."""
+    vendor_cost = normalized_vendor_cost_usd(vendor_cost_usd)
+    if vendor_cost is not None:
+        return vendor_cost, RuntimeCostSource.VENDOR
+    estimated = estimated_cost_usd(model, usage)
+    if estimated is not None:
+        return estimated, RuntimeCostSource.ESTIMATED
+    return None, RuntimeCostSource.UNKNOWN
+
+
 def total_tokens(usage: RuntimeUsage | None, *, model: str | None = None) -> int | None:
     """Return total evidence using the pinned model's cache-counter semantics."""
     if usage is None or usage.input_tokens is None or usage.output_tokens is None:
@@ -85,6 +114,7 @@ def total_tokens(usage: RuntimeUsage | None, *, model: str | None = None) -> int
 
 
 __all__ = [
-    "MODEL_PRICES", "PRICE_TABLE_VERSION", "ModelPrice",
-    "estimated_cost_usd", "total_tokens",
+    "MAX_VENDOR_COST_USD", "MODEL_PRICES", "PRICE_TABLE_VERSION", "ModelPrice",
+    "estimated_cost_usd", "normalized_vendor_cost_usd", "resolved_cost_usd",
+    "total_tokens",
 ]

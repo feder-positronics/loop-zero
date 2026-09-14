@@ -2546,12 +2546,15 @@ async def _run_claude(
             usage = _usage_payload(message.usage)
             if usage is not None:
                 frame["usage"] = usage
+            vendor_cost = message.total_cost_usd
             if (
-                message.total_cost_usd is not None
-                and math.isfinite(message.total_cost_usd)
-                and 0 <= message.total_cost_usd <= 1_000_000
+                isinstance(vendor_cost, (int, float))
+                and not isinstance(vendor_cost, bool)
+                and 0 <= vendor_cost <= 1_000_000
+                and math.isfinite(vendor_cost)
             ):
-                frame["total_cost_usd"] = message.total_cost_usd
+                frame["total_cost_usd"] = float(vendor_cost)
+                frame["cost_source"] = "vendor"
             _write_frame(frame)
             return
     if not saw_message:
