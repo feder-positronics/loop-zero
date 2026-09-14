@@ -16,6 +16,9 @@ jobs:
     name: ${{ matrix.runtime }} conformance
     if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
+    # Cursor stays wired and reported, but the owner holds its paid tier
+    # (issue #35), so its readiness failure must not mask Claude and Codex.
+    continue-on-error: ${{ matrix.runtime == 'cursor' }}
     environment: nightly-conformance
     strategy:
       fail-fast: false
