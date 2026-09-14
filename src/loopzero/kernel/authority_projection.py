@@ -519,6 +519,19 @@ def _authority_record_list(
 # outside the append-only authority contract.
 _AUTHENTICATION_CACHE_LIMIT = 8
 _authentication_cache: dict[tuple[object, ...], tuple[object, frozenset[int]]] = {}
+_REVIEW_STATE_CACHE_LIMIT = 16
+_generation_projection_cache: dict[
+    tuple[object, ...], tuple[object, dict[str, object]]
+] = {}
+_carry_projection_cache: dict[
+    tuple[object, ...], tuple[object, tuple[object, ...]]
+] = {}
+_link_projection_cache: dict[
+    tuple[object, ...], tuple[object, tuple[object, ...]]
+] = {}
+_slot_projection_cache: dict[
+    tuple[object, ...], tuple[object, object]
+] = {}
 
 
 def _authentication_cache_key(
@@ -558,6 +571,13 @@ def _authentication_cache_key(
             head_key,
         )
     return (tuple(map(id, records)), None, frozenset(), None, None)
+
+
+def _review_cache_store(cache: dict, key: tuple[object, ...], records, value) -> None:
+    """Bound projection caches while pinning record identities against reuse."""
+    if len(cache) >= _REVIEW_STATE_CACHE_LIMIT:
+        cache.pop(next(iter(cache)))
+    cache[key] = ((tuple(records), records), value)
 
 
 def _authenticated_coordinator_record_ids(
@@ -1594,6 +1614,7 @@ def authenticated_review_state_records(
     """
     from .review_state import (
         GENERATION_CARRY_TYPE,
+        GENERATION_LINK_TYPE,
         GENERATION_PROOF_TYPE,
         REVIEW_GENERATION_TYPE,
         REVIEW_SLOT_RESERVATION_TYPE,
@@ -1603,6 +1624,7 @@ def authenticated_review_state_records(
     record_types = {
         REVIEW_GENERATION_TYPE,
         GENERATION_PROOF_TYPE,
+        GENERATION_LINK_TYPE,
         GENERATION_CARRY_TYPE,
         REVIEW_SLOT_RESERVATION_TYPE,
         REVIEW_SLOT_SETTLEMENT_TYPE,
@@ -1648,6 +1670,12 @@ def _legacy_review_generations(
     for task_id, terminal in accepted.items():
         if (
             terminal.get("advisory") is True
+            or terminal.get("delta_from_snapshot_sha") is not None
+            or (
+                isinstance(terminal.get("task_contract"), Mapping)
+                and terminal["task_contract"].get("delta_from_snapshot_sha")
+                is not None
+            )
             or record_indices.get(id(terminal), len(records)) >= d29_cutover_index
         ):
             continue
@@ -1741,10 +1769,22 @@ def generations(records: Sequence[dict[str, object]]) -> dict[str, object]:
     """Project authenticated native generations plus legacy primary seeds."""
     from .review_state import REVIEW_GENERATION_TYPE, ReviewGenerationV1
 
+    cache_key = _authentication_cache_key(records)
+    cached = _generation_projection_cache.get(cache_key)
+    if cached is not None:
+        return dict(cached[1])
     projected = _legacy_review_generations(records)
     legacy_ids = set(projected)
     ambiguous_ids: set[str] = set()
-    for record in authenticated_review_state_records(records):
+    authenticated_rows = authenticated_review_state_records(records)
+    record_indices = {id(record): index for index, record in enumerate(records)}
+    links = [
+        (record_indices[id(record)], link)
+        for record in authenticated_rows
+        if record.get("type") == "review-generation-link-v1"
+        for link in _parsed_generation_link(record)
+    ]
+    for record in authenticated_rows:
         if record.get("type") != REVIEW_GENERATION_TYPE:
             continue
         try:
@@ -1771,7 +1811,44 @@ def generations(records: Sequence[dict[str, object]]) -> dict[str, object]:
                 generation.lineage_id
             ):
                 continue
+            generation_index = record_indices[id(record)]
+            if not any(
+                link_index < generation_index
+                and link.repository_binding == generation.repository_binding
+                and link.predecessor_generation_id == generation.predecessor_id
+                and link.to_identity == generation.patch_identity
+                for link_index, link in links
+            ):
+                continue
         projected[generation.generation_id] = generation
+    _review_cache_store(
+        _generation_projection_cache, cache_key, records, dict(projected)
+    )
+    return projected
+
+
+def _parsed_generation_link(record: Mapping[str, object]) -> tuple[object, ...]:
+    from .review_state import GenerationLinkV1
+
+    try:
+        return (GenerationLinkV1.from_dict(record),)
+    except (TypeError, ValueError):
+        return ()
+
+
+def generation_links(records: Sequence[dict[str, object]]) -> tuple[object, ...]:
+    """Project coordinator-authenticated exact content-predecessor links."""
+    cache_key = _authentication_cache_key(records)
+    cached = _link_projection_cache.get(cache_key)
+    if cached is not None:
+        return cached[1]
+    projected = tuple(
+        link
+        for record in authenticated_review_state_records(records)
+        if record.get("type") == "review-generation-link-v1"
+        for link in _parsed_generation_link(record)
+    )
+    _review_cache_store(_link_projection_cache, cache_key, records, projected)
     return projected
 
 
@@ -1785,6 +1862,10 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
         patch_identity_digest,
     )
 
+    cache_key = _authentication_cache_key(records)
+    cached = _carry_projection_cache.get(cache_key)
+    if cached is not None:
+        return cached[1]
     projected = generations(records)
     known: dict[str, set[str]] = {
         generation_id: {patch_identity_digest(generation.patch_identity)}
@@ -1838,7 +1919,9 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
             continue
         carries.append(carry)
         known.setdefault(carry.generation_id, set()).add(target_digest)
-    return tuple(carries)
+    result = tuple(carries)
+    _review_cache_store(_carry_projection_cache, cache_key, records, result)
+    return result
 
 
 def generation_proofs(records: Sequence[dict[str, object]]) -> tuple[object, ...]:
@@ -1863,8 +1946,9 @@ class ReviewSlotState:
     reservations: tuple[object, ...]
     settlements: tuple[object, ...]
     inherited_primary_ref: str | None = None
+    effective_outcomes: tuple[tuple[str, object], ...] = ()
 
-    def _settlement_for(self, reservation_id: str):
+    def settlement_for(self, reservation_id: str):
         return next(
             (
                 settlement
@@ -1874,13 +1958,20 @@ class ReviewSlotState:
             None,
         )
 
+    def _effective_outcome(self, settlement):
+        return dict(self.effective_outcomes).get(
+            settlement.reservation_id, settlement.outcome
+        )
+
     @property
     def outstanding(self):
         from ..runners.contract import ReviewOutcome
 
         for reservation in reversed(self.reservations):
-            settlement = self._settlement_for(reservation.reservation_id)
-            if settlement is None or settlement.outcome is ReviewOutcome.UNRESOLVED:
+            settlement = self.settlement_for(reservation.reservation_id)
+            if settlement is None or self._effective_outcome(settlement) is (
+                ReviewOutcome.UNRESOLVED
+            ):
                 return reservation
         return None
 
@@ -1895,7 +1986,7 @@ class ReviewSlotState:
 
         return any(
             settlement.slot_kind == slot_kind
-            and settlement.outcome is ReviewOutcome.CONSUMED
+            and self._effective_outcome(settlement) is ReviewOutcome.CONSUMED
             for settlement in self.settlements
         )
 
@@ -1919,7 +2010,7 @@ class ReviewSlotState:
         for settlement in reversed(self.settlements):
             if (
                 settlement.slot_kind == "primary"
-                and settlement.outcome is ReviewOutcome.CONSUMED
+                and self._effective_outcome(settlement) is ReviewOutcome.CONSUMED
             ):
                 return cast(str, settlement.terminal_ref)
         return self.inherited_primary_ref
@@ -1931,7 +2022,7 @@ class ReviewSlotState:
         values = [
             settlement.terminal_ref
             for settlement in self.settlements
-            if settlement.outcome is ReviewOutcome.CONSUMED
+            if self._effective_outcome(settlement) is ReviewOutcome.CONSUMED
         ]
         if self.inherited_primary_ref is not None:
             values.insert(0, self.inherited_primary_ref)
@@ -1950,6 +2041,10 @@ def slot_state(
     )
     from ..review.authority import classify_review_outcome
 
+    cache_key = (*_authentication_cache_key(records), generation_id, family)
+    cached = _slot_projection_cache.get(cache_key)
+    if cached is not None:
+        return cast(ReviewSlotState, cached[1])
     generation = generations(records).get(generation_id)
     inherited = (
         generation.primary_origin_receipt
@@ -1990,8 +2085,12 @@ def slot_state(
         for record in records
         if id(record) in coordinator or id(record) in terminals
     }
+    from ..runners.contract import ReviewOutcome
+
     settlements = []
     settled_ids: set[str] = set()
+    settled_reservations: set[str] = set()
+    effective_outcomes: list[tuple[str, ReviewOutcome]] = []
     reservations_by_id = {
         reservation.reservation_id: reservation for reservation in reservations
     }
@@ -2004,27 +2103,67 @@ def slot_state(
             continue
         reservation = reservations_by_id.get(settlement.reservation_id)
         terminal = terminal_by_digest.get(settlement.terminal_ref)
+        classified = (
+            classify_review_outcome(terminal, records)
+            if terminal is not None
+            else ReviewOutcome.UNRESOLVED
+        )
+        effective = (
+            ReviewOutcome.UNRESOLVED
+            if terminal is None
+            else ReviewOutcome.CONSUMED
+            if settlement.outcome is ReviewOutcome.UNRESOLVED
+            and classified is ReviewOutcome.CONSUMED
+            else settlement.outcome
+        )
+        generation_trees = (
+            {generation.tree}
+            if generation is not None
+            else set()
+        )
+        generation_trees.update(
+            cast(str, carry.to_identity["candidate_tree_sha"])
+            for carry in generation_carries(records)
+            if carry.generation_id == generation_id
+            and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
+        )
         if (
             reservation is None
             or settlement.settlement_id in settled_ids
-            or terminal is None
-            or terminal.get("task_id") != reservation.task_id
+            or settlement.reservation_id in settled_reservations
+            or (
+                terminal is not None
+                and terminal.get("task_id") != reservation.task_id
+            )
+            or (
+                terminal is not None
+                and terminal.get("snapshot_tree_sha") not in generation_trees
+            )
             or settlement.generation_id != reservation.generation_id
             or settlement.family != reservation.family
             or settlement.slot_kind != reservation.slot_kind
             or settlement.task_id != reservation.task_id
-            or classify_review_outcome(terminal, records) is not settlement.outcome
+            or (
+                terminal is not None
+                and settlement.outcome is not ReviewOutcome.UNRESOLVED
+                and classified is not settlement.outcome
+            )
         ):
             continue
         settlements.append(settlement)
         settled_ids.add(settlement.settlement_id)
-    return ReviewSlotState(
+        settled_reservations.add(settlement.reservation_id)
+        effective_outcomes.append((settlement.reservation_id, effective))
+    result = ReviewSlotState(
         generation_id=generation_id,
         family=family,
         reservations=tuple(reservations),
         settlements=tuple(settlements),
         inherited_primary_ref=inherited,
+        effective_outcomes=tuple(effective_outcomes),
     )
+    _review_cache_store(_slot_projection_cache, cache_key, records, result)
+    return result
 
 
 def _is_valid_sha256(value: object) -> bool:

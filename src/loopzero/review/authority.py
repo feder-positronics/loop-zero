@@ -110,7 +110,8 @@ def classify_review_outcome(
     mapped = cast(Sequence[dict[str, object]], records)
     terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
     coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
-    if id(terminal) not in terminal_ids | coordinator_ids:
+    retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
+    if id(terminal) not in terminal_ids | coordinator_ids and not retained:
         return ReviewOutcome.UNRESOLVED
     status = terminal.get("status")
     reason = terminal.get("terminal_reason")
@@ -120,6 +121,12 @@ def classify_review_outcome(
         (index for index, record in enumerate(records) if record is terminal), None
     )
     verdict: str | None = None
+    if (
+        retained
+        and terminal.get("review_acceptance_verified") is True
+        and terminal.get("accepted_verdict") in {"pass", "fail"}
+    ):
+        verdict = cast(str, terminal["accepted_verdict"])
     if isinstance(task_id, str) and terminal_index is not None:
         for record in records[terminal_index + 1 :]:
             if (

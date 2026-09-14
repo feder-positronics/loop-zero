@@ -37,6 +37,24 @@ def test_archive_anchor_is_accepted_history_only():
     assert authority.passing_archive_anchor([row, row], "review-1") is None
 
 
+def test_checkpoint_retained_retry_outcome_remains_classifiable():
+    released = Retained(
+        type="attempt-terminal",
+        task_id="retry",
+        status="infrastructure-failure",
+        terminal_reason="transport-disconnect",
+    )
+    consumed = Retained(
+        type="attempt-terminal",
+        task_id="review",
+        status="completed",
+        review_acceptance_verified=True,
+        accepted_verdict="pass",
+    )
+    assert authority.classify_review_outcome(released) is ReviewOutcome.RELEASED
+    assert authority.classify_review_outcome(consumed) is ReviewOutcome.CONSUMED
+
+
 def test_archive_deposits_fail_closed_without_excluded_controller_validator():
     authority.configure(uncarryable_delta_authority_is_valid=None)
     assert authority.archived_supersession_deposits([], []) == {}

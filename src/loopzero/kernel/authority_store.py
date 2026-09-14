@@ -875,6 +875,51 @@ def _retention_live_record_ids(
         if (record.get("run_id"), record.get("work_unit_id")) in retry_units
         and record.get("type") in {"attempt-start", "attempt-terminal"}
     }
+    settlement_terminal_refs = {
+        str(record.get("terminal_ref"))
+        for record in records
+        if record.get("type") == "review-slot-settlement-v1"
+        and isinstance(record.get("terminal_ref"), str)
+    }
+    referenced_terminals = [
+        record
+        for record in records
+        if canonical_record_digest(record) in settlement_terminal_refs
+    ]
+    referenced_terminal_contexts = {
+        (
+            record.get("task_id"),
+            record.get("attempt_index"),
+            record.get("run_id"),
+            _terminal_authority_work_unit(record),
+        )
+        for record in referenced_terminals
+    }
+    referenced_terminal_tasks = {
+        (record.get("task_id"), record.get("run_id"))
+        for record in referenced_terminals
+    }
+    referenced_terminal_ids = {id(record) for record in referenced_terminals}
+    referenced_dependency_ids = {
+        id(record)
+        for record in records
+        if id(record) in referenced_terminal_ids
+        or (
+            record.get("type") == "attempt-start"
+            and (
+                record.get("task_id"),
+                record.get("attempt_index"),
+                record.get("run_id"),
+                _terminal_authority_work_unit(record),
+            )
+            in referenced_terminal_contexts
+        )
+        or (
+            record.get("type") == "verdict"
+            and (record.get("task_id"), record.get("run_id"))
+            in referenced_terminal_tasks
+        )
+    }
     active_runs = frozenset(active_run_ids)
     open_units_by_worktree: dict[str, dict[str, list[str]]] = {}
     latest_standing: dict[tuple[object, ...], int] = {}
@@ -931,10 +976,12 @@ def _retention_live_record_ids(
         )
         if (
             id(record) in authenticated_reentry_ids
+            or id(record) in referenced_dependency_ids
             or record_type
             in {
                 "review-generation-v1",
                 "review-generation-proof-v1",
+                "review-generation-link-v1",
                 "generation-carry-v1",
                 "review-slot-reservation-v1",
                 "review-slot-settlement-v1",
@@ -1496,6 +1543,7 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "review-chain-advisory",
         "review-generation-v1",
         "review-generation-proof-v1",
+        "review-generation-link-v1",
         "review-recovery-verification",
         "review-slot-reservation-v1",
         "review-slot-settlement-v1",

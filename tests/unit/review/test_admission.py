@@ -113,8 +113,9 @@ def admit(
     )
 
 
-def terminal(task_id, *, released=False, unresolved=False):
+def terminal(task_id, *, tree=None, released=False, unresolved=False):
     row = {"type": "attempt-terminal", "task_id": task_id}
+    row["snapshot_tree_sha"] = tree
     if released:
         row.update(status="infrastructure-failure", terminal_reason="transport-disconnect")
     elif unresolved:
@@ -131,6 +132,8 @@ def terminal(task_id, *, released=False, unresolved=False):
 def append_settlement(rows, reservation, outcome, result):
     if reservation.to_dict() not in rows:
         rows.append(reservation.to_dict())
+    generation = authority_projection.generations(rows)[reservation.generation_id]
+    result = {**result, "snapshot_tree_sha": result.get("snapshot_tree_sha") or generation.tree}
     rows.append(result)
     if outcome is ReviewOutcome.CONSUMED:
         rows.append({
@@ -148,6 +151,17 @@ def primary_history():
     rows = list(first.records_to_append)
     append_settlement(rows, first.slot, ReviewOutcome.CONSUMED, terminal("review"))
     return rows, first.generation
+
+
+def link_generation(rows, predecessor, target, *, source=None, kind="substantive"):
+    source = source or predecessor.patch_identity
+    rows.append(review_state.GenerationLinkV1(
+        repository_binding="repo",
+        predecessor_generation_id=predecessor.generation_id,
+        from_identity=source,
+        to_identity=target,
+        transition_kind=kind,
+    ).to_dict())
 
 
 def released_twice_history():
@@ -179,15 +193,14 @@ def test_carry_dispatches_nothing():
     assert result.dispatch is False
     assert result.generation.generation_id == generation.generation_id
     assert result.receipts
-    assert [row["type"] for row in result.records_to_append] == [
-        "generation-carry-v1"
-    ]
+    assert result.records_to_append == ()
 
 
 def test_delta_scope_is_changed_plus_security_paths():
     rows, previous = primary_history()
     changed = ("src/a.py", "src/b.py")
     _TREE_DIFFS[(previous.tree, "b" * 40)] = (changed, "e" * 64)
+    link_generation(rows, previous, identity("b"))
     result = admit(
         rows,
         identity("b"),
@@ -237,7 +250,7 @@ def test_security_overlap_keeps_generation_but_requires_delta():
         current_source_identity={"head": rebased["candidate_sha"]},
         current_tree_sha=rebased["candidate_tree_sha"], patch_identity=rebased,
         required_sections=("code", "security"),
-        equivalence_proof=receipt,
+        equivalence_proof=rows[-1],
         format_only_proof=None, requested="delta", changed_paths=None,
         security_trigger_paths=("security/policy.py",),
     )
@@ -273,15 +286,15 @@ def test_every_blocked_code_is_reachable():
     held = admit(held_rows, patch, review_task=task("competing", "competing"))
     conflict = admit(held_rows, patch, review_task=task("other", "holder"))
 
-    primary_rows, _ = primary_history()
-    exhausted = admit(
-        primary_rows, identity("b"), review_task=task("fresh", "fresh")
-    )
+    primary_rows, primary_generation = primary_history()
+    link_generation(primary_rows, primary_generation, identity("b"))
+    exhausted = admit(primary_rows, identity("b"), review_task=task("fresh", "fresh"))
     retries = admit(
         released_twice_history(), patch, review_task=task("third", "third")
     )
     oversized_paths = tuple(f"src/{index}.py" for index in range(301))
     _TREE_DIFFS[("a" * 40, "c" * 40)] = (oversized_paths, "f" * 64)
+    link_generation(primary_rows, primary_generation, identity("c"))
     oversized = admit(
         primary_rows,
         identity("c"),
@@ -327,9 +340,49 @@ def test_idempotent_admission_returns_own_reservation_and_blocks_competitor():
     assert competing.evidence["reservation_id"] == first.slot.reservation_id
 
 
+def test_settled_idempotency_key_never_relaunches_or_bypasses_current_holder():
+    patch = identity("a")
+    first = admit([], patch, review_task=task("one", "old-key"))
+    rows = list(first.records_to_append)
+    append_settlement(
+        rows, first.slot, ReviewOutcome.RELEASED,
+        terminal("one", released=True),
+    )
+    retired = admit(rows, patch, review_task=task("one", "old-key"))
+    assert isinstance(retired, admission.Blocked)
+    assert retired.code == "reservation-conflict"
+
+    second = admit(rows, patch, review_task=task("two", "current-key"))
+    assert isinstance(second, admission.Reserved)
+    rows.extend(second.records_to_append)
+    retired_while_held = admit(rows, patch, review_task=task("one", "old-key"))
+    assert isinstance(retired_while_held, admission.Blocked)
+    assert retired_while_held.code == "reservation-conflict"
+    competitor = admit(rows, patch, review_task=task("three", "other-key"))
+    assert isinstance(competitor, admission.Blocked)
+    assert competitor.code == "slot-held"
+    assert competitor.evidence["reservation_id"] == second.slot.reservation_id
+    append_settlement(
+        rows, second.slot, ReviewOutcome.CONSUMED, terminal("two")
+    )
+    consumed_repeat = admit(rows, patch, review_task=task("two", "current-key"))
+    assert isinstance(consumed_repeat, admission.Carry)
+    assert consumed_repeat.dispatch is False
+
+
+def test_unrelated_candidate_gets_fresh_lineage_and_primary_slot():
+    rows, previous = primary_history()
+    result = admit(rows, identity("b"), review_task=task("other", "other"))
+    assert isinstance(result, admission.Reserved)
+    assert result.slot.slot_kind == "primary"
+    assert result.generation.predecessor_id is None
+    assert result.generation.lineage_id != previous.lineage_id
+
+
 def test_substantive_generation_needs_delta_before_exact_content_can_carry():
-    rows, _ = primary_history()
+    rows, previous = primary_history()
     changed = identity("b")
+    link_generation(rows, previous, changed)
     opened = admit(rows, changed, review_task=task("delta", "delta"), requested="delta")
     assert isinstance(opened, admission.Reserved)
     history = [*rows, *opened.records_to_append]
@@ -350,6 +403,7 @@ def test_caller_paths_and_digest_cannot_narrow_kernel_diff():
         ("src/a.py", "src/omitted.py"),
         "9" * 64,
     )
+    link_generation(rows, previous, identity("b"))
     result = admit(
         rows,
         identity("b"),

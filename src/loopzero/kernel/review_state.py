@@ -23,6 +23,7 @@ from ..runners.contract import ReviewOutcome
 
 REVIEW_GENERATION_TYPE = "review-generation-v1"
 GENERATION_PROOF_TYPE = "review-generation-proof-v1"
+GENERATION_LINK_TYPE = "review-generation-link-v1"
 GENERATION_CARRY_TYPE = "generation-carry-v1"
 REVIEW_SLOT_RESERVATION_TYPE = "review-slot-reservation-v1"
 REVIEW_SLOT_SETTLEMENT_TYPE = "review-slot-settlement-v1"
@@ -371,6 +372,85 @@ class GenerationProofV1:
         )
 
     from_json = from_dict
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationLinkV1:
+    """Coordinator-authorized content link for one substantive successor.
+
+    Record order is never ancestry: a successor inherits review authority only
+    when a preceding authenticated link binds the exact known source identity
+    and exact target identity.
+    """
+
+    repository_binding: str
+    predecessor_generation_id: str
+    from_identity: Mapping[str, object] = field(repr=False)
+    to_identity: Mapping[str, object] = field(repr=False)
+    transition_kind: Literal["substantive", "supersession", "owner-requested"]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.repository_binding, str) or not self.repository_binding:
+            raise ReviewStateError("generation link repository binding is invalid")
+        if not re.fullmatch(r"cg_[0-9a-f]{32}", self.predecessor_generation_id):
+            raise ReviewStateError("generation link predecessor is invalid")
+        if self.transition_kind not in {
+            "substantive", "supersession", "owner-requested"
+        }:
+            raise ReviewStateError("generation link transition is invalid")
+        source_tree = self.from_identity.get("candidate_tree_sha")
+        target_tree = self.to_identity.get("candidate_tree_sha")
+        if not isinstance(source_tree, str) or not isinstance(target_tree, str):
+            raise ReviewStateError("generation link identity is missing a tree")
+        source = _validate_identity(self.from_identity, source_tree)
+        target = _validate_identity(self.to_identity, target_tree)
+        object.__setattr__(self, "from_identity", source)
+        object.__setattr__(self, "to_identity", target)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "type": GENERATION_LINK_TYPE,
+            "repository_binding": self.repository_binding,
+            "predecessor_generation_id": self.predecessor_generation_id,
+            "from_identity": dict(self.from_identity),
+            "to_identity": dict(self.to_identity),
+            "transition_kind": self.transition_kind,
+        }
+
+    to_json = to_dict
+    to_record = to_dict
+
+    def canonical_digest(self) -> str:
+        return canonical_record_digest(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, record: Mapping[str, object]) -> GenerationLinkV1:
+        expected = {
+            "type", "repository_binding", "predecessor_generation_id",
+            "from_identity", "to_identity", "transition_kind",
+        }
+        if set(record) not in (expected, expected | {"terminal_authority_proof"}):
+            raise ReviewStateError("generation link fields are invalid")
+        source = record.get("from_identity")
+        target = record.get("to_identity")
+        if (
+            record.get("type") != GENERATION_LINK_TYPE
+            or not isinstance(source, Mapping)
+            or not isinstance(target, Mapping)
+        ):
+            raise ReviewStateError("generation link is invalid")
+        return cls(
+            repository_binding=cast(str, record.get("repository_binding")),
+            predecessor_generation_id=cast(
+                str, record.get("predecessor_generation_id")
+            ),
+            from_identity=source,
+            to_identity=target,
+            transition_kind=cast(
+                Literal["substantive", "supersession", "owner-requested"],
+                record.get("transition_kind"),
+            ),
+        )
 
 
 def prove_generation_carry(
@@ -799,8 +879,19 @@ def resolve_generation(
         return GenerationResolution("refused", reason="invalid-proof")
     if format_only_proof is not None and not isinstance(format_only_proof, Mapping):
         return GenerationResolution("refused", reason="invalid-proof")
+    accumulator = getattr(records, "accumulator_head", None)
+    ledger_binding = getattr(accumulator, "repository_binding", None)
+    if isinstance(ledger_binding, str) and ledger_binding != repository_binding:
+        return GenerationResolution(
+            "refused", reason="missing-evidence:repository binding mismatch"
+        )
 
-    from .authority_projection import generations, generation_carries, slot_state
+    from .authority_projection import (
+        generation_carries,
+        generation_links,
+        generations,
+        slot_state,
+    )
 
     from .seams import MissingAdapter
 
@@ -960,7 +1051,30 @@ def resolve_generation(
             ),
         )
 
-    predecessor = repository_generations[-1] if repository_generations else None
+    projected_carries = generation_carries(
+        cast(Sequence[dict[str, object]], records)
+    )
+    matching_links = [
+        link
+        for link in generation_links(cast(Sequence[dict[str, object]], records))
+        if link.repository_binding == repository_binding
+        and link.to_identity == identity
+        and link.predecessor_generation_id in projected
+        and link.from_identity in (
+            [projected[link.predecessor_generation_id].patch_identity]
+            + [
+                carry.to_identity
+                for carry in projected_carries
+                if carry.generation_id == link.predecessor_generation_id
+            ]
+        )
+    ]
+    if len(matching_links) > 1:
+        return GenerationResolution("refused", reason="ambiguous-lineage")
+    link = matching_links[0] if matching_links else None
+    predecessor = (
+        projected.get(link.predecessor_generation_id) if link is not None else None
+    )
     predecessor_id = predecessor.generation_id if predecessor is not None else None
     lineage_id = (
         predecessor.lineage_id
@@ -994,7 +1108,11 @@ def resolve_generation(
         tree=tree_sha,
         required_sections=sections,
         policy_digest=_policy_digest(sections),
-        delta_from_tree=predecessor.tree if predecessor is not None else None,
+        delta_from_tree=(
+            cast(str, link.from_identity.get("candidate_tree_sha"))
+            if link is not None
+            else None
+        ),
         delta_sha256=(
             cast(str, identity.get("diff_sha256"))
             if isinstance(identity.get("diff_sha256"), str)
@@ -1007,11 +1125,14 @@ def resolve_generation(
         inherited_coverage=inherited,
         invalidated_sections=sections if predecessor is not None else (),
     )
-    transition_kind: GenerationTransitionKind = (
-        "initial"
-        if predecessor is None
-        else _transition_kind(records, predecessor.generation_id, identity)
-    )
+    transition_kind: GenerationTransitionKind = "initial"
+    if link is not None:
+        transition_kind = link.transition_kind
+        if transition_kind in {"supersession", "owner-requested"} and (
+            _transition_kind(records, predecessor.generation_id, identity)
+            != transition_kind
+        ):
+            return GenerationResolution("refused", reason="invalid-proof")
     return GenerationResolution(
         "new",
         generation=generation,
@@ -1087,6 +1208,12 @@ def _reserve_review_slot(
             raise ReviewSlotError(
                 "reservation-conflict",
                 "idempotency key is already bound to another review obligation",
+            )
+        settlement = state.settlement_for(existing.reservation_id)
+        if settlement is not None:
+            raise ReviewSlotError(
+                "reservation-conflict",
+                "idempotency key belongs to an already settled review reservation",
             )
         return ReviewSlotReservation(
             **{
@@ -1212,7 +1339,11 @@ def settle_review_slot(
     terminal_ref: object,
 ) -> ReviewSlotSettlement:
     """Build an idempotent settlement bound to an authenticated terminal."""
-    from .authority_projection import authenticated_review_state_records
+    from .authority_projection import (
+        authenticated_review_state_records,
+        generation_carries,
+        generations,
+    )
     from ..review.authority import classify_review_outcome
 
     try:
@@ -1240,6 +1371,21 @@ def settle_review_slot(
         raise ReviewSlotError(
             "reservation-conflict", "terminal reference belongs to another task"
         )
+    generation = generations(cast(Sequence[dict[str, object]], records)).get(
+        reservation.generation_id
+    )
+    valid_trees = {generation.tree} if generation is not None else set()
+    valid_trees.update(
+        cast(str, carry.to_identity["candidate_tree_sha"])
+        for carry in generation_carries(cast(Sequence[dict[str, object]], records))
+        if carry.generation_id == reservation.generation_id
+        and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
+    )
+    if terminal.get("snapshot_tree_sha") not in valid_trees:
+        raise ReviewSlotError(
+            "reservation-conflict",
+            "terminal tree is outside the reserved content generation",
+        )
     classified = classify_review_outcome(terminal, records)
     if classified is not normalized_outcome:
         raise ReviewSlotError(
@@ -1264,7 +1410,14 @@ def settle_review_slot(
         and record.get("reservation_id") == reservation.reservation_id
     ]
     if existing:
-        if len(existing) == 1 and existing[0].to_dict() == proposed.to_dict():
+        if len(existing) == 1 and (
+            existing[0].to_dict() == proposed.to_dict()
+            or (
+                existing[0].outcome is ReviewOutcome.UNRESOLVED
+                and normalized_outcome is ReviewOutcome.CONSUMED
+                and existing[0].terminal_ref == digest
+            )
+        ):
             return ReviewSlotSettlement(
                 **{
                     name: getattr(proposed, name)
@@ -1292,6 +1445,7 @@ def assert_authority_ledger_lock_held(repo: Path) -> None:
 
 __all__ = [
     "GenerationCarryV1",
+    "GenerationLinkV1",
     "GenerationProofV1",
     "GenerationResolution",
     "GenerationTransition",

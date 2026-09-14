@@ -219,10 +219,15 @@ def admit_review(
         return _blocked(code, reason)
     generation = resolution.generation
     carry_record = resolution.carry
-    diff_from_tree = generation.delta_from_tree
-    if diff_from_tree is None and carry_record is not None:
+    # A carry endpoint is the immediate reviewed content boundary.  Diffing a
+    # later delta against the generation root would reintroduce base motion and
+    # can falsely inflate a bounded repair into an oversized delta.
+    diff_from_tree = None
+    if carry_record is not None:
         candidate = carry_record.from_identity.get("candidate_tree_sha")
         diff_from_tree = candidate if isinstance(candidate, str) else None
+    if diff_from_tree is None:
+        diff_from_tree = generation.delta_from_tree
     if diff_from_tree is None:
         base_tree = patch_identity.get("base_tree_sha")
         diff_from_tree = base_tree if isinstance(base_tree, str) else None
@@ -277,12 +282,17 @@ def admit_review(
         ).primary_terminal_ref
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []
+    carry_proof = carry_record.proof if carry_record is not None else None
+    if isinstance(carry_proof, Mapping) and isinstance(
+        carry_proof.get("proof"), Mapping
+    ):
+        carry_proof = cast(Mapping[str, object], carry_proof["proof"])
     if (
         carry_record is not None
         and "security" in carry_record.sections
-        and isinstance(equivalence_proof, Mapping)
-        and isinstance(equivalence_proof.get("base_path_overlap"), list)
-        and set(cast(list[object], equivalence_proof["base_path_overlap"]))
+        and isinstance(carry_proof, Mapping)
+        and isinstance(carry_proof.get("base_path_overlap"), list)
+        and set(cast(list[object], carry_proof["base_path_overlap"]))
         .intersection(security)
     ):
         # Base motion across a security-trigger path keeps content lineage but
@@ -299,7 +309,10 @@ def admit_review(
         )
     if resolution.kind == "new":
         append_before_slot.append(generation.to_dict())
-    elif carry_record is not None:
+    elif (
+        carry_record is not None
+        and carry_record.from_identity != carry_record.to_identity
+    ):
         append_before_slot.append(carry_record.to_dict())
 
     # Equivalence, format-only, and exact-content lookup are all zero author

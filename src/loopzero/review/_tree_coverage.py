@@ -351,20 +351,26 @@ def _generation_chain_covers_tree(
             )
         )
     ]
-    if len(candidates) != 1 or not isinstance(terminal_tree, str):
+    if not candidates or not isinstance(terminal_tree, str):
         return False
-    generation = candidates[0]
-    edges = {
-        str(carry.from_identity.get("candidate_tree_sha")): str(
-            carry.to_identity.get("candidate_tree_sha")
+    carries = generation_carries(records)  # type: ignore[arg-type]
+    return any(
+        chain_covers_tree(
+            terminal_tree,
+            {
+                str(carry.from_identity.get("candidate_tree_sha")): str(
+                    carry.to_identity.get("candidate_tree_sha")
+                )
+                for carry in carries
+                if carry.generation_id == generation.generation_id
+                and lens in carry.sections
+                and isinstance(carry.from_identity.get("candidate_tree_sha"), str)
+                and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
+            },
+            current_tree,
         )
-        for carry in generation_carries(records)  # type: ignore[arg-type]
-        if carry.generation_id == generation.generation_id
-        and lens in carry.sections
-        and isinstance(carry.from_identity.get("candidate_tree_sha"), str)
-        and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
-    }
-    return chain_covers_tree(terminal_tree, edges, current_tree)
+        for generation in candidates
+    )
 
 
 def covers_frozen_tree(

@@ -429,6 +429,68 @@ def test_legacy_primary_projects_a_consumed_content_generation(monkeypatch) -> N
     ).primary_consumed
 
 
+def test_legacy_delta_terminal_is_not_projected_as_a_primary(monkeypatch) -> None:
+    from loopzero.kernel import authority_projection
+
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "legacy-delta",
+        "snapshot_tree_sha": "b" * 40,
+        "delta_from_snapshot_sha": "a" * 40,
+        "patch_identity": {
+            "candidate_sha": "c" * 40,
+            "candidate_tree_sha": "b" * 40,
+        },
+        "review_lens": "code",
+    }
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_accepted_review_terminals",
+        lambda rows: {"legacy-delta": terminal},
+    )
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_authenticated_verdicts",
+        lambda rows, **kwargs: {"legacy-delta": {"verdict": "pass"}},
+    )
+    assert authority_projection.generations([terminal]) == {}
+
+
+def test_generation_projection_is_cached_for_an_unchanged_ledger(monkeypatch) -> None:
+    from loopzero.kernel import authority_projection
+
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "legacy-cache-probe",
+        "snapshot_tree_sha": "d" * 40,
+        "patch_identity": {
+            "candidate_sha": "c" * 40,
+            "candidate_tree_sha": "d" * 40,
+        },
+        "review_lens": "code",
+    }
+    calls = 0
+
+    def accepted(rows):
+        nonlocal calls
+        calls += 1
+        return {"legacy-cache-probe": terminal}
+
+    monkeypatch.setattr(authority_projection, "seam_accepted_review_terminals", accepted)
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_authenticated_verdicts",
+        lambda rows, **kwargs: {"legacy-cache-probe": {"verdict": "pass"}},
+    )
+    records = [terminal]
+    first = authority_projection.generations(records)
+    assert authority_projection.generations(records) == first
+    generation = next(iter(first.values()))
+    authority_projection.slot_state(records, generation.generation_id, "delivery")
+    authority_projection.slot_state(records, generation.generation_id, "delivery")
+    assert calls == 1
+
+
 def test_legacy_projection_refuses_when_adapter_is_missing(monkeypatch) -> None:
     from loopzero.kernel import authority_projection, seams
 
