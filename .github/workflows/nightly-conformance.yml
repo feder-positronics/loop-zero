@@ -119,6 +119,12 @@ jobs:
           printf 'LOOPZERO_LIVE_CLI_PATH=%s\n' "$CLI_PATH" >> "$GITHUB_ENV"
           printf 'LOOPZERO_LIVE_RUNTIME_ROOT=%s\n' "$RUNTIME_ROOT" >> "$GITHUB_ENV"
 
+      - name: Prove the pinned runtime executes on the runner host
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: |
+          set -eu
+          PATH="/usr/bin:/bin" "$LOOPZERO_LIVE_CLI_PATH" --version
       - name: Seal access-only credential on the host
         env:
           LIVE_CREDENTIAL: ${{ secrets[matrix.secret] }}

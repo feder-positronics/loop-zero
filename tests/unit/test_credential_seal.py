@@ -173,7 +173,7 @@ def test_entry_point_rejects_unsafe_input_and_never_prints_credential(
     ) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "credential sealing failed\n"
+    assert captured.err .startswith("credential sealing failed")
     assert secret not in captured.err
 
 
@@ -236,5 +236,5 @@ def test_main_reports_only_a_fixed_error_message(
     ) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
-    assert captured.err == "credential sealing failed\n"
+    assert captured.err .startswith("credential sealing failed")
     assert secret not in captured.err

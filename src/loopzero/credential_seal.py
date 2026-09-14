@@ -343,10 +343,14 @@ def main(argv: list[str] | None = None) -> int:
         source_kind = seal_credential(
             args.vendor, source=args.source, output=args.out
         )
-    except Exception:
-        # Errors are deliberately content-free: neither provider exceptions nor
+    except Exception as exc:
+        # Errors are deliberately content-free: neither provider messages nor
         # path values can accidentally echo credential material or locations.
-        print("credential sealing failed", file=sys.stderr)
+        # The exception class name is the only detail, so an operator can
+        # tell a refresh failure from a validation failure in a CI log.
+        print(
+            f"credential sealing failed: {type(exc).__name__}", file=sys.stderr
+        )
         return 1
     print(f"credential source: {source_kind}")
     return 0
