@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,10 +31,15 @@ def test_review_findings_keep_material_severities_only():
         {"severity": "important", "claim": "b"},
         {"severity": "suggestion", "claim": "c"},
     ]
-    assert evidence.persisted_review_findings(rows, review_intent="discovery") == rows[:2]
-    assert evidence.persisted_review_findings(
-        rows, review_intent="trust-manifest-verification"
-    ) == []
+    assert (
+        evidence.persisted_review_findings(rows, review_intent="discovery") == rows[:2]
+    )
+    assert (
+        evidence.persisted_review_findings(
+            rows, review_intent="trust-manifest-verification"
+        )
+        == []
+    )
 
 
 def test_evidence_snapshot_uses_configured_private_root_and_detects_drift(configured):
@@ -177,6 +183,123 @@ def test_trust_claim_evidence_expands_a_covered_directory(configured):
     assert [entry["origin"] for entry in snapshot.manifest] == [
         "worktree/src/auth/login.py"
     ]
+
+
+def test_trust_claim_directory_expansion_has_a_typed_counted_limit(configured):
+    covered = configured / "src" / "large"
+    covered.mkdir(parents=True)
+    for index in range(evidence.EVIDENCE_MAX_FILES + 1):
+        (covered / f"file-{index:02d}.txt").write_text("proof", encoding="utf-8")
+    task = {
+        "invalidated_claims": [{"text": "large", "paths": ["src/large"]}],
+        "changed_paths": [],
+    }
+    with pytest.raises(
+        evidence.EvidenceScopeTooLargeError,
+        match=r"evidence-scope-too-large: expanded evidence contains 65 paths",
+    ) as raised:
+        evidence.stage_trust_claim_evidence(
+            worktree=configured,
+            primary_repo=configured,
+            task_id="large-directory-trust-evidence",
+            task=task,
+        )
+    assert raised.value.count == evidence.EVIDENCE_MAX_FILES + 1
+
+
+def test_retirement_directory_limit_counts_current_and_previous_paths_before_reading(
+    configured, monkeypatch,
+):
+    subprocess.run(["git", "init", "-q", str(configured)], check=True)
+    covered = configured / "retired"
+    covered.mkdir()
+    for index in range(evidence.EVIDENCE_MAX_FILES):
+        (covered / f"file-{index}.txt").write_text("proof", encoding="utf-8")
+    subprocess.run(["git", "-C", str(configured), "add", "retired"], check=True)
+    tree_sha = subprocess.run(
+        ["git", "-C", str(configured), "write-tree"],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    original_run = subprocess.run
+
+    def no_blob_reads(command, **kwargs):
+        assert "show" not in command
+        return original_run(command, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", no_blob_reads)
+    with pytest.raises(evidence.EvidenceScopeTooLargeError) as raised:
+        evidence.stage_trust_claim_evidence(
+            worktree=configured, primary_repo=configured, task_id="retirement-cap",
+            task={
+                "invalidated_claims": [],
+                "retirements": [{"text": "retired", "paths": ["retired"]}],
+                "changed_paths": ["other.txt"], "delta_from_tree_sha": tree_sha,
+            },
+        )
+    assert raised.value.code == "evidence-scope-too-large"
+    assert raised.value.count == evidence.EVIDENCE_MAX_FILES + 1
+
+
+def test_retirement_evidence_uses_the_bound_previous_tree_when_path_is_gone(
+    configured,
+):
+    subprocess.run(["git", "init", "-q", str(configured)], check=True)
+    subprocess.run(
+        ["git", "-C", str(configured), "config", "user.name", "Test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(configured), "config", "user.email", "test@example.com"],
+        check=True,
+    )
+    retired = configured / "retired.txt"
+    retired.write_text("previous content", encoding="utf-8")
+    subprocess.run(["git", "-C", str(configured), "add", "retired.txt"], check=True)
+    subprocess.run(
+        ["git", "-C", str(configured), "commit", "-qm", "previous"], check=True
+    )
+    tree_sha = subprocess.run(
+        ["git", "-C", str(configured), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    retired.unlink()
+    task = {
+        "invalidated_claims": [],
+        "retirements": [
+            {
+                "claim_id": "tc_" + "a" * 64,
+                "section": "actors_assets",
+                "text": "retired content",
+                "paths": ["retired.txt", "never-existed.txt"],
+            }
+        ],
+        "changed_paths": ["retired.txt"],
+        "delta_from_tree_sha": tree_sha,
+    }
+    snapshot = evidence.stage_trust_claim_evidence(
+        worktree=configured,
+        primary_repo=configured,
+        task_id="retirement-evidence",
+        task=task,
+    )
+    states = {
+        entry["origin"]: entry.get("state", "present") for entry in snapshot.manifest
+    }
+    assert states == {
+        "worktree/retired.txt": "absent",
+        f"previous-tree/{tree_sha}/retired.txt": "present",
+        f"previous-tree/{tree_sha}/never-existed.txt": "absent",
+    }
+    previous_entry = next(
+        entry
+        for entry in snapshot.manifest
+        if str(entry["origin"]).startswith("previous-tree/")
+        and str(entry["origin"]).endswith("/retired.txt")
+    )
+    staged = configured / str(previous_entry["path"])
+    assert staged.read_text(encoding="utf-8") == "previous content"
+    evidence.verify_evidence_snapshot(snapshot)
 
 
 def test_trust_claim_evidence_allows_an_empty_manifest_only_inventory(configured):

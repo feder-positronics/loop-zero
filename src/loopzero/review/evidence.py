@@ -105,6 +105,20 @@ class EvidenceSnapshot:
     manifest: tuple[dict[str, object], ...]
     task_id: str
 
+
+class EvidenceScopeTooLargeError(DispatchError):
+    """A mechanically expanded trust evidence scope exceeded its hard cap."""
+
+    code = "evidence-scope-too-large"
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(
+            f"{self.code}: expanded evidence contains {count} paths "
+            f"(limit {EVIDENCE_MAX_FILES})"
+        )
+
+
 def _validate_result_findings(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list) or len(value) > MAX_RESULT_ITEMS:
         raise DispatchError("worker result findings are invalid")
@@ -175,8 +189,7 @@ def _snapshot_git(
     )
     if completed.returncode != 0:
         raise DispatchError(
-            f"review-snapshot git {args[0]} failed: "
-            f"{completed.stderr.strip()[:200]}"
+            f"review-snapshot git {args[0]} failed: {completed.stderr.strip()[:200]}"
         )
     return completed.stdout.strip()
 
@@ -712,8 +725,10 @@ def validate_evidence_inputs(
         seen.add(resolved)
         if not resolved.exists() and not _allow_absent:
             raise DispatchError("evidence-unavailable: evidence file is missing")
-        if resolved.exists() and not resolved.is_file() and not (
-            _allow_directories and resolved.is_dir()
+        if (
+            resolved.exists()
+            and not resolved.is_file()
+            and not (_allow_directories and resolved.is_dir())
         ):
             raise DispatchError("evidence-unavailable: evidence input is not a file")
         if resolved.exists() and not os.access(resolved, os.R_OK):
@@ -909,22 +924,28 @@ def trust_claim_evidence_scope(task: object) -> tuple[str, ...]:
 
     if isinstance(task, TrustClaimTaskV1):
         claims: object = task.invalidated_claims
+        retirements: object = task.retirements
         changed: object = task.changed_paths
     elif isinstance(task, Mapping):
         claims = task.get("invalidated_claims")
+        retirements = task.get("retirements", [])
         changed = task.get("changed_paths")
     else:
         raise DispatchError("trust-claim evidence task is invalid")
-    if not isinstance(claims, (list, tuple)) or not isinstance(
-        changed, (list, tuple)
+    if (
+        not isinstance(claims, (list, tuple))
+        or not isinstance(retirements, (list, tuple))
+        or not isinstance(changed, (list, tuple))
     ):
         raise DispatchError("trust-claim evidence task is invalid")
     allowed: set[str] = set()
     try:
         allowed.update(_canonical_path(path, label="changed_paths") for path in changed)
-        for claim in claims:
-            raw_paths = claim.paths if hasattr(claim, "paths") else (
-                claim.get("paths") if isinstance(claim, Mapping) else None
+        for claim in (*claims, *retirements):
+            raw_paths = (
+                claim.paths
+                if hasattr(claim, "paths")
+                else (claim.get("paths") if isinstance(claim, Mapping) else None)
             )
             if not isinstance(raw_paths, (list, tuple)):
                 raise DispatchError("trust-claim evidence claim is invalid")
@@ -957,6 +978,8 @@ def _expanded_trust_claim_evidence_paths(
             selected.update(descendants)
         else:
             selected.add(path)
+    if len(selected) > EVIDENCE_MAX_FILES:
+        raise EvidenceScopeTooLargeError(len(selected))
     return tuple(sorted(selected))
 
 
@@ -964,6 +987,172 @@ def _trust_claim_evidence_is_scoped(path: str, allowed: Sequence[str]) -> bool:
     from .trust_claims import _path_covers
 
     return any(_path_covers(root, path) for root in allowed)
+
+
+def _trust_claim_paths(task: object, field: str) -> tuple[str, ...]:
+    from .trust_claims import _canonical_path
+
+    raw_claims = (
+        getattr(task, field)
+        if hasattr(task, field)
+        else task.get(field, [])
+        if isinstance(task, Mapping)
+        else None
+    )
+    if not isinstance(raw_claims, (list, tuple)):
+        raise DispatchError("trust-claim evidence task is invalid")
+    paths: set[str] = set()
+    try:
+        for claim in raw_claims:
+            raw_paths = (
+                claim.paths
+                if hasattr(claim, "paths")
+                else claim.get("paths")
+                if isinstance(claim, Mapping)
+                else None
+            )
+            if not isinstance(raw_paths, (list, tuple)):
+                raise DispatchError("trust-claim evidence claim is invalid")
+            paths.update(
+                _canonical_path(path, label="trust claim paths") for path in raw_paths
+            )
+    except ValueError as exc:
+        raise DispatchError(f"trust-claim evidence scope is invalid: {exc}") from exc
+    return tuple(sorted(paths))
+
+
+def _previous_tree_retirement_entries(
+    primary_repo: Path,
+    tree_sha: object,
+    roots: Sequence[str],
+    *,
+    current_count: int,
+) -> tuple[tuple[str, bytes | None], ...]:
+    """Read retired coverage from the bound previous tree, never the worktree."""
+    if not roots:
+        return ()
+    if (
+        not isinstance(tree_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40,64}", tree_sha) is None
+    ):
+        raise DispatchError("trust-claim retirement evidence tree is invalid")
+    environment = sandbox_environment(os.environ)
+    listed = subprocess.run(
+        trusted_git_command(
+            primary_repo.resolve(),
+            "--literal-pathspecs",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            tree_sha,
+            "--",
+            *roots,
+        ),
+        capture_output=True,
+        check=False,
+        env=environment,
+    )
+    if listed.returncode != 0:
+        raise DispatchError("evidence-unavailable: previous trust tree is unavailable")
+    try:
+        paths = tuple(
+            path.decode("utf-8") for path in listed.stdout.split(b"\0") if path
+        )
+    except UnicodeDecodeError as exc:
+        raise DispatchError(
+            "evidence-unavailable: previous trust tree path is invalid"
+        ) from exc
+    selected: set[str] = set()
+    absent: set[str] = set()
+    for root in roots:
+        matches = [
+            path for path in paths if _trust_claim_evidence_is_scoped(path, (root,))
+        ]
+        if not matches:
+            absent.add(root)
+        selected.update(matches)
+    total_count = current_count + len(selected) + len(absent)
+    if total_count > EVIDENCE_MAX_FILES:
+        raise EvidenceScopeTooLargeError(total_count)
+    entries: list[tuple[str, bytes | None]] = [(path, None) for path in sorted(absent)]
+    for path in sorted(selected):
+        shown = subprocess.run(
+            trusted_git_command(
+                primary_repo.resolve(), "show", f"{tree_sha}:{path}"
+            ),
+            capture_output=True,
+            check=False,
+            env=environment,
+        )
+        if shown.returncode != 0:
+            raise DispatchError(
+                "evidence-unavailable: previous trust evidence is unavailable"
+            )
+        if len(shown.stdout) > EVIDENCE_MAX_FILE_BYTES:
+            raise DispatchError(
+                "evidence-unavailable: evidence file exceeds size limit"
+            )
+        entries.append((path, shown.stdout))
+    return tuple(entries)
+
+
+def _append_previous_tree_evidence(
+    snapshot: EvidenceSnapshot,
+    *,
+    worktree: Path,
+    tree_sha: str,
+    entries: Sequence[tuple[str, bytes | None]],
+) -> EvidenceSnapshot:
+    if not entries:
+        return snapshot
+    manifest = list(snapshot.manifest)
+    files = list(snapshot.files)
+    total_bytes = sum(
+        int(entry.get("size", 0))
+        for entry in manifest
+        if entry.get("state", "present") == "present"
+    )
+    try:
+        for path, content in entries:
+            index = len(files)
+            destination = snapshot.directory / f"{index:02d}-previous-{Path(path).name}"
+            entry: dict[str, object] = {
+                "origin": f"previous-tree/{tree_sha}/{path}",
+                "path": destination.relative_to(worktree.resolve()).as_posix(),
+            }
+            if content is None:
+                entry["state"] = "absent"
+            else:
+                total_bytes += len(content)
+                if total_bytes > EVIDENCE_MAX_TOTAL_BYTES:
+                    raise DispatchError(
+                        "evidence-unavailable: evidence total exceeds size limit"
+                    )
+                destination.write_bytes(content)
+                destination.chmod(0o400)
+                entry.update(
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size=len(content),
+                )
+            files.append(destination)
+            manifest.append(entry)
+        manifest_path = snapshot.directory / EVIDENCE_MANIFEST_FILENAME
+        manifest_path.chmod(0o600)
+        manifest_path.write_text(
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        manifest_path.chmod(0o400)
+    except Exception:
+        shutil.rmtree(snapshot.directory, ignore_errors=True)
+        raise
+    return EvidenceSnapshot(
+        directory=snapshot.directory,
+        files=tuple(files),
+        manifest=tuple(manifest),
+        task_id=snapshot.task_id,
+    )
 
 
 def stage_trust_claim_evidence(
@@ -976,6 +1165,19 @@ def stage_trust_claim_evidence(
 ) -> EvidenceSnapshot:
     """Stage a trust delta after enforcing its claim-and-change path boundary."""
     allowed = trust_claim_evidence_scope(task)
+    retirement_roots = _trust_claim_paths(task, "retirements")
+    changed = (
+        task.changed_paths
+        if hasattr(task, "changed_paths")
+        else task.get("changed_paths")
+        if isinstance(task, Mapping)
+        else None
+    )
+    if not isinstance(changed, (list, tuple)):
+        raise DispatchError("trust-claim evidence task is invalid")
+    current_allowed = tuple(
+        sorted(set(changed) | set(_trust_claim_paths(task, "invalidated_claims")))
+    )
     if evidence_paths is None:
         if isinstance(task, Mapping) and "evidence_inventory" in task:
             declared = task.get("evidence_inventory")
@@ -983,7 +1185,7 @@ def stage_trust_claim_evidence(
                 raise DispatchError("trust-claim evidence inventory is invalid")
             selected = tuple(declared)
         else:
-            selected = _expanded_trust_claim_evidence_paths(worktree, allowed)
+            selected = _expanded_trust_claim_evidence_paths(worktree, current_allowed)
     else:
         selected = tuple(evidence_paths)
     declared_inventory = (
@@ -1000,9 +1202,8 @@ def stage_trust_claim_evidence(
         raise DispatchError("trust-claim evidence inventory exceeds task scope")
     from .trust_claims import _canonical_path
 
-    if (
-        not all(isinstance(path, str) for path in selected)
-        or len(selected) != len(set(selected))
+    if not all(isinstance(path, str) for path in selected) or len(selected) != len(
+        set(selected)
     ):
         raise DispatchError("trust-claim evidence inventory exceeds task scope")
     try:
@@ -1019,7 +1220,20 @@ def stage_trust_claim_evidence(
         for path in normalized_selected
     ):
         raise DispatchError("trust-claim evidence inventory exceeds task scope")
-    return stage_evidence_snapshot(
+    tree_sha = (
+        task.delta_from_tree_sha
+        if hasattr(task, "delta_from_tree_sha")
+        else task.get("delta_from_tree_sha")
+        if isinstance(task, Mapping)
+        else None
+    )
+    previous_entries = _previous_tree_retirement_entries(
+        primary_repo, tree_sha, retirement_roots, current_count=len(normalized_selected)
+    )
+    total_count = len(normalized_selected) + len(previous_entries)
+    if total_count > EVIDENCE_MAX_FILES:
+        raise EvidenceScopeTooLargeError(total_count)
+    snapshot = stage_evidence_snapshot(
         worktree=worktree,
         primary_repo=primary_repo,
         task_id=task_id,
@@ -1027,6 +1241,12 @@ def stage_trust_claim_evidence(
         _allow_empty=True,
         _allow_absent=True,
         _allow_directories=True,
+    )
+    return _append_previous_tree_evidence(
+        snapshot,
+        worktree=worktree,
+        tree_sha=tree_sha,  # type: ignore[arg-type]
+        entries=previous_entries,
     )
 
 
