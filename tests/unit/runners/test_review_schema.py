@@ -3,6 +3,8 @@ from copy import deepcopy
 import jsonschema
 import pytest
 
+from loopzero.kernel.gitscope import DispatchError
+from loopzero.review.authority import normalize_review_result
 from loopzero.runners._review_schema import (
     TrustClaimResultError,
     validate_trust_claim_result,
@@ -68,9 +70,7 @@ def test_claim_verdicts_must_match_aggregate(claim_verdicts, aggregate):
     jsonschema.validate(payload, schema())
     validate_trust_claim_result(payload)
     forged = deepcopy(payload)
-    forged["verification_verdict"] = (
-        "fail" if aggregate != "fail" else "inconclusive"
-    )
+    forged["verification_verdict"] = "fail" if aggregate != "fail" else "inconclusive"
     jsonschema.validate(forged, schema())
     with pytest.raises(TrustClaimResultError, match="contradicts"):
         validate_trust_claim_result(forged)
@@ -84,6 +84,20 @@ def test_all_passing_claims_allow_inconclusive_until_task_coverage_is_checked():
     ]
     jsonschema.validate(payload, schema())
     validate_trust_claim_result(payload)
+
+
+def test_runner_normalization_rejects_a_contradictory_trust_aggregate():
+    payload = result()
+    payload["verification_verdict"] = "pass"
+    payload["claim_verdicts"] = [
+        {"claim_id": CLAIM_A, "verdict": "fail", "rationale": "failed"}
+    ]
+    jsonschema.validate(payload, schema())
+    with pytest.raises(DispatchError, match="trust result is inconsistent"):
+        normalize_review_result(
+            payload,
+            task={"review_intent": "trust-manifest-verification"},
+        )
 
 
 def test_claim_verdict_entries_are_strict_and_bounded():

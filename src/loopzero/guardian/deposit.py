@@ -78,7 +78,10 @@ class AuditDeposit:
 
 def _copy_dispatch_history(*, repo: Path, source: Path, destination: Path) -> None:
     from ..kernel.authority_projection import coordinator_ledger_prefix
-    from ..kernel.authority_store import create_coordinator_authority, load_authority_records
+    from ..kernel.authority_store import (
+        create_coordinator_authority,
+        load_authority_records,
+    )
     from ..kernel.gitscope import DispatchError
     from ..kernel.policy import (
         DISPATCH_POLICY_VERSION,
@@ -503,6 +506,21 @@ def promote(
         or result_payload.get("task_id") != deposit.task_id
     ):
         raise AuditDepositError("dispatch deposit result identity is invalid")
+    launch_task = launch["task"]
+    assert isinstance(launch_task, dict)
+    if (
+        launch_task.get("work_kind") == "review"
+        and launch_task.get("review_intent") == "trust-manifest-verification"
+    ):
+        from ..kernel.gitscope import DispatchError
+        from ..review.authority import normalize_review_result
+
+        try:
+            normalize_review_result(result_payload, task=launch_task)
+        except DispatchError as exc:
+            raise AuditDepositError(
+                "dispatch deposit review result is invalid"
+            ) from exc
     records = _deposited_records(deposit)
     terminal = [
         row

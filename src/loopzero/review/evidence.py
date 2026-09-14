@@ -339,6 +339,10 @@ def append_finding_records(
     source head), the anchor, and the claim. Producer-operation replay is
     resolved before that source identity is consulted.
     """
+    if review_intent == "trust-manifest-verification":
+        from .authority import normalize_review_result
+
+        normalize_review_result(result, task={"review_intent": review_intent})
     findings = result.get("findings")
     if not isinstance(findings, list) or not findings:
         return None

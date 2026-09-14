@@ -189,3 +189,26 @@ def test_trust_claim_evidence_allows_an_empty_manifest_only_inventory(configured
     assert snapshot.files == ()
     assert snapshot.manifest == ()
     evidence.verify_evidence_snapshot(snapshot)
+
+
+def test_trust_finding_intake_checks_results_even_without_findings(configured):
+    with pytest.raises(evidence.DispatchError, match="trust result is inconsistent"):
+        evidence.append_finding_records(
+            configured,
+            task_id="trust",
+            result={
+                "findings": [],
+                "verification_verdict": "pass",
+                "claim_verdicts": [{
+                    "claim_id": "tc_" + "a" * 64,
+                    "verdict": "fail",
+                    "rationale": "failed",
+                }],
+            },
+            snapshot=None,
+            worktree=configured,
+            advisory=False,
+            source_head=None,
+            review_intent="trust-manifest-verification",
+            pr=1,
+        )
