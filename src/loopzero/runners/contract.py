@@ -1,6 +1,10 @@
 """Immutable, vendor-neutral contracts for native agent runtimes."""
 
-from ._review_schema import review_sections_schema, validate_review_chain_task
+from ._review_schema import (
+    review_sections_schema,
+    trust_claim_verdicts_schema,
+    validate_review_chain_task,
+)
 
 import math
 import re
@@ -590,5 +594,8 @@ def governed_result_schema(
             "type": "string",
             "enum": ["pass", "fail", "inconclusive"],
         }
+        properties["claim_verdicts"] = trust_claim_verdicts_schema(
+            bounded_string=bounded_string
+        )
         required.append("verification_verdict")
     return schema

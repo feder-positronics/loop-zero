@@ -15,6 +15,7 @@ from . import (
     preflight,
     risk,
     routing,
+    trust_claims,
 )
 from ..config import ConfigError, Profile
 from ..kernel import settings as kernel_settings
@@ -70,5 +71,5 @@ def configure(
 
 __all__ = [
     "acceptance", "admission", "authority", "chain", "evidence", "findings",
-    "harness", "preflight", "risk", "routing", "configure"
+    "harness", "preflight", "risk", "routing", "trust_claims", "configure"
 ]

@@ -33,6 +33,7 @@ from ..runners.registry import RUNTIME_REGISTRY, RuntimeRegistry
 from ..runners.settings import RuntimeSettings
 from . import routing
 from ..kernel.gitscope import (
+    DispatchError,
     ReviewSnapshot,
     primary_repo_root,
 )
@@ -845,7 +846,7 @@ def run_review(runner_or_profile: Any, **kwargs: Any) -> int | AdvisoryResult:
     if "worktree" not in kwargs:
         return _run_review_flow(runner_or_profile, **kwargs)
 
-    from .evidence import _validate_result_findings
+    from .authority import normalize_review_result
 
     profile = runner_or_profile
     worktree = Path(kwargs.pop("worktree"))
@@ -856,6 +857,7 @@ def run_review(runner_or_profile: Any, **kwargs: Any) -> int | AdvisoryResult:
     registry = kwargs.pop("registry", RUNTIME_REGISTRY)
     adapter_options = dict(kwargs.pop("adapter_options", {}) or {})
     output_schema = kwargs.pop("output_schema", None)
+    review_intent = kwargs.pop("review_intent", None)
     if kwargs:
         raise TypeError(f"unexpected run_review arguments: {sorted(kwargs)}")
     routing.configure(profile)
@@ -909,7 +911,24 @@ def run_review(runner_or_profile: Any, **kwargs: Any) -> int | AdvisoryResult:
             raise CrossHarnessError("review runtime result is not JSON") from exc
     if not isinstance(payload, Mapping):
         raise CrossHarnessError("review runtime result must be an object")
-    findings = _validate_result_findings(payload.get("findings"))
+    schema_properties = (
+        output_schema.get("properties") if isinstance(output_schema, Mapping) else None
+    )
+    review_intent = review_intent or (
+        "trust-manifest-verification"
+        if isinstance(schema_properties, Mapping)
+        and "claim_verdicts" in schema_properties
+        and "verification_verdict" in schema_properties
+        else "discovery"
+    )
+    try:
+        normalized = normalize_review_result(
+            payload, task={"review_intent": review_intent}
+        )
+    except DispatchError as exc:
+        raise CrossHarnessError(str(exc)) from exc
+    findings = normalized["findings"]
+    assert isinstance(findings, list)
     severities = {"suggestion": 1, "important": 2, "critical": 3}
     maximum = max(
         (str(row["severity"]) for row in findings),
