@@ -164,27 +164,18 @@ def classify_review_outcome(
     verdict = authenticated_review_verdict(terminal, records)
     verification = terminal.get("verification_verdict")
 
-    if status == "completed" and verdict is not None:
+    # A verdict is the review's content fact regardless of how the surrounding
+    # runner terminal closed.  Timeout and operator termination only release a
+    # slot when no authenticated result survived the terminal boundary.
+    if verdict is not None:
         return ReviewOutcome.CONSUMED
     if reason == "model-result" or failure == "model-result":
-        return (
-            ReviewOutcome.CONSUMED
-            if verdict is not None
-            else ReviewOutcome.RELEASED
-        )
+        return ReviewOutcome.RELEASED
     if reason == "budget-exhausted-after-result":
-        return (
-            ReviewOutcome.CONSUMED
-            if verdict is not None
-            else ReviewOutcome.UNRESOLVED
-        )
+        return ReviewOutcome.UNRESOLVED
     if reason == "budget-exhausted" or failure in {"budget-kill", "budget"}:
-        return (
-            ReviewOutcome.CONSUMED
-            if verdict is not None
-            else ReviewOutcome.RELEASED
-        )
-    if verification == "inconclusive" and verdict is None:
+        return ReviewOutcome.RELEASED
+    if verification == "inconclusive":
         return ReviewOutcome.RELEASED
     released_reasons = {
         "timeout",

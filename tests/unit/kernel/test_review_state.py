@@ -165,6 +165,7 @@ def settle(rows, reservation, terminal, outcome):
             "type": "verdict", "task_id": terminal["task_id"], "verdict": "pass"
         })
     settlement = review_state.settle_review_slot(
+        _REPOSITORY,
         rows,
         reservation=reservation,
         outcome=outcome,
@@ -548,11 +549,13 @@ def test_delta_requires_one_settled_primary_and_settlement_is_idempotent():
     rows.extend((primary.to_dict(), terminal))
     rows.append({"type": "verdict", "task_id": "primary", "verdict": "pass"})
     settlement = review_state.settle_review_slot(
+        _REPOSITORY,
         rows, reservation=primary, outcome=ReviewOutcome.CONSUMED,
         terminal_ref=terminal,
     )
     rows.append(settlement.to_dict())
     repeated = review_state.settle_review_slot(
+        _REPOSITORY,
         rows, reservation=primary, outcome=ReviewOutcome.CONSUMED,
         terminal_ref=terminal,
     )
@@ -679,6 +682,7 @@ def test_unresolved_settlement_resolves_from_a_late_verdict_without_a_second_row
     terminal = consumed_terminal("late", generation.tree)
     rows.extend((reservation.to_dict(), terminal))
     settlement = review_state.settle_review_slot(
+        _REPOSITORY,
         rows, reservation=reservation, outcome=ReviewOutcome.UNRESOLVED,
         terminal_ref=terminal,
     )
@@ -695,6 +699,7 @@ def test_unresolved_settlement_resolves_from_a_late_verdict_without_a_second_row
     assert unresolved_key.value.code == "reservation-conflict"
 
     duplicate = review_state.settle_review_slot(
+        _REPOSITORY,
         rows, reservation=reservation, outcome=ReviewOutcome.UNRESOLVED,
         terminal_ref=terminal,
     )
@@ -708,6 +713,7 @@ def test_unresolved_settlement_resolves_from_a_late_verdict_without_a_second_row
     assert len(resolved.settlements) == 1
 
     no_second_row = review_state.settle_review_slot(
+        _REPOSITORY,
         rows, reservation=reservation, outcome=ReviewOutcome.CONSUMED,
         terminal_ref=terminal,
     )
@@ -726,6 +732,7 @@ def test_settlement_rejects_terminal_from_outside_generation_tree():
     rows.append({"type": "verdict", "task_id": "wrong-tree", "verdict": "pass"})
     with pytest.raises(review_state.ReviewSlotError, match="outside"):
         review_state.settle_review_slot(
+            _REPOSITORY,
             rows, reservation=reservation, outcome=ReviewOutcome.CONSUMED,
             terminal_ref=terminal,
         )
@@ -776,6 +783,7 @@ def test_projection_never_drops_a_settlement_with_missing_terminal_evidence():
         "type": "verdict", "task_id": "missing-terminal", "verdict": "pass"
     })
     settlement = review_state.settle_review_slot(
+        _REPOSITORY,
         complete, reservation=reservation, outcome=ReviewOutcome.CONSUMED,
         terminal_ref=terminal,
     )
@@ -808,4 +816,22 @@ def test_reservation_api_refuses_without_authority_lock(tmp_path):
             slot_kind="primary",
             task_id="review",
             idempotency_key="key",
+        )
+
+
+def test_settlement_api_refuses_without_authority_lock(tmp_path):
+    with pytest.raises(review_state.ReviewStateError, match="must be held"):
+        review_state.settle_review_slot(
+            tmp_path / "unlocked-settlement",
+            [],
+            reservation=review_state.ReviewSlotReservation(
+                generation_id="cg_" + "1" * 32,
+                family="delivery",
+                slot_kind="primary",
+                task_id="review",
+                idempotency_key="key",
+                reservation_id="rs_" + "2" * 32,
+            ),
+            outcome=ReviewOutcome.UNRESOLVED,
+            terminal_ref="3" * 64,
         )

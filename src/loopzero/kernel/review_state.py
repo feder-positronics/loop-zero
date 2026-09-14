@@ -1495,6 +1495,7 @@ def _terminal_reference(
 
 
 def settle_review_slot(
+    repository: Path,
     records: Sequence[Mapping[str, object]],
     *,
     reservation: ReviewSlotReservation,
@@ -1509,6 +1510,7 @@ def settle_review_slot(
     )
     from ..review.authority import classify_review_outcome
 
+    assert_authority_ledger_lock_held(repository)
     try:
         normalized_outcome = ReviewOutcome(outcome)
     except (TypeError, ValueError) as exc:

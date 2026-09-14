@@ -159,7 +159,11 @@ def append_settlement(rows, reservation, outcome, result, *, verdict="pass"):
             "type": "verdict", "task_id": result["task_id"], "verdict": verdict
         })
     settlement = review_state.settle_review_slot(
-        rows, reservation=reservation, outcome=outcome, terminal_ref=result
+        _REPOSITORY,
+        rows,
+        reservation=reservation,
+        outcome=outcome,
+        terminal_ref=result,
     )
     rows.append(settlement.to_dict())
 

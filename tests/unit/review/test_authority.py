@@ -186,17 +186,40 @@ def outcome_authentication(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "reason",
-    ("model-result", "transport-disconnect", "budget-exhausted"),
+    ("field", "value"),
+    (
+        ("terminal_reason", "model-result"),
+        ("terminal_reason", "budget-exhausted"),
+        ("terminal_reason", "timeout"),
+        ("terminal_reason", "transport-disconnect"),
+        ("terminal_reason", "malformed-event"),
+        ("terminal_reason", "missing-terminal-event"),
+        ("terminal_reason", "startup-failure"),
+        ("terminal_reason", "protocol-failure"),
+        ("terminal_reason", "subscription-unavailable"),
+        ("terminal_reason", "cancelled"),
+        ("terminal_reason", "commercial-boundary"),
+        ("failure_class", "verified-limit"),
+        ("failure_class", "output-limit"),
+        ("failure_class", "engine-output"),
+        ("failure_class", "engine-output-failure"),
+        ("failure_class", "operator-terminated"),
+        ("failure_class", "transport-disconnect"),
+        ("failure_class", "protocol-failure"),
+        ("failure_class", "packaging-failure"),
+        ("failure_class", "budget-kill"),
+        ("failure_class", "budget"),
+        ("verification_verdict", "inconclusive"),
+    ),
 )
-def test_authenticated_infrastructure_outcomes_release(
-    outcome_authentication, reason
+def test_each_authenticated_release_class_without_a_verdict_releases(
+    outcome_authentication, field, value
 ):
     terminal = {
         "type": "attempt-terminal",
         "task_id": "review",
         "status": "failed",
-        "terminal_reason": reason,
+        field: value,
         "ledger_authenticated": True,
     }
     assert authority.classify_review_outcome(terminal, [terminal]) is ReviewOutcome.RELEASED
@@ -222,6 +245,37 @@ def test_coordinator_verdict_consumes(outcome_authentication, reason):
         "verdict": "fail",
         "coordinator_authenticated": True,
     }
+    assert authority.classify_review_outcome(
+        terminal, [terminal, verdict]
+    ) is ReviewOutcome.CONSUMED
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("terminal_reason", "timeout"),
+        ("failure_class", "operator-terminated"),
+    ),
+)
+def test_authenticated_verdict_dominates_noncompleted_terminal_class(
+    outcome_authentication, field, value
+):
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "run_id": "run",
+        "status": "failed",
+        field: value,
+        "ledger_authenticated": True,
+    }
+    verdict = {
+        "type": "verdict",
+        "task_id": "review",
+        "run_id": "run",
+        "verdict": "fail",
+        "coordinator_authenticated": True,
+    }
+
     assert authority.classify_review_outcome(
         terminal, [terminal, verdict]
     ) is ReviewOutcome.CONSUMED
