@@ -30,14 +30,24 @@ def manifest(*claims, risk_paths=("src/auth.py",)):
     }
 
 
-def legacy(raw, *, source="source-1", tree=TREE, digest=SHA):
-    return legacy_receipt(
+def legacy(raw, *, source="source-1", tree=TREE, digest=SHA, whole_manifest=False):
+    projected = legacy_receipt(
         raw,
         source_identity=source,
         tree_sha=tree,
         manifest_sha256=digest,
         verifier_run_id="legacy-run",
         verifier_task_id="legacy-task",
+    )
+    if whole_manifest:
+        return projected
+    return type(projected).build(
+        task_hash=projected.task_hash,
+        source_identity=projected.source_identity,
+        tree_sha=projected.tree_sha,
+        manifest_sha256=projected.manifest_sha256,
+        claim_set=normalize_manifest(raw),
+        claims=projected.claims,
     )
 
 
@@ -74,9 +84,18 @@ def fresh(task, verdicts=None):
         }
         for identity in {
             *(claim.claim_id for claim in task.invalidated_claims),
-            *task.retirements,
+            *(claim.claim_id for claim in task.retirements),
         }
     }
+
+
+def compose(previous, task, results, *, changed=None):
+    return compose_claim_verdict(
+        previous,
+        task,
+        results,
+        changed_paths=task.changed_paths if changed is None else changed,
+    )
 
 
 def test_claim_identity_is_stable_under_manifest_path_order_and_crlf():
@@ -271,6 +290,9 @@ def test_task_deserialization_rejects_hash_tampering_and_dropped_retirement():
     )
     task = task_for(prior, current)
     assert task is not None and task.retirements
+    assert task.retirements[0].text == "remove"
+    assert task.retirements[0].section == "actors_assets"
+    assert task.retirements[0].paths == ("src/old.py",)
 
     tampered_hash = task.to_dict()
     tampered_hash["task_hash"] = "0" * 64
@@ -292,6 +314,94 @@ def test_task_deserialization_rejects_hash_tampering_and_dropped_retirement():
         type(task).from_mapping(dropped, claim_set=current, previous=prior)
 
 
+@pytest.mark.parametrize("cause", ["path", "pathless", "new", "inconclusive", "base", "risk"])
+def test_task_deserialization_rejects_a_rehashed_dropped_invalidation(cause):
+    raw = manifest(
+        {"text": "changed", "paths": [] if cause in {"pathless", "base", "risk"} else ["src/auth.py"]},
+        {"text": "carried", "paths": ["src/db.py"]},
+    )
+    prior = legacy(raw)
+    if cause == "new":
+        prior = legacy(manifest(raw["actors_assets"][1]))
+    elif cause == "inconclusive":
+        identity = next(claim.claim_id for claim in normalize_manifest(raw).claims if claim.text == "changed")
+        prior = type(prior).build(
+            task_hash=prior.task_hash,
+            source_identity=prior.source_identity,
+            tree_sha=prior.tree_sha,
+            manifest_sha256=prior.manifest_sha256,
+            claim_set=normalize_manifest(raw),
+            claims={**prior.claims, identity: replace(prior.claims[identity], verdict="inconclusive")},
+        )
+    if cause == "risk":
+        raw["risk_paths"].append("src/new.py")
+    current = normalize_manifest(raw)
+    task = task_for(
+        prior, current,
+        changed=["src/auth.py"] if cause in {"path", "pathless"} else [],
+        base_moved=cause == "base",
+        added=["src/new.py"] if cause == "risk" else [],
+    )
+    assert task is not None and len(task.invalidated_claims) == 1
+    dropped = task.to_dict()
+    dropped["invalidated_claims"] = []
+    payload = {key: value for key, value in dropped.items() if key != "task_hash"}
+    dropped["task_hash"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(TrustClaimError, match="invalidated set"):
+        type(task).from_mapping(dropped, claim_set=current, previous=prior)
+
+
+def test_task_deserialization_rejects_rehashed_dropped_carried_digest():
+    raw = manifest(
+        {"text": "changed", "paths": ["src/auth.py"]},
+        {"text": "carried", "paths": ["src/db.py"]},
+    )
+    prior = legacy(raw)
+    current = normalize_manifest(raw)
+    task = task_for(prior, current, changed=["src/auth.py"])
+    assert task is not None and task.carried_receipt_digests
+    dropped = task.to_dict()
+    dropped["carried_receipt_digests"] = []
+    payload = {key: value for key, value in dropped.items() if key != "task_hash"}
+    dropped["task_hash"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    with pytest.raises(TrustClaimError, match="carried receipt binding"):
+        type(task).from_mapping(dropped, claim_set=current, previous=prior)
+
+
+def test_task_restoration_requires_the_bound_previous_receipt():
+    raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
+    current = normalize_manifest(raw)
+    task = task_for(None, current)
+    assert task is not None
+    with pytest.raises(TrustClaimError, match="required for restoration"):
+        type(task).from_mapping(task.to_dict(), claim_set=current, previous=None)
+
+
+def test_composition_rechecks_the_caller_supplied_changed_path_receipt():
+    raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
+    prior = legacy(raw)
+    current = normalize_manifest(raw)
+    task = task_for(prior, current, changed=["src/auth.py"])
+    assert task is not None
+    assert task.changed_paths_digest != "0" * 64
+    with pytest.raises(TrustClaimError, match="task diff"):
+        compose(prior, task, fresh(task), changed=["src/other.py"])
+
+
 @pytest.mark.parametrize("mutation", ["extra", "missing", "tree", "task"])
 def test_composition_rejects_extra_missing_and_forged_fresh_results(mutation):
     raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
@@ -309,7 +419,7 @@ def test_composition_rejects_extra_missing_and_forged_fresh_results(mutation):
     else:
         results[identity]["task_hash"] = "0" * 64
     with pytest.raises(TrustClaimError):
-        compose_claim_verdict(legacy(raw), task, results)
+        compose(legacy(raw), task, results)
 
 
 def test_aggregate_pass_fail_inconclusive_and_uncovered_risk_path():
@@ -320,17 +430,13 @@ def test_aggregate_pass_fail_inconclusive_and_uncovered_risk_path():
     assert task is not None
     identity = task.invalidated_claims[0].claim_id
 
-    passed, aggregate = compose_claim_verdict(prior, task, fresh(task))
+    passed, aggregate = compose(prior, task, fresh(task))
     assert aggregate == "pass"
     assert passed.claims[identity].carried_from is None
 
-    _, aggregate = compose_claim_verdict(
-        prior, task, fresh(task, {identity: "fail"})
-    )
+    _, aggregate = compose(prior, task, fresh(task, {identity: "fail"}))
     assert aggregate == "fail"
-    _, aggregate = compose_claim_verdict(
-        prior, task, fresh(task, {identity: "inconclusive"})
-    )
+    _, aggregate = compose(prior, task, fresh(task, {identity: "inconclusive"}))
     assert aggregate == "inconclusive"
 
     uncovered_raw = manifest(
@@ -339,9 +445,7 @@ def test_aggregate_pass_fail_inconclusive_and_uncovered_risk_path():
     uncovered = normalize_manifest(uncovered_raw)
     uncovered_task = task_for(None, uncovered)
     assert uncovered_task is not None
-    receipt, aggregate = compose_claim_verdict(
-        None, uncovered_task, fresh(uncovered_task)
-    )
+    receipt, aggregate = compose(None, uncovered_task, fresh(uncovered_task))
     assert aggregate == "inconclusive"
     assert receipt.uncovered_risk_paths == ("src/auth.py",)
     envelope = {
@@ -359,13 +463,13 @@ def test_aggregate_pass_fail_inconclusive_and_uncovered_risk_path():
         "verified_tree_sha": uncovered_task.tree_sha,
         "task_hash": uncovered_task.task_hash,
     }
-    composed, aggregate = compose_claim_verdict(None, uncovered_task, envelope)
+    composed, aggregate = compose(None, uncovered_task, envelope)
     assert aggregate == "inconclusive"
     assert composed.uncovered_risk_paths == ("src/auth.py",)
 
     envelope["verification_verdict"] = "pass"
     with pytest.raises(TrustClaimError, match="aggregate"):
-        compose_claim_verdict(None, uncovered_task, envelope)
+        compose(None, uncovered_task, envelope)
 
 
 def test_risk_coverage_requires_declared_exact_or_component_prefix_paths():
@@ -377,14 +481,14 @@ def test_risk_coverage_requires_declared_exact_or_component_prefix_paths():
         current = normalize_manifest(raw)
         task = task_for(None, current)
         assert task is not None
-        receipt, aggregate = compose_claim_verdict(None, task, fresh(task))
+        receipt, aggregate = compose(None, task, fresh(task))
         assert aggregate == "pass"
         assert receipt.uncovered_risk_paths == ()
 
     pathless = normalize_manifest(manifest("repository-wide dependency"))
     task = task_for(None, pathless)
     assert task is not None
-    receipt, aggregate = compose_claim_verdict(None, task, fresh(task))
+    receipt, aggregate = compose(None, task, fresh(task))
     assert aggregate == "inconclusive"
     assert receipt.uncovered_risk_paths == ("src/auth.py",)
 
@@ -401,15 +505,48 @@ def test_retirement_requires_a_result_and_can_block_the_aggregate():
     task = task_for(prior, current)
     assert task is not None and task.retirements
     results = fresh(task)
-    results.pop(task.retirements[0])
+    retirement_id = task.retirements[0].claim_id
+    results.pop(retirement_id)
     with pytest.raises(TrustClaimError, match="missing"):
-        compose_claim_verdict(prior, task, results)
-    failed = fresh(task, {task.retirements[0]: "fail"})
-    _, aggregate = compose_claim_verdict(prior, task, failed)
+        compose(prior, task, results)
+    failed = fresh(task, {retirement_id: "fail"})
+    failed_receipt, aggregate = compose(prior, task, failed)
     assert aggregate == "fail"
-    inconclusive = fresh(task, {task.retirements[0]: "inconclusive"})
-    _, aggregate = compose_claim_verdict(prior, task, inconclusive)
+    assert failed_receipt.retirements[retirement_id].verdict == "fail"
+    assert not receipt_covers(
+        failed_receipt,
+        source_identity=failed_receipt.source_identity,
+        tree_sha=failed_receipt.tree_sha,
+        manifest_sha256=failed_receipt.manifest_sha256,
+        risk_paths=current.risk_paths,
+    )
+    inconclusive = fresh(task, {retirement_id: "inconclusive"})
+    inconclusive_receipt, aggregate = compose(prior, task, inconclusive)
     assert aggregate == "inconclusive"
+    assert inconclusive_receipt.retirements[retirement_id].verdict == "inconclusive"
+    assert not receipt_covers(
+        inconclusive_receipt,
+        source_identity=inconclusive_receipt.source_identity,
+        tree_sha=inconclusive_receipt.tree_sha,
+        manifest_sha256=inconclusive_receipt.manifest_sha256,
+        risk_paths=current.risk_paths,
+    )
+    restored = type(failed_receipt).from_mapping(
+        failed_receipt.to_dict(), claim_set=current
+    )
+    assert restored.retirements == failed_receipt.retirements
+    tampered = failed_receipt.to_dict()
+    tampered["retirements"][retirement_id]["verdict"] = "pass"
+    with pytest.raises(TrustClaimError, match="receipt digest"):
+        type(failed_receipt).from_mapping(tampered, claim_set=current)
+    with pytest.raises(TrustClaimError, match="unresolved retirements"):
+        invalidate_claims(
+            failed_receipt,
+            current,
+            changed_paths=[],
+            base_moved=False,
+            risk_paths_added=[],
+        )
 
 
 def test_carried_claim_preserves_verifier_binding_and_names_prior_receipt():
@@ -421,7 +558,7 @@ def test_carried_claim_preserves_verifier_binding_and_names_prior_receipt():
     current = normalize_manifest(raw)
     task = task_for(prior, current, changed=["src/auth.py"])
     assert task is not None
-    receipt, aggregate = compose_claim_verdict(prior, task, fresh(task))
+    receipt, aggregate = compose(prior, task, fresh(task))
     carried_id = next(
         claim.claim_id for claim in current.claims if claim.text == "carried"
     )
@@ -442,8 +579,36 @@ def test_composition_rejects_a_different_previous_receipt_for_carried_claims():
     task = task_for(prior, current, changed=["src/auth.py"])
     assert task is not None
     unrelated = legacy(raw, source="unrelated", digest="d" * 64)
-    with pytest.raises(TrustClaimError, match="carried binding"):
-        compose_claim_verdict(unrelated, task, fresh(task))
+    with pytest.raises(TrustClaimError, match="previous receipt"):
+        compose(unrelated, task, fresh(task))
+
+
+def test_task_binds_previous_receipt_even_without_carried_claims():
+    raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
+    prior = legacy(raw)
+    current = normalize_manifest(raw)
+    task = task_for(prior, current, changed=["src/auth.py"])
+    assert task is not None and not task.carried_receipt_digests
+    unrelated = legacy(raw, source="unrelated", digest="d" * 64)
+    with pytest.raises(TrustClaimError, match="previous receipt"):
+        compose(unrelated, task, fresh(task))
+    with pytest.raises(TrustClaimError, match="previous receipt"):
+        type(task).from_mapping(task.to_dict(), claim_set=current, previous=unrelated)
+
+
+def test_carry_only_composition_rederives_invalidation():
+    raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
+    prior = legacy(raw)
+    current = normalize_manifest(raw)
+    invalidation = invalidate_claims(
+        prior, current, changed_paths=[], base_moved=False, risk_paths_added=[]
+    )
+    forged = replace(invalidation, changed_paths=("src/auth.py",))
+    with pytest.raises(TrustClaimError, match="carry invalidation"):
+        carry_trust_claim_receipt(
+            prior, current, forged, source_identity="source-2", tree_sha="2" * 40,
+            manifest_sha256=SHA, delta_from_tree_sha=TREE, changed_paths=["src/auth.py"],
+        )
 
 
 def test_composition_and_deserialization_reject_a_wrong_delta_base_tree():
@@ -457,7 +622,7 @@ def test_composition_and_deserialization_reject_a_wrong_delta_base_tree():
     assert task is not None
     forged = replace(task, delta_from_tree_sha="9" * 40)
     with pytest.raises(TrustClaimError, match="delta tree"):
-        compose_claim_verdict(prior, forged, fresh(forged))
+        compose(prior, forged, fresh(forged))
     with pytest.raises(TrustClaimError, match="delta tree"):
         type(task).from_mapping(
             forged.to_dict(), claim_set=current, previous=prior
@@ -491,7 +656,7 @@ def test_receipt_covers_exact_legacy_pass_and_legacy_seeding_is_conservative():
         "repository wide",
         {"text": "scoped", "paths": ["src/auth.py"]},
     )
-    receipt = legacy(raw)
+    receipt = legacy(raw, whole_manifest=True)
     assert receipt_covers(
         receipt,
         source_identity="source-1",
@@ -507,14 +672,33 @@ def test_receipt_covers_exact_legacy_pass_and_legacy_seeding_is_conservative():
         base_moved=False,
         risk_paths_added=[],
     )
-    wide = next(claim.claim_id for claim in current.claims if not claim.paths)
-    scoped = next(claim.claim_id for claim in current.claims if claim.paths)
-    assert invalidation.fresh_claim_ids == (wide,)
-    assert set(invalidation.carried_claims) == {scoped}
+    assert set(invalidation.fresh_claim_ids) == set(current.by_id)
+    assert not invalidation.carried_claims
+    assert set(invalidation.causes.values()) == {"repository-wide-dependency"}
     restored = type(receipt).from_mapping(
         receipt.to_dict(), claim_set=normalize_manifest(raw)
     )
     assert restored.to_dict() == receipt.to_dict()
+
+
+def test_pathless_legacy_receipt_covers_only_its_exact_whole_manifest_source():
+    raw = manifest("repository wide")
+    receipt = legacy(raw, whole_manifest=True)
+    assert receipt.uncovered_risk_paths == ("src/auth.py",)
+    assert receipt_covers(
+        receipt,
+        source_identity="source-1",
+        tree_sha=TREE,
+        manifest_sha256=SHA,
+        risk_paths=["src/auth.py"],
+    )
+    assert not receipt_covers(
+        receipt,
+        source_identity="source-2",
+        tree_sha=TREE,
+        manifest_sha256=SHA,
+        risk_paths=["src/auth.py"],
+    )
 
 
 def test_receipt_digest_tampering_is_detected():
@@ -537,7 +721,7 @@ def test_fresh_verdict_outside_the_closed_set_is_rejected():
     result = fresh(task)
     result[task.invalidated_claims[0].claim_id]["verdict"] = "clean"
     with pytest.raises(TrustClaimError, match="verdict is invalid"):
-        compose_claim_verdict(prior, task, result)
+        compose(prior, task, result)
 
 
 @pytest.mark.parametrize("change_kind", ["tree", "manifest-whitespace"])
@@ -558,16 +742,19 @@ def test_zero_invalidation_yields_a_carry_receipt_for_the_new_head(change_kind):
         base_moved=False,
         risk_paths_added=[],
     )
-    assert build_trust_claim_task(
-        current,
-        invalidation,
-        generation_ref="generation",
-        source_identity="source-2",
-        tree_sha="2" * 40,
-        manifest_sha256="b" * 64,
-        delta_from_tree_sha=prior.tree_sha,
-        changed_paths=changed,
-    ) is None
+    assert (
+        build_trust_claim_task(
+            current,
+            invalidation,
+            generation_ref="generation",
+            source_identity="source-2",
+            tree_sha="2" * 40,
+            manifest_sha256="b" * 64,
+            delta_from_tree_sha=prior.tree_sha,
+            changed_paths=changed,
+        )
+        is None
+    )
     carried, aggregate = carry_trust_claim_receipt(
         prior,
         current,
@@ -576,6 +763,7 @@ def test_zero_invalidation_yields_a_carry_receipt_for_the_new_head(change_kind):
         tree_sha="2" * 40,
         manifest_sha256="b" * 64,
         delta_from_tree_sha=prior.tree_sha,
+        changed_paths=changed,
     )
     assert aggregate == "pass"
     assert carried.tree_sha == "2" * 40
@@ -593,6 +781,48 @@ def test_zero_invalidation_yields_a_carry_receipt_for_the_new_head(change_kind):
     )
 
 
+def test_carry_only_preserves_a_failed_claim_as_fail():
+    raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
+    current = normalize_manifest(raw)
+    task = task_for(None, current)
+    assert task is not None
+    identity = current.claims[0].claim_id
+    prior, aggregate = compose(None, task, fresh(task, {identity: "fail"}))
+    assert aggregate == "fail"
+    invalidation = invalidate_claims(
+        prior, current, changed_paths=["README.md"], base_moved=False, risk_paths_added=[]
+    )
+    carried, aggregate = carry_trust_claim_receipt(
+        prior, current, invalidation, source_identity="source-3", tree_sha="3" * 40,
+        manifest_sha256=SHA, delta_from_tree_sha=prior.tree_sha, changed_paths=["README.md"],
+    )
+    assert aggregate == "fail"
+    assert carried.claims[identity].verdict == "fail"
+    assert carried.claims[identity].carried_from == prior.receipt_digest
+    assert not receipt_covers(
+        carried, source_identity="source-3", tree_sha="3" * 40,
+        manifest_sha256=SHA, risk_paths=current.risk_paths,
+    )
+
+
+def test_empty_claim_set_can_carry_to_a_new_head_without_a_task():
+    raw = manifest(risk_paths=[])
+    prior = legacy(raw)
+    current = normalize_manifest(raw)
+    invalidation = invalidate_claims(
+        prior, current, changed_paths=["README.md"], base_moved=False, risk_paths_added=[]
+    )
+    receipt, aggregate = carry_trust_claim_receipt(
+        prior, current, invalidation, source_identity="source-2", tree_sha="2" * 40,
+        manifest_sha256=SHA, delta_from_tree_sha=TREE, changed_paths=["README.md"],
+    )
+    assert aggregate == "pass"
+    assert receipt_covers(
+        receipt, source_identity="source-2", tree_sha="2" * 40,
+        manifest_sha256=SHA, risk_paths=[],
+    )
+
+
 def test_delivery_contract_states_exact_claim_coverage_rule():
     contract = (
         Path(__file__).parents[3] / "core" / "CONTRACT.md"
@@ -602,6 +832,14 @@ def test_delivery_contract_states_exact_claim_coverage_rule():
         "passes only when every claim passes and every required risk path is covered,\n"
         "exactly or by path-component prefix, by a passing claim that declares that\n"
         "coverage. Claims without declared paths provide no risk-path coverage."
+    ) in contract
+    assert (
+        "A legacy whole-manifest pass remains reusable at its exact source identity,\n"
+        "tree, and manifest digest because that pass judged the inventory as a whole,\n"
+        "even when its projected claims do not declare enough paths to cover the risk\n"
+        "inventory mechanically. At a changed source, the first claim-level run after\n"
+        "adoption is a full run; selective coverage reuse begins only with that first\n"
+        "claim-level receipt."
     ) in contract
 
 
@@ -633,3 +871,4 @@ def test_inconclusive_never_carries():
         risk_paths_added=[],
     )
     assert invalidation.fresh_claim_ids == (identity,)
+    assert invalidation.causes == {identity: "prior-inconclusive"}

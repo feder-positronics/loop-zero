@@ -182,6 +182,14 @@ claims without declared coverage are re-verified on any change. The aggregate
 passes only when every claim passes and every required risk path is covered,
 exactly or by path-component prefix, by a passing claim that declares that
 coverage. Claims without declared paths provide no risk-path coverage.
+Retirement verdicts remain bound in the receipt; any failed or inconclusive
+retirement prevents reuse of that receipt as a pass.
+A legacy whole-manifest pass remains reusable at its exact source identity,
+tree, and manifest digest because that pass judged the inventory as a whole,
+even when its projected claims do not declare enough paths to cover the risk
+inventory mechanically. At a changed source, the first claim-level run after
+adoption is a full run; selective coverage reuse begins only with that first
+claim-level receipt.
 
 Harness timeouts must leave tracked and untracked task changes intact. Record
 base, head, dirty state, completed checks and the next action; stop the old writer
