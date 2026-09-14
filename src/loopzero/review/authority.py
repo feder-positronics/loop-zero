@@ -139,6 +139,29 @@ def _archive_validator() -> Callable[..., bool]:
     return _ARCHIVE_VALIDATOR.get() or _DEFAULT_ARCHIVE_VALIDATOR
 
 
+def normalize_review_result(
+    result: Mapping[str, object], *, task: Mapping[str, object]
+) -> dict[str, object]:
+    """Apply package-owned post-schema checks at review-result intake."""
+    if not isinstance(result, Mapping):
+        raise DispatchError("governed review result must be an object")
+    review_intent = task.get("review_intent")
+    if review_intent == "trust-manifest-verification":
+        from ..runners._review_schema import (
+            TrustClaimResultError,
+            validate_trust_claim_result,
+        )
+
+        try:
+            validate_trust_claim_result(result)
+        except TrustClaimResultError as exc:
+            raise DispatchError(
+                f"governed trust result is inconsistent: {exc}"
+            ) from exc
+    _validate_result_findings(result.get("findings"))
+    return dict(result)
+
+
 def _latest_attempt_settlement_indices(
     records: Sequence[dict[str, object]],
     record_types: Collection[str] = ("attempt-terminal", "attempt-abort", "inline"),
@@ -218,10 +241,17 @@ def fold_in_governed_review_findings(
         raise DispatchError("governed fold-in result artifact is invalid") from exc
     if not isinstance(result, dict) or not isinstance(result.get("findings"), list):
         raise DispatchError("governed fold-in result artifact has no findings")
-    findings = _validate_result_findings(cast(list[object], result["findings"]))
     contract = terminal.get("task_contract")
     intent = contract.get("review_intent") if isinstance(contract, dict) else None
     review_intent = str(intent or terminal.get("review_intent") or "discovery")
+    normalized_result = normalize_review_result(
+        result,
+        task={
+            **(contract if isinstance(contract, dict) else {}),
+            "review_intent": review_intent,
+        },
+    )
+    findings = cast(list[dict[str, object]], normalized_result["findings"])
     if receipt is None:
         # Governed intake persists only material findings, so an accepted
         # terminal whose review returned nothing persistable carries no receipt

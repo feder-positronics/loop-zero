@@ -4,7 +4,18 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 
-from . import acceptance, authority, chain, evidence, findings, harness, preflight, risk, routing
+from . import (
+    acceptance,
+    authority,
+    chain,
+    evidence,
+    findings,
+    harness,
+    preflight,
+    risk,
+    routing,
+    trust_claims,
+)
 from ..config import ConfigError, Profile
 from ..kernel import settings as kernel_settings
 
@@ -59,5 +70,5 @@ def configure(
 
 __all__ = [
     "acceptance", "authority", "chain", "evidence", "findings", "harness",
-    "preflight", "risk", "routing", "configure"
+    "preflight", "risk", "routing", "trust_claims", "configure"
 ]

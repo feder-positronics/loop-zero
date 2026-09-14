@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero.runners.fake import FakeAdapter, ScenarioSpec
+from loopzero.runners.contract import governed_result_schema
 from loopzero.runners.registry import RuntimeRegistration, RuntimeRegistry
 from loopzero.review import harness
 
@@ -82,6 +83,41 @@ def test_harness_rejects_malformed_or_failed_runtime_result(tmp_path):
             _profile(tmp_path), worktree=tmp_path, alias="alternate", effort="low",
             prompt="review", attempt_id="attempt-2",
             adapter_options={"scenario": "timeout/expiry"},
+        )
+
+
+@pytest.mark.parametrize("explicit_intent", [False, True])
+def test_harness_rejects_runner_normalized_contradictory_trust_result(tmp_path, explicit_intent):
+    output_schema = governed_result_schema(
+        "trust-task",
+        task={
+            "work_kind": "review",
+            "review_intent": "trust-manifest-verification",
+        },
+    )
+    contradictory = {
+        "findings": [],
+        "verification_verdict": "pass",
+        "claim_verdicts": [
+            {
+                "claim_id": "tc_" + "a" * 64,
+                "verdict": "fail",
+                "rationale": "failed",
+            }
+        ],
+    }
+    with pytest.raises(harness.CrossHarnessError, match="trust result is inconsistent"):
+        harness.run_review(
+            _profile(tmp_path),
+            worktree=tmp_path,
+            alias="alternate",
+            effort="low",
+            prompt="review",
+            attempt_id="attempt-trust",
+            **({"review_intent": "trust-manifest-verification"} if explicit_intent else {"output_schema": output_schema}),
+            adapter_options={
+                "scenario": ScenarioSpec(output=json.dumps(contradictory))
+            },
         )
 
 
