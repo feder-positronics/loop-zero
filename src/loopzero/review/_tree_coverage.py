@@ -316,6 +316,78 @@ def chain_covers_tree(
     return False
 
 
+def _generation_chain_covers_tree(
+    records: Sequence[Mapping[str, object]],
+    terminal: Mapping[str, object],
+    *,
+    lens: str,
+    current_tree: str,
+) -> bool:
+    """Use authenticated generation carries as an additional exact-tree path."""
+    from ..kernel.authority_projection import generation_carries, generations
+    from ..kernel.canonical import canonical_record_digest
+    from ..kernel.review_state import patch_identity_digest
+    from ..kernel.seams import MissingAdapter
+
+    try:
+        projected = generations(records)  # type: ignore[arg-type]
+        carries = generation_carries(records)  # type: ignore[arg-type]
+    except MissingAdapter:
+        # Pre-cutover ledgers need consumer adapters for their compatibility
+        # projection. Missing adapters withhold coverage; they do not make the
+        # publication coverage predicate raise.
+        return False
+    terminal_identity = terminal.get("patch_identity")
+    terminal_tree = terminal.get("snapshot_tree_sha")
+    terminal_digest = (
+        patch_identity_digest(terminal_identity)
+        if isinstance(terminal_identity, Mapping)
+        else None
+    )
+    terminal_ref = canonical_record_digest(terminal)
+    candidates = [
+        generation
+        for generation in projected.values()
+        if lens in generation.required_sections
+        and (
+            generation.primary_origin_receipt == terminal_ref
+            or (
+                terminal_digest is not None
+                and generation.tree == terminal_tree
+                and patch_identity_digest(generation.patch_identity)
+                == terminal_digest
+            )
+        )
+    ]
+    if not candidates or not isinstance(terminal_tree, str):
+        return False
+
+    def carry_chain_covers(generation_id: str) -> bool:
+        # A source endpoint can have several authenticated successor proofs.
+        # Preserve that graph shape instead of collapsing it to one dict edge.
+        reachable = {terminal_tree}
+        for _ in range(64):
+            if current_tree in reachable:
+                return True
+            next_trees = {
+                str(carry.to_identity["candidate_tree_sha"])
+                for carry in carries
+                if carry.generation_id == generation_id
+                and lens in carry.sections
+                and carry.from_identity.get("candidate_tree_sha") in reachable
+                and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
+            }
+            if not next_trees.difference(reachable):
+                return False
+            reachable.update(next_trees)
+        return False
+
+    return any(
+        carry_chain_covers(generation.generation_id)
+        for generation in candidates
+    )
+
+
 def covers_frozen_tree(
     *,
     review_snapshot_tree: str | None,
@@ -424,12 +496,18 @@ def review_task_covers_tree(
     source = terminal.get("source_identity")
     snapshot_tree = terminal.get("snapshot_tree_sha")
     current_head = current_source.get("head")
+    generation_covered = _generation_chain_covers_tree(
+        records, terminal, lens=lens, current_tree=current_tree
+    )
     if (
         not isinstance(source, Mapping)
         or source.get("version") != 2
         or not isinstance(snapshot_tree, str)
         or not isinstance(current_head, str)
-        or source.get("ref") != current_source.get("ref")
+        or (
+            source.get("ref") != current_source.get("ref")
+            and not generation_covered
+        )
     ):
         return False
     review_identity = accepted_review_patch_identity(terminal)
@@ -461,6 +539,7 @@ def review_task_covers_tree(
         review_snapshot_tree=snapshot_tree,
         current_tree=current_tree,
         chain_covered=mechanical_review_carry(repo, terminal, current_tree)
+        or generation_covered
         or chain_covers_tree(snapshot_tree, edges, current_tree)
         or chain_covers_rebased_tree(
             repo,

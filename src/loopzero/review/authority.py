@@ -64,6 +64,7 @@ from .findings import (
     replay_finding_capture,
 )
 from ..kernel.sandbox import environment as sandbox_environment
+from ..runners.contract import ReviewOutcome
 from .chain import (
     review_chain_receipt_reasons,
     review_record_lens as review_gate_lens,
@@ -73,6 +74,133 @@ DELTA_CUMULATIVE_LINE_CAP = 300
 DELTA_REVIEW_PATCH_MAX_BYTES = 225_000
 CONTROL_TYPE = "delivery-control"
 _ARCHIVE_VALIDATOR: ContextVar[Callable[..., bool] | None]
+
+
+def _accepted_terminal_verdict(terminal: Mapping[str, object]) -> str | None:
+    """Derive a verdict from a validated accepted-terminal chain receipt."""
+    receipt = terminal.get("review_chain_receipt")
+    if isinstance(receipt, Mapping):
+        required = receipt.get("required_sections")
+        sections = receipt.get("sections")
+        if (
+            isinstance(required, list)
+            and required
+            and isinstance(sections, Mapping)
+            and set(required) == set(sections)
+            and all(
+                isinstance(sections.get(section), Mapping)
+                and sections[section].get("completion") == "completed"
+                and sections[section].get("verdict") in {"clean", "findings"}
+                for section in required
+            )
+        ):
+            return "fail" if any(
+                sections[section].get("verdict") == "findings"
+                for section in required
+            ) else "pass"
+    return None
+
+
+def authenticated_review_verdict(
+    terminal: object, records: Sequence[Mapping[str, object]] = ()
+) -> str | None:
+    """Return the authenticated pass/fail fact carried by one terminal."""
+    if not isinstance(terminal, Mapping):
+        return None
+    mapped = cast(Sequence[dict[str, object]], records)
+    terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
+    coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
+    retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
+    if id(terminal) not in terminal_ids | coordinator_ids and not retained:
+        return None
+    task_id = terminal.get("task_id")
+    terminal_index = next(
+        (index for index, record in enumerate(records) if record is terminal), None
+    )
+    verdict: str | None = None
+    if (
+        retained
+        and terminal.get("review_acceptance_verified") is True
+        and terminal.get("accepted_verdict") in {"pass", "fail"}
+    ):
+        verdict = cast(str, terminal["accepted_verdict"])
+    if isinstance(task_id, str) and terminal_index is not None:
+        for record in records[terminal_index + 1 :]:
+            if (
+                id(record) in coordinator_ids
+                and record.get("type") == "verdict"
+                and record.get("task_id") == task_id
+                and record.get("verdict") in {"pass", "fail"}
+                and (
+                    terminal.get("run_id") is None
+                    or record.get("run_id") == terminal.get("run_id")
+                )
+            ):
+                verdict = cast(str, record["verdict"])
+    try:
+        accepted = accepted_review_terminals(cast(Sequence[dict[str, object]], records))
+    except (DispatchError, RuntimeError, ValueError):
+        accepted = {}
+    if isinstance(task_id, str) and accepted.get(task_id) is terminal:
+        verdict = verdict or _accepted_terminal_verdict(terminal)
+    return verdict
+
+
+def classify_review_outcome(
+    terminal: object, records: Sequence[Mapping[str, object]] = ()
+) -> ReviewOutcome:
+    """Map ledger-authenticated terminal and verdict facts to slot accounting."""
+    if not isinstance(terminal, Mapping):
+        return ReviewOutcome.UNRESOLVED
+    mapped = cast(Sequence[dict[str, object]], records)
+    terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
+    coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
+    retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
+    if id(terminal) not in terminal_ids | coordinator_ids and not retained:
+        return ReviewOutcome.UNRESOLVED
+    status = terminal.get("status")
+    reason = terminal.get("terminal_reason")
+    failure = terminal.get("failure_class")
+    verdict = authenticated_review_verdict(terminal, records)
+    verification = terminal.get("verification_verdict")
+
+    # A verdict is the review's content fact regardless of how the surrounding
+    # runner terminal closed.  Timeout and operator termination only release a
+    # slot when no authenticated result survived the terminal boundary.
+    if verdict is not None:
+        return ReviewOutcome.CONSUMED
+    if reason == "model-result" or failure == "model-result":
+        return ReviewOutcome.RELEASED
+    if reason == "budget-exhausted-after-result":
+        return ReviewOutcome.UNRESOLVED
+    if reason == "budget-exhausted" or failure in {"budget-kill", "budget"}:
+        return ReviewOutcome.RELEASED
+    if verification == "inconclusive":
+        return ReviewOutcome.RELEASED
+    released_reasons = {
+        "timeout",
+        "transport-disconnect",
+        "malformed-event",
+        "missing-terminal-event",
+        "startup-failure",
+        "protocol-failure",
+        "subscription-unavailable",
+        "cancelled",
+        "commercial-boundary",
+    }
+    released_failures = {
+        "verified-limit",
+        "output-limit",
+        "engine-output",
+        "engine-output-failure",
+        "operator-terminated",
+        "transport-disconnect",
+        "protocol-failure",
+        "packaging-failure",
+    }
+    if reason in released_reasons or failure in released_failures:
+        return ReviewOutcome.RELEASED
+    return ReviewOutcome.UNRESOLVED
 
 
 def uncarryable_delta_authority_is_valid(

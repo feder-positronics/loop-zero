@@ -6,6 +6,7 @@ import pytest
 from loopzero.config import Alias, Tier
 from loopzero.kernel.gitscope import DispatchError
 from loopzero.review import routing
+from loopzero.review import authority
 
 
 def configure():
@@ -62,3 +63,74 @@ def test_verifier_must_be_a_different_configured_model():
         worker_model="consumer-model-1", verifier_identity="session-2",
         verifier_alias="writer",
     )
+
+
+def retry_outcome(task_id, *, reason="transport-disconnect"):
+    return {
+        "type": "attempt-terminal",
+        "task_id": task_id,
+        "work_unit_id": task_id,
+        "unit_attempt_number": 1,
+        "effective_alias": "luna",
+        "status": "infrastructure-failure",
+        "terminal_reason": reason,
+        "review_lineage_id": "rl_" + "1" * 32,
+        "review_generation_id": "cg_" + "2" * 32,
+        "review_family": "delivery",
+        "review_slot_kind": "primary",
+    }
+
+
+def test_retry_bound_is_per_content_obligation_across_task_ids(monkeypatch):
+    first = retry_outcome("provider-one")
+    monkeypatch.setattr(authority, "authenticated_retry_outcomes", lambda rows: rows)
+    monkeypatch.setattr(
+        authority, "_authenticated_attempt_terminal_ids",
+        lambda rows, **kwargs: frozenset(map(id, rows)),
+    )
+    assert routing.validate_retry_policy(
+        [first],
+        task_id="provider-two",
+        work_unit_id="different-work-unit",
+        alias="terra",
+        effort="high",
+        lineage="rl_" + "1" * 32,
+        generation="cg_" + "2" * 32,
+        family="delivery",
+        slot_kind="primary",
+    ) == 2
+
+    second = {**retry_outcome("provider-two"), "unit_attempt_number": 2}
+    with pytest.raises(DispatchError, match="retry budget exhausted"):
+        routing.validate_retry_policy(
+            [first, second],
+            task_id="provider-three",
+            work_unit_id="yet-another-unit",
+            alias="sol",
+            effort="high",
+            lineage="rl_" + "1" * 32,
+            generation="cg_" + "2" * 32,
+            family="delivery",
+            slot_kind="primary",
+        )
+
+
+def test_unresolved_obligation_cannot_retry(monkeypatch):
+    unresolved = retry_outcome("unknown", reason="unknown-provider-result")
+    monkeypatch.setattr(authority, "authenticated_retry_outcomes", lambda rows: rows)
+    monkeypatch.setattr(
+        authority, "_authenticated_attempt_terminal_ids",
+        lambda rows, **kwargs: frozenset(map(id, rows)),
+    )
+    with pytest.raises(DispatchError, match="not released"):
+        routing.validate_retry_policy(
+            [unresolved],
+            task_id="retry",
+            work_unit_id="retry",
+            alias="terra",
+            effort="high",
+            lineage="rl_" + "1" * 32,
+            generation="cg_" + "2" * 32,
+            family="delivery",
+            slot_kind="primary",
+        )

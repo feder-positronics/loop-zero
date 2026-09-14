@@ -6,6 +6,7 @@ from threading import Lock
 
 from . import (
     acceptance,
+    admission,
     authority,
     chain,
     evidence,
@@ -69,6 +70,6 @@ def configure(
         _DEFAULT_PROFILE = profile
 
 __all__ = [
-    "acceptance", "authority", "chain", "evidence", "findings", "harness",
-    "preflight", "risk", "routing", "trust_claims", "configure"
+    "acceptance", "admission", "authority", "chain", "evidence", "findings",
+    "harness", "preflight", "risk", "routing", "trust_claims", "configure"
 ]

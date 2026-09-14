@@ -1,5 +1,6 @@
 from loopzero.kernel import authority as kernel_authority, authority_store, seams
 from loopzero.review import authority
+from loopzero.runners.contract import ReviewOutcome
 import copy
 import pytest
 
@@ -34,6 +35,24 @@ def test_archive_anchor_is_accepted_history_only():
     assert authority.passing_archive_anchor([row], "review-1") is row
     assert authority.passing_archive_anchor([{**row, "accepted_verdict": "fail"}], "review-1") is None
     assert authority.passing_archive_anchor([row, row], "review-1") is None
+
+
+def test_checkpoint_retained_retry_outcome_remains_classifiable():
+    released = Retained(
+        type="attempt-terminal",
+        task_id="retry",
+        status="infrastructure-failure",
+        terminal_reason="transport-disconnect",
+    )
+    consumed = Retained(
+        type="attempt-terminal",
+        task_id="review",
+        status="completed",
+        review_acceptance_verified=True,
+        accepted_verdict="pass",
+    )
+    assert authority.classify_review_outcome(released) is ReviewOutcome.RELEASED
+    assert authority.classify_review_outcome(consumed) is ReviewOutcome.CONSUMED
 
 
 def test_archive_deposits_fail_closed_without_excluded_controller_validator():
@@ -146,3 +165,138 @@ def test_archived_review_witness_rejects_identity_or_signature_damage(damage):
 
     with pytest.raises(authority.DispatchError):
         authority.validate_archived_review_witness(damaged, anchor)
+
+
+@pytest.fixture
+def outcome_authentication(monkeypatch):
+    monkeypatch.setattr(
+        authority,
+        "_authenticated_attempt_terminal_ids",
+        lambda rows, **kwargs: frozenset(
+            id(row) for row in rows if row.get("ledger_authenticated") is True
+        ),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_authenticated_coordinator_record_ids",
+        lambda rows: frozenset(
+            id(row) for row in rows if row.get("coordinator_authenticated") is True
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("terminal_reason", "model-result"),
+        ("terminal_reason", "budget-exhausted"),
+        ("terminal_reason", "timeout"),
+        ("terminal_reason", "transport-disconnect"),
+        ("terminal_reason", "malformed-event"),
+        ("terminal_reason", "missing-terminal-event"),
+        ("terminal_reason", "startup-failure"),
+        ("terminal_reason", "protocol-failure"),
+        ("terminal_reason", "subscription-unavailable"),
+        ("terminal_reason", "cancelled"),
+        ("terminal_reason", "commercial-boundary"),
+        ("failure_class", "verified-limit"),
+        ("failure_class", "output-limit"),
+        ("failure_class", "engine-output"),
+        ("failure_class", "engine-output-failure"),
+        ("failure_class", "operator-terminated"),
+        ("failure_class", "transport-disconnect"),
+        ("failure_class", "protocol-failure"),
+        ("failure_class", "packaging-failure"),
+        ("failure_class", "budget-kill"),
+        ("failure_class", "budget"),
+        ("verification_verdict", "inconclusive"),
+    ),
+)
+def test_each_authenticated_release_class_without_a_verdict_releases(
+    outcome_authentication, field, value
+):
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "status": "failed",
+        field: value,
+        "ledger_authenticated": True,
+    }
+    assert authority.classify_review_outcome(terminal, [terminal]) is ReviewOutcome.RELEASED
+
+
+@pytest.mark.parametrize(
+    "reason", (None, "model-result", "budget-exhausted-after-result")
+)
+def test_coordinator_verdict_consumes(outcome_authentication, reason):
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "run_id": "run",
+        "status": "completed" if reason is None else "failed",
+        "ledger_authenticated": True,
+    }
+    if reason is not None:
+        terminal["terminal_reason"] = reason
+    verdict = {
+        "type": "verdict",
+        "task_id": "review",
+        "run_id": "run",
+        "verdict": "fail",
+        "coordinator_authenticated": True,
+    }
+    assert authority.classify_review_outcome(
+        terminal, [terminal, verdict]
+    ) is ReviewOutcome.CONSUMED
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("terminal_reason", "timeout"),
+        ("failure_class", "operator-terminated"),
+    ),
+)
+def test_authenticated_verdict_dominates_noncompleted_terminal_class(
+    outcome_authentication, field, value
+):
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "run_id": "run",
+        "status": "failed",
+        field: value,
+        "ledger_authenticated": True,
+    }
+    verdict = {
+        "type": "verdict",
+        "task_id": "review",
+        "run_id": "run",
+        "verdict": "fail",
+        "coordinator_authenticated": True,
+    }
+
+    assert authority.classify_review_outcome(
+        terminal, [terminal, verdict]
+    ) is ReviewOutcome.CONSUMED
+
+
+def test_self_asserted_authentication_without_ledger_verdict_is_unresolved(
+    outcome_authentication,
+):
+    forged = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "status": "completed",
+        "ledger_authenticated": True,
+        "review_acceptance_verified": True,
+        "accepted_verdict": "pass",
+        "verdict_authenticated": True,
+        "authenticated_verdict": {"verdict": "pass", "authenticated": True},
+    }
+    assert authority.classify_review_outcome(forged, [forged]) is ReviewOutcome.UNRESOLVED
+
+
+def test_unknown_or_unrecorded_terminal_is_unresolved(outcome_authentication):
+    terminal = {"status": "forged", "terminal_reason": "invented"}
+    assert authority.classify_review_outcome(terminal, [terminal]) is ReviewOutcome.UNRESOLVED

@@ -2,6 +2,7 @@
 
 from .contract import (
     RUNTIME_PROGRESS_PROTOCOL_VERSION,
+    ReviewOutcome,
     RuntimeAdapter,
     RuntimeCapabilityProfile,
     RuntimeCostSource,
@@ -23,6 +24,7 @@ from .settings import RuntimeBudget, RuntimeSettings
 
 __all__ = [
     "RUNTIME_PROGRESS_PROTOCOL_VERSION",
+    "ReviewOutcome",
     "RuntimeAdapter",
     "RuntimeEvent",
     "RuntimePhase",

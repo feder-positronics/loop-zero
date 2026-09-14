@@ -106,6 +106,14 @@ class RuntimeStatus(StrEnum):
     SUBSCRIPTION_UNAVAILABLE = "subscription-unavailable"
 
 
+class ReviewOutcome(StrEnum):
+    """Slot-accounting effect of one authenticated review terminal."""
+
+    CONSUMED = "consumed"
+    RELEASED = "released"
+    UNRESOLVED = "unresolved"
+
+
 class RuntimeCostStatus(StrEnum):
     """Evidence strength for a normalized runtime cost value."""
 

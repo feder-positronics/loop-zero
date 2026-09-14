@@ -1,0 +1,535 @@
+"""Shared, storage-agnostic admission for content-addressed reviews.
+
+The import dependency closure intentionally is not computed in this release.
+``closure_paths`` is the exact union of changed paths and security-trigger
+paths; the repository-aware closure belongs in a later ``review/scope.py``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path, PurePosixPath
+from typing import Literal, cast
+
+from ..kernel.authority_projection import generations, slot_state
+from ..kernel.canonical import canonical_record_digest
+from ..kernel.patch_identity import PatchIdentityError, tree_diff_paths
+from ..kernel.review_state import (
+    GenerationCarryV1,
+    ReviewGenerationV1,
+    ReviewSlotError,
+    ReviewSlotReservation,
+    _reserve_review_slot,
+    assert_authority_ledger_lock_held,
+    fresh_review_generation,
+    resolve_generation,
+)
+from ._security_scope import (
+    SecurityReviewScopeError,
+    security_trigger_paths_between,
+)
+
+BlockedCode = Literal[
+    "stale-source",
+    "invalid-proof",
+    "missing-evidence",
+    "slot-held",
+    "slots-exhausted",
+    "retries-exhausted",
+    "oversized-delta",
+    "reservation-conflict",
+]
+RequestedReview = Literal["review", "delta"]
+
+MAX_DELTA_SCOPE_PATHS = 300
+
+
+@dataclass(frozen=True, slots=True)
+class Carry:
+    generation: ReviewGenerationV1
+    receipts: tuple[str, ...]
+    verdicts: tuple[tuple[str, Literal["pass", "fail"]], ...]
+    carry_record: GenerationCarryV1
+    records_to_append: tuple[Mapping[str, object], ...]
+    dispatch: bool = field(default=False, init=False)
+    kind: str = field(default="carry", init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class Reserved:
+    generation: ReviewGenerationV1
+    slot: ReviewSlotReservation
+    scoped_task: Mapping[str, object]
+    records_to_append: tuple[Mapping[str, object], ...]
+    dispatch: bool = field(default=True, init=False)
+    kind: str = field(default="reserved", init=False)
+
+    @property
+    def reservation(self) -> ReviewSlotReservation:
+        return self.slot
+
+
+@dataclass(frozen=True, slots=True)
+class Blocked:
+    code: BlockedCode
+    evidence: Mapping[str, object]
+    records_to_append: tuple[Mapping[str, object], ...] = ()
+    dispatch: bool = field(default=False, init=False)
+    kind: str = field(default="blocked", init=False)
+
+
+Admission = Carry | Reserved | Blocked
+
+
+def _blocked(
+    code: BlockedCode,
+    message: str,
+    *,
+    records: Sequence[Mapping[str, object]] = (),
+    **evidence: object,
+) -> Blocked:
+    return Blocked(
+        code,
+        {"message": message, **evidence},
+        tuple(records),
+    )
+
+
+def _task_source(task: Mapping[str, object]) -> Mapping[str, object] | None:
+    source = task.get("source_identity")
+    if isinstance(source, Mapping):
+        return source
+    contract = task.get("task_contract")
+    if isinstance(contract, Mapping) and isinstance(
+        contract.get("source_identity"), Mapping
+    ):
+        return cast(Mapping[str, object], contract["source_identity"])
+    return None
+
+
+def _canonical_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise ValueError(f"{label} must be a sequence")
+    normalized: set[str] = set()
+    for value in values:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{label} contains an invalid path")
+        path = PurePosixPath(value)
+        if path.is_absolute() or ".." in path.parts or str(path) != value:
+            raise ValueError(f"{label} contains a non-canonical path")
+        normalized.add(value)
+    return tuple(sorted(normalized))
+
+
+def _review_family(task: Mapping[str, object]) -> Literal["delivery", "trust"]:
+    contract = task.get("task_contract")
+    intent = (
+        contract.get("review_intent")
+        if isinstance(contract, Mapping)
+        else task.get("review_intent")
+    )
+    return "trust" if intent == "trust-manifest-verification" else "delivery"
+
+
+def admit_review(
+    repository: Path,
+    records: Sequence[Mapping[str, object]],
+    *,
+    repository_binding: str,
+    task: Mapping[str, object],
+    current_source_identity: Mapping[str, object],
+    current_tree_sha: str,
+    patch_identity: Mapping[str, object],
+    required_sections: Sequence[str],
+    equivalence_proof: object | None,
+    format_only_proof: object | None,
+    requested: RequestedReview,
+    changed_paths: Sequence[str] | None,
+    security_trigger_paths: Sequence[str],
+    changed_paths_digest: str | None = None,
+    diff_sha256: str | None = None,
+) -> Admission:
+    """Resolve content, carry valid coverage, or reserve one bounded review."""
+    assert_authority_ledger_lock_held(repository)
+    if requested not in {"review", "delta"}:
+        return _blocked("reservation-conflict", "unknown requested review kind")
+    if not isinstance(task, Mapping) or not isinstance(
+        current_source_identity, Mapping
+    ):
+        return _blocked("missing-evidence", "review source evidence is missing")
+    task_source = _task_source(task)
+    if task_source is not None and dict(task_source) != dict(current_source_identity):
+        return _blocked(
+            "stale-source",
+            "task source no longer matches the current source identity",
+        )
+    identity_tree = patch_identity.get("candidate_tree_sha")
+    current_head = current_source_identity.get("head")
+    identity_head = patch_identity.get("candidate_sha")
+    if identity_tree != current_tree_sha or (
+        isinstance(current_head, str)
+        and isinstance(identity_head, str)
+        and current_head != identity_head
+    ):
+        return _blocked(
+            "stale-source", "patch identity no longer matches the current source"
+        )
+    task_id = task.get("task_id")
+    idempotency_key = task.get("idempotency_key")
+    if not isinstance(task_id, str) or not task_id or not isinstance(
+        idempotency_key, str
+    ) or not idempotency_key:
+        return _blocked(
+            "missing-evidence", "task_id and idempotency_key are required"
+        )
+    try:
+        supplied_changed = (
+            None
+            if changed_paths is None
+            else _canonical_paths(changed_paths, label="changed paths")
+        )
+        # Validate the legacy caller field, but never use it as authority. The
+        # exact Git objects are classified below by the package-owned policy.
+        _canonical_paths(
+            security_trigger_paths, label="security trigger paths"
+        )
+    except ValueError as exc:
+        return _blocked("missing-evidence", str(exc))
+    if (
+        changed_paths_digest is not None
+        and diff_sha256 is not None
+        and changed_paths_digest != diff_sha256
+    ):
+        return _blocked("invalid-proof", "conflicting caller diff digests")
+    supplied_diff_digest = (
+        changed_paths_digest
+        if changed_paths_digest is not None
+        else diff_sha256
+    )
+
+    resolution = resolve_generation(
+        records,
+        repository_binding=repository_binding,
+        patch_identity=patch_identity,
+        tree_sha=current_tree_sha,
+        required_sections=required_sections,
+        equivalence_proof=equivalence_proof,
+        format_only_proof=format_only_proof,
+    )
+    if resolution.kind == "refused" or resolution.generation is None:
+        reason = str(resolution.reason or "missing-evidence")
+        code: BlockedCode = (
+            "invalid-proof" if reason == "invalid-proof" else "missing-evidence"
+        )
+        return _blocked(code, reason)
+    generation = resolution.generation
+    requested_sections = tuple(sorted(set(required_sections)))
+    if (
+        resolution.kind == "same"
+        and generation.required_sections != requested_sections
+    ):
+        return _blocked(
+            "missing-evidence",
+            "required sections conflict with the existing content generation",
+            generation_id=generation.generation_id,
+        )
+    carry_record = resolution.carry
+    # A carry endpoint is the immediate reviewed content boundary.  Diffing a
+    # later delta against the generation root would reintroduce base motion and
+    # can falsely inflate a bounded repair into an oversized delta.
+    diff_from_tree = None
+    if carry_record is not None:
+        candidate = carry_record.from_identity.get("candidate_tree_sha")
+        diff_from_tree = candidate if isinstance(candidate, str) else None
+    if diff_from_tree is None:
+        diff_from_tree = generation.delta_from_tree
+    if diff_from_tree is None:
+        base_tree = patch_identity.get("base_tree_sha")
+        diff_from_tree = base_tree if isinstance(base_tree, str) else None
+    if diff_from_tree is None:
+        if supplied_changed not in {None, ()} or supplied_diff_digest is not None:
+            return _blocked(
+                "invalid-proof", "changed paths have no kernel-verifiable source tree"
+            )
+        changed: tuple[str, ...] = ()
+        actual_diff_digest: str | None = None
+    else:
+        try:
+            changed, actual_diff_digest = tree_diff_paths(
+                repository, diff_from_tree, current_tree_sha
+            )
+        except PatchIdentityError as exc:
+            return _blocked("invalid-proof", str(exc))
+        if supplied_changed is not None and (
+            supplied_diff_digest != actual_diff_digest
+            or supplied_changed != changed
+        ):
+            return _blocked(
+                "invalid-proof",
+                "caller path scope does not match the kernel tree diff",
+                expected_diff_digest=actual_diff_digest,
+            )
+    security_from_tree = patch_identity.get("base_tree_sha")
+    if not isinstance(security_from_tree, str):
+        return _blocked(
+            "missing-evidence", "patch identity has no recorded base tree"
+        )
+    try:
+        _identity_paths, identity_diff_digest = tree_diff_paths(
+            repository, security_from_tree, current_tree_sha
+        )
+        if identity_diff_digest != patch_identity.get("diff_sha256"):
+            return _blocked(
+                "invalid-proof",
+                "patch identity diff does not match its recorded base tree",
+                expected_diff_digest=identity_diff_digest,
+            )
+        security = _canonical_paths(
+            security_trigger_paths_between(
+                repository, security_from_tree, current_tree_sha
+            ),
+            label="kernel security trigger paths",
+        )
+    except (SecurityReviewScopeError, ValueError) as exc:
+        return _blocked("invalid-proof", f"security classification failed: {exc}")
+    if resolution.kind == "new":
+        generation = replace(
+            generation,
+            delta_sha256=actual_diff_digest,
+            changed_paths=changed,
+            dependency_paths=tuple(
+                sorted(set(security).difference(changed))
+            ),
+        )
+    family = _review_family(task)
+    state = slot_state(
+        cast(Sequence[dict[str, object]], records), generation.generation_id, family
+    )
+    inherited_primary = (
+        generation.primary_origin_receipt if family == "delivery" else None
+    )
+    if (
+        inherited_primary is None
+        and resolution.kind == "new"
+        and generation.predecessor_id is not None
+    ):
+        predecessor = generations(
+            cast(Sequence[dict[str, object]], records)
+        ).get(generation.predecessor_id)
+        predecessor_state = slot_state(
+            cast(Sequence[dict[str, object]], records),
+            generation.predecessor_id,
+            family,
+        )
+        if (
+            predecessor_state.own_primary_consumed
+            or (
+                predecessor_state.inherited_primary_ref is not None
+                and predecessor is not None
+                and (
+                    not predecessor.invalidated_sections
+                    or predecessor_state.delta_consumed
+                )
+            )
+        ):
+            inherited_primary = predecessor_state.primary_terminal_ref
+    has_primary = state.primary_consumed or inherited_primary is not None
+    append_before_slot: list[Mapping[str, object]] = []
+    carry_proof = carry_record.proof if carry_record is not None else None
+    if isinstance(carry_proof, Mapping) and isinstance(
+        carry_proof.get("proof"), Mapping
+    ):
+        carry_proof = cast(Mapping[str, object], carry_proof["proof"])
+    if (
+        carry_record is not None
+        and "security" in carry_record.sections
+        and isinstance(carry_proof, Mapping)
+        and isinstance(carry_proof.get("base_path_overlap"), list)
+        and set(cast(list[object], carry_proof["base_path_overlap"]))
+        .intersection(security)
+    ):
+        # Base motion across a security-trigger path keeps content lineage but
+        # cannot carry that section's coverage.
+        carry_record = GenerationCarryV1(
+            generation_id=carry_record.generation_id,
+            from_identity=carry_record.from_identity,
+            to_identity=carry_record.to_identity,
+            proof=carry_record.proof,
+            sections=tuple(
+                section for section in carry_record.sections
+                if section != "security"
+            ),
+        )
+    if resolution.kind == "new":
+        append_before_slot.append(generation.to_dict())
+    elif (
+        carry_record is not None
+        and carry_record.from_identity != carry_record.to_identity
+    ):
+        append_before_slot.append(carry_record.to_dict())
+
+    # Equivalence, format-only, and exact-content lookup are all zero author
+    # churn.  A standing consumed primary is therefore a content fact and no
+    # dispatcher call is admitted.
+    complete_carry = bool(
+        carry_record is not None
+        and set(generation.required_sections) <= set(carry_record.sections)
+    )
+    own_primary_consumed = state.own_primary_consumed
+    inherited_coverage_complete = bool(
+        inherited_primary is not None
+        and (
+            not generation.invalidated_sections
+            or state.delta_consumed
+        )
+    )
+    if (
+        resolution.kind == "same"
+        and (own_primary_consumed or inherited_coverage_complete)
+        and complete_carry
+    ):
+        receipts = state.receipts
+        if inherited_primary is not None and inherited_primary not in receipts:
+            receipts = (inherited_primary, *receipts)
+        if not receipts:
+            return _blocked(
+                "missing-evidence",
+                "generation primary verdict has no authenticated receipt",
+                records=append_before_slot,
+            )
+        from .authority import authenticated_review_verdict
+
+        terminal_by_digest = {
+            canonical_record_digest(record): record
+            for record in records
+            if isinstance(record, Mapping)
+        }
+        verdicts: list[tuple[str, Literal["pass", "fail"]]] = []
+        for receipt in receipts:
+            verdict = authenticated_review_verdict(
+                terminal_by_digest.get(receipt), records
+            )
+            if verdict not in {"pass", "fail"}:
+                return _blocked(
+                    "missing-evidence",
+                    "generation receipt has no authenticated verdict",
+                    records=append_before_slot,
+                    terminal_ref=receipt,
+                )
+            verdicts.append(
+                (receipt, cast(Literal["pass", "fail"], verdict))
+            )
+        return Carry(
+            generation=generation,
+            receipts=receipts,
+            verdicts=tuple(verdicts),
+            carry_record=cast(GenerationCarryV1, carry_record),
+            records_to_append=tuple(append_before_slot),
+        )
+
+    closure = tuple(sorted(set(changed).union(security)))
+    if (
+        has_primary
+        and requested == "review"
+        and resolution.kind == "new"
+        and len(closure) > MAX_DELTA_SCOPE_PATHS
+    ):
+        # A bounded delta cannot cover this successor.  An explicit full-review
+        # request may detach it into a fresh lineage, but only after the kernel
+        # has measured the same oversized scope; small repairs cannot widen.
+        generation = fresh_review_generation(generation)
+        state = slot_state(
+            cast(Sequence[dict[str, object]], records),
+            generation.generation_id,
+            family,
+        )
+        inherited_primary = None
+        has_primary = state.primary_consumed
+        append_before_slot = [generation.to_dict()]
+
+    if has_primary and requested != "delta":
+        return _blocked(
+            "slots-exhausted",
+            "generation already has a primary; only a delta is admissible",
+            records=append_before_slot,
+        )
+    if not has_primary and requested == "delta":
+        return _blocked(
+            "missing-evidence",
+            "delta review requires exactly one settled primary",
+            records=append_before_slot,
+        )
+
+    slot_kind: Literal["primary", "delta"] = "delta" if has_primary else "primary"
+    delta_scope: dict[str, object] | None = None
+    if slot_kind == "delta":
+        if len(closure) > MAX_DELTA_SCOPE_PATHS:
+            return _blocked(
+                "oversized-delta",
+                "delta closure exceeds the fixed path bound",
+                records=append_before_slot,
+                path_count=len(closure),
+                maximum=MAX_DELTA_SCOPE_PATHS,
+            )
+        from_tree = diff_from_tree
+        if not isinstance(from_tree, str):
+            return _blocked(
+                "missing-evidence",
+                "delta generation has no predecessor tree",
+                records=append_before_slot,
+            )
+        delta_scope = {
+            "from_tree": from_tree,
+            "to_tree": current_tree_sha,
+            "changed_paths": list(changed),
+            "closure_paths": list(closure),
+        }
+    try:
+        reservation = _reserve_review_slot(
+            records,
+            generation_id=generation.generation_id,
+            family=family,
+            slot_kind=slot_kind,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            prospective_generation=(generation if resolution.kind == "new" else None),
+            prospective_inherited_primary=(inherited_primary is not None),
+        )
+    except ReviewSlotError as exc:
+        code = cast(BlockedCode, exc.code)
+        return _blocked(code, str(exc), records=append_before_slot)
+    if reservation.existing and reservation.conflict:
+        return _blocked(
+            "slot-held",
+            "review family already has an outstanding reservation",
+            records=append_before_slot,
+            reservation_id=reservation.reservation_id,
+        )
+
+    scoped_task = {
+        **dict(task),
+        "source_identity": dict(current_source_identity),
+        "snapshot_tree_sha": current_tree_sha,
+        "patch_identity": dict(patch_identity),
+        "required_sections": list(generation.required_sections),
+        "review_lineage_id": generation.lineage_id,
+        "review_generation_id": generation.generation_id,
+        "review_family": family,
+        "review_slot_kind": slot_kind,
+        "review_reservation_id": reservation.reservation_id,
+    }
+    if delta_scope is not None:
+        scoped_task["delta_scope"] = delta_scope
+    to_append = list(append_before_slot)
+    if not reservation.existing:
+        to_append.append(reservation.to_dict())
+    return Reserved(
+        generation=generation,
+        slot=reservation,
+        scoped_task=scoped_task,
+        records_to_append=tuple(to_append),
+    )
+
+
+__all__ = ["Admission", "Blocked", "Carry", "Reserved", "admit_review"]

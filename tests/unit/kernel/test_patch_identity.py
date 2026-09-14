@@ -102,6 +102,21 @@ def test_patch_identity_git_scrubs_exec_path(
     assert "DYLD_INSERT_LIBRARIES" not in environment
 
 
+def test_tree_diff_paths_is_tree_bound_and_keeps_both_rename_endpoints(
+    patch_repo: Path,
+) -> None:
+    before = git(patch_repo, "rev-parse", "HEAD^{tree}")
+    git(patch_repo, "mv", "shared.txt", "renamed.txt")
+    after_commit = commit_all(patch_repo, "rename")
+    after = git(patch_repo, "rev-parse", f"{after_commit}^{{tree}}")
+
+    paths, digest = module.tree_diff_paths(patch_repo, before, after)
+
+    assert paths == ("renamed.txt", "shared.txt")
+    assert len(digest) == 64
+    assert module.tree_diff_paths(patch_repo, before, after) == (paths, digest)
+
+
 @pytest.fixture
 def patch_repo(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"

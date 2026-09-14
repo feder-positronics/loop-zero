@@ -416,6 +416,55 @@ def _changed_paths(repo: Path, left: str, right: str) -> set[str]:
     }
 
 
+def tree_diff_paths(
+    repo: Path, from_tree: str, to_tree: str
+) -> tuple[tuple[str, ...], str]:
+    """Return the kernel-derived path scope and digest for two exact trees.
+
+    The digest is the SHA-256 of the same fixed, binary-capable Git diff format
+    used by patch identities. Admission uses it instead of trusting a
+    consumer's path list. Rename detection is deliberately disabled so both
+    endpoints remain in the review scope.
+    """
+    if not all(isinstance(value, str) and _OID_RE.fullmatch(value) for value in (
+        from_tree,
+        to_tree,
+    )):
+        raise PatchIdentityError("tree diff identity is invalid")
+    resolved_from = _require_stdout(repo, "rev-parse", f"{from_tree}^{{tree}}")
+    resolved_to = _require_stdout(repo, "rev-parse", f"{to_tree}^{{tree}}")
+    completed = _git(
+        repo,
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--no-ext-diff",
+        "--no-textconv",
+        resolved_from,
+        resolved_to,
+    )
+    if completed.returncode != 0:
+        raise PatchIdentityError("tree diff failed")
+    try:
+        paths = tuple(
+            sorted(
+                {
+                    value.decode("utf-8", errors="strict")
+                    for value in completed.stdout.split(b"\0")
+                    if value
+                }
+            )
+        )
+    except UnicodeError as exc:
+        raise PatchIdentityError("tree diff contains a non-UTF-8 path") from exc
+    diff = _git(repo, "diff", *PATCH_DIFF_FLAGS, resolved_from, resolved_to)
+    if diff.returncode != 0:
+        raise PatchIdentityError("tree content diff failed")
+    digest = hashlib.sha256(diff.stdout).hexdigest()
+    return paths, digest
+
+
 def prove_patch_equivalence(
     repo: Path,
     left: Mapping[str, object],
