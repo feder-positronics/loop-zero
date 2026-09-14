@@ -102,6 +102,29 @@ def equivalence(left, right, *, overlap=()):
     return payload
 
 
+def generation_proof(source, target, *, kind="patch-equivalence", overlap=()):
+    proof = (
+        equivalence(source, target, overlap=overlap)
+        if kind == "patch-equivalence"
+        else {
+            "schema_version": "format-only-v1",
+            "from_identity_digest": review_state.patch_identity_digest(source),
+            "from_tree": source["candidate_tree_sha"],
+            "to_identity_digest": review_state.patch_identity_digest(target),
+            "to_tree": target["candidate_tree_sha"],
+            "verified": True,
+        }
+    )
+    return review_state.GenerationProofV1(
+        proof_kind=kind,
+        from_identity=source,
+        from_tree=source["candidate_tree_sha"],
+        to_identity=target,
+        to_tree=target["candidate_tree_sha"],
+        proof=proof,
+    ).to_dict()
+
+
 def task(name="review", key="key"):
     return {
         "task_id": name,
@@ -185,6 +208,26 @@ def link_generation(rows, predecessor, target, *, source=None, kind="substantive
         to_identity=target,
         transition_kind=kind,
     ).to_dict())
+
+
+def admit_all_sections(
+    rows, patch, name, *, proof=None, kind="patch-equivalence", requested="delta"
+):
+    return admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=task(name, name),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("code", "security"),
+        equivalence_proof=proof if kind == "patch-equivalence" else None,
+        format_only_proof=proof if kind == "format-only" else None,
+        requested=requested,
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
 
 
 def git(repo, *args, env=None):
@@ -492,6 +535,131 @@ def test_security_overlap_keeps_generation_but_requires_delta():
     )
     assert isinstance(full, admission.Blocked)
     assert full.code == "slots-exhausted"
+
+
+def withheld_proof_hop_ledger():
+    original = identity("a")
+    primary = admit_all_sections(
+        [], original, "primary", requested="review"
+    )
+    assert isinstance(primary, admission.Reserved)
+    rows = list(primary.records_to_append)
+    append_settlement(
+        rows,
+        primary.slot,
+        ReviewOutcome.CONSUMED,
+        {**terminal("primary"), "patch_identity": original},
+    )
+    primary_terminal = next(
+        row for row in rows if row.get("type") == "attempt-terminal"
+    )
+
+    rebased = identity("b")
+    first_proof = generation_proof(
+        original,
+        rebased,
+        overlap=("security/policy.py",),
+    )
+    rows.append(first_proof)
+    first_hop = admit_all_sections(
+        rows, rebased, "delta-b", proof=first_proof
+    )
+    assert isinstance(first_hop, admission.Reserved)
+    rows.extend(first_hop.records_to_append)
+
+    equivalent = identity("c")
+    equivalence_proof = generation_proof(rebased, equivalent)
+    rows.append(equivalence_proof)
+    equivalence_hop = admit_all_sections(
+        rows, equivalent, "delta-c", proof=equivalence_proof
+    )
+    rows.extend(equivalence_hop.records_to_append)
+
+    formatted = identity("d")
+    format_proof = generation_proof(rebased, formatted, kind="format-only")
+    rows.append(format_proof)
+    format_hop = admit_all_sections(
+        rows,
+        formatted,
+        "delta-d",
+        proof=format_proof,
+        kind="format-only",
+    )
+    rows.extend(format_hop.records_to_append)
+    return (
+        rows,
+        primary,
+        primary_terminal,
+        (original, rebased, equivalent, formatted),
+        equivalence_hop,
+        format_hop,
+    )
+
+
+def test_proof_hops_never_regrant_a_section_withheld_by_an_earlier_carry():
+    (
+        rows,
+        primary,
+        _primary_terminal,
+        (_original, rebased, equivalent, formatted),
+        equivalence_hop,
+        format_hop,
+    ) = withheld_proof_hop_ledger()
+
+    assert isinstance(equivalence_hop, admission.Blocked)
+    assert equivalence_hop.code == "slot-held"
+    assert isinstance(format_hop, admission.Blocked)
+    assert format_hop.code == "slot-held"
+    carries = {
+        (
+            carry.from_identity["candidate_tree_sha"],
+            carry.to_identity["candidate_tree_sha"],
+        ): carry.sections
+        for carry in authority_projection.generation_carries(rows)
+    }
+    assert carries == {
+        ("a" * 40, rebased["candidate_tree_sha"]): ("code",),
+        (rebased["candidate_tree_sha"], equivalent["candidate_tree_sha"]): (
+            "code",
+        ),
+        (rebased["candidate_tree_sha"], formatted["candidate_tree_sha"]): (
+            "code",
+        ),
+    }
+    state = authority_projection.slot_state(
+        rows, primary.generation.generation_id, "delivery"
+    )
+    assert state.outstanding is not None
+    assert state.outstanding.task_id == "delta-b"
+    assert not state.delta_consumed
+
+
+def test_admission_resolution_and_publication_agree_per_section_on_proof_hops():
+    from loopzero.review import _tree_coverage as coverage
+
+    rows, _primary, primary_terminal, heads, _equivalence_hop, _format_hop = (
+        withheld_proof_hop_ledger()
+    )
+    for head in heads:
+        resolution = review_state.resolve_generation(
+            rows,
+            repository_binding="repo",
+            patch_identity=head,
+            tree_sha=head["candidate_tree_sha"],
+            required_sections=("code", "security"),
+            equivalence_proof=None,
+            format_only_proof=None,
+        )
+        assert resolution.kind == "same"
+        assert resolution.carry is not None
+        admitted_sections = set(resolution.carry.sections)
+        for section in ("code", "security"):
+            assert (section in admitted_sections) is coverage._generation_chain_covers_tree(
+                rows,
+                primary_terminal,
+                lens=section,
+                current_tree=head["candidate_tree_sha"],
+            )
 
 
 def test_every_blocked_code_is_reachable():

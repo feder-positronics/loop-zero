@@ -1143,9 +1143,16 @@ def resolve_generation(
                 proof=authenticated_proof.to_dict(),
                 sections=tuple(
                     sorted(
-                        set(source_generation.required_sections).intersection(
-                            sections
-                        )
+                        # Proof validity is local to this hop. Coverage is not:
+                        # a proof cannot restore a section withheld on any
+                        # earlier authenticated edge into its source endpoint.
+                        reachable_sections.get(
+                            (
+                                source_generation.generation_id,
+                                patch_identity_digest(source_identity),
+                            ),
+                            set(),
+                        ).intersection(sections)
                     )
                 ),
             ),

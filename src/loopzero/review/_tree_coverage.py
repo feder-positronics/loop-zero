@@ -361,21 +361,29 @@ def _generation_chain_covers_tree(
     ]
     if not candidates or not isinstance(terminal_tree, str):
         return False
-    return any(
-        chain_covers_tree(
-            terminal_tree,
-            {
-                str(carry.from_identity.get("candidate_tree_sha")): str(
-                    carry.to_identity.get("candidate_tree_sha")
-                )
+
+    def carry_chain_covers(generation_id: str) -> bool:
+        # A source endpoint can have several authenticated successor proofs.
+        # Preserve that graph shape instead of collapsing it to one dict edge.
+        reachable = {terminal_tree}
+        for _ in range(64):
+            if current_tree in reachable:
+                return True
+            next_trees = {
+                str(carry.to_identity["candidate_tree_sha"])
                 for carry in carries
-                if carry.generation_id == generation.generation_id
+                if carry.generation_id == generation_id
                 and lens in carry.sections
-                and isinstance(carry.from_identity.get("candidate_tree_sha"), str)
+                and carry.from_identity.get("candidate_tree_sha") in reachable
                 and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
-            },
-            current_tree,
-        )
+            }
+            if not next_trees.difference(reachable):
+                return False
+            reachable.update(next_trees)
+        return False
+
+    return any(
+        carry_chain_covers(generation.generation_id)
         for generation in candidates
     )
 
