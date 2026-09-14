@@ -793,12 +793,17 @@ def stage_evidence_snapshot(
     primary_repo: Path,
     task_id: str,
     evidence_paths: Sequence[str],
+    _allow_empty: bool = False,
 ) -> EvidenceSnapshot:
     """Copy declared repository evidence into one immutable worker snapshot."""
-    resolved_inputs = validate_evidence_inputs(
-        worktree=worktree,
-        primary_repo=primary_repo,
-        evidence_paths=evidence_paths,
+    resolved_inputs = (
+        []
+        if _allow_empty and not evidence_paths
+        else validate_evidence_inputs(
+            worktree=worktree,
+            primary_repo=primary_repo,
+            evidence_paths=evidence_paths,
+        )
     )
 
     resolved_worktree = worktree.resolve()
@@ -855,6 +860,78 @@ def stage_evidence_snapshot(
         manifest=tuple(manifest),
         task_id=task_id,
     )
+
+
+def trust_claim_evidence_scope(task: object) -> tuple[str, ...]:
+    """Return the only repository paths a trust-claim delta may expose."""
+    from .trust_claims import TrustClaimTaskV1, _canonical_path
+
+    if isinstance(task, TrustClaimTaskV1):
+        claims: object = task.invalidated_claims
+        changed: object = task.changed_paths
+    elif isinstance(task, Mapping):
+        claims = task.get("invalidated_claims")
+        changed = task.get("changed_paths")
+    else:
+        raise DispatchError("trust-claim evidence task is invalid")
+    if not isinstance(claims, (list, tuple)) or not isinstance(
+        changed, (list, tuple)
+    ):
+        raise DispatchError("trust-claim evidence task is invalid")
+    allowed: set[str] = set()
+    try:
+        allowed.update(_canonical_path(path, label="changed_paths") for path in changed)
+        for claim in claims:
+            raw_paths = claim.paths if hasattr(claim, "paths") else (
+                claim.get("paths") if isinstance(claim, Mapping) else None
+            )
+            if not isinstance(raw_paths, (list, tuple)):
+                raise DispatchError("trust-claim evidence claim is invalid")
+            allowed.update(
+                _canonical_path(path, label="trust claim paths")
+                for path in raw_paths
+            )
+    except ValueError as exc:
+        raise DispatchError(f"trust-claim evidence scope is invalid: {exc}") from exc
+    return tuple(sorted(allowed))
+
+
+def stage_trust_claim_evidence(
+    *,
+    worktree: Path,
+    primary_repo: Path,
+    task_id: str,
+    task: object,
+    evidence_paths: Sequence[str] | None = None,
+) -> EvidenceSnapshot:
+    """Stage a trust delta after enforcing its claim-and-change path boundary."""
+    allowed = trust_claim_evidence_scope(task)
+    if evidence_paths is None:
+        if isinstance(task, Mapping):
+            declared = task.get("evidence_inventory", allowed)
+            if not isinstance(declared, (list, tuple)):
+                raise DispatchError("trust-claim evidence inventory is invalid")
+            selected = tuple(declared)
+        else:
+            selected = allowed
+    else:
+        selected = tuple(evidence_paths)
+    if (
+        not all(isinstance(path, str) for path in selected)
+        or len(selected) != len(set(selected))
+        or not set(selected) <= set(allowed)
+    ):
+        raise DispatchError("trust-claim evidence inventory exceeds task scope")
+    return stage_evidence_snapshot(
+        worktree=worktree,
+        primary_repo=primary_repo,
+        task_id=task_id,
+        evidence_paths=selected,
+        _allow_empty=True,
+    )
+
+
+stage_trust_claim_evidence_snapshot = stage_trust_claim_evidence
 
 def verify_evidence_snapshot(snapshot: EvidenceSnapshot) -> None:
     """Fail when copied evidence changes between engine attempts or acceptance."""

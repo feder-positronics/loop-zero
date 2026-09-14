@@ -5,6 +5,12 @@ import pytest
 
 from loopzero.kernel.gitscope import DispatchError
 from loopzero.review import evidence
+from loopzero.review.trust_claims import (
+    build_trust_claim_task,
+    invalidate_claims,
+    legacy_receipt,
+    normalize_manifest,
+)
 
 
 @pytest.fixture
@@ -53,4 +59,58 @@ def test_evidence_paths_cannot_escape_configured_roots(configured, tmp_path_fact
     with pytest.raises(DispatchError, match="outside allowed roots"):
         evidence.validate_evidence_inputs(
             worktree=configured, primary_repo=configured, evidence_paths=[str(outside)]
+        )
+
+
+def test_trust_claim_evidence_stages_only_invalidated_and_changed_paths(configured):
+    for name in ("covered.py", "changed.py", "outside.py"):
+        (configured / name).write_text(name, encoding="utf-8")
+    raw = {
+        "risk_paths": ["covered.py"],
+        "actors_assets": [{"text": "claim", "paths": ["covered.py"]}],
+    }
+    claims = normalize_manifest(raw)
+    previous = legacy_receipt(
+        raw,
+        source_identity="source",
+        tree_sha="1" * 40,
+        manifest_sha256="a" * 64,
+        verifier_run_id="run",
+        verifier_task_id="task",
+    )
+    invalidation = invalidate_claims(
+        previous,
+        claims,
+        changed_paths=["covered.py", "changed.py"],
+        base_moved=False,
+        risk_paths_added=[],
+    )
+    task = build_trust_claim_task(
+        claims,
+        invalidation,
+        generation_ref="generation",
+        source_identity="source-2",
+        tree_sha="2" * 40,
+        manifest_sha256="b" * 64,
+        delta_from_tree_sha="1" * 40,
+        changed_paths=["covered.py", "changed.py"],
+    )
+    assert task is not None
+    snapshot = evidence.stage_trust_claim_evidence(
+        worktree=configured,
+        primary_repo=configured,
+        task_id="trust-task",
+        task=task,
+    )
+    assert {entry["origin"] for entry in snapshot.manifest} == {
+        "worktree/covered.py",
+        "worktree/changed.py",
+    }
+    with pytest.raises(DispatchError, match="exceeds task scope"):
+        evidence.stage_trust_claim_evidence(
+            worktree=configured,
+            primary_repo=configured,
+            task_id="forged-task",
+            task=task,
+            evidence_paths=["outside.py"],
         )
