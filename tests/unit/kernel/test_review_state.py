@@ -720,6 +720,37 @@ def test_unresolved_settlement_resolves_from_a_late_verdict_without_a_second_row
     assert no_second_row.existing
 
 
+def test_released_settlement_is_consumed_by_a_late_authenticated_verdict():
+    generation = resolve([], identity("a", "1" * 40)).generation
+    rows = [generation.to_dict()]
+    reservation = review_state.reserve_review_slot(
+        _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
+        slot_kind="primary", task_id="late-release", idempotency_key="late-release",
+    )
+    terminal = released_terminal("late-release", generation.tree)
+    rows.extend((reservation.to_dict(), terminal))
+    settlement = review_state.settle_review_slot(
+        _REPOSITORY,
+        rows, reservation=reservation, outcome=ReviewOutcome.RELEASED,
+        terminal_ref=terminal,
+    )
+    rows.append(settlement.to_dict())
+    released = authority_projection.slot_state(
+        rows, generation.generation_id, "delivery"
+    )
+    assert released.settlements == (settlement,)
+    assert not released.primary_consumed
+    assert released.outstanding is None
+
+    rows.append({"type": "verdict", "task_id": "late-release", "verdict": "pass"})
+    consumed = authority_projection.slot_state(
+        rows, generation.generation_id, "delivery"
+    )
+    assert consumed.settlements == (settlement,)
+    assert consumed.primary_consumed
+    assert consumed.outstanding is None
+
+
 def test_settlement_rejects_terminal_from_outside_generation_tree():
     generation = resolve([], identity("a", "1" * 40)).generation
     rows = [generation.to_dict()]

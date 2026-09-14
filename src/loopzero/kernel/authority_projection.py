@@ -2132,6 +2132,7 @@ class ReviewSlotState:
     settlements: tuple[object, ...]
     inherited_primary_ref: str | None = None
     inherited_delta_refs: tuple[str, ...] = ()
+    inherited_delta_consumed: bool = False
     effective_outcomes: tuple[tuple[str, object], ...] = ()
 
     def settlement_for(self, reservation_id: str):
@@ -2187,7 +2188,8 @@ class ReviewSlotState:
 
     @property
     def delta_consumed(self) -> bool:
-        return bool(self.inherited_delta_refs) or self._consumed("delta")
+        """Whether one delta covers the generation's complete section policy."""
+        return self.inherited_delta_consumed or self._consumed("delta")
 
     @property
     def primary_terminal_ref(self) -> str | None:
@@ -2285,9 +2287,11 @@ def slot_state(
         effective = (
             ReviewOutcome.UNRESOLVED
             if terminal is None
+            # Verdict authority is append-only and dominates a previously
+            # released terminal classification without requiring a second,
+            # conflicting settlement row.
             else ReviewOutcome.CONSUMED
-            if settlement.outcome is ReviewOutcome.UNRESOLVED
-            and classified is ReviewOutcome.CONSUMED
+            if classified is ReviewOutcome.CONSUMED
             else settlement.outcome
         )
         generation_trees = (
@@ -2321,6 +2325,10 @@ def slot_state(
                 terminal is not None
                 and settlement.outcome is not ReviewOutcome.UNRESOLVED
                 and classified is not settlement.outcome
+                and not (
+                    settlement.outcome is ReviewOutcome.RELEASED
+                    and classified is ReviewOutcome.CONSUMED
+                )
             )
         ):
             continue
@@ -2330,6 +2338,7 @@ def slot_state(
         effective_outcomes.append((settlement.reservation_id, effective))
     inherited = None
     inherited_deltas: tuple[str, ...] = ()
+    inherited_delta_consumed = False
     if generation is not None:
         native_generation_ids = {
             record.get("generation_id")
@@ -2341,8 +2350,13 @@ def slot_state(
             # primary and has no native slot rows.
             if family == "delivery":
                 inherited = generation.primary_origin_receipt
-                _legacy_carries, delta_refs = _legacy_delta_projection(records)
+                legacy_carries, delta_refs = _legacy_delta_projection(records)
                 inherited_deltas = delta_refs.get(generation_id, ())
+                inherited_delta_consumed = any(
+                    carry.generation_id == generation_id
+                    and set(generation.required_sections) <= set(carry.sections)
+                    for carry in legacy_carries
+                )
         elif generation.predecessor_id is not None:
             predecessor = generations(records).get(generation.predecessor_id)
             predecessor_state = slot_state(records, generation.predecessor_id, family)
@@ -2371,6 +2385,7 @@ def slot_state(
         settlements=tuple(settlements),
         inherited_primary_ref=inherited,
         inherited_delta_refs=inherited_deltas,
+        inherited_delta_consumed=inherited_delta_consumed,
         effective_outcomes=tuple(effective_outcomes),
     )
     _review_cache_store(_slot_projection_cache, cache_key, records, result)

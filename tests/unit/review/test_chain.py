@@ -523,6 +523,102 @@ def test_legacy_delta_content_is_bound_to_its_primary_generation(monkeypatch) ->
     assert represented.generation.generation_id == generation.generation_id
 
 
+def test_narrow_legacy_delta_does_not_consume_the_generations_delta_slot(
+    monkeypatch,
+) -> None:
+    from loopzero.kernel import authority_projection, review_state
+
+    primary_identity = {
+        "schema_version": "patch-identity-v1",
+        "base_sha": "0" * 40,
+        "base_tree_sha": "1" * 40,
+        "candidate_sha": "a" * 40,
+        "candidate_tree_sha": "b" * 40,
+        "diff_format": "git-binary-full-index-no-renames-v1",
+        "diff_sha256": "2" * 64,
+        "patch_id_verbatim": "3" * 40,
+    }
+    delta_identity = {
+        **primary_identity,
+        "base_sha": "a" * 40,
+        "base_tree_sha": "b" * 40,
+        "candidate_sha": "c" * 40,
+        "candidate_tree_sha": "d" * 40,
+        "diff_sha256": "4" * 64,
+        "patch_id_verbatim": "5" * 40,
+    }
+    primary = {
+        "type": "attempt-terminal",
+        "task_id": "legacy-wide-primary",
+        "snapshot_sha": "a" * 40,
+        "snapshot_tree_sha": "b" * 40,
+        "patch_identity": primary_identity,
+        "review_lens": "code",
+        "repository_binding": "repo",
+        "task_contract": {"required_sections": ["code", "security"]},
+    }
+    delta = {
+        "type": "attempt-terminal",
+        "task_id": "legacy-code-delta",
+        "snapshot_sha": "c" * 40,
+        "snapshot_tree_sha": "d" * 40,
+        "delta_from_snapshot_sha": "a" * 40,
+        "delta_from_tree_sha": "b" * 40,
+        "patch_identity": delta_identity,
+        "review_lens": "code",
+        "repository_binding": "repo",
+        "task_contract": {"required_sections": ["code"]},
+    }
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_accepted_review_terminals",
+        lambda rows: {
+            "legacy-wide-primary": primary,
+            "legacy-code-delta": delta,
+        },
+    )
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_authenticated_verdicts",
+        lambda rows, **kwargs: {
+            "legacy-wide-primary": {"verdict": "pass"},
+            "legacy-code-delta": {"verdict": "pass"},
+        },
+    )
+    rows = [primary, delta]
+    generation = next(iter(authority_projection.generations(rows).values()))
+    state = authority_projection.slot_state(
+        rows, generation.generation_id, "delivery"
+    )
+    assert state.primary_consumed
+    assert not state.delta_consumed
+    assert state.inherited_delta_refs == (
+        authority_projection.canonical_record_digest(delta),
+    )
+
+    represented = review_state.resolve_generation(
+        rows,
+        repository_binding="repo",
+        patch_identity=delta_identity,
+        tree_sha="d" * 40,
+        required_sections=("code", "security"),
+        equivalence_proof=None,
+        format_only_proof=None,
+    )
+    assert represented.kind == "same"
+    assert represented.carry is not None
+    assert represented.carry.sections == ("code",)
+    reservation = review_state._reserve_review_slot(
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="delta",
+        task_id="security-delta",
+        idempotency_key="security-delta",
+    )
+    assert reservation.slot_kind == "delta"
+
+
 def test_generation_projection_is_cached_for_an_unchanged_ledger(monkeypatch) -> None:
     from loopzero.kernel import authority_projection
 
