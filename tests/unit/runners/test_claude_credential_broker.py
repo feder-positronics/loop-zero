@@ -150,13 +150,15 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
     lock.touch(mode=0o644)
     lock.chmod(0o644)
     observed_lock: dict[str, object] = {}
+    commands: list[list[str]] = []
 
-    def refresh(command, *, timeout, check, capture_output, text, env, cwd):
-        assert command[-3:] == ["auth", "status", "--json"]
+    def refresh(command, *, timeout, check, capture_output, text, stdin, env, cwd):
+        commands.append(command)
         assert timeout == claude_credential.REFRESH_TIMEOUT_S
         assert check is False
         assert capture_output is True
         assert text is True
+        assert stdin == subprocess.DEVNULL
         assert cwd == Path(env["HOME"])
         assert cwd.parent == state_root
         assert not cwd.is_relative_to(workspace_root)
@@ -164,19 +166,26 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
         observed_lock["staging_home"] = cwd
         staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
         staged = json.loads(staging_credential.read_text(encoding="utf-8"))
-        assert staged["claudeAiOauth"]["expiresAt"] < 1_000_000
-        _write_credential(staging_credential, refreshed)
+        if command[-1] == "doctor":
+            assert staged["claudeAiOauth"]["expiresAt"] < 1_000_000
+            _write_credential(staging_credential, refreshed)
+        else:
+            assert staged == refreshed
         observed_lock["mode"] = stat.S_IMODE(lock.stat().st_mode)
         observed_lock["uid"] = lock.stat().st_uid
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps(
-                {
-                    "loggedIn": True,
-                    "authMethod": "claude.ai",
-                    "subscriptionType": "max",
-                }
+            stdout=(
+                json.dumps(
+                    {
+                        "loggedIn": True,
+                        "authMethod": "claude.ai",
+                        "subscriptionType": "max",
+                    }
+                )
+                if command[-3:] == ["auth", "status", "--json"]
+                else ""
             ),
             stderr="",
         )
@@ -197,6 +206,10 @@ def test_near_expiry_refreshes_in_host_staging_and_installs_validated_snapshot(
     assert observed_lock["mode"] == 0o600
     assert observed_lock["uid"] == os.getuid()
     assert not Path(observed_lock["staging_home"]).exists()
+    assert commands == [
+        ["/trusted/claude", "doctor"],
+        ["/trusted/claude", "auth", "status", "--json"],
+    ]
 
 
 def test_refresh_mount_is_private_to_one_worker_launch(tmp_path: Path) -> None:
@@ -214,15 +227,18 @@ def test_refresh_mount_is_private_to_one_worker_launch(tmp_path: Path) -> None:
         f"""#!{sys.executable}
 import json
 import os
+import sys
 from pathlib import Path
 
 path = Path(os.environ["HOME"]) / ".claude" / ".credentials.json"
-credential = json.loads(path.read_text(encoding="utf-8"))
-credential["claudeAiOauth"]["accessToken"] += "-refreshed"
-credential["claudeAiOauth"]["expiresAt"] = 3_000_000
-path.write_text(json.dumps(credential), encoding="utf-8")
-path.chmod(0o600)
-print(json.dumps({{"loggedIn": True}}))
+if sys.argv[1] == "doctor":
+    credential = json.loads(path.read_text(encoding="utf-8"))
+    credential["claudeAiOauth"]["accessToken"] += "-refreshed"
+    credential["claudeAiOauth"]["expiresAt"] = 3_000_000
+    path.write_text(json.dumps(credential), encoding="utf-8")
+    path.chmod(0o600)
+else:
+    print(json.dumps({{"loggedIn": True}}))
 """,
         encoding="utf-8",
     )
@@ -253,21 +269,26 @@ print(json.dumps({{"loggedIn": True}}))
             ):
                 pass
 
-    assert len(rendered_launches) == 2
+    assert [launch[launch.index("--") + 1 :] for launch in rendered_launches] == [
+        [str(fake_claude), "doctor"],
+        [str(fake_claude), "auth", "status", "--json"],
+        [str(fake_claude), "doctor"],
+        [str(fake_claude), "auth", "status", "--json"],
+    ]
     first_staging = next(
         Path(rendered_launches[0][index + 1])
         for index, value in enumerate(rendered_launches[0])
         if value == "--bind" and "claude-renewal" in rendered_launches[0][index + 1]
     )
     second_staging = next(
-        Path(rendered_launches[1][index + 1])
-        for index, value in enumerate(rendered_launches[1])
-        if value == "--bind" and "claude-renewal" in rendered_launches[1][index + 1]
+        Path(rendered_launches[2][index + 1])
+        for index, value in enumerate(rendered_launches[2])
+        if value == "--bind" and "claude-renewal" in rendered_launches[2][index + 1]
     )
     assert first_staging != second_staging
     assert not first_staging.is_relative_to(workspace_root)
     assert not second_staging.is_relative_to(workspace_root)
-    assert str(first_staging) not in rendered_launches[1]
+    assert str(first_staging) not in rendered_launches[2]
     assert not first_staging.exists()
     assert not second_staging.exists()
 
@@ -305,15 +326,17 @@ if sys.argv[1] == "rewrite-installed":
     raise SystemExit(0)
 
 source = json.loads(host.read_text(encoding="utf-8"))
-metadata = source.setdefault("providerMetadata", {{}})
-metadata["rewriteCount"] = metadata.get("rewriteCount", 0) + 1
-host.write_text(json.dumps(source, indent=2, sort_keys=True), encoding="utf-8")
-host.chmod(0o600)
+if sys.argv[1] == "doctor":
+    metadata = source.setdefault("providerMetadata", {{}})
+    metadata["rewriteCount"] = metadata.get("rewriteCount", 0) + 1
+    host.write_text(json.dumps(source, indent=2, sort_keys=True), encoding="utf-8")
+    host.chmod(0o600)
 
-staging = Path(os.environ[\"HOME\"]) / \".claude\" / \".credentials.json\"
-staging.write_text(json.dumps({refreshed!r}), encoding=\"utf-8\")
-staging.chmod(0o600)
-print(json.dumps({{\"loggedIn\": True}}))
+    staging = Path(os.environ[\"HOME\"]) / \".claude\" / \".credentials.json\"
+    staging.write_text(json.dumps({refreshed!r}), encoding=\"utf-8\")
+    staging.chmod(0o600)
+else:
+    print(json.dumps({{\"loggedIn\": True}}))
 """,
         encoding="utf-8",
     )
@@ -360,12 +383,17 @@ def test_refresh_race_is_not_reported_as_unsafe_credential(
     _write_credential(credential, original)
 
     def refresh(command, *, env, **_kwargs):
-        staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
-        _write_credential(staging_credential, refreshed)
+        if command[-1] == "doctor":
+            staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
+            _write_credential(staging_credential, refreshed)
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps({"loggedIn": True}),
+            stdout=(
+                json.dumps({"loggedIn": True})
+                if command[-1] != "doctor"
+                else ""
+            ),
             stderr="",
         )
 
@@ -404,13 +432,18 @@ def test_concurrent_login_replaces_refresh_source_without_being_overwritten(
     _write_credential(credential, original)
 
     def refresh(command, *, env, **_kwargs):
-        _write_credential(credential, concurrent_login)
-        staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
-        _write_credential(staging_credential, refreshed)
+        if command[-1] == "doctor":
+            _write_credential(credential, concurrent_login)
+            staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
+            _write_credential(staging_credential, refreshed)
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps({"loggedIn": True}),
+            stdout=(
+                json.dumps({"loggedIn": True})
+                if command[-1] != "doctor"
+                else ""
+            ),
             stderr="",
         )
 
@@ -448,20 +481,25 @@ def test_concurrent_near_expiry_login_is_refreshed_from_its_own_lineage(
     refreshed_sources: list[str] = []
 
     def refresh(command, *, env, **_kwargs):
-        staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
-        staged = json.loads(staging_credential.read_text(encoding="utf-8"))
-        source = staged["claudeAiOauth"]["accessToken"]
-        refreshed_sources.append(source)
-        if source == "old":
-            _write_credential(credential, concurrent_login)
-            candidate = discarded_refresh
-        else:
-            candidate = final_refresh
-        _write_credential(staging_credential, candidate)
+        if command[-1] == "doctor":
+            staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
+            staged = json.loads(staging_credential.read_text(encoding="utf-8"))
+            source = staged["claudeAiOauth"]["accessToken"]
+            refreshed_sources.append(source)
+            if source == "old":
+                _write_credential(credential, concurrent_login)
+                candidate = discarded_refresh
+            else:
+                candidate = final_refresh
+            _write_credential(staging_credential, candidate)
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps({"loggedIn": True}),
+            stdout=(
+                json.dumps({"loggedIn": True})
+                if command[-1] != "doctor"
+                else ""
+            ),
             stderr="",
         )
 
@@ -502,21 +540,26 @@ def test_repeated_concurrent_logins_fail_bounded_without_overwriting_latest(
 
     def refresh(command, *, env, **_kwargs):
         nonlocal refresh_calls
-        replacement = replacements[refresh_calls]
-        refresh_calls += 1
-        _write_credential(credential, replacement)
-        staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
-        _write_credential(
-            staging_credential,
-            _credential(
-                expires_at_ms=3_000_000 + refresh_calls,
-                access_token=f"discarded-{refresh_calls}",
-            ),
-        )
+        if command[-1] == "doctor":
+            replacement = replacements[refresh_calls]
+            refresh_calls += 1
+            _write_credential(credential, replacement)
+            staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
+            _write_credential(
+                staging_credential,
+                _credential(
+                    expires_at_ms=3_000_000 + refresh_calls,
+                    access_token=f"discarded-{refresh_calls}",
+                ),
+            )
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps({"loggedIn": True}),
+            stdout=(
+                json.dumps({"loggedIn": True})
+                if command[-1] != "doctor"
+                else ""
+            ),
             stderr="",
         )
 
@@ -560,6 +603,37 @@ def test_refresh_timeout_is_distinct_and_preserves_host_credential(
     assert json.loads(credential.read_text(encoding="utf-8")) == original
 
 
+def test_nonzero_doctor_is_typed_refresh_failure_and_skips_status(
+    tmp_path: Path,
+) -> None:
+    credential = tmp_path / ".claude" / ".credentials.json"
+    original = _credential(expires_at_ms=1_100_000)
+    _write_credential(credential, original)
+    commands: list[list[str]] = []
+
+    def failed_doctor(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(
+            command,
+            7,
+            stdout="",
+            stderr="private vendor detail",
+        )
+
+    with pytest.raises(claude_credential.ClaudeCredentialRefreshFailed):
+        with claude_credential.claude_subscription_credential(
+            requested_runtime_s=600,
+            credential_path=credential,
+            clock=lambda: 1_000.0,
+            run_status=failed_doctor,
+            claude_binary=Path("/trusted/claude"),
+        ):
+            pass
+
+    assert commands == [["/trusted/claude", "doctor"]]
+    assert json.loads(credential.read_text(encoding="utf-8")) == original
+
+
 def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -586,6 +660,7 @@ def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
             check=False,
             capture_output=True,
             text=True,
+            stdin=subprocess.DEVNULL,
             env={},
             cwd=tmp_path,
             sandbox_wrapper=wrapper,
@@ -597,6 +672,7 @@ def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
         "input_text": "",
         "timeout_s": 1,
         "env": {},
+        "stdin": subprocess.DEVNULL,
         "private_mounts": (),
         "sandbox_wrapper": wrapper,
     }
@@ -633,8 +709,12 @@ def test_revoked_status_is_distinct_and_preserves_host_credential(
     credential = tmp_path / ".claude" / ".credentials.json"
     original = _credential(expires_at_ms=1_100_000)
     _write_credential(credential, original)
+    commands: list[list[str]] = []
 
     def revoked(command, **_kwargs):
+        commands.append(command)
+        if command[-1] == "doctor":
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(
             command,
             1,
@@ -658,6 +738,10 @@ def test_revoked_status_is_distinct_and_preserves_host_credential(
         ):
             pass
 
+    assert commands == [
+        ["/trusted/claude", "doctor"],
+        ["/trusted/claude", "auth", "status", "--json"],
+    ]
     assert json.loads(credential.read_text(encoding="utf-8")) == original
 
 
@@ -679,17 +763,22 @@ def test_refresh_rejects_unadvanced_or_under_scoped_credential(
     _write_credential(credential, original)
 
     def invalid_refresh(command, *, env, **_kwargs):
-        staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
-        _write_credential(staging_credential, candidate)
+        if command[-1] == "doctor":
+            staging_credential = Path(env["HOME"]) / ".claude" / ".credentials.json"
+            _write_credential(staging_credential, candidate)
         return subprocess.CompletedProcess(
             command,
             0,
-            stdout=json.dumps(
-                {
-                    "loggedIn": True,
-                    "authMethod": "claude.ai",
-                    "subscriptionType": "max",
-                }
+            stdout=(
+                json.dumps(
+                    {
+                        "loggedIn": True,
+                        "authMethod": "claude.ai",
+                        "subscriptionType": "max",
+                    }
+                )
+                if command[-1] != "doctor"
+                else ""
             ),
             stderr="",
         )

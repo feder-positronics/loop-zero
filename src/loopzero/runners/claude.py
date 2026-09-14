@@ -2120,11 +2120,12 @@ def _run_refresh_process_group(
     text: bool,
     env: dict[str, str],
     cwd: Path,
+    stdin: int = subprocess.DEVNULL,
     private_mounts: Sequence[Path] = (),
     sandbox_wrapper: SandboxWrapper | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run Claude refresh through the mandatory contained process seam."""
-    if check or not capture_output or not text:
+    if check or not capture_output or not text or stdin != subprocess.DEVNULL:
         raise ValueError("Claude refresh runner contract is invalid")
     result = default_run_cli(
         command,
@@ -2132,6 +2133,7 @@ def _run_refresh_process_group(
         input_text="",
         timeout_s=timeout,
         env=env,
+        stdin=stdin,
         private_mounts=private_mounts,
         sandbox_wrapper=sandbox_wrapper,
     )
@@ -2164,20 +2166,27 @@ def _refresh_credential(
             staging_credential,
             _force_staged_expiry(credential, now_ms=now_ms),
         )
-        command = [str(claude_binary), "auth", "status", "--json"]
         try:
             runner_arguments = {
                 "timeout": REFRESH_TIMEOUT_S,
                 "check": False,
                 "capture_output": True,
                 "text": True,
+                "stdin": subprocess.DEVNULL,
                 "env": _staged_refresh_environment(staging_home),
                 "cwd": staging_home,
             }
             if run_status is _run_refresh_process_group:
                 runner_arguments["private_mounts"] = (staging_home,)
                 runner_arguments["sandbox_wrapper"] = sandbox_wrapper
-            outcome = run_status(command, **runner_arguments)
+            doctor_command = [str(claude_binary), "doctor"]
+            doctor_outcome = run_status(doctor_command, **runner_arguments)
+            if doctor_outcome.returncode != 0:
+                raise ClaudeCredentialRefreshFailed(
+                    "Claude credential refresh failed"
+                )
+            status_command = [str(claude_binary), "auth", "status", "--json"]
+            status_outcome = run_status(status_command, **runner_arguments)
         except subprocess.TimeoutExpired as exc:
             raise ClaudeCredentialRefreshTimeout(
                 "Claude credential refresh timed out"
@@ -2186,9 +2195,9 @@ def _refresh_credential(
             raise ClaudeCredentialRefreshFailed(
                 "Claude credential refresh could not start"
             ) from exc
-        if _status_is_revoked(outcome.stdout):
+        if _status_is_revoked(status_outcome.stdout):
             raise ClaudeCredentialRevoked("Claude subscription login was revoked")
-        if outcome.returncode != 0:
+        if status_outcome.returncode != 0:
             raise ClaudeCredentialRefreshFailed("Claude credential refresh failed")
         refreshed = _read_credential(staging_credential, now_ms=now_ms)
         if (
