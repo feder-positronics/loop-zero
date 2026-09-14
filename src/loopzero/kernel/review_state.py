@@ -1,5 +1,11 @@
 """Content-addressed review generations and durable review-slot authority.
 
+Content identity includes the base tree, candidate tree, and exact diff digest.
+The same candidate tree and diff on a different base therefore rejoins an
+existing generation only through an authenticated exact-pair equivalence
+proof.  Without that proof, the changed base is substantive review context: it
+starts a detached generation with no inherited primary authority.
+
 This module is deliberately storage agnostic.  A caller that changes slot state
 must hold :func:`authority_store.authority_ledger_lock`, reload the authority
 history while holding it, call the resolver/reservation operation, coordinator-
@@ -993,31 +999,64 @@ def resolve_generation(
         return GenerationResolution("same", generation=generation, carry=carry)
 
     # A prior carry endpoint is equally content-addressed and cannot mint slots.
-    carried_exact: list[tuple[ReviewGenerationV1, Mapping[str, object]]] = []
-    for carry in generation_carries(cast(Sequence[dict[str, object]], records)):
-        generation = projected.get(carry.generation_id)
+    # Preserve the sections that can actually reach that endpoint through the
+    # authenticated carry graph.  Reconstructing the generation's full policy
+    # here would regrant coverage an earlier carry deliberately withheld.
+    projected_carries = generation_carries(
+        cast(Sequence[dict[str, object]], records)
+    )
+    reachable_sections: dict[tuple[str, str], set[str]] = {
+        (generation.generation_id, patch_identity_digest(generation.patch_identity)):
+        set(generation.required_sections)
+        for generation in projected.values()
+    }
+    carry_identities: dict[tuple[str, str], Mapping[str, object]] = {}
+    for carry in projected_carries:
+        source_key = (
+            carry.generation_id,
+            patch_identity_digest(carry.from_identity),
+        )
+        target_key = (
+            carry.generation_id,
+            patch_identity_digest(carry.to_identity),
+        )
+        carried_sections = reachable_sections.get(source_key, set()).intersection(
+            carry.sections
+        )
+        reachable_sections.setdefault(target_key, set()).update(carried_sections)
+        carry_identities[target_key] = carry.to_identity
+
+    carried_exact: list[
+        tuple[ReviewGenerationV1, Mapping[str, object], tuple[str, ...]]
+    ] = []
+    for key, source in carry_identities.items():
+        generation = projected.get(key[0])
         if (
             generation is not None
             and (
                 generation.repository_binding == repository_binding
                 or generation.repository_binding.startswith("legacy-")
             )
-            and carry.to_identity.get("candidate_tree_sha") == tree_sha
-            and patch_content_digest(carry.to_identity) == current_content
+            and source.get("candidate_tree_sha") == tree_sha
+            and patch_content_digest(source) == current_content
         ):
-            carried_exact.append((generation, carry.to_identity))
+            carried_exact.append(
+                (
+                    generation,
+                    source,
+                    tuple(sorted(reachable_sections.get(key, set()))),
+                )
+            )
     if len({item[0].generation_id for item in carried_exact}) > 1:
         return GenerationResolution("refused", reason="ambiguous-lineage")
     if carried_exact:
-        generation, source = carried_exact[-1]
+        generation, source, carried_sections = carried_exact[-1]
         carry = GenerationCarryV1(
             generation_id=generation.generation_id,
             from_identity=source,
             to_identity=identity,
             proof=_proof_for_exact_content(identity, tree_sha),
-            sections=tuple(
-                sorted(set(generation.required_sections).intersection(sections))
-            ),
+            sections=tuple(sorted(set(carried_sections).intersection(sections))),
         )
         return GenerationResolution("same", generation=generation, carry=carry)
 
@@ -1112,9 +1151,6 @@ def resolve_generation(
             ),
         )
 
-    projected_carries = generation_carries(
-        cast(Sequence[dict[str, object]], records)
-    )
     matching_links = [
         link
         for link in generation_links(cast(Sequence[dict[str, object]], records))
@@ -1205,6 +1241,19 @@ def resolve_generation(
             != transition_kind
         ):
             return GenerationResolution("refused", reason="invalid-proof")
+    elif any(
+        generation.tree == tree_sha
+        and generation.patch_identity.get("diff_sha256")
+        == identity.get("diff_sha256")
+        and generation.patch_identity.get("base_tree_sha")
+        != identity.get("base_tree_sha")
+        for generation in repository_generations
+    ):
+        # The candidate bytes and patch bytes match, but a different base is a
+        # different contextual claim until an exact-pair proof authenticates
+        # equivalence.  Keep this generation detached so no prior primary or
+        # retry budget is inherited, while labelling the change substantive.
+        transition_kind = "substantive"
     return GenerationResolution(
         "new",
         generation=generation,

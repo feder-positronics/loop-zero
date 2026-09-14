@@ -371,6 +371,64 @@ def test_seen_content_section_change_cannot_mint_another_generation():
     assert same.generation.generation_id == initial.generation.generation_id
 
 
+def test_seen_carry_endpoint_preserves_only_authenticated_reachable_sections():
+    original = identity("a", "1" * 40)
+    rebased = identity("b", "2" * 40)
+    initial = resolve([], original)
+    rows = [initial.generation.to_dict()]
+    recorded_proof(rows, original, rebased)
+    rows.append(
+        review_state.GenerationCarryV1(
+            generation_id=initial.generation.generation_id,
+            from_identity=original,
+            to_identity=rebased,
+            proof=rows[-1],
+            sections=("code",),
+        ).to_dict()
+    )
+
+    repeated = resolve(rows, rebased)
+
+    assert repeated.kind == "same"
+    assert repeated.generation.generation_id == initial.generation.generation_id
+    assert repeated.carry.sections == ("code",)
+
+
+def test_same_tree_and_diff_on_an_unproven_different_base_is_substantive():
+    original = identity("a", "1" * 40)
+    different_base = {
+        **original,
+        "base_sha": "2" * 40,
+        "base_tree_sha": "3" * 40,
+    }
+    initial = resolve([], original)
+
+    changed_context = resolve([initial.generation.to_dict()], different_base)
+
+    assert changed_context.kind == "new"
+    assert changed_context.transition.kind == "substantive"
+    assert changed_context.generation.predecessor_id is None
+    assert changed_context.generation.primary_origin_receipt is None
+    assert changed_context.generation.lineage_id != initial.generation.lineage_id
+
+
+def test_same_tree_and_diff_on_a_proven_equivalent_base_reuses_generation():
+    original = identity("a", "1" * 40)
+    equivalent_base = {
+        **original,
+        "base_sha": "2" * 40,
+        "base_tree_sha": "3" * 40,
+    }
+    initial = resolve([], original)
+    rows = [initial.generation.to_dict()]
+    proof = recorded_proof(rows, original, equivalent_base)
+
+    resolved = resolve(rows, equivalent_base, equivalence_proof=proof)
+
+    assert resolved.kind == "same"
+    assert resolved.generation.generation_id == initial.generation.generation_id
+
+
 def test_unrelated_content_starts_fresh_lineage_without_authenticated_link():
     first = resolve([], identity("a", "1" * 40))
     second = resolve([first.generation.to_dict()], identity("b", "2" * 40))

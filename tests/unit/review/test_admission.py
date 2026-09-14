@@ -452,6 +452,43 @@ def test_security_overlap_keeps_generation_but_requires_delta():
     assert result.slot.slot_kind == "delta"
     assert result.records_to_append[0]["sections"] == ["code"]
 
+    rows.extend(result.records_to_append)
+    repeated = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=task("delta", "delta"),
+        current_source_identity={"head": rebased["candidate_sha"]},
+        current_tree_sha=rebased["candidate_tree_sha"],
+        patch_identity=rebased,
+        required_sections=("code", "security"),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="delta",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(repeated, admission.Reserved)
+    assert repeated.slot.reservation_id == result.slot.reservation_id
+
+    full = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=task("full", "full"),
+        current_source_identity={"head": rebased["candidate_sha"]},
+        current_tree_sha=rebased["candidate_tree_sha"],
+        patch_identity=rebased,
+        required_sections=("code", "security"),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(full, admission.Blocked)
+    assert full.code == "slots-exhausted"
+
 
 def test_every_blocked_code_is_reachable():
     patch = identity("a")
@@ -570,6 +607,26 @@ def test_unrelated_candidate_gets_fresh_lineage_and_primary_slot():
     assert result.slot.slot_kind == "primary"
     assert result.generation.predecessor_id is None
     assert result.generation.lineage_id != previous.lineage_id
+
+
+def test_reviewed_tree_against_an_unproven_different_base_gets_no_primary_carry():
+    rows, previous = primary_history()
+    represented = {
+        **identity("a"),
+        "base_sha": "2" * 40,
+        "base_tree_sha": "3" * 40,
+    }
+    result = admit(
+        rows,
+        represented,
+        review_task=task("new-context", "new-context"),
+    )
+
+    assert isinstance(result, admission.Reserved)
+    assert result.slot.slot_kind == "primary"
+    assert result.generation.generation_id != previous.generation_id
+    assert result.generation.predecessor_id is None
+    assert result.generation.primary_origin_receipt is None
 
 
 def test_caller_family_labels_cannot_open_a_second_pool():
