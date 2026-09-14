@@ -1,0 +1,77 @@
+{
+  "failures_by_class": {
+    "acceptance-environment": 1,
+    "engine-output": 4,
+    "model-result": 1,
+    "operator-terminated": 1
+  },
+  "per_intent": {
+    "delivery-code-review": {
+      "api_equivalent_usd": 14.1,
+      "failures": 6,
+      "minutes": 273.0,
+      "terminals": 51,
+      "unchanged_content_repetitions": 1
+    },
+    "review-adjudication": {
+      "api_equivalent_usd": 0.6,
+      "failures": 1,
+      "minutes": 12.0,
+      "terminals": 3,
+      "unchanged_content_repetitions": 0
+    },
+    "trust-manifest-verification": {
+      "api_equivalent_usd": 19.6,
+      "failures": 0,
+      "minutes": 285.0,
+      "terminals": 49,
+      "unchanged_content_repetitions": 12
+    }
+  },
+  "percentiles": {
+    "api_equivalent_usd": {"median": 0.8, "p95": 13.470588, "unknown": 2},
+    "carried_claims": {"median": 0.0, "p95": 0.0, "unknown": 0},
+    "failures": {"median": 0.0, "p95": 1.0, "unknown": 0},
+    "fresh_claims": {"median": 0.0, "p95": 0.0, "unknown": 0},
+    "minutes": {"median": 11.632653, "p95": 214.533013, "unknown": 2},
+    "starts": {"median": 2.0, "p95": 14.0, "unknown": 0},
+    "terminals": {"median": 2.0, "p95": 14.0, "unknown": 0},
+    "unchanged_content_repetitions": {"median": 0.0, "p95": 0.0, "unknown": 0},
+    "verdicts": {"median": 2.0, "p95": 14.0, "unknown": 0}
+  },
+  "pr_starts": {
+    "#4375": 8,
+    "#4378": 4,
+    "#4379": 13,
+    "#4381": 14,
+    "#4385": 5,
+    "#4390": 3,
+    "#4396": 38,
+    "#4402": 5,
+    "#4403": 2,
+    "#4404": 2,
+    "#4405": 2,
+    "#4406": 1,
+    "#4407": 1,
+    "#4408": 1,
+    "#4409": 1,
+    "#4410": 1,
+    "#4411": 1,
+    "#4412": 1,
+    "#4413": 0,
+    "#4422": 0
+  },
+  "reason_keys": ["unrecorded"],
+  "totals": {
+    "api_equivalent_usd": 34.3,
+    "distinct_manifest_identities": 49,
+    "distinct_patch_identities": 50,
+    "distinct_source_identities": 91,
+    "failures": 7,
+    "minutes": 570.0,
+    "starts": 103,
+    "terminals": 103,
+    "unchanged_content_repetitions": 13,
+    "verdicts": 96
+  }
+}

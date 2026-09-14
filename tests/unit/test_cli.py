@@ -1,11 +1,12 @@
 import json
-from pathlib import Path
 import shutil
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 from conftest import REPO
+
 from loopzero import __version__, cli
 
 
@@ -49,7 +50,9 @@ def test_status_compares_package_and_snapshot(consumer: Path, capsys):
     assert "pass" not in output
 
 
-def test_status_uses_only_trusted_source_verifier(consumer: Path, capsys, tmp_path: Path):
+def test_status_uses_only_trusted_source_verifier(
+    consumer: Path, capsys, tmp_path: Path
+):
     source = tmp_path / "source"
     source.mkdir()
     shutil.copytree(REPO / "core", source / "core")
@@ -79,7 +82,11 @@ def test_status_uses_only_trusted_source_verifier(consumer: Path, capsys, tmp_pa
         text=True,
     ).stdout.strip()
     workflow = consumer / "workflow.toml"
-    workflow.write_text(workflow.read_text().replace("0123456789abcdef0123456789abcdef01234567", revision))
+    workflow.write_text(
+        workflow.read_text().replace(
+            "0123456789abcdef0123456789abcdef01234567", revision
+        )
+    )
     shutil.rmtree(consumer / "vendor/loop-zero")
     shutil.copytree(source / "core", consumer / "vendor/loop-zero")
 
@@ -107,9 +114,10 @@ def test_policy_lint_reports_problems_and_base_hooks(consumer: Path, capsys):
         text=True,
     ).stdout.strip()
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 0
-    assert run(
-        "--root", str(consumer), "policy", "lint", "--base-ref", "refs/heads/main"
-    ) == 0
+    assert (
+        run("--root", str(consumer), "policy", "lint", "--base-ref", "refs/heads/main")
+        == 0
+    )
     assert base in capsys.readouterr().out
     assert run("--root", str(consumer), "policy", "lint", "--base", "main") == 1
     (consumer / "workflow.toml").write_text("[core]\n", encoding="utf-8")
@@ -117,9 +125,13 @@ def test_policy_lint_reports_problems_and_base_hooks(consumer: Path, capsys):
     assert "[core].revision" in capsys.readouterr().err
 
 
-def test_checks_matches_snapshot_tool_without_executing_it(consumer: Path, capfd, tmp_path: Path):
+def test_checks_matches_snapshot_tool_without_executing_it(
+    consumer: Path, capfd, tmp_path: Path
+):
     results = consumer / "results.json"
-    results.write_text(json.dumps({"tests": {"conclusion": "network_timeout", "attempts": 2}}))
+    results.write_text(
+        json.dumps({"tests": {"conclusion": "network_timeout", "attempts": 2}})
+    )
     snapshot_tool = consumer / "vendor/loop-zero/tools/checks.py"
     expected = subprocess.run(
         [
@@ -136,7 +148,9 @@ def test_checks_matches_snapshot_tool_without_executing_it(consumer: Path, capfd
         text=True,
     ).stdout
     marker = tmp_path / "snapshot-ran"
-    snapshot_tool.write_text(f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n")
+    snapshot_tool.write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('bad')\n"
+    )
     rc = run("--root", str(consumer), "checks", "--results", str(results))
     assert rc == 0
     output = capfd.readouterr().out
@@ -147,7 +161,62 @@ def test_checks_matches_snapshot_tool_without_executing_it(consumer: Path, capfd
     assert entry["blocks"] is True
 
 
-def test_hook_commands_reject_shell_syntax_and_inherited_path(consumer: Path, capsys, tmp_path: Path, monkeypatch):
+def test_review_stats_cli_json_and_human_shapes(tmp_path: Path, capsys, monkeypatch):
+    from loopzero.kernel import authority_store
+
+    monkeypatch.setattr(authority_store, "load_records", lambda root, days: [])
+    assert run("--root", str(tmp_path), "review-stats", "--json") == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == {
+        "filters",
+        "totals",
+        "per_pr",
+        "per_intent",
+        "per_reason",
+        "per_engine",
+        "failures_by_class",
+        "percentiles",
+    }
+    assert payload["totals"]["api_equivalent_usd"] is None
+
+    assert run("--root", str(tmp_path), "review-stats") == 0
+    output = capsys.readouterr().out
+    assert "starts=0 terminals=0 verdicts=0 failures=0" in output
+    assert "API-equivalent USD=unknown" in output
+    assert "median / p95 per PR" in output
+
+
+def test_review_stats_human_output_escapes_and_bounds_ledger_labels(
+    tmp_path: Path, capsys, monkeypatch
+):
+    from loopzero.kernel import authority_store
+
+    hostile = "engine\n\x1b[31m" + "x" * 300
+    monkeypatch.setattr(
+        authority_store,
+        "load_records",
+        lambda root, days: [
+            {
+                "type": "attempt-start",
+                "task_id": "review",
+                "attempt_index": 0,
+                "run_id": "run",
+                "work_unit_id": "code-review",
+                "review_intent": hostile,
+                "engine": hostile,
+            }
+        ],
+    )
+    assert run("--root", str(tmp_path), "review-stats") == 0
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "engine\\n\\u001b[31m" in output
+    assert "x" * 121 not in output
+
+
+def test_hook_commands_reject_shell_syntax_and_inherited_path(
+    consumer: Path, capsys, tmp_path: Path, monkeypatch
+):
     base = subprocess.run(
         ["git", "-C", str(consumer), "rev-parse", "main"],
         check=True,
@@ -156,8 +225,19 @@ def test_hook_commands_reject_shell_syntax_and_inherited_path(consumer: Path, ca
     ).stdout.strip()
     workflow = consumer / "workflow.toml"
     original = workflow.read_text()
-    for command in ("true && false", "true || false", "true; false", "true | false", "`false`", "echo $(false)"):
-        workflow.write_text(original.replace('worktree_setup = ["make setup"]', f'worktree_setup = ["{command}"]'))
+    for command in (
+        "true && false",
+        "true || false",
+        "true; false",
+        "true | false",
+        "`false`",
+        "echo $(false)",
+    ):
+        workflow.write_text(
+            original.replace(
+                'worktree_setup = ["make setup"]', f'worktree_setup = ["{command}"]'
+            )
+        )
         assert run("--root", str(consumer), "policy", "lint", "--base", base) == 1
         assert "metacharacters" in capsys.readouterr().err
 
@@ -174,21 +254,33 @@ def test_hook_commands_reject_shell_syntax_and_inherited_path(consumer: Path, ca
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 0
     capsys.readouterr()
 
-    workflow.write_text(original.replace('worktree_setup = ["make setup"]', 'worktree_setup = ["shadow-only"]'))
+    workflow.write_text(
+        original.replace(
+            'worktree_setup = ["make setup"]', 'worktree_setup = ["shadow-only"]'
+        )
+    )
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 1
     assert "allowed PATH" in capsys.readouterr().err
 
     repository_hook = consumer / "hook-script"
     repository_hook.write_text("#!/bin/sh\nexit 0\n")
     repository_hook.chmod(repository_hook.stat().st_mode | stat.S_IXUSR)
-    workflow.write_text(original.replace('worktree_setup = ["make setup"]', 'worktree_setup = ["./hook-script"]'))
+    workflow.write_text(
+        original.replace(
+            'worktree_setup = ["make setup"]', 'worktree_setup = ["./hook-script"]'
+        )
+    )
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 0
     capsys.readouterr()
 
     outside_hook = tmp_path / "outside-hook"
     outside_hook.write_text("#!/bin/sh\nexit 0\n")
     outside_hook.chmod(outside_hook.stat().st_mode | stat.S_IXUSR)
-    workflow.write_text(original.replace('worktree_setup = ["make setup"]', 'worktree_setup = ["../outside-hook"]'))
+    workflow.write_text(
+        original.replace(
+            'worktree_setup = ["make setup"]', 'worktree_setup = ["../outside-hook"]'
+        )
+    )
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 1
     assert "allowed PATH" in capsys.readouterr().err
 
@@ -206,16 +298,19 @@ def test_allowlist_rejects_symlinked_directory_and_executable(
     allowed.mkdir()
     linked_directory = tmp_path / "linked-allowed"
     linked_directory.symlink_to(allowed, target_is_directory=True)
-    assert run(
-        "--root",
-        str(consumer),
-        "policy",
-        "lint",
-        "--base",
-        base,
-        "--path-entry",
-        str(linked_directory),
-    ) == 1
+    assert (
+        run(
+            "--root",
+            str(consumer),
+            "policy",
+            "lint",
+            "--base",
+            base,
+            "--path-entry",
+            str(linked_directory),
+        )
+        == 1
+    )
     assert "symlink" in capsys.readouterr().err
 
     outside = tmp_path / "outside-tool"
@@ -228,17 +323,21 @@ def test_allowlist_rejects_symlinked_directory_and_executable(
             'worktree_setup = ["make setup"]', 'worktree_setup = ["linked-tool"]'
         )
     )
-    assert run(
-        "--root",
-        str(consumer),
-        "policy",
-        "lint",
-        "--base",
-        base,
-        "--path-entry",
-        str(allowed),
-    ) == 1
+    assert (
+        run(
+            "--root",
+            str(consumer),
+            "policy",
+            "lint",
+            "--base",
+            base,
+            "--path-entry",
+            str(allowed),
+        )
+        == 1
+    )
     assert "allowed PATH" in capsys.readouterr().err
+
 
 def test_non_commit_base_and_symlinked_base_workflow_fail(consumer: Path, capsys):
     blob = subprocess.run(
@@ -360,7 +459,9 @@ def test_base_policy_ignores_git_replacement_objects(consumer: Path, capsys):
         capture_output=True,
         text=True,
     ).stdout.strip()
-    subprocess.run(["git", "-C", str(consumer), "replace", base, replacement], check=True)
+    subprocess.run(
+        ["git", "-C", str(consumer), "replace", base, replacement], check=True
+    )
     workflow.write_text(contents)
     assert run("--root", str(consumer), "policy", "lint", "--base", base) == 0
     assert capsys.readouterr().out.strip() == "pass"

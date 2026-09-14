@@ -25,3 +25,25 @@ with the next action recorded. Supersede stale READY evidence when the head
 changes, retaining the reviewed commit only as provenance in the same block.
 READY requires complete checks and review coverage for the current head; it
 does not mean merged. Stop at READY unless merge is explicitly authorized.
+
+## Adopting generation-owned review authority from loop-zero 0.3.2
+
+Adoption is a projection of existing evidence, not a replay of historical
+work. With dispatch writers stopped, preserve the complete authority ledger and
+consumer trust receipts, install and pin the new loop-zero release, and let the
+new package authenticate that history before the first new admission. Do not
+rewrite old task payloads, task hashes, terminals, verdicts, or receipts.
+
+An authenticated legacy whole-manifest pass remains the seed at its original
+source identity, tree, and manifest digest. An unchanged source therefore
+reuses that pass without verification or review. If the source later changes,
+the first claim-level trust run is conservatively repository-wide; subsequent
+runs can carry unaffected per-claim verdicts. Existing delivery verdicts are
+projected into content generations and carry only across package-proven
+equivalent heads, so upgrade itself creates neither a launch nor a new slot.
+
+Start only new-release writers after the projection succeeds. Retain the
+downgrade barrier and authority archives: an older binary must not write once
+new authority record families exist. Historical observational rows remain
+visible to `loopzero review-stats`, with fields unavailable in 0.3.2 reported as
+`unrecorded` or `unknown`, never fabricated as labels or zero cost.

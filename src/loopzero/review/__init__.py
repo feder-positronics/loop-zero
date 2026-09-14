@@ -4,6 +4,8 @@ from dataclasses import replace
 from pathlib import Path
 from threading import Lock
 
+from ..config import ConfigError, Profile
+from ..kernel import settings as kernel_settings
 from . import (
     acceptance,
     admission,
@@ -15,10 +17,10 @@ from . import (
     preflight,
     risk,
     routing,
+    stats,
+    telemetry,
     trust_claims,
 )
-from ..config import ConfigError, Profile
-from ..kernel import settings as kernel_settings
 
 _DEFAULT_PROFILE: Profile | None = None
 _CONFIGURE_LOCK = Lock()
@@ -56,9 +58,9 @@ def configure(
     global _DEFAULT_PROFILE
     with _CONFIGURE_LOCK:
         if _DEFAULT_PROFILE is not None and profile != _DEFAULT_PROFILE:
-            raise ConfigError([
-                "review is already configured with a different Profile"
-            ])
+            raise ConfigError(
+                ["review is already configured with a different Profile"]
+            )
         kernel_settings.configure(_merged_kernel_settings(profile))
         for mechanism in (acceptance, chain, evidence, findings, risk, routing):
             mechanism.configure(profile)
@@ -70,6 +72,18 @@ def configure(
         _DEFAULT_PROFILE = profile
 
 __all__ = [
-    "acceptance", "admission", "authority", "chain", "evidence", "findings",
-    "harness", "preflight", "risk", "routing", "trust_claims", "configure"
+    "acceptance",
+    "admission",
+    "authority",
+    "chain",
+    "configure",
+    "evidence",
+    "findings",
+    "harness",
+    "preflight",
+    "risk",
+    "routing",
+    "stats",
+    "telemetry",
+    "trust_claims",
 ]

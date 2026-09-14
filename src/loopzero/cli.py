@@ -1,7 +1,7 @@
 """``loopzero`` command line.
 
 Subcommands present in this release: ``init``, ``sync``, ``status``,
-``policy lint``, ``doctor``, ``checks``. Later releases add ``worktree``,
+``policy lint``, ``doctor``, ``checks``, ``review-stats``. Later releases add ``worktree``,
 ``job``, ``ledger``, ``dispatch``, ``review``, ``delivery`` and ``evidence``
 as their modules land. Exit code 0 means the command produced its result; a
 report command's exit code never asserts that a policy passed unless the
@@ -21,7 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, gates
+from . import sync as sync_module
 from .config import (
     CONTRACT_ID,
     WORKFLOW_FILE,
@@ -31,8 +32,6 @@ from .config import (
     load_profile,
     resolve_base,
 )
-from . import gates
-from . import sync as sync_module
 from .trust import allowed_path, resolve_executable
 
 TOOLS = ("git", "bwrap", "openssl", "gh")
@@ -83,7 +82,9 @@ def _lint_hook_commands(
         for command in commands:
             where = f"[hooks].{name}"
             if SHELL_METACHARACTERS.search(command):
-                problems.append(f"{where}: shell metacharacters are not allowed: {command!r}")
+                problems.append(
+                    f"{where}: shell metacharacters are not allowed: {command!r}"
+                )
                 continue
             try:
                 argv = shlex.split(command, posix=True)
@@ -99,11 +100,15 @@ def _lint_hook_commands(
     return problems
 
 
-def _run_source_status(profile: Profile, source_arg: str) -> subprocess.CompletedProcess[str]:
+def _run_source_status(
+    profile: Profile, source_arg: str
+) -> subprocess.CompletedProcess[str]:
     try:
         source = Path(source_arg).resolve(strict=True)
         tool = source / "core" / "tools" / "status.py"
-        if stat.S_ISLNK(os.lstat(tool).st_mode) or not stat.S_ISREG(os.lstat(tool).st_mode):
+        if stat.S_ISLNK(os.lstat(tool).st_mode) or not stat.S_ISREG(
+            os.lstat(tool).st_mode
+        ):
             raise OSError("verifier is not a regular file")
     except OSError as exc:
         raise ConfigError([f"trusted source verifier unavailable: {exc}"]) from None
@@ -140,8 +145,12 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"{target} exists; use --force to overwrite", file=sys.stderr)
         return 1
     revision = args.revision or "0" * 40
-    target.write_text(INIT_TEMPLATE.format(revision=revision, contract=CONTRACT_ID), encoding="utf-8")
-    print(f"wrote {target}; set [core].revision to the inspected full SHA and fill [checks]")
+    target.write_text(
+        INIT_TEMPLATE.format(revision=revision, contract=CONTRACT_ID), encoding="utf-8"
+    )
+    print(
+        f"wrote {target}; set [core].revision to the inspected full SHA and fill [checks]"
+    )
     return 0
 
 
@@ -172,9 +181,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     profile = load_profile(Path(args.root))
     snapshot = profile.snapshot_version()
     if snapshot is None:
-        print(f"version equality: unavailable; snapshot VERSION missing at {profile.snapshot_dir}")
+        print(
+            f"version equality: unavailable; snapshot VERSION missing at {profile.snapshot_dir}"
+        )
     elif snapshot != __version__:
-        print(f"version equality: different; package {__version__}, snapshot {snapshot}")
+        print(
+            f"version equality: different; package {__version__}, snapshot {snapshot}"
+        )
     else:
         print(f"version equality: equal; package and snapshot are {snapshot}")
     if not args.source:
@@ -203,7 +216,10 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
         print("fail")
         return 1
     if not args.no_hooks and not (args.base or args.base_ref):
-        print("UNVERIFIED: hook-aware policy lint requires --base or --base-ref", file=sys.stderr)
+        print(
+            "UNVERIFIED: hook-aware policy lint requires --base or --base-ref",
+            file=sys.stderr,
+        )
         return 1
 
     allowed = allowed_path(args.path_entry)
@@ -211,7 +227,9 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
     base_sha: str | None = None
     if not args.no_hooks:
         try:
-            base_sha = resolve_base(profile.root, base=args.base, base_ref=args.base_ref)
+            base_sha = resolve_base(
+                profile.root, base=args.base, base_ref=args.base_ref
+            )
             if args.base_ref:
                 print(f"base: {base_sha}")
             hooks = effective_hooks(profile, base_sha)
@@ -227,9 +245,13 @@ def cmd_policy_lint(args: argparse.Namespace) -> int:
         if name not in explicitly_configured_aliases:
             continue
         if alias.runner in ("claude", "codex", "cursor"):
-            binary = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[alias.runner]
+            binary = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[
+                alias.runner
+            ]
             if resolve_executable(profile.root, binary, allowed) is None:
-                problems.append(f"[routing.aliases].{name}: runtime {binary!r} not in the allowed PATH")
+                problems.append(
+                    f"[routing.aliases].{name}: runtime {binary!r} not in the allowed PATH"
+                )
     if problems:
         for problem in problems:
             print(problem, file=sys.stderr)
@@ -259,7 +281,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def cmd_checks(args: argparse.Namespace) -> int:
     profile = load_profile(Path(args.root))
     try:
-        results = json.loads(Path(args.results).read_text(encoding="utf-8")) if args.results else {}
+        results = (
+            json.loads(Path(args.results).read_text(encoding="utf-8"))
+            if args.results
+            else {}
+        )
         rows = gates.classify(profile.raw["checks"], results)
     except (OSError, ValueError, TypeError, RecursionError, KeyError) as exc:
         raise ConfigError([f"checks report: {exc}"]) from None
@@ -267,10 +293,91 @@ def cmd_checks(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_stats(args: argparse.Namespace) -> int:
+    """Print an archive-aware, read-only review ledger measurement."""
+    from .kernel.authority_store import load_records
+    from .review.stats import review_stats
+
+    root = Path(args.root).resolve()
+    try:
+        result = review_stats(
+            load_records(root, days=36_500),
+            last_merged=args.last_merged,
+            since=args.since,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"review-stats: {exc}", file=sys.stderr)
+        return 1
+    payload = result.to_dict()
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    totals = payload["totals"]
+    assert isinstance(totals, dict)
+    print("review stats")
+    print(
+        "starts={starts} terminals={terminals} verdicts={verdicts} "
+        "failures={failures}".format(**totals)
+    )
+    minutes = totals["minutes"] if totals["minutes"] is not None else "unknown"
+    cost = (
+        totals["api_equivalent_usd"]
+        if totals["api_equivalent_usd"] is not None
+        else "unknown"
+    )
+    print(f"minutes={minutes} API-equivalent USD={cost}")
+    for title, key in (
+        ("per PR", "per_pr"),
+        ("per intent", "per_intent"),
+        ("per reason", "per_reason"),
+        ("per engine", "per_engine"),
+    ):
+        print(f"\n{title}")
+        table = payload[key]
+        assert isinstance(table, dict)
+        for name, row in table.items():
+            assert isinstance(row, dict)
+            row_cost = (
+                row["api_equivalent_usd"]
+                if row["api_equivalent_usd"] is not None
+                else "unknown"
+            )
+            safe_name = _bounded_human_label(name)
+            print(
+                f"{safe_name}: starts={row['starts']} terminals={row['terminals']} "
+                f"verdicts={row['verdicts']} failures={row['failures']} "
+                f"minutes={row['minutes'] if row['minutes'] is not None else 'unknown'} "
+                f"API-equivalent USD={row_cost}"
+            )
+    print("\nmedian / p95 per PR")
+    percentiles = payload["percentiles"]
+    assert isinstance(percentiles, dict)
+    for metric, row in percentiles.items():
+        assert isinstance(row, dict)
+        print(
+            f"{metric}: median={row['median']} p95={row['p95']} "
+            f"unknown={row['unknown']}"
+        )
+    return 0
+
+
+def _bounded_human_label(value: object, *, limit: int = 120) -> str:
+    """Escape and bound a ledger-supplied label before writing a terminal."""
+    encoded = json.dumps(str(value), ensure_ascii=True)[1:-1]
+    return encoded if len(encoded) <= limit else encoded[: limit - 3] + "..."
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="loopzero", description=__doc__.split("\n\n")[0])
-    parser.add_argument("--version", action="version", version=f"loopzero {__version__}")
-    parser.add_argument("--root", default=".", help="consumer repository root (default: .)")
+    parser = argparse.ArgumentParser(
+        prog="loopzero", description=__doc__.split("\n\n")[0]
+    )
+    parser.add_argument(
+        "--version", action="version", version=f"loopzero {__version__}"
+    )
+    parser.add_argument(
+        "--root", default=".", help="consumer repository root (default: .)"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init", help="write a starter workflow.toml")
@@ -291,19 +398,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.set_defaults(func=cmd_sync)
 
-    p = sub.add_parser("status", help="report version equality; --source performs a trusted pin check")
-    p.add_argument("--source", help="local source checkout for the byte-level pin check")
+    p = sub.add_parser(
+        "status", help="report version equality; --source performs a trusted pin check"
+    )
+    p.add_argument(
+        "--source", help="local source checkout for the byte-level pin check"
+    )
     p.set_defaults(func=cmd_status)
 
-    policy = sub.add_parser("policy", help="policy commands").add_subparsers(dest="policy_command", required=True)
-    p = policy.add_parser("lint", help="validate workflow.toml and its base-governed hooks")
+    policy = sub.add_parser("policy", help="policy commands").add_subparsers(
+        dest="policy_command", required=True
+    )
+    p = policy.add_parser(
+        "lint", help="validate workflow.toml and its base-governed hooks"
+    )
     base = p.add_mutually_exclusive_group()
     base.add_argument("--base", help="trusted full 40-character base commit SHA")
     base.add_argument(
         "--base-ref",
         help="full refs/heads/... or refs/remotes/... base ref to resolve and print",
     )
-    base.add_argument("--no-hooks", action="store_true", help="explicitly skip all hook checks")
+    base.add_argument(
+        "--no-hooks", action="store_true", help="explicitly skip all hook checks"
+    )
     p.add_argument(
         "--path-entry",
         action="append",
@@ -318,6 +435,18 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("checks", help="read-only in-package check-policy report")
     p.add_argument("--results", help="JSON results file keyed by exact check name")
     p.set_defaults(func=cmd_checks)
+
+    p = sub.add_parser("review-stats", help="summarize review ledger telemetry")
+    p.add_argument("--json", action="store_true", help="emit the stable JSON shape")
+    p.add_argument(
+        "--last-merged", type=int, metavar="N", help="select the latest N merged PRs"
+    )
+    p.add_argument(
+        "--since",
+        metavar="ISO",
+        help="select observations at or after an ISO timestamp",
+    )
+    p.set_defaults(func=cmd_review_stats)
     from .code_health.cli import register
 
     register(sub)

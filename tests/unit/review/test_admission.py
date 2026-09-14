@@ -133,6 +133,139 @@ def task(name="review", key="key"):
     }
 
 
+def test_admission_rejects_caller_supplied_launch_reason():
+    result = admit(
+        [],
+        identity("a"),
+        review_task={**task(), "launch_reason": "initial"},
+    )
+    assert isinstance(result, admission.Blocked)
+    assert result.code == "invalid-launch-label"
+    assert "package-derived" in result.evidence["message"]
+
+    missing_identity = admit(
+        [],
+        identity("a"),
+        review_task={"launch_reason": "initial"},
+    )
+    assert isinstance(missing_identity, admission.Blocked)
+    assert missing_identity.code == "missing-evidence"
+
+
+def test_all_launch_reasons_are_observable_through_admission(monkeypatch):
+    monkeypatch.setattr(
+        admission, "security_trigger_paths_between", lambda repo, source, target: ()
+    )
+    initial = admit([], identity("a"))
+    assert isinstance(initial, admission.Reserved)
+    assert initial.launch_reason == "initial"
+
+    monkeypatch.setattr(
+        admission,
+        "security_trigger_paths_between",
+        lambda repo, source, target: ("security/policy.py",),
+    )
+    security = admit([], identity("b"), review_task=task("security", "security"))
+    assert isinstance(security, admission.Reserved)
+    assert security.launch_reason == "security-path"
+
+    trust = admit(
+        [],
+        identity("c"),
+        review_task={
+            **task("trust", "trust"),
+            "review_intent": "trust-manifest-verification",
+        },
+    )
+    assert isinstance(trust, admission.Reserved)
+    assert trust.launch_reason == "trust-verification"
+
+    rows, previous = primary_history()
+    target = identity("d")
+    link_generation(rows, previous, target)
+    bounded = admit(
+        rows,
+        target,
+        review_task=task("bounded", "bounded"),
+        requested="delta",
+    )
+    assert isinstance(bounded, admission.Reserved)
+    assert bounded.launch_reason == "bounded-delta"
+
+    trust_rows = list(trust.records_to_append)
+    append_settlement(
+        trust_rows,
+        trust.slot,
+        ReviewOutcome.CONSUMED,
+        terminal("trust", tree=trust.generation.tree),
+    )
+    trust_target = identity("e")
+    link_generation(trust_rows, trust.generation, trust_target)
+    trust_delta = admit(
+        trust_rows,
+        trust_target,
+        review_task={
+            **task("trust-delta", "trust-delta"),
+            "review_intent": "trust-manifest-verification",
+        },
+        requested="delta",
+    )
+    assert isinstance(trust_delta, admission.Reserved)
+    assert trust_delta.launch_reason == "trust-delta"
+
+    for transition, reason in (
+        ("owner-requested", "owner-requested"),
+        ("supersession", "supersession"),
+    ):
+        transition_rows, predecessor = primary_history()
+        transition_target = identity("f" if transition == "owner-requested" else "9")
+        if transition == "owner-requested":
+            transition_rows.append(
+                {
+                    "type": "review-generation-owner-request",
+                    "generation_id": predecessor.generation_id,
+                }
+            )
+        else:
+            transition_rows.append(
+                {
+                    "type": "attempt-supersession",
+                    "review_generation_id": predecessor.generation_id,
+                    "superseding_source_identity": {
+                        "head": transition_target["candidate_sha"]
+                    },
+                }
+            )
+        link_generation(
+            transition_rows, predecessor, transition_target, kind=transition
+        )
+        observed = admit(
+            transition_rows,
+            transition_target,
+            review_task=task(reason, reason),
+            requested="delta",
+        )
+        assert isinstance(observed, admission.Reserved)
+        assert observed.launch_reason == reason
+
+    first = admit([], identity("8"), review_task=task("failed", "failed"))
+    assert isinstance(first, admission.Reserved)
+    retry_rows = list(first.records_to_append)
+    append_settlement(
+        retry_rows,
+        first.slot,
+        ReviewOutcome.RELEASED,
+        terminal("failed", tree=first.generation.tree, released=True),
+    )
+    retry = admit(
+        retry_rows,
+        identity("8"),
+        review_task=task("retry", "retry"),
+    )
+    assert isinstance(retry, admission.Reserved)
+    assert retry.launch_reason == "infrastructure-retry"
+
+
 def admit(
     rows, patch, *, review_task=None, requested="review", changed=None,
     changed_digest=None, security=("security/policy.py",),
@@ -704,10 +837,14 @@ def test_every_blocked_code_is_reachable():
         requested="delta",
         changed=None,
     )
+    invalid_label = admit(
+        [], patch, review_task={**task("label", "label"), "launch_reason": "initial"}
+    )
     results = {
         result.code
         for result in (
-            stale, invalid, missing, held, conflict, exhausted, retries, oversized
+            stale, invalid, missing, held, conflict, exhausted, retries, oversized,
+            invalid_label,
         )
     }
     assert results == {
@@ -719,6 +856,7 @@ def test_every_blocked_code_is_reachable():
         "retries-exhausted",
         "oversized-delta",
         "reservation-conflict",
+        "invalid-launch-label",
     }
 
 

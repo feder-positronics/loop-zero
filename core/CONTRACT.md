@@ -159,10 +159,18 @@ check a child's environment; it is not a sandbox or arbitrary command runner.
 Run every applicable class-1 gate, required and advisory, including lint, type
 checks, complexity ratchets and tests, before freezing the review tree. Record
 unavailable required gates as blockers and genuinely inapplicable gates with a
-reason. Use one independent review per PR and at most one bounded delta review
-for substantive repairs. Mechanical post-review lint, formatting or ratchet
-fixes need no re-review when behavior and acceptance are unchanged; rerun
-deterministic gates.
+reason. One primary review plus one bounded delta is a per-content-generation
+invariant owned atomically by the authority ledger, not a caller-maintained
+per-PR counter. A verdict carries to another head only when the kernel proves
+that head equivalent and all required section coverage remains valid.
+Unsuccessful execution never consumes a verdict slot; the ledger releases only
+a verified inconclusive outcome and permits at most one retry for the same
+lineage, generation, family, and slot-kind obligation. Consumer configuration
+may only narrow these limits and required coverage; it cannot grant another
+slot, weaken equivalence, or remove a mandatory security obligation. Mechanical
+post-review lint, formatting or ratchet fixes need no re-review when the kernel
+proves equivalence and behavior and acceptance are unchanged; rerun deterministic
+gates.
 A ratchet change that weakens a threshold is not a mechanical fix.
 
 Bind publication and review evidence to the exact head in exactly one place:
@@ -171,9 +179,9 @@ only a link). Record the originally reviewed commit and any subsequent delta,
 its classification and gate results at the current head. Old-head evidence does
 not certify a new head. Return to editing and validation freely; no irreversible
 phase machine or unavailable review harness may wedge a small repair. Use an
-available independent route for the single bounded delta if needed. If review
+available independent route for the ledger-admitted bounded delta if needed. If review
 remains incomplete, preserve an adoptable diff and report the specific blocker;
-never imply a pass. After the review budget is exhausted, narrow or defer scope
+never imply a pass. After the generation slots are exhausted, narrow or defer scope
 with the owner rather than silently starting another full review cycle.
 
 A trust verification verdict is a set of per-claim verdicts. A repair
