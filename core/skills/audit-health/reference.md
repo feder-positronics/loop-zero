@@ -39,9 +39,15 @@ or the mode's generated status summary before interpreting payload artifacts.
 | public env/auth/maintenance/queue | `next-public-env.txt`, `route-auth-signal.txt`, `disabled-maintenance.txt`, `queue-health.txt` |
 | graph | `graph-*.json`, `graph-summary-*.md` when requested |
 | learnings | `learnings_status.txt`, `learnings_verify.txt` |
+| optional committed-source structure | `code-structure.json`, `code-structure.md` when the consumer enables `loopzero code-health` |
 
 - A missing, stale, invalid, or failed payload inherits the collector status; it
   is not a clean zero.
+- For requested structure evidence, verify `valid`, source SHA(s), policy,
+  completion, and coverage. Consumer scripts own invocation and status
+  registration. Route useful size, complexity, or clone hypotheses to
+  `code-quality-drift`; candidates are not automatic findings or threshold
+  failures. Reconcile existing same-source gate findings first.
 - Coverage with `status: "infra_unavailable"` is unmeasured/deferred. For a real
   reading, run `{{toolchain.commands.infra_start}}` and rerun the collector.
 - `symbol_cleanup` entries are unused symbols inside live files; route them to

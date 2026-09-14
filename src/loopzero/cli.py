@@ -318,6 +318,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("checks", help="read-only in-package check-policy report")
     p.add_argument("--results", help="JSON results file keyed by exact check name")
     p.set_defaults(func=cmd_checks)
+    from .code_health.cli import register
+
+    register(sub)
     return parser
 
 

@@ -12,6 +12,8 @@ claude = ["claude-agent-sdk==0.2.152"]
 codex = ["openai-codex==0.154.0", "openai-codex-cli-bin==0.154.0"]
 acp = ["agent-client-protocol>=0.12"]
 guardian = ["PyYAML>=6"]
+code-health = ["ruff==0.16.7", "jscpd==5.2.0"]
+code-health-duplication = ["jscpd==5.2.0"]
 
 [project.scripts]
 loopzero = "loopzero.cli:main"
