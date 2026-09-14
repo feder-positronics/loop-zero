@@ -256,6 +256,8 @@ def test_planted_repository_gh_config_is_invisible_to_the_child(
 
 _PROCESS_CALL_ALLOWLIST = {
     "cli.py": "Runs the configured source-status observation command.",
+    "code_health/source.py": "Reads immutable regular Git blobs with a credential-free environment.",
+    "code_health/analyzers.py": "Runs version-checked Ruff/jscpd on private source corpora without candidate configuration.",
     "config.py": "Reads repository identity through bounded Git queries.",
     "delivery/_obligations.py": "Computes obligation changes with Git.",
     "delivery/_publish_body.py": "Runs the isolated PR-body validator.",

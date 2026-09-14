@@ -2,6 +2,15 @@
 
 ## Run State And Resume
 
+When the consumer supplies `code-structure.json`, read its collector status,
+source identity, and coverage before using measured growth or clone families.
+Reuse the existing artifact; do not launch a second scanner from skill prose.
+Test each selected hypothesis against source, callers, tests, and a concrete
+future change. Repeated policy tables can matter even at low complexity;
+imports, signatures, and ordinary UI repetition may require no change. Preserve
+`confirmed / wrong / partial` dispositions and existing repair/design routing.
+Reference an existing same-source gate finding instead of duplicating it.
+
 Reports live at `{{package.audit_root}}/YYYY-MM-DD/drift-<be|fe|all>/`. Follow the
 [parallel-agent rule] rather than creating runtime-specific worktrees manually.
 Default runs keep the main report to the ten highest-value routed proposals;

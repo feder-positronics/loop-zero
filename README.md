@@ -32,6 +32,11 @@ CI runs the tests and `python3 core/tools/status.py --known-gaps KNOWN-GAPS.md
 There are no configured lint, type or complexity ratchets in this source package;
 consumers must run every applicable gate from their own contract.
 
+The optional [code-health collector](docs/code-health.md) provides committed
+snapshot inventories and advisory base/head comparisons for size, Python
+complexity, and duplication. Existing health/drift audits can consume its
+source-bound artifact without changing required gates.
+
 ## Nightly real-runtime conformance
 
 [`nightly-conformance.yml`](.github/workflows/nightly-conformance.yml) runs at
