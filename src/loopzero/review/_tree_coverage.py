@@ -327,8 +327,16 @@ def _generation_chain_covers_tree(
     from ..kernel.authority_projection import generation_carries, generations
     from ..kernel.canonical import canonical_record_digest
     from ..kernel.review_state import patch_identity_digest
+    from ..kernel.seams import MissingAdapter
 
-    projected = generations(records)  # type: ignore[arg-type]
+    try:
+        projected = generations(records)  # type: ignore[arg-type]
+        carries = generation_carries(records)  # type: ignore[arg-type]
+    except MissingAdapter:
+        # Pre-cutover ledgers need consumer adapters for their compatibility
+        # projection. Missing adapters withhold coverage; they do not make the
+        # publication coverage predicate raise.
+        return False
     terminal_identity = terminal.get("patch_identity")
     terminal_tree = terminal.get("snapshot_tree_sha")
     terminal_digest = (
@@ -353,7 +361,6 @@ def _generation_chain_covers_tree(
     ]
     if not candidates or not isinstance(terminal_tree, str):
         return False
-    carries = generation_carries(records)  # type: ignore[arg-type]
     return any(
         chain_covers_tree(
             terminal_tree,

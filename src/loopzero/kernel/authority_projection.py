@@ -532,6 +532,10 @@ _link_projection_cache: dict[
 _slot_projection_cache: dict[
     tuple[object, ...], tuple[object, object]
 ] = {}
+_legacy_delta_projection_cache: dict[
+    tuple[object, ...],
+    tuple[object, tuple[tuple[object, ...], dict[str, tuple[str, ...]]]],
+] = {}
 
 
 def _authentication_cache_key(
@@ -1641,7 +1645,12 @@ def _legacy_review_generations(
     records: Sequence[dict[str, object]],
 ) -> dict[str, object]:
     """Synthesize conservative content generations for accepted old terminals."""
-    from .review_state import ReviewGenerationV1, generation_id_for, patch_identity_digest
+    from .review_state import (
+        GenerationCarryV1,
+        ReviewGenerationV1,
+        generation_id_for,
+        patch_identity_digest,
+    )
 
     authenticated = _authenticated_coordinator_record_ids(records)
     d29_cutover_index = next(
@@ -1667,15 +1676,16 @@ def _legacy_review_generations(
         ) from exc
     record_indices = {id(record): index for index, record in enumerate(records)}
     legacy: dict[str, ReviewGenerationV1] = {}
+    primary_terminals: dict[str, Mapping[str, object]] = {}
     for task_id, terminal in accepted.items():
+        contract = terminal.get("task_contract")
+        is_delta = terminal.get("delta_from_snapshot_sha") is not None or (
+            isinstance(contract, Mapping)
+            and contract.get("delta_from_snapshot_sha") is not None
+        )
         if (
             terminal.get("advisory") is True
-            or terminal.get("delta_from_snapshot_sha") is not None
-            or (
-                isinstance(terminal.get("task_contract"), Mapping)
-                and terminal["task_contract"].get("delta_from_snapshot_sha")
-                is not None
-            )
+            or is_delta
             or record_indices.get(id(terminal), len(records)) >= d29_cutover_index
         ):
             continue
@@ -1718,7 +1728,6 @@ def _legacy_review_generations(
                 "patch_id_verbatim": candidate_sha,
             }
         chain_receipt = terminal.get("review_chain_receipt")
-        contract = terminal.get("task_contract")
         raw_sections = (
             chain_receipt.get("required_sections")
             if isinstance(chain_receipt, Mapping)
@@ -1786,7 +1795,145 @@ def _legacy_review_generations(
             inherited_coverage=sections,
             invalidated_sections=(),
         )
+        primary_terminals[generation_id] = terminal
+
+    legacy_carries: list[GenerationCarryV1] = []
+    legacy_delta_refs: dict[str, list[str]] = {}
+    for task_id, terminal in accepted.items():
+        contract = terminal.get("task_contract")
+        delta_from_snapshot = terminal.get("delta_from_snapshot_sha")
+        if delta_from_snapshot is None and isinstance(contract, Mapping):
+            delta_from_snapshot = contract.get("delta_from_snapshot_sha")
+        delta_from_tree = terminal.get("delta_from_tree_sha")
+        if delta_from_tree is None and isinstance(contract, Mapping):
+            delta_from_tree = contract.get("delta_from_tree_sha")
+        terminal_index = record_indices.get(id(terminal), len(records))
+        if (
+            terminal.get("advisory") is True
+            or not isinstance(delta_from_snapshot, str)
+            or re.fullmatch(r"[0-9a-f]{40,64}", delta_from_snapshot) is None
+            or (
+                delta_from_tree is not None
+                and not isinstance(delta_from_tree, str)
+            )
+            or terminal_index >= d29_cutover_index
+        ):
+            continue
+        verdict = verdicts.get(task_id)
+        if not isinstance(verdict, Mapping) or verdict.get("verdict") not in {
+            "pass",
+            "fail",
+        }:
+            continue
+        identity = terminal.get("patch_identity")
+        tree = terminal.get("snapshot_tree_sha")
+        if (
+            not isinstance(identity, Mapping)
+            or not isinstance(tree, str)
+            or identity.get("candidate_tree_sha") != tree
+        ):
+            continue
+        if set(identity) == {"candidate_sha", "candidate_tree_sha"}:
+            candidate_sha = identity.get("candidate_sha")
+            if not isinstance(candidate_sha, str) or re.fullmatch(
+                r"[0-9a-f]{40,64}", candidate_sha
+            ) is None:
+                continue
+            legacy_diff = hashlib.sha256(
+                json.dumps(
+                    ["legacy-patch-identity-v1", dict(identity)],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            identity = {
+                "schema_version": "patch-identity-v1",
+                "base_sha": candidate_sha,
+                "base_tree_sha": tree,
+                "candidate_sha": candidate_sha,
+                "candidate_tree_sha": tree,
+                "diff_format": "git-binary-full-index-no-renames-v1",
+                "diff_sha256": legacy_diff,
+                "patch_id_verbatim": candidate_sha,
+            }
+        candidates: list[tuple[str, ReviewGenerationV1]] = []
+        for generation_id, primary in primary_terminals.items():
+            if record_indices.get(id(primary), len(records)) >= terminal_index:
+                continue
+            generation = legacy[generation_id]
+            primary_snapshot = primary.get("snapshot_sha")
+            primary_candidate = generation.patch_identity.get("candidate_sha")
+            if delta_from_snapshot not in {primary_snapshot, primary_candidate}:
+                continue
+            if delta_from_tree is not None and delta_from_tree != generation.tree:
+                continue
+            candidates.append((generation_id, generation))
+        if len(candidates) != 1:
+            # Historical compatibility never guesses which primary owns a
+            # delta. Ambiguous or incomplete links remain unindexed.
+            continue
+        generation_id, generation = candidates[0]
+        chain_receipt = terminal.get("review_chain_receipt")
+        raw_sections = (
+            chain_receipt.get("required_sections")
+            if isinstance(chain_receipt, Mapping)
+            else contract.get("required_sections")
+            if isinstance(contract, Mapping)
+            else None
+        )
+        if not isinstance(raw_sections, list) or not all(
+            isinstance(section, str) and section for section in raw_sections
+        ):
+            lens = terminal.get("review_lens")
+            raw_sections = [lens] if isinstance(lens, str) and lens else ["code"]
+        sections = tuple(
+            sorted(set(generation.required_sections).intersection(raw_sections))
+        )
+        if not sections:
+            continue
+        delta_ref = canonical_record_digest(terminal)
+        legacy_carries.append(
+            GenerationCarryV1(
+                generation_id=generation_id,
+                from_identity=generation.patch_identity,
+                to_identity=identity,
+                proof={
+                    "kind": "legacy-delta-review-v1",
+                    "primary_terminal_ref": generation.primary_origin_receipt,
+                    "delta_terminal_ref": delta_ref,
+                },
+                sections=sections,
+            )
+        )
+        legacy_delta_refs.setdefault(generation_id, []).append(delta_ref)
+
+    cache_key = _authentication_cache_key(records)
+    _review_cache_store(
+        _legacy_delta_projection_cache,
+        cache_key,
+        records,
+        (
+            tuple(legacy_carries),
+            {
+                generation_id: tuple(dict.fromkeys(refs))
+                for generation_id, refs in legacy_delta_refs.items()
+            },
+        ),
+    )
     return cast(dict[str, object], legacy)
+
+
+def _legacy_delta_projection(
+    records: Sequence[dict[str, object]],
+) -> tuple[tuple[object, ...], dict[str, tuple[str, ...]]]:
+    """Return authenticated historical delta endpoints and their receipts."""
+    cache_key = _authentication_cache_key(records)
+    cached = _legacy_delta_projection_cache.get(cache_key)
+    if cached is None:
+        _legacy_review_generations(records)
+        cached = _legacy_delta_projection_cache.get(cache_key)
+    return cached[1] if cached is not None else ((), {})
 
 
 def generations(records: Sequence[dict[str, object]]) -> dict[str, object]:
@@ -1896,7 +2043,18 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
         generation_id: {patch_identity_digest(generation.patch_identity)}
         for generation_id, generation in projected.items()
     }
-    carries: list[GenerationCarryV1] = []
+    legacy_carries, _legacy_delta_refs = _legacy_delta_projection(records)
+    carries: list[GenerationCarryV1] = [
+        carry
+        for carry in legacy_carries
+        if carry.generation_id in projected
+        and patch_identity_digest(carry.from_identity)
+        in known.get(carry.generation_id, set())
+    ]
+    for carry in carries:
+        known.setdefault(carry.generation_id, set()).add(
+            patch_identity_digest(carry.to_identity)
+        )
     authenticated_rows = authenticated_review_state_records(records)
     authenticated_ids = {id(record) for record in authenticated_rows}
     proof_rows: dict[int, GenerationProofV1] = {}
@@ -1973,6 +2131,7 @@ class ReviewSlotState:
     reservations: tuple[object, ...]
     settlements: tuple[object, ...]
     inherited_primary_ref: str | None = None
+    inherited_delta_refs: tuple[str, ...] = ()
     effective_outcomes: tuple[tuple[str, object], ...] = ()
 
     def settlement_for(self, reservation_id: str):
@@ -2028,7 +2187,7 @@ class ReviewSlotState:
 
     @property
     def delta_consumed(self) -> bool:
-        return self._consumed("delta")
+        return bool(self.inherited_delta_refs) or self._consumed("delta")
 
     @property
     def primary_terminal_ref(self) -> str | None:
@@ -2053,6 +2212,7 @@ class ReviewSlotState:
         ]
         if self.inherited_primary_ref is not None:
             values.insert(0, self.inherited_primary_ref)
+        values.extend(self.inherited_delta_refs)
         return tuple(dict.fromkeys(values))
 
 
@@ -2169,6 +2329,7 @@ def slot_state(
         settled_reservations.add(settlement.reservation_id)
         effective_outcomes.append((settlement.reservation_id, effective))
     inherited = None
+    inherited_deltas: tuple[str, ...] = ()
     if generation is not None:
         native_generation_ids = {
             record.get("generation_id")
@@ -2180,6 +2341,8 @@ def slot_state(
             # primary and has no native slot rows.
             if family == "delivery":
                 inherited = generation.primary_origin_receipt
+                _legacy_carries, delta_refs = _legacy_delta_projection(records)
+                inherited_deltas = delta_refs.get(generation_id, ())
         elif generation.predecessor_id is not None:
             predecessor = generations(records).get(generation.predecessor_id)
             predecessor_state = slot_state(records, generation.predecessor_id, family)
@@ -2207,6 +2370,7 @@ def slot_state(
         reservations=tuple(reservations),
         settlements=tuple(settlements),
         inherited_primary_ref=inherited,
+        inherited_delta_refs=inherited_deltas,
         effective_outcomes=tuple(effective_outcomes),
     )
     _review_cache_store(_slot_projection_cache, cache_key, records, result)
