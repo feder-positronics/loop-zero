@@ -82,6 +82,17 @@ def _canonical_paths(value: object, *, label: str) -> tuple[str, ...]:
     return tuple(sorted({_canonical_path(path, label=label) for path in value}))
 
 
+def _path_covers(declared_path: str, candidate_path: str) -> bool:
+    """Return whether a declared path covers a path on component boundaries."""
+    return candidate_path == declared_path or candidate_path.startswith(
+        declared_path + "/"
+    )
+
+
+def _covered_by_any(candidate_path: str, declared_paths: Sequence[str]) -> bool:
+    return any(_path_covers(path, candidate_path) for path in declared_paths)
+
+
 def claim_id(section: str, text: str, paths: Sequence[str]) -> str:
     """Return the stable identity of one normalized trust claim."""
     if section not in TRUST_CLAIM_SECTIONS:
@@ -268,6 +279,22 @@ class ClaimVerdict:
         return cls(**raw)  # type: ignore[arg-type]
 
 
+def _uncovered_risk_paths(
+    claim_set: ClaimSet, claims: Mapping[str, ClaimVerdict]
+) -> tuple[str, ...]:
+    passing_paths = tuple(
+        path
+        for identity, binding in claims.items()
+        if binding.verdict == "pass" and identity in claim_set.by_id
+        for path in claim_set.by_id[identity].paths
+    )
+    return tuple(
+        risk_path
+        for risk_path in claim_set.risk_paths
+        if not _covered_by_any(risk_path, passing_paths)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class TrustClaimReceiptV1:
     task_hash: str
@@ -276,6 +303,7 @@ class TrustClaimReceiptV1:
     manifest_sha256: str
     claim_set_digest: str
     claims: Mapping[str, ClaimVerdict]
+    uncovered_risk_paths: tuple[str, ...]
     receipt_digest: str
     _claim_set: ClaimSet | None = field(default=None, repr=False, compare=False)
 
@@ -307,11 +335,24 @@ class TrustClaimReceiptV1:
                 else ClaimVerdict.from_mapping(binding)  # type: ignore[arg-type]
             )
         object.__setattr__(self, "claims", MappingProxyType(dict(sorted(normalized.items()))))
+        object.__setattr__(
+            self,
+            "uncovered_risk_paths",
+            _canonical_paths(
+                self.uncovered_risk_paths, label="uncovered_risk_paths"
+            ),
+        )
         if self._claim_set is not None:
             if self._claim_set.claim_set_digest != self.claim_set_digest:
                 raise TrustClaimError("receipt claim set digest does not match")
             if set(self.claims) != set(self._claim_set.by_id):
                 raise TrustClaimError("receipt claims do not match the claim set")
+            if self.uncovered_risk_paths != _uncovered_risk_paths(
+                self._claim_set, self.claims
+            ):
+                raise TrustClaimError(
+                    "receipt uncovered risk paths do not match the claim verdicts"
+                )
 
     def _payload(self) -> dict[str, object]:
         return {
@@ -324,6 +365,7 @@ class TrustClaimReceiptV1:
                 identity: binding.to_dict()
                 for identity, binding in sorted(self.claims.items())
             },
+            "uncovered_risk_paths": list(self.uncovered_risk_paths),
         }
 
     def to_dict(self) -> dict[str, object]:
@@ -343,9 +385,14 @@ class TrustClaimReceiptV1:
             "manifest_sha256",
             "claim_set_digest",
             "claims",
+            "uncovered_risk_paths",
             "receipt_digest",
         }
-        if set(raw) != expected or not isinstance(raw.get("claims"), Mapping):
+        if (
+            set(raw) != expected
+            or not isinstance(raw.get("claims"), Mapping)
+            or not isinstance(raw.get("uncovered_risk_paths"), list)
+        ):
             raise TrustClaimError("trust claim receipt fields are invalid")
         claims = {
             identity: ClaimVerdict.from_mapping(binding)
@@ -361,6 +408,9 @@ class TrustClaimReceiptV1:
             manifest_sha256=raw["manifest_sha256"],  # type: ignore[arg-type]
             claim_set_digest=raw["claim_set_digest"],  # type: ignore[arg-type]
             claims=claims,
+            uncovered_risk_paths=tuple(
+                raw["uncovered_risk_paths"]  # type: ignore[arg-type]
+            ),
             receipt_digest=raw["receipt_digest"],  # type: ignore[arg-type]
             _claim_set=claim_set,
         )
@@ -389,6 +439,9 @@ class TrustClaimReceiptV1:
                 identity: binding.to_dict()
                 for identity, binding in sorted(claims.items())
             },
+            "uncovered_risk_paths": list(
+                _uncovered_risk_paths(claim_set, claims)
+            ),
         }
         return cls(
             **payload,
@@ -469,7 +522,9 @@ def invalidate_claims(
         if prior is None or prior.verdict == "inconclusive":
             fresh.append(identity)
             causes[identity] = "text-or-coverage-changed"
-        elif claim.paths and set(claim.paths) & changed:
+        elif claim.paths and any(
+            _covered_by_any(path, claim.paths) for path in changed
+        ):
             fresh.append(identity)
             causes[identity] = "covered-path-changed"
         elif not claim.paths and base_moved:
@@ -665,6 +720,8 @@ class TrustClaimTaskV1:
         )
         if raw["task_hash"] != task.task_hash:
             raise TrustClaimError("trust claim task hash is invalid")
+        if previous is not None and not previous.digest_is_valid():
+            raise TrustClaimError("previous trust claim receipt digest is invalid")
         expected_digests = (previous.receipt_digest,) if carried and previous else ()
         if task.carried_receipt_digests != expected_digests:
             raise TrustClaimError("trust claim carried receipt binding is invalid")
@@ -675,6 +732,10 @@ class TrustClaimTaskV1:
         )
         if set(task.retirements) != expected_retirements:
             raise TrustClaimError("trust claim retirements are invalid")
+        if previous is not None and task.delta_from_tree_sha != previous.tree_sha:
+            raise TrustClaimError(
+                "trust claim delta tree does not match the previous receipt"
+            )
         return task
 
 
@@ -826,12 +887,7 @@ def _aggregate(
     }
     if passing != set(claim_set.by_id):
         return "inconclusive"
-    passing_claims = [claim_set.by_id[identity] for identity in passing]
-    repository_wide = any(not claim.paths for claim in passing_claims)
-    covered_paths = {
-        path for claim in passing_claims for path in claim.paths
-    }
-    if not repository_wide and not set(claim_set.risk_paths) <= covered_paths:
+    if _uncovered_risk_paths(claim_set, claims):
         return "inconclusive"
     return "pass"
 
@@ -842,15 +898,31 @@ def compose_claim_verdict(
     fresh_results: object,
 ) -> tuple[TrustClaimReceiptV1, str]:
     """Merge exact carried bindings and complete fresh results into a receipt."""
+    if isinstance(fresh_results, Mapping) and "claim_verdicts" in fresh_results:
+        from ..runners._review_schema import (
+            TrustClaimResultError,
+            validate_trust_claim_result,
+        )
+
+        try:
+            validate_trust_claim_result(fresh_results)
+        except TrustClaimResultError as exc:
+            raise TrustClaimError(str(exc)) from exc
     if task._claim_set is None:
         raise TrustClaimError("claim task is not bound to its normalized claim set")
     if previous is not None and not previous.digest_is_valid():
         raise TrustClaimError("previous trust claim receipt digest is invalid")
-    if task._carried_claims and (
-        previous is None
-        or task.carried_receipt_digests != (previous.receipt_digest,)
-    ):
+    expected_carried_receipts = (
+        (previous.receipt_digest,)
+        if previous is not None and task._carried_claims
+        else ()
+    )
+    if task.carried_receipt_digests != expected_carried_receipts:
         raise TrustClaimError("previous receipt does not match the carried binding")
+    if previous is not None and task.delta_from_tree_sha != previous.tree_sha:
+        raise TrustClaimError(
+            "trust claim delta tree does not match the previous receipt"
+        )
     fresh = _validated_fresh_results(task, fresh_results)
     claims: dict[str, ClaimVerdict] = {}
     for identity, binding in task._carried_claims.items():
@@ -889,6 +961,66 @@ def compose_claim_verdict(
         claims=claims,
     )
     return receipt, aggregate
+
+
+def carry_trust_claim_receipt(
+    previous: TrustClaimReceiptV1,
+    current: ClaimSet,
+    invalidation: Invalidation,
+    *,
+    source_identity: str,
+    tree_sha: str,
+    manifest_sha256: str,
+    delta_from_tree_sha: str,
+) -> tuple[TrustClaimReceiptV1, str]:
+    """Bind an all-carried claim set to a new head without launching a task."""
+    if not previous.digest_is_valid():
+        raise TrustClaimError("previous trust claim receipt digest is invalid")
+    if delta_from_tree_sha != previous.tree_sha:
+        raise TrustClaimError(
+            "trust claim delta tree does not match the previous receipt"
+        )
+    if invalidation.fresh_claim_ids or invalidation.retired_claim_ids:
+        raise TrustClaimError("carry-only receipt requires zero invalidations")
+    if set(invalidation.carried_claims) != set(current.by_id):
+        raise TrustClaimError("carry-only invalidation does not cover every claim")
+    if invalidation.carried_receipt_digests != (previous.receipt_digest,):
+        raise TrustClaimError("previous receipt does not match the carried binding")
+
+    carried: dict[str, ClaimVerdict] = {}
+    for identity, binding in invalidation.carried_claims.items():
+        if binding.verdict == "inconclusive":
+            raise TrustClaimError("an inconclusive claim verdict cannot be carried")
+        if previous.claims.get(identity) != binding:
+            raise TrustClaimError("carried claim binding is not in the prior receipt")
+        carried[identity] = ClaimVerdict(
+            verdict=binding.verdict,
+            verifier_run_id=binding.verifier_run_id,
+            verifier_task_id=binding.verifier_task_id,
+            evidence_digest=binding.evidence_digest,
+            verified_tree_sha=binding.verified_tree_sha,
+            carried_from=previous.receipt_digest,
+        )
+    task_hash = _digest(
+        [
+            "trust-claim-carry-v1",
+            previous.receipt_digest,
+            source_identity,
+            tree_sha,
+            manifest_sha256,
+            current.claim_set_digest,
+            delta_from_tree_sha,
+        ]
+    )
+    receipt = TrustClaimReceiptV1.build(
+        task_hash=task_hash,
+        source_identity=source_identity,
+        tree_sha=tree_sha,
+        manifest_sha256=manifest_sha256,
+        claim_set=current,
+        claims=carried,
+    )
+    return receipt, _aggregate(current, carried)
 
 
 def receipt_covers(
@@ -969,6 +1101,7 @@ __all__ = [
     "TrustClaimTaskV1",
     "build_claim_task",
     "build_trust_claim_task",
+    "carry_trust_claim_receipt",
     "claim_id",
     "compose_claim_verdict",
     "invalidate_claims",

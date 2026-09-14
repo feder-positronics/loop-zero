@@ -179,8 +179,9 @@ with the owner rather than silently starting another full review cycle.
 A trust verification verdict is a set of per-claim verdicts. A repair
 re-verifies only claims whose text, declared coverage, or covered paths changed;
 claims without declared coverage are re-verified on any change. The aggregate
-passes only when every claim passes and every required risk path has passing
-claim coverage.
+passes only when every claim passes and every required risk path is covered,
+exactly or by path-component prefix, by a passing claim that declares that
+coverage. Claims without declared paths provide no risk-path coverage.
 
 Harness timeouts must leave tracked and untracked task changes intact. Record
 base, head, dirty state, completed checks and the next action; stop the old writer
