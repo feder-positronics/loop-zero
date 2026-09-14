@@ -41,6 +41,16 @@ BlockedCode = Literal[
     "reservation-conflict",
 ]
 RequestedReview = Literal["review", "delta"]
+LaunchReason = Literal[
+    "initial",
+    "bounded-delta",
+    "supersession",
+    "trust-verification",
+    "trust-delta",
+    "security-path",
+    "owner-requested",
+    "infrastructure-retry",
+]
 
 MAX_DELTA_SCOPE_PATHS = 300
 
@@ -62,6 +72,8 @@ class Reserved:
     slot: ReviewSlotReservation
     scoped_task: Mapping[str, object]
     records_to_append: tuple[Mapping[str, object], ...]
+    launch_reason: LaunchReason
+    secondary_triggers: tuple[LaunchReason, ...] = ()
     dispatch: bool = field(default=True, init=False)
     kind: str = field(default="reserved", init=False)
 
@@ -80,6 +92,37 @@ class Blocked:
 
 
 Admission = Carry | Reserved | Blocked
+
+
+def _launch_reasons(
+    *,
+    family: Literal["delivery", "trust"],
+    slot_kind: Literal["primary", "delta"],
+    transition_kind: str | None,
+    security_triggered: bool,
+    infrastructure_retry: bool,
+) -> tuple[LaunchReason, tuple[LaunchReason, ...]]:
+    """Derive the bounded explanatory vocabulary from admission authority."""
+    triggers: list[LaunchReason] = []
+    if infrastructure_retry:
+        triggers.append("infrastructure-retry")
+    if transition_kind == "owner-requested":
+        triggers.append("owner-requested")
+    elif transition_kind == "supersession":
+        triggers.append("supersession")
+    if family == "trust":
+        triggers.append("trust-delta" if slot_kind == "delta" else "trust-verification")
+    elif slot_kind == "delta":
+        triggers.append("bounded-delta")
+    elif security_triggered:
+        triggers.append("security-path")
+    else:
+        triggers.append("initial")
+    if security_triggered and "security-path" not in triggers:
+        triggers.append("security-path")
+    if transition_kind == "initial" and "initial" not in triggers:
+        triggers.append("initial")
+    return triggers[0], tuple(dict.fromkeys(triggers[1:]))
 
 
 def _blocked(
@@ -177,12 +220,22 @@ def admit_review(
         )
     task_id = task.get("task_id")
     idempotency_key = task.get("idempotency_key")
-    if not isinstance(task_id, str) or not task_id or not isinstance(
-        idempotency_key, str
-    ) or not idempotency_key:
+    forbidden_labels = {
+        name for name in ("launch_reason", "review_launch_reason") if name in task
+    }
+    if forbidden_labels:
         return _blocked(
-            "missing-evidence", "task_id and idempotency_key are required"
+            "reservation-conflict",
+            "review launch reasons are package-derived, not caller labels",
+            fields=sorted(forbidden_labels),
         )
+    if (
+        not isinstance(task_id, str)
+        or not task_id
+        or not isinstance(idempotency_key, str)
+        or not idempotency_key
+    ):
+        return _blocked("missing-evidence", "task_id and idempotency_key are required")
     try:
         supplied_changed = (
             None
@@ -191,9 +244,7 @@ def admit_review(
         )
         # Validate the legacy caller field, but never use it as authority. The
         # exact Git objects are classified below by the package-owned policy.
-        _canonical_paths(
-            security_trigger_paths, label="security trigger paths"
-        )
+        _canonical_paths(security_trigger_paths, label="security trigger paths")
     except ValueError as exc:
         return _blocked("missing-evidence", str(exc))
     if (
@@ -203,9 +254,7 @@ def admit_review(
     ):
         return _blocked("invalid-proof", "conflicting caller diff digests")
     supplied_diff_digest = (
-        changed_paths_digest
-        if changed_paths_digest is not None
-        else diff_sha256
+        changed_paths_digest if changed_paths_digest is not None else diff_sha256
     )
 
     resolution = resolve_generation(
@@ -225,10 +274,7 @@ def admit_review(
         return _blocked(code, reason)
     generation = resolution.generation
     requested_sections = tuple(sorted(set(required_sections)))
-    if (
-        resolution.kind == "same"
-        and generation.required_sections != requested_sections
-    ):
+    if resolution.kind == "same" and generation.required_sections != requested_sections:
         return _blocked(
             "missing-evidence",
             "required sections conflict with the existing content generation",
@@ -262,8 +308,7 @@ def admit_review(
         except PatchIdentityError as exc:
             return _blocked("invalid-proof", str(exc))
         if supplied_changed is not None and (
-            supplied_diff_digest != actual_diff_digest
-            or supplied_changed != changed
+            supplied_diff_digest != actual_diff_digest or supplied_changed != changed
         ):
             return _blocked(
                 "invalid-proof",
@@ -272,9 +317,7 @@ def admit_review(
             )
     security_from_tree = patch_identity.get("base_tree_sha")
     if not isinstance(security_from_tree, str):
-        return _blocked(
-            "missing-evidence", "patch identity has no recorded base tree"
-        )
+        return _blocked("missing-evidence", "patch identity has no recorded base tree")
     try:
         _identity_paths, identity_diff_digest = tree_diff_paths(
             repository, security_from_tree, current_tree_sha
@@ -298,9 +341,7 @@ def admit_review(
             generation,
             delta_sha256=actual_diff_digest,
             changed_paths=changed,
-            dependency_paths=tuple(
-                sorted(set(security).difference(changed))
-            ),
+            dependency_paths=tuple(sorted(set(security).difference(changed))),
         )
     family = _review_family(task)
     state = slot_state(
@@ -314,23 +355,19 @@ def admit_review(
         and resolution.kind == "new"
         and generation.predecessor_id is not None
     ):
-        predecessor = generations(
-            cast(Sequence[dict[str, object]], records)
-        ).get(generation.predecessor_id)
+        predecessor = generations(cast(Sequence[dict[str, object]], records)).get(
+            generation.predecessor_id
+        )
         predecessor_state = slot_state(
             cast(Sequence[dict[str, object]], records),
             generation.predecessor_id,
             family,
         )
-        if (
-            predecessor_state.own_primary_consumed
-            or (
-                predecessor_state.inherited_primary_ref is not None
-                and predecessor is not None
-                and (
-                    not predecessor.invalidated_sections
-                    or predecessor_state.delta_consumed
-                )
+        if predecessor_state.own_primary_consumed or (
+            predecessor_state.inherited_primary_ref is not None
+            and predecessor is not None
+            and (
+                not predecessor.invalidated_sections or predecessor_state.delta_consumed
             )
         ):
             inherited_primary = predecessor_state.primary_terminal_ref
@@ -346,8 +383,9 @@ def admit_review(
         and "security" in carry_record.sections
         and isinstance(carry_proof, Mapping)
         and isinstance(carry_proof.get("base_path_overlap"), list)
-        and set(cast(list[object], carry_proof["base_path_overlap"]))
-        .intersection(security)
+        and set(cast(list[object], carry_proof["base_path_overlap"])).intersection(
+            security
+        )
     ):
         # Base motion across a security-trigger path keeps content lineage but
         # cannot carry that section's coverage.
@@ -357,8 +395,7 @@ def admit_review(
             to_identity=carry_record.to_identity,
             proof=carry_record.proof,
             sections=tuple(
-                section for section in carry_record.sections
-                if section != "security"
+                section for section in carry_record.sections if section != "security"
             ),
         )
     if resolution.kind == "new":
@@ -379,10 +416,7 @@ def admit_review(
     own_primary_consumed = state.own_primary_consumed
     inherited_coverage_complete = bool(
         inherited_primary is not None
-        and (
-            not generation.invalidated_sections
-            or state.delta_consumed
-        )
+        and (not generation.invalidated_sections or state.delta_consumed)
     )
     if (
         resolution.kind == "same"
@@ -417,9 +451,7 @@ def admit_review(
                     records=append_before_slot,
                     terminal_ref=receipt,
                 )
-            verdicts.append(
-                (receipt, cast(Literal["pass", "fail"], verdict))
-            )
+            verdicts.append((receipt, cast(Literal["pass", "fail"], verdict)))
         return Carry(
             generation=generation,
             receipts=receipts,
@@ -524,12 +556,37 @@ def admit_review(
     to_append = list(append_before_slot)
     if not reservation.existing:
         to_append.append(reservation.to_dict())
+    transition_kind = (
+        resolution.transition.kind if resolution.transition is not None else None
+    )
+    prior_release = any(
+        settlement.slot_kind == slot_kind
+        and state._effective_outcome(settlement).value == "released"
+        for settlement in state.settlements
+    )
+    launch_reason, secondary_triggers = _launch_reasons(
+        family=family,
+        slot_kind=slot_kind,
+        transition_kind=transition_kind,
+        security_triggered=bool(security),
+        infrastructure_retry=prior_release,
+    )
     return Reserved(
         generation=generation,
         slot=reservation,
         scoped_task=scoped_task,
         records_to_append=tuple(to_append),
+        launch_reason=launch_reason,
+        secondary_triggers=secondary_triggers,
     )
 
 
-__all__ = ["Admission", "Blocked", "Carry", "Reserved", "admit_review"]
+__all__ = [
+    "Admission",
+    "Blocked",
+    "Carry",
+    "LaunchReason",
+    "Reserved",
+    "_launch_reasons",
+    "admit_review",
+]

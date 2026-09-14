@@ -985,6 +985,8 @@ def _retention_live_record_ids(
                 "generation-carry-v1",
                 "review-slot-reservation-v1",
                 "review-slot-settlement-v1",
+                "review-launch-v1",
+                "review-launch-outcome-v1",
             }
             or (record.get("run_id"), record.get("work_unit_id")) in retry_units
             or (
@@ -1547,6 +1549,8 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "review-recovery-verification",
         "review-slot-reservation-v1",
         "review-slot-settlement-v1",
+        "review-launch-v1",
+        "review-launch-outcome-v1",
         RETENTION_STATE_TYPE,
         "route",
         "scratch-cleanup",

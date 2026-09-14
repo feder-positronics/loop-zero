@@ -133,6 +133,17 @@ def task(name="review", key="key"):
     }
 
 
+def test_admission_rejects_caller_supplied_launch_reason():
+    result = admit(
+        [],
+        identity("a"),
+        review_task={**task(), "launch_reason": "initial"},
+    )
+    assert isinstance(result, admission.Blocked)
+    assert result.code == "reservation-conflict"
+    assert "package-derived" in result.evidence["message"]
+
+
 def admit(
     rows, patch, *, review_task=None, requested="review", changed=None,
     changed_digest=None, security=("security/policy.py",),
