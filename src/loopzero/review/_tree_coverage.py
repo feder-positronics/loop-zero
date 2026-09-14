@@ -316,6 +316,57 @@ def chain_covers_tree(
     return False
 
 
+def _generation_chain_covers_tree(
+    records: Sequence[Mapping[str, object]],
+    terminal: Mapping[str, object],
+    *,
+    lens: str,
+    current_tree: str,
+) -> bool:
+    """Use authenticated generation carries as an additional exact-tree path."""
+    from ..kernel.authority_projection import generation_carries, generations
+    from ..kernel.canonical import canonical_record_digest
+    from ..kernel.review_state import patch_identity_digest
+
+    projected = generations(records)  # type: ignore[arg-type]
+    terminal_identity = terminal.get("patch_identity")
+    terminal_tree = terminal.get("snapshot_tree_sha")
+    terminal_digest = (
+        patch_identity_digest(terminal_identity)
+        if isinstance(terminal_identity, Mapping)
+        else None
+    )
+    terminal_ref = canonical_record_digest(terminal)
+    candidates = [
+        generation
+        for generation in projected.values()
+        if lens in generation.required_sections
+        and (
+            generation.primary_origin_receipt == terminal_ref
+            or (
+                terminal_digest is not None
+                and generation.tree == terminal_tree
+                and patch_identity_digest(generation.patch_identity)
+                == terminal_digest
+            )
+        )
+    ]
+    if len(candidates) != 1 or not isinstance(terminal_tree, str):
+        return False
+    generation = candidates[0]
+    edges = {
+        str(carry.from_identity.get("candidate_tree_sha")): str(
+            carry.to_identity.get("candidate_tree_sha")
+        )
+        for carry in generation_carries(records)  # type: ignore[arg-type]
+        if carry.generation_id == generation.generation_id
+        and lens in carry.sections
+        and isinstance(carry.from_identity.get("candidate_tree_sha"), str)
+        and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
+    }
+    return chain_covers_tree(terminal_tree, edges, current_tree)
+
+
 def covers_frozen_tree(
     *,
     review_snapshot_tree: str | None,
@@ -424,12 +475,18 @@ def review_task_covers_tree(
     source = terminal.get("source_identity")
     snapshot_tree = terminal.get("snapshot_tree_sha")
     current_head = current_source.get("head")
+    generation_covered = _generation_chain_covers_tree(
+        records, terminal, lens=lens, current_tree=current_tree
+    )
     if (
         not isinstance(source, Mapping)
         or source.get("version") != 2
         or not isinstance(snapshot_tree, str)
         or not isinstance(current_head, str)
-        or source.get("ref") != current_source.get("ref")
+        or (
+            source.get("ref") != current_source.get("ref")
+            and not generation_covered
+        )
     ):
         return False
     review_identity = accepted_review_patch_identity(terminal)
@@ -461,6 +518,7 @@ def review_task_covers_tree(
         review_snapshot_tree=snapshot_tree,
         current_tree=current_tree,
         chain_covered=mechanical_review_carry(repo, terminal, current_tree)
+        or generation_covered
         or chain_covers_tree(snapshot_tree, edges, current_tree)
         or chain_covers_rebased_tree(
             repo,

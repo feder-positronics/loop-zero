@@ -21,6 +21,11 @@ from typing import cast
 
 from . import ledger as authority_ledger
 from .seams import archived_supersession_deposits
+from .seams import (
+    MissingAdapter,
+    accepted_review_terminals as seam_accepted_review_terminals,
+    authenticated_verdicts as seam_authenticated_verdicts,
+)
 from .authority import (
     COORDINATOR_AUTHORITY_SCHEME,
     authenticated_gone_owner_abort,
@@ -1576,6 +1581,410 @@ def current_telemetry(records: Sequence[dict[str, object]]) -> list[dict[str, ob
     if isinstance(records, AuthorityRecordView):
         return records.filtered(selected)
     return selected
+
+
+def authenticated_review_state_records(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return coordinator-authenticated D29 review-state rows in ledger order.
+
+    Unlike observational telemetry, these rows carry their own record version
+    and are selected by authority rather than the consumer's telemetry schema.
+    Proofless rows are never grandfathered into this post-cutover authority.
+    """
+    from .review_state import (
+        GENERATION_CARRY_TYPE,
+        REVIEW_GENERATION_TYPE,
+        REVIEW_SLOT_RESERVATION_TYPE,
+        REVIEW_SLOT_SETTLEMENT_TYPE,
+    )
+
+    record_types = {
+        REVIEW_GENERATION_TYPE,
+        GENERATION_CARRY_TYPE,
+        REVIEW_SLOT_RESERVATION_TYPE,
+        REVIEW_SLOT_SETTLEMENT_TYPE,
+    }
+    authenticated = _authenticated_coordinator_record_ids(records)
+    return [
+        record
+        for record in records
+        if record.get("type") in record_types and id(record) in authenticated
+    ]
+
+
+def _legacy_review_generations(
+    records: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    """Synthesize conservative content generations for accepted old terminals."""
+    from .review_state import ReviewGenerationV1, generation_id_for, patch_identity_digest
+
+    try:
+        accepted = seam_accepted_review_terminals(records)
+        verdicts = seam_authenticated_verdicts(records, _accepted_terminals=accepted)
+    except MissingAdapter:
+        return {}
+    authenticated = _authenticated_coordinator_record_ids(records)
+    d29_cutover_index = next(
+        (
+            index
+            for index, record in enumerate(records)
+            if record.get("type") == "review-generation-v1"
+            and id(record) in authenticated
+        ),
+        len(records),
+    )
+    record_indices = {id(record): index for index, record in enumerate(records)}
+    legacy: dict[str, ReviewGenerationV1] = {}
+    for task_id, terminal in accepted.items():
+        if (
+            terminal.get("advisory") is True
+            or record_indices.get(id(terminal), len(records)) >= d29_cutover_index
+        ):
+            continue
+        verdict = verdicts.get(task_id)
+        if not isinstance(verdict, Mapping) or verdict.get("verdict") not in {
+            "pass",
+            "fail",
+        }:
+            continue
+        identity = terminal.get("patch_identity")
+        tree = terminal.get("snapshot_tree_sha")
+        if (
+            not isinstance(identity, Mapping)
+            or not isinstance(tree, str)
+            or identity.get("candidate_tree_sha") != tree
+        ):
+            continue
+        chain_receipt = terminal.get("review_chain_receipt")
+        contract = terminal.get("task_contract")
+        raw_sections = (
+            chain_receipt.get("required_sections")
+            if isinstance(chain_receipt, Mapping)
+            else contract.get("required_sections")
+            if isinstance(contract, Mapping)
+            else None
+        )
+        if not isinstance(raw_sections, list) or not all(
+            isinstance(section, str) and section for section in raw_sections
+        ):
+            lens = terminal.get("review_lens")
+            raw_sections = [lens] if isinstance(lens, str) and lens else ["code"]
+        sections = tuple(sorted(set(raw_sections)))
+        source = terminal.get("source_identity")
+        accumulator = getattr(records, "accumulator_head", None)
+        binding = getattr(accumulator, "repository_binding", None)
+        if not isinstance(binding, str) or not binding:
+            binding = terminal.get("repository_binding")
+        if not isinstance(binding, str) or not binding:
+            source_binding = (
+                source.get("repository_binding")
+                if isinstance(source, Mapping)
+                else None
+            )
+            binding = (
+                source_binding
+                if isinstance(source_binding, str) and source_binding
+                else "legacy-" + patch_identity_digest(identity)
+            )
+        generation_id = generation_id_for(binding, identity, tree, sections)
+        policy_digest = hashlib.sha256(
+            json.dumps(
+                ["review-generation-policy-v1", list(sections)],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        legacy[generation_id] = ReviewGenerationV1(
+            repository_binding=binding,
+            lineage_id="rl_" + hashlib.sha256(
+                json.dumps(
+                    [
+                        "legacy-review-lineage-v1",
+                        binding,
+                        patch_identity_digest(identity),
+                        tree,
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()[:32],
+            generation_id=generation_id,
+            predecessor_id=None,
+            patch_identity=dict(identity),
+            tree=tree,
+            required_sections=sections,
+            policy_digest=policy_digest,
+            delta_from_tree=None,
+            delta_sha256=None,
+            changed_paths=(),
+            dependency_paths=(),
+            primary_origin_receipt=canonical_record_digest(terminal),
+            inherited_coverage=sections,
+            invalidated_sections=(),
+        )
+    return cast(dict[str, object], legacy)
+
+
+def generations(records: Sequence[dict[str, object]]) -> dict[str, object]:
+    """Project authenticated native generations plus legacy primary seeds."""
+    from .review_state import REVIEW_GENERATION_TYPE, ReviewGenerationV1
+
+    projected = _legacy_review_generations(records)
+    legacy_ids = set(projected)
+    ambiguous_ids: set[str] = set()
+    for record in authenticated_review_state_records(records):
+        if record.get("type") != REVIEW_GENERATION_TYPE:
+            continue
+        try:
+            generation = ReviewGenerationV1.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+        if generation.generation_id in ambiguous_ids:
+            continue
+        previous = projected.get(generation.generation_id)
+        if previous is not None and previous != generation:
+            if generation.generation_id in legacy_ids:
+                # A native D29 start replaces its synthetic compatibility view.
+                projected.pop(generation.generation_id, None)
+                legacy_ids.remove(generation.generation_id)
+            else:
+                # An authenticated native identifier collision is ambiguous and
+                # cannot be resolved by record order.
+                projected.pop(generation.generation_id, None)
+                ambiguous_ids.add(generation.generation_id)
+                continue
+        if generation.predecessor_id is not None:
+            predecessor = projected.get(generation.predecessor_id)
+            if predecessor is None or getattr(predecessor, "lineage_id", None) != (
+                generation.lineage_id
+            ):
+                continue
+        projected[generation.generation_id] = generation
+    return projected
+
+
+def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ...]:
+    """Project proof-valid authenticated carries whose source is already known."""
+    from .patch_identity import equivalence_receipt_is_valid
+    from .review_state import (
+        GENERATION_CARRY_TYPE,
+        GenerationCarryV1,
+        patch_identity_digest,
+    )
+
+    projected = generations(records)
+    known: dict[str, set[str]] = {
+        generation_id: {patch_identity_digest(generation.patch_identity)}
+        for generation_id, generation in projected.items()
+    }
+    carries: list[GenerationCarryV1] = []
+    for record in authenticated_review_state_records(records):
+        if record.get("type") != GENERATION_CARRY_TYPE:
+            continue
+        try:
+            carry = GenerationCarryV1.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+        generation = projected.get(carry.generation_id)
+        source_digest = patch_identity_digest(carry.from_identity)
+        target_digest = patch_identity_digest(carry.to_identity)
+        if (
+            generation is None
+            or source_digest not in known.get(carry.generation_id, set())
+            or not set(carry.sections) <= set(generation.required_sections)
+        ):
+            continue
+        proof = carry.proof
+        proof_valid = bool(
+            equivalence_receipt_is_valid(proof)
+            and proof.get("left_identity_digest") == source_digest
+            and proof.get("right_identity_digest") == target_digest
+            and proof.get("result_tree_sha")
+            == carry.to_identity.get("candidate_tree_sha")
+        ) or proof == {
+            "kind": "format-only-v1",
+            "from_tree": carry.from_identity.get("candidate_tree_sha"),
+            "to_tree": carry.to_identity.get("candidate_tree_sha"),
+            "verified": True,
+        } or proof == {
+            "kind": "seen-content-v1",
+            "patch_identity_digest": target_digest,
+            "tree": carry.to_identity.get("candidate_tree_sha"),
+        }
+        if not proof_valid:
+            continue
+        carries.append(carry)
+        known.setdefault(carry.generation_id, set()).add(target_digest)
+    return tuple(carries)
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewSlotState:
+    generation_id: str
+    family: str
+    reservations: tuple[object, ...]
+    settlements: tuple[object, ...]
+    inherited_primary_ref: str | None = None
+
+    def _settlement_for(self, reservation_id: str):
+        return next(
+            (
+                settlement
+                for settlement in reversed(self.settlements)
+                if settlement.reservation_id == reservation_id
+            ),
+            None,
+        )
+
+    @property
+    def outstanding(self):
+        from ..runners.contract import ReviewOutcome
+
+        for reservation in reversed(self.reservations):
+            settlement = self._settlement_for(reservation.reservation_id)
+            if settlement is None or settlement.outcome is ReviewOutcome.UNRESOLVED:
+                return reservation
+        return None
+
+    def attempt_count(self, slot_kind: str) -> int:
+        return sum(
+            1 for reservation in self.reservations
+            if reservation.slot_kind == slot_kind
+        )
+
+    def _consumed(self, slot_kind: str) -> bool:
+        from ..runners.contract import ReviewOutcome
+
+        return any(
+            settlement.slot_kind == slot_kind
+            and settlement.outcome is ReviewOutcome.CONSUMED
+            for settlement in self.settlements
+        )
+
+    @property
+    def primary_consumed(self) -> bool:
+        return self.inherited_primary_ref is not None or self._consumed("primary")
+
+    @property
+    def delta_consumed(self) -> bool:
+        return self._consumed("delta")
+
+    @property
+    def primary_terminal_ref(self) -> str | None:
+        from ..runners.contract import ReviewOutcome
+
+        for settlement in reversed(self.settlements):
+            if (
+                settlement.slot_kind == "primary"
+                and settlement.outcome is ReviewOutcome.CONSUMED
+            ):
+                return cast(str, settlement.terminal_ref)
+        return self.inherited_primary_ref
+
+    @property
+    def receipts(self) -> tuple[str, ...]:
+        from ..runners.contract import ReviewOutcome
+
+        values = [
+            settlement.terminal_ref
+            for settlement in self.settlements
+            if settlement.outcome is ReviewOutcome.CONSUMED
+        ]
+        if self.inherited_primary_ref is not None:
+            values.insert(0, self.inherited_primary_ref)
+        return tuple(dict.fromkeys(values))
+
+
+def slot_state(
+    records: Sequence[dict[str, object]], generation_id: str, family: str
+) -> ReviewSlotState:
+    """Fold authenticated reservations and terminal-bound settlements."""
+    from .review_state import (
+        REVIEW_SLOT_RESERVATION_TYPE,
+        REVIEW_SLOT_SETTLEMENT_TYPE,
+        ReviewSlotReservation,
+        ReviewSlotSettlement,
+    )
+    from ..review.authority import classify_review_outcome
+
+    generation = generations(records).get(generation_id)
+    inherited = (
+        generation.primary_origin_receipt
+        if generation is not None and family == "delivery"
+        else None
+    )
+    if (
+        inherited is None
+        and generation is not None
+        and generation.predecessor_id is not None
+    ):
+        inherited = slot_state(
+            records, generation.predecessor_id, family
+        ).primary_terminal_ref
+    authenticated = authenticated_review_state_records(records)
+    reservations = []
+    seen_reservation_ids: set[str] = set()
+    for record in authenticated:
+        if record.get("type") != REVIEW_SLOT_RESERVATION_TYPE:
+            continue
+        try:
+            reservation = ReviewSlotReservation.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+        if (
+            reservation.generation_id != generation_id
+            or reservation.family != family
+            or reservation.reservation_id in seen_reservation_ids
+        ):
+            continue
+        reservations.append(reservation)
+        seen_reservation_ids.add(reservation.reservation_id)
+
+    coordinator = set(_authenticated_coordinator_record_ids(records))
+    terminals = set(_authenticated_attempt_terminal_ids(records))
+    terminal_by_digest = {
+        canonical_record_digest(record): record
+        for record in records
+        if id(record) in coordinator or id(record) in terminals
+    }
+    settlements = []
+    settled_ids: set[str] = set()
+    reservations_by_id = {
+        reservation.reservation_id: reservation for reservation in reservations
+    }
+    for record in authenticated:
+        if record.get("type") != REVIEW_SLOT_SETTLEMENT_TYPE:
+            continue
+        try:
+            settlement = ReviewSlotSettlement.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+        reservation = reservations_by_id.get(settlement.reservation_id)
+        terminal = terminal_by_digest.get(settlement.terminal_ref)
+        if (
+            reservation is None
+            or settlement.settlement_id in settled_ids
+            or terminal is None
+            or terminal.get("task_id") != reservation.task_id
+            or settlement.generation_id != reservation.generation_id
+            or settlement.family != reservation.family
+            or settlement.slot_kind != reservation.slot_kind
+            or settlement.task_id != reservation.task_id
+            or classify_review_outcome(terminal) is not settlement.outcome
+        ):
+            continue
+        settlements.append(settlement)
+        settled_ids.add(settlement.settlement_id)
+    return ReviewSlotState(
+        generation_id=generation_id,
+        family=family,
+        reservations=tuple(reservations),
+        settlements=tuple(settlements),
+        inherited_primary_ref=inherited,
+    )
 
 
 def _is_valid_sha256(value: object) -> bool:

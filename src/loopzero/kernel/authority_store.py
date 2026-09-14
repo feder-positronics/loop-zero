@@ -47,6 +47,7 @@ from .authority_projection import (
     _is_coordinator_cutover_attempt,
     _terminal_authority_attempt_key,
     _terminal_authority_work_unit,
+    authenticated_review_state_records,
     current_telemetry,
     encode_retention_anchor_fields,
     retained_attempt_settlements,
@@ -88,6 +89,20 @@ from .run_log import active_run, load_entries as load_skill_run_entries
 
 _ATTEMPT_LOCK_STATE = threading.local()
 _AUTHORITY_LEDGER_LOCK_STATE = threading.local()
+
+
+def _governed_records_with_review_state(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Merge telemetry-policy rows with separately versioned D29 authority."""
+    selected = {
+        id(record)
+        for record in (
+            *current_telemetry(records),
+            *authenticated_review_state_records(records),
+        )
+    }
+    return [record for record in records if id(record) in selected]
 
 
 def worktree_branch(worktree: Path) -> str:
@@ -916,6 +931,13 @@ def _retention_live_record_ids(
         )
         if (
             id(record) in authenticated_reentry_ids
+            or record_type
+            in {
+                "review-generation-v1",
+                "generation-carry-v1",
+                "review-slot-reservation-v1",
+                "review-slot-settlement-v1",
+            }
             or (record.get("run_id"), record.get("work_unit_id")) in retry_units
             or (
                 record_type == "verdict"
@@ -947,7 +969,7 @@ def authority_projection_bundle_v1(
     retention-state fields in this bundle.
     """
     authority_history = _authority_record_list(records)
-    governed = current_telemetry(authority_history)
+    governed = _governed_records_with_review_state(authority_history)
     retained_raw_ids = _retention_live_record_ids(
         governed, active_run_ids=active_run_ids
     )
@@ -1290,7 +1312,7 @@ def _retention_state_record(
 ) -> dict[str, object]:
     """Build the deterministic compact state authenticated by the checkpoint."""
     authority_history = _authority_record_list(records)
-    governed = current_telemetry(authority_history)
+    governed = _governed_records_with_review_state(authority_history)
     live_ids = frozenset(live_record_ids)
     open_before_ids = _authenticated_open_before_record_ids(authority_history)
     outcomes = _retry_outcome_projection(authority_history)
@@ -1352,7 +1374,7 @@ def retained_authority_projection(
     active_run_ids: Collection[str] = (),
 ) -> list[dict[str, object]]:
     """Return the deterministic dependency seed for the current authority policy."""
-    governed = current_telemetry(records)
+    governed = _governed_records_with_review_state(records)
     unknown = sorted(
         {
             str(record.get("type"))
@@ -1471,11 +1493,15 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "inline",
         "inconclusive-retry-authorization",
         "review-chain-advisory",
+        "review-generation-v1",
         "review-recovery-verification",
+        "review-slot-reservation-v1",
+        "review-slot-settlement-v1",
         RETENTION_STATE_TYPE,
         "route",
         "scratch-cleanup",
         "verdict",
+        "generation-carry-v1",
     }
 )
 

@@ -84,15 +84,18 @@ def test_review_budget_cannot_be_widened_and_can_be_narrowed() -> None:
     )
     with pytest.raises(module.ReviewChainError, match="primary"):
         module.enforce_review_budget(
-            completed_reviews=1, completed_delta_reviews=0, requested="review"
+            completed_reviews=1, completed_delta_reviews=0, requested="review",
+            generation="cg_" + "1" * 32,
         )
     with pytest.raises(module.ReviewChainError, match="delta"):
         module.enforce_review_budget(
-            completed_reviews=0, completed_delta_reviews=1, requested="delta"
+            completed_reviews=0, completed_delta_reviews=1, requested="delta",
+            generation="cg_" + "1" * 32,
         )
     with pytest.raises(module.ReviewChainError, match="exactly one primary"):
         module.enforce_review_budget(
-            completed_reviews=0, completed_delta_reviews=0, requested="delta"
+            completed_reviews=0, completed_delta_reviews=0, requested="delta",
+            generation="cg_" + "1" * 32,
         )
 
     module.configure(
@@ -102,7 +105,8 @@ def test_review_budget_cannot_be_widened_and_can_be_narrowed() -> None:
     )
     with pytest.raises(module.ReviewChainError, match="primary"):
         module.enforce_review_budget(
-            completed_reviews=0, completed_delta_reviews=0, requested="review"
+            completed_reviews=0, completed_delta_reviews=0, requested="review",
+            generation="cg_" + "1" * 32,
         )
     module.configure(
         SimpleNamespace(
@@ -392,3 +396,98 @@ def test_receipt_defaults_missing_review_intent_to_the_deposit_policy() -> None:
             result=result,
             finding_ids=[],
         )
+
+
+def test_legacy_primary_projects_a_consumed_content_generation(monkeypatch) -> None:
+    from loopzero.kernel import authority_projection
+
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "legacy-review",
+        "snapshot_tree_sha": "b" * 40,
+        "patch_identity": {
+            "candidate_sha": "a" * 40,
+            "candidate_tree_sha": "b" * 40,
+        },
+        "review_lens": "code",
+    }
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_accepted_review_terminals",
+        lambda rows: {"legacy-review": terminal},
+    )
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_authenticated_verdicts",
+        lambda rows, **kwargs: {"legacy-review": {"verdict": "pass"}},
+    )
+    projected = authority_projection.generations([terminal])
+    assert len(projected) == 1
+    generation = next(iter(projected.values()))
+    assert authority_projection.slot_state(
+        [terminal], generation.generation_id, "delivery"
+    ).primary_consumed
+
+
+def test_generation_carry_is_a_tree_coverage_disjunct(monkeypatch, tmp_path) -> None:
+    from loopzero.kernel import authority_projection
+    from loopzero.review import _tree_coverage as coverage
+
+    before = {"candidate_sha": "a" * 40, "candidate_tree_sha": "b" * 40}
+    after = {"candidate_sha": "c" * 40, "candidate_tree_sha": "d" * 40}
+    generation = SimpleNamespace(
+        generation_id="cg_" + "1" * 32,
+        required_sections=("code",),
+        patch_identity=before,
+        tree="b" * 40,
+        primary_origin_receipt=None,
+    )
+    carry = SimpleNamespace(
+        generation_id=generation.generation_id,
+        from_identity=before,
+        to_identity=after,
+        sections=("code",),
+    )
+    monkeypatch.setattr(
+        authority_projection, "generations", lambda rows: {generation.generation_id: generation}
+    )
+    monkeypatch.setattr(
+        authority_projection, "generation_carries", lambda rows: (carry,)
+    )
+    monkeypatch.setattr(coverage, "accepted_review_patch_identity", lambda terminal: before)
+    monkeypatch.setattr(coverage, "carried_review_patch_identity", lambda *args, **kwargs: after)
+    monkeypatch.setattr(coverage, "section_patch_equivalence", lambda *args, **kwargs: None)
+    monkeypatch.setattr(coverage, "load_delta_edges", lambda *args, **kwargs: {})
+    monkeypatch.setattr(coverage, "mechanical_review_carry", lambda *args: False)
+    monkeypatch.setattr(coverage, "chain_covers_rebased_tree", lambda *args, **kwargs: False)
+    terminal = {
+        "task_id": "review",
+        "review_intent": "delivery-code-review",
+        "review_lens": "code",
+        "snapshot_tree_sha": "b" * 40,
+        "patch_identity": before,
+        "source_identity": {
+            "version": 2,
+            "ref": "refs/heads/feature",
+            "head": "a" * 40,
+        },
+        "task_contract": {
+            "review_intent": "delivery-code-review",
+            "review_lens": "code",
+        },
+    }
+    assert coverage.review_task_covers_tree(
+        tmp_path,
+        records=[],
+        accepted_terminals={"review": terminal},
+        latest_verdicts={"review": "pass"},
+        finding_records=[],
+        task_id="review",
+        lens="code",
+        current_source={
+            "version": 2,
+            "ref": "refs/heads/feature",
+            "head": "c" * 40,
+        },
+        current_tree="d" * 40,
+    )
