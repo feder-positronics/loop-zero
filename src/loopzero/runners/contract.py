@@ -2,7 +2,6 @@
 
 from ._review_schema import (
     review_sections_schema,
-    trust_claim_consistency_schema,
     trust_claim_verdicts_schema,
     validate_review_chain_task,
 )
@@ -591,5 +590,4 @@ def governed_result_schema(
             bounded_string=bounded_string
         )
         required.append("verification_verdict")
-        schema["allOf"] = [trust_claim_consistency_schema()]
     return schema
