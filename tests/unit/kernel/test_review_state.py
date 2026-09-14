@@ -51,8 +51,11 @@ def authenticated_rows(monkeypatch, tmp_path):
 def identity(label, tree):
     return {
         "schema_version": "patch-identity-v1",
+        "base_sha": "0" * 40,
+        "base_tree_sha": "1" * 40,
         "candidate_sha": label * 40,
         "candidate_tree_sha": tree,
+        "diff_format": "git-binary-full-index-no-renames-v1",
         "diff_sha256": label * 64,
         "patch_id_verbatim": label * 40,
     }
@@ -324,6 +327,50 @@ def test_seen_content_revert_and_branch_rename_reuse_generation():
     assert renamed_branch.carry.proof["kind"] == "seen-content-v1"
 
 
+def test_seen_content_ignores_commit_metadata_but_rejects_identity_extensions():
+    patch = identity("a", "1" * 40)
+    initial = resolve([], patch)
+    recommitted = {
+        **patch,
+        "candidate_sha": "b" * 40,
+    }
+    assert review_state.generation_id_for(
+        "repository-one", patch, patch["candidate_tree_sha"], ("code", "security")
+    ) == review_state.generation_id_for(
+        "repository-one", recommitted, recommitted["candidate_tree_sha"], ("code",)
+    )
+    same = resolve([initial.generation.to_dict()], recommitted)
+    assert same.kind == "same"
+    assert same.generation.generation_id == initial.generation.generation_id
+    assert same.carry.proof == {
+        "kind": "seen-content-v1",
+        "content_digest": review_state.patch_content_digest(patch),
+        "tree": patch["candidate_tree_sha"],
+    }
+
+    extended = resolve(
+        [initial.generation.to_dict()], {**recommitted, "caller_label": "trusted"}
+    )
+    assert extended.kind == "refused"
+    assert extended.reason.startswith("missing-evidence:patch identity fields")
+
+
+def test_seen_content_section_change_cannot_mint_another_generation():
+    patch = identity("a", "1" * 40)
+    initial = resolve([], patch)
+    same = review_state.resolve_generation(
+        [initial.generation.to_dict()],
+        repository_binding="repository-one",
+        patch_identity=patch,
+        tree_sha=patch["candidate_tree_sha"],
+        required_sections=("code",),
+        equivalence_proof=None,
+        format_only_proof=None,
+    )
+    assert same.kind == "same"
+    assert same.generation.generation_id == initial.generation.generation_id
+
+
 def test_unrelated_content_starts_fresh_lineage_without_authenticated_link():
     first = resolve([], identity("a", "1" * 40))
     second = resolve([first.generation.to_dict()], identity("b", "2" * 40))
@@ -535,6 +582,33 @@ def test_idempotency_key_is_reusable_only_for_an_unsettled_reservation():
         slot_kind="primary", task_id="third", idempotency_key="third-key",
     )
     assert held.conflict and held.reservation_id == second.reservation_id
+
+
+def test_idempotency_key_is_bound_across_generations_and_families():
+    first = resolve([], identity("a", "1" * 40)).generation
+    second = resolve([], identity("b", "2" * 40)).generation
+    rows = [first.to_dict(), second.to_dict()]
+    reservation = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=first.generation_id,
+        family="delivery",
+        slot_kind="primary",
+        task_id="first",
+        idempotency_key="global-key",
+    )
+    rows.append(reservation.to_dict())
+    with pytest.raises(review_state.ReviewSlotError) as reused:
+        review_state.reserve_review_slot(
+            _REPOSITORY,
+            rows,
+            generation_id=second.generation_id,
+            family="trust",
+            slot_kind="primary",
+            task_id="second",
+            idempotency_key="global-key",
+        )
+    assert reused.value.code == "reservation-conflict"
 
 
 def test_unresolved_settlement_resolves_from_a_late_verdict_without_a_second_row():

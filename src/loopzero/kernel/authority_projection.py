@@ -1693,6 +1693,30 @@ def _legacy_review_generations(
             or identity.get("candidate_tree_sha") != tree
         ):
             continue
+        if set(identity) == {"candidate_sha", "candidate_tree_sha"}:
+            candidate_sha = identity.get("candidate_sha")
+            if not isinstance(candidate_sha, str) or re.fullmatch(
+                r"[0-9a-f]{40,64}", candidate_sha
+            ) is None:
+                continue
+            legacy_diff = hashlib.sha256(
+                json.dumps(
+                    ["legacy-patch-identity-v1", dict(identity)],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
+            identity = {
+                "schema_version": "patch-identity-v1",
+                "base_sha": candidate_sha,
+                "base_tree_sha": tree,
+                "candidate_sha": candidate_sha,
+                "candidate_tree_sha": tree,
+                "diff_format": "git-binary-full-index-no-renames-v1",
+                "diff_sha256": legacy_diff,
+                "patch_id_verbatim": candidate_sha,
+            }
         chain_receipt = terminal.get("review_chain_receipt")
         contract = terminal.get("task_contract")
         raw_sections = (
@@ -1859,6 +1883,7 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
         GENERATION_PROOF_TYPE,
         GenerationCarryV1,
         GenerationProofV1,
+        patch_content_digest,
         patch_identity_digest,
     )
 
@@ -1907,13 +1932,15 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
             and candidate.from_identity == carry.from_identity
             and candidate.to_identity == carry.to_identity
             for proof_index, candidate in proof_rows.items()
-        ) or proof == {
-            "kind": "seen-content-v1",
-            "patch_identity_digest": target_digest,
-            "tree": carry.to_identity.get("candidate_tree_sha"),
-        } and source_digest == target_digest and (
-            carry.from_identity.get("candidate_tree_sha")
-            == carry.to_identity.get("candidate_tree_sha")
+        ) or (
+            proof
+            == {
+                "kind": "seen-content-v1",
+                "content_digest": patch_content_digest(carry.to_identity),
+                "tree": carry.to_identity.get("candidate_tree_sha"),
+            }
+            and patch_content_digest(carry.from_identity)
+            == patch_content_digest(carry.to_identity)
         )
         if not proof_valid:
             continue
@@ -2046,19 +2073,6 @@ def slot_state(
     if cached is not None:
         return cast(ReviewSlotState, cached[1])
     generation = generations(records).get(generation_id)
-    inherited = (
-        generation.primary_origin_receipt
-        if generation is not None and family == "delivery"
-        else None
-    )
-    if (
-        inherited is None
-        and generation is not None
-        and generation.predecessor_id is not None
-    ):
-        inherited = slot_state(
-            records, generation.predecessor_id, family
-        ).primary_terminal_ref
     authenticated = authenticated_review_state_records(records)
     reservations = []
     seen_reservation_ids: set[str] = set()
@@ -2154,6 +2168,39 @@ def slot_state(
         settled_ids.add(settlement.settlement_id)
         settled_reservations.add(settlement.reservation_id)
         effective_outcomes.append((settlement.reservation_id, effective))
+    inherited = None
+    if generation is not None:
+        native_generation_ids = {
+            record.get("generation_id")
+            for record in authenticated
+            if record.get("type") == "review-generation-v1"
+        }
+        if generation.generation_id not in native_generation_ids:
+            # A synthesized legacy generation represents an already accepted
+            # primary and has no native slot rows.
+            if family == "delivery":
+                inherited = generation.primary_origin_receipt
+        elif generation.predecessor_id is not None:
+            predecessor = generations(records).get(generation.predecessor_id)
+            predecessor_state = slot_state(records, generation.predecessor_id, family)
+            predecessor_complete = bool(
+                predecessor_state.own_primary_consumed
+                or (
+                    predecessor_state.inherited_primary_ref is not None
+                    and predecessor is not None
+                    and (
+                        not predecessor.invalidated_sections
+                        or predecessor_state.delta_consumed
+                    )
+                )
+            )
+            candidate = (
+                predecessor_state.primary_terminal_ref
+                if predecessor_complete
+                else None
+            )
+            if family != "delivery" or generation.primary_origin_receipt == candidate:
+                inherited = candidate
     result = ReviewSlotState(
         generation_id=generation_id,
         family=family,

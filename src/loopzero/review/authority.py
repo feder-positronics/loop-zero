@@ -101,21 +101,18 @@ def _accepted_terminal_verdict(terminal: Mapping[str, object]) -> str | None:
     return None
 
 
-def classify_review_outcome(
+def authenticated_review_verdict(
     terminal: object, records: Sequence[Mapping[str, object]] = ()
-) -> ReviewOutcome:
-    """Map ledger-authenticated terminal and verdict facts to slot accounting."""
+) -> str | None:
+    """Return the authenticated pass/fail fact carried by one terminal."""
     if not isinstance(terminal, Mapping):
-        return ReviewOutcome.UNRESOLVED
+        return None
     mapped = cast(Sequence[dict[str, object]], records)
     terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
     coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
     retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
     if id(terminal) not in terminal_ids | coordinator_ids and not retained:
-        return ReviewOutcome.UNRESOLVED
-    status = terminal.get("status")
-    reason = terminal.get("terminal_reason")
-    failure = terminal.get("failure_class")
+        return None
     task_id = terminal.get("task_id")
     terminal_index = next(
         (index for index, record in enumerate(records) if record is terminal), None
@@ -146,6 +143,25 @@ def classify_review_outcome(
         accepted = {}
     if isinstance(task_id, str) and accepted.get(task_id) is terminal:
         verdict = verdict or _accepted_terminal_verdict(terminal)
+    return verdict
+
+
+def classify_review_outcome(
+    terminal: object, records: Sequence[Mapping[str, object]] = ()
+) -> ReviewOutcome:
+    """Map ledger-authenticated terminal and verdict facts to slot accounting."""
+    if not isinstance(terminal, Mapping):
+        return ReviewOutcome.UNRESOLVED
+    mapped = cast(Sequence[dict[str, object]], records)
+    terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
+    coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
+    retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
+    if id(terminal) not in terminal_ids | coordinator_ids and not retained:
+        return ReviewOutcome.UNRESOLVED
+    status = terminal.get("status")
+    reason = terminal.get("terminal_reason")
+    failure = terminal.get("failure_class")
+    verdict = authenticated_review_verdict(terminal, records)
     verification = terminal.get("verification_verdict")
 
     if status == "completed" and verdict is not None:

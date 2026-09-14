@@ -12,7 +12,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
-from ..kernel.authority_projection import slot_state
+from ..kernel.authority_projection import generations, slot_state
+from ..kernel.canonical import canonical_record_digest
 from ..kernel.patch_identity import PatchIdentityError, tree_diff_paths
 from ..kernel.review_state import (
     GenerationCarryV1,
@@ -21,7 +22,12 @@ from ..kernel.review_state import (
     ReviewSlotReservation,
     _reserve_review_slot,
     assert_authority_ledger_lock_held,
+    fresh_review_generation,
     resolve_generation,
+)
+from ._security_scope import (
+    SecurityReviewScopeError,
+    security_trigger_paths_between,
 )
 
 BlockedCode = Literal[
@@ -43,6 +49,7 @@ MAX_DELTA_SCOPE_PATHS = 300
 class Carry:
     generation: ReviewGenerationV1
     receipts: tuple[str, ...]
+    verdicts: tuple[tuple[str, Literal["pass", "fail"]], ...]
     carry_record: GenerationCarryV1
     records_to_append: tuple[Mapping[str, object], ...]
     dispatch: bool = field(default=False, init=False)
@@ -116,9 +123,6 @@ def _canonical_paths(values: Sequence[str], *, label: str) -> tuple[str, ...]:
 
 
 def _review_family(task: Mapping[str, object]) -> Literal["delivery", "trust"]:
-    explicit = task.get("review_family") or task.get("family")
-    if explicit in {"delivery", "trust"}:
-        return cast(Literal["delivery", "trust"], explicit)
     contract = task.get("task_contract")
     intent = (
         contract.get("review_intent")
@@ -185,7 +189,9 @@ def admit_review(
             if changed_paths is None
             else _canonical_paths(changed_paths, label="changed paths")
         )
-        security = _canonical_paths(
+        # Validate the legacy caller field, but never use it as authority. The
+        # exact Git objects are classified below by the package-owned policy.
+        _canonical_paths(
             security_trigger_paths, label="security trigger paths"
         )
     except ValueError as exc:
@@ -218,6 +224,16 @@ def admit_review(
         )
         return _blocked(code, reason)
     generation = resolution.generation
+    requested_sections = tuple(sorted(set(required_sections)))
+    if (
+        resolution.kind == "same"
+        and generation.required_sections != requested_sections
+    ):
+        return _blocked(
+            "missing-evidence",
+            "required sections conflict with the existing content generation",
+            generation_id=generation.generation_id,
+        )
     carry_record = resolution.carry
     # A carry endpoint is the immediate reviewed content boundary.  Diffing a
     # later delta against the generation root would reintroduce base motion and
@@ -254,6 +270,29 @@ def admit_review(
                 "caller path scope does not match the kernel tree diff",
                 expected_diff_digest=actual_diff_digest,
             )
+    security_from_tree = patch_identity.get("base_tree_sha")
+    if not isinstance(security_from_tree, str):
+        return _blocked(
+            "missing-evidence", "patch identity has no recorded base tree"
+        )
+    try:
+        _identity_paths, identity_diff_digest = tree_diff_paths(
+            repository, security_from_tree, current_tree_sha
+        )
+        if identity_diff_digest != patch_identity.get("diff_sha256"):
+            return _blocked(
+                "invalid-proof",
+                "patch identity diff does not match its recorded base tree",
+                expected_diff_digest=identity_diff_digest,
+            )
+        security = _canonical_paths(
+            security_trigger_paths_between(
+                repository, security_from_tree, current_tree_sha
+            ),
+            label="kernel security trigger paths",
+        )
+    except (SecurityReviewScopeError, ValueError) as exc:
+        return _blocked("invalid-proof", f"security classification failed: {exc}")
     if resolution.kind == "new":
         generation = replace(
             generation,
@@ -275,11 +314,26 @@ def admit_review(
         and resolution.kind == "new"
         and generation.predecessor_id is not None
     ):
-        inherited_primary = slot_state(
+        predecessor = generations(
+            cast(Sequence[dict[str, object]], records)
+        ).get(generation.predecessor_id)
+        predecessor_state = slot_state(
             cast(Sequence[dict[str, object]], records),
             generation.predecessor_id,
             family,
-        ).primary_terminal_ref
+        )
+        if (
+            predecessor_state.own_primary_consumed
+            or (
+                predecessor_state.inherited_primary_ref is not None
+                and predecessor is not None
+                and (
+                    not predecessor.invalidated_sections
+                    or predecessor_state.delta_consumed
+                )
+            )
+        ):
+            inherited_primary = predecessor_state.primary_terminal_ref
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []
     carry_proof = carry_record.proof if carry_record is not None else None
@@ -344,12 +398,55 @@ def admit_review(
                 "generation primary verdict has no authenticated receipt",
                 records=append_before_slot,
             )
+        from .authority import authenticated_review_verdict
+
+        terminal_by_digest = {
+            canonical_record_digest(record): record
+            for record in records
+            if isinstance(record, Mapping)
+        }
+        verdicts: list[tuple[str, Literal["pass", "fail"]]] = []
+        for receipt in receipts:
+            verdict = authenticated_review_verdict(
+                terminal_by_digest.get(receipt), records
+            )
+            if verdict not in {"pass", "fail"}:
+                return _blocked(
+                    "missing-evidence",
+                    "generation receipt has no authenticated verdict",
+                    records=append_before_slot,
+                    terminal_ref=receipt,
+                )
+            verdicts.append(
+                (receipt, cast(Literal["pass", "fail"], verdict))
+            )
         return Carry(
             generation=generation,
             receipts=receipts,
+            verdicts=tuple(verdicts),
             carry_record=cast(GenerationCarryV1, carry_record),
             records_to_append=tuple(append_before_slot),
         )
+
+    closure = tuple(sorted(set(changed).union(security)))
+    if (
+        has_primary
+        and requested == "review"
+        and resolution.kind == "new"
+        and len(closure) > MAX_DELTA_SCOPE_PATHS
+    ):
+        # A bounded delta cannot cover this successor.  An explicit full-review
+        # request may detach it into a fresh lineage, but only after the kernel
+        # has measured the same oversized scope; small repairs cannot widen.
+        generation = fresh_review_generation(generation)
+        state = slot_state(
+            cast(Sequence[dict[str, object]], records),
+            generation.generation_id,
+            family,
+        )
+        inherited_primary = None
+        has_primary = state.primary_consumed
+        append_before_slot = [generation.to_dict()]
 
     if has_primary and requested != "delta":
         return _blocked(
@@ -367,7 +464,6 @@ def admit_review(
     slot_kind: Literal["primary", "delta"] = "delta" if has_primary else "primary"
     delta_scope: dict[str, object] | None = None
     if slot_kind == "delta":
-        closure = tuple(sorted(set(changed).union(security)))
         if len(closure) > MAX_DELTA_SCOPE_PATHS:
             return _blocked(
                 "oversized-delta",
@@ -398,6 +494,7 @@ def admit_review(
             task_id=task_id,
             idempotency_key=idempotency_key,
             prospective_generation=(generation if resolution.kind == "new" else None),
+            prospective_inherited_primary=(inherited_primary is not None),
         )
     except ReviewSlotError as exc:
         code = cast(BlockedCode, exc.code)

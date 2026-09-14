@@ -18,7 +18,11 @@ from pathlib import Path
 from typing import Literal, cast
 
 from .canonical import canonical_json_bytes, canonical_record_digest
-from .patch_identity import equivalence_receipt_is_valid
+from .patch_identity import (
+    PATCH_DIFF_FORMAT,
+    PATCH_IDENTITY_SCHEMA,
+    equivalence_receipt_is_valid,
+)
 from ..runners.contract import ReviewOutcome
 
 REVIEW_GENERATION_TYPE = "review-generation-v1"
@@ -38,6 +42,16 @@ GenerationProofKind = Literal["patch-equivalence", "format-only"]
 
 _OID_RE = re.compile(r"[0-9a-f]{40,64}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
+_PATCH_IDENTITY_FIELDS = {
+    "schema_version",
+    "base_sha",
+    "base_tree_sha",
+    "candidate_sha",
+    "candidate_tree_sha",
+    "diff_format",
+    "diff_sha256",
+    "patch_id_verbatim",
+}
 
 
 class ReviewStateError(ValueError):
@@ -74,12 +88,46 @@ def _frozen_strings(values: Sequence[str], *, label: str) -> tuple[str, ...]:
 def _validate_identity(identity: Mapping[str, object], tree: str) -> dict[str, object]:
     if not isinstance(identity, Mapping) or not identity:
         raise ReviewStateError("patch identity is missing")
+    if set(identity) != _PATCH_IDENTITY_FIELDS:
+        raise ReviewStateError("patch identity fields are invalid")
+    if (
+        identity.get("schema_version") != PATCH_IDENTITY_SCHEMA
+        or identity.get("diff_format") != PATCH_DIFF_FORMAT
+    ):
+        raise ReviewStateError("patch identity schema or diff format is invalid")
+    for field_name in (
+        "base_sha",
+        "base_tree_sha",
+        "candidate_sha",
+        "candidate_tree_sha",
+        "patch_id_verbatim",
+    ):
+        value = identity.get(field_name)
+        if not isinstance(value, str) or _OID_RE.fullmatch(value) is None:
+            raise ReviewStateError(f"patch identity {field_name} is invalid")
+    diff_digest = identity.get("diff_sha256")
+    if not isinstance(diff_digest, str) or _SHA256_RE.fullmatch(diff_digest) is None:
+        raise ReviewStateError("patch identity diff digest is invalid")
     candidate_tree = identity.get("candidate_tree_sha")
     if not isinstance(candidate_tree, str) or candidate_tree != tree:
         raise ReviewStateError("patch identity does not bind the current tree")
-    if _OID_RE.fullmatch(tree) is None:
-        raise ReviewStateError("review generation tree is invalid")
     return dict(identity)
+
+
+def patch_content_digest(identity: Mapping[str, object]) -> str:
+    """Identify patch content without commit metadata or caller extensions."""
+    tree = identity.get("candidate_tree_sha")
+    if not isinstance(tree, str):
+        raise ReviewStateError("patch identity is missing a candidate tree")
+    validated = _validate_identity(identity, tree)
+    return _digest(
+        [
+            "review-patch-content-v1",
+            validated["base_tree_sha"],
+            validated["candidate_tree_sha"],
+            validated["diff_sha256"],
+        ]
+    )
 
 
 def generation_id_for(
@@ -88,15 +136,15 @@ def generation_id_for(
     tree: str,
     required_sections: Sequence[str],
 ) -> str:
-    """Derive the D29 content-generation identifier exactly once."""
-    sections = _frozen_strings(required_sections, label="required sections")
+    """Derive one identifier from content, never commit or policy metadata."""
+    _frozen_strings(required_sections, label="required sections")
+    validated = _validate_identity(patch_identity, tree)
     return "cg_" + _digest(
         [
             "review-generation-v1",
             repository_binding,
-            patch_identity_digest(patch_identity),
+            patch_content_digest(validated),
             tree,
-            list(sections),
         ]
     )[:32]
 
@@ -106,11 +154,12 @@ def _lineage_id(
     patch_identity: Mapping[str, object],
     tree: str,
 ) -> str:
+    validated = _validate_identity(patch_identity, tree)
     return "rl_" + _digest(
         [
             "review-lineage-v1",
             repository_binding,
-            patch_identity_digest(patch_identity),
+            patch_content_digest(validated),
             tree,
         ]
     )[:32]
@@ -519,9 +568,15 @@ class GenerationCarryV1:
             for value in (self.from_identity, self.to_identity, self.proof)
         ):
             raise ReviewStateError("generation carry evidence is invalid")
+        from_tree = self.from_identity.get("candidate_tree_sha")
+        to_tree = self.to_identity.get("candidate_tree_sha")
+        if not isinstance(from_tree, str) or not isinstance(to_tree, str):
+            raise ReviewStateError("generation carry identity is missing a tree")
+        source = _validate_identity(self.from_identity, from_tree)
+        target = _validate_identity(self.to_identity, to_tree)
         sections = _frozen_strings(self.sections, label="carry sections")
-        object.__setattr__(self, "from_identity", dict(self.from_identity))
-        object.__setattr__(self, "to_identity", dict(self.to_identity))
+        object.__setattr__(self, "from_identity", source)
+        object.__setattr__(self, "to_identity", target)
         object.__setattr__(self, "proof", dict(self.proof))
         object.__setattr__(self, "sections", sections)
 
@@ -751,7 +806,7 @@ def _proof_for_exact_content(
 ) -> dict[str, object]:
     return {
         "kind": "seen-content-v1",
-        "patch_identity_digest": patch_identity_digest(identity),
+        "content_digest": patch_content_digest(identity),
         "tree": tree,
     }
 
@@ -911,15 +966,16 @@ def resolve_generation(
         if generation.repository_binding == repository_binding
         or generation.repository_binding.startswith("legacy-")
     ]
-    current_digest = patch_identity_digest(identity)
+    current_content = patch_content_digest(identity)
 
     # Exact content is an authenticated lookup, not a caller assertion.  It is
-    # what prevents a revert or a branch rename from replenishing review slots.
+    # what prevents an amend, re-commit, revert, or branch rename from
+    # replenishing review slots. Commit metadata and policy sections are not
+    # content identity.
     exact = [
         generation for generation in exact_generations
         if generation.tree == tree_sha
-        and patch_identity_digest(generation.patch_identity) == current_digest
-        and generation.required_sections == sections
+        and patch_content_digest(generation.patch_identity) == current_content
     ]
     if len(exact) > 1:
         return GenerationResolution("refused", reason="ambiguous-lineage")
@@ -930,7 +986,9 @@ def resolve_generation(
             from_identity=generation.patch_identity,
             to_identity=identity,
             proof=_proof_for_exact_content(identity, tree_sha),
-            sections=sections,
+            sections=tuple(
+                sorted(set(generation.required_sections).intersection(sections))
+            ),
         )
         return GenerationResolution("same", generation=generation, carry=carry)
 
@@ -944,9 +1002,8 @@ def resolve_generation(
                 generation.repository_binding == repository_binding
                 or generation.repository_binding.startswith("legacy-")
             )
-            and generation.required_sections == sections
             and carry.to_identity.get("candidate_tree_sha") == tree_sha
-            and patch_identity_digest(carry.to_identity) == current_digest
+            and patch_content_digest(carry.to_identity) == current_content
         ):
             carried_exact.append((generation, carry.to_identity))
     if len({item[0].generation_id for item in carried_exact}) > 1:
@@ -958,7 +1015,9 @@ def resolve_generation(
             from_identity=source,
             to_identity=identity,
             proof=_proof_for_exact_content(identity, tree_sha),
-            sections=sections,
+            sections=tuple(
+                sorted(set(generation.required_sections).intersection(sections))
+            ),
         )
         return GenerationResolution("same", generation=generation, carry=carry)
 
@@ -967,8 +1026,6 @@ def resolve_generation(
     if equivalence_proof is not None:
         candidates: list[tuple[ReviewGenerationV1, Mapping[str, object]]] = []
         for generation in repository_generations:
-            if generation.required_sections != sections:
-                continue
             identities: list[Mapping[str, object]] = [generation.patch_identity]
             identities.extend(
                 carry.to_identity
@@ -999,8 +1056,6 @@ def resolve_generation(
         candidates = []
         carries = generation_carries(cast(Sequence[dict[str, object]], records))
         for generation in repository_generations:
-            if generation.required_sections != sections:
-                continue
             identities = [generation.patch_identity]
             identities.extend(
                 carry.to_identity
@@ -1047,7 +1102,13 @@ def resolve_generation(
                 from_identity=source_identity,
                 to_identity=identity,
                 proof=authenticated_proof.to_dict(),
-                sections=sections,
+                sections=tuple(
+                    sorted(
+                        set(source_generation.required_sections).intersection(
+                            sections
+                        )
+                    )
+                ),
             ),
         )
 
@@ -1089,9 +1150,20 @@ def resolve_generation(
             predecessor.generation_id,
             "delivery",
         )
+        predecessor_is_covered = bool(
+            predecessor_slots.own_primary_consumed
+            or (
+                predecessor_slots.inherited_primary_ref is not None
+                and (
+                    not predecessor.invalidated_sections
+                    or predecessor_slots.delta_consumed
+                )
+            )
+        )
         primary_receipt = (
             predecessor_slots.primary_terminal_ref
-            or predecessor.primary_origin_receipt
+            if predecessor_is_covered
+            else None
         )
         if primary_receipt is not None:
             inherited = tuple(
@@ -1152,6 +1224,31 @@ def _prospective_generations(
     return projected
 
 
+def fresh_review_generation(generation: ReviewGenerationV1) -> ReviewGenerationV1:
+    """Detach an oversized successor from inherited authority for a full review."""
+    return ReviewGenerationV1(
+        repository_binding=generation.repository_binding,
+        lineage_id=_lineage_id(
+            generation.repository_binding,
+            generation.patch_identity,
+            generation.tree,
+        ),
+        generation_id=generation.generation_id,
+        predecessor_id=None,
+        patch_identity=generation.patch_identity,
+        tree=generation.tree,
+        required_sections=generation.required_sections,
+        policy_digest=generation.policy_digest,
+        delta_from_tree=None,
+        delta_sha256=generation.delta_sha256,
+        changed_paths=generation.changed_paths,
+        dependency_paths=generation.dependency_paths,
+        primary_origin_receipt=None,
+        inherited_coverage=(),
+        invalidated_sections=(),
+    )
+
+
 def _reserve_review_slot(
     records: Sequence[Mapping[str, object]],
     *,
@@ -1161,8 +1258,9 @@ def _reserve_review_slot(
     task_id: str,
     idempotency_key: str,
     prospective_generation: ReviewGenerationV1 | None = None,
+    prospective_inherited_primary: bool = False,
 ) -> ReviewSlotReservation:
-    from .authority_projection import slot_state
+    from .authority_projection import authenticated_review_state_records, slot_state
     from ..review.chain import ReviewChainError, enforce_review_budget
 
     if family not in {"delivery", "trust"} or slot_kind not in {"primary", "delta"}:
@@ -1174,23 +1272,39 @@ def _reserve_review_slot(
     if generation_id not in _prospective_generations(records, prospective_generation):
         raise ReviewSlotError("missing-evidence", "review generation is not authenticated")
 
+    for record in authenticated_review_state_records(
+        cast(Sequence[dict[str, object]], records)
+    ):
+        if (
+            record.get("type") != REVIEW_SLOT_RESERVATION_TYPE
+            or record.get("idempotency_key") != idempotency_key
+        ):
+            continue
+        try:
+            bound = ReviewSlotReservation.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+        if (
+            bound.generation_id,
+            bound.family,
+            bound.slot_kind,
+            bound.task_id,
+        ) != (generation_id, family, slot_kind, task_id):
+            raise ReviewSlotError(
+                "reservation-conflict",
+                "idempotency key is already bound to another review obligation",
+            )
+
     state = slot_state(
         cast(Sequence[dict[str, object]], records), generation_id, family
     )
     prospective_primary = bool(
         prospective_generation is not None
         and (
-            (
+            prospective_inherited_primary
+            or (
                 family == "delivery"
                 and prospective_generation.primary_origin_receipt is not None
-            )
-            or (
-                prospective_generation.predecessor_id is not None
-                and slot_state(
-                    cast(Sequence[dict[str, object]], records),
-                    prospective_generation.predecessor_id,
-                    family,
-                ).primary_consumed
             )
         )
     )
@@ -1455,7 +1569,9 @@ __all__ = [
     "ReviewSlotSettlement",
     "ReviewStateError",
     "assert_authority_ledger_lock_held",
+    "fresh_review_generation",
     "generation_id_for",
+    "patch_content_digest",
     "patch_identity_digest",
     "prove_generation_carry",
     "reserve_review_slot",
