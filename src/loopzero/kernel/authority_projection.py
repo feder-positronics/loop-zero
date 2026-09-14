@@ -1594,6 +1594,7 @@ def authenticated_review_state_records(
     """
     from .review_state import (
         GENERATION_CARRY_TYPE,
+        GENERATION_PROOF_TYPE,
         REVIEW_GENERATION_TYPE,
         REVIEW_SLOT_RESERVATION_TYPE,
         REVIEW_SLOT_SETTLEMENT_TYPE,
@@ -1601,6 +1602,7 @@ def authenticated_review_state_records(
 
     record_types = {
         REVIEW_GENERATION_TYPE,
+        GENERATION_PROOF_TYPE,
         GENERATION_CARRY_TYPE,
         REVIEW_SLOT_RESERVATION_TYPE,
         REVIEW_SLOT_SETTLEMENT_TYPE,
@@ -1619,11 +1621,6 @@ def _legacy_review_generations(
     """Synthesize conservative content generations for accepted old terminals."""
     from .review_state import ReviewGenerationV1, generation_id_for, patch_identity_digest
 
-    try:
-        accepted = seam_accepted_review_terminals(records)
-        verdicts = seam_authenticated_verdicts(records, _accepted_terminals=accepted)
-    except MissingAdapter:
-        return {}
     authenticated = _authenticated_coordinator_record_ids(records)
     d29_cutover_index = next(
         (
@@ -1634,6 +1631,18 @@ def _legacy_review_generations(
         ),
         len(records),
     )
+    if not any(
+        record.get("type") in {"attempt-terminal", "attempt-recovery"}
+        for record in records[:d29_cutover_index]
+    ):
+        return {}
+    try:
+        accepted = seam_accepted_review_terminals(records)
+        verdicts = seam_authenticated_verdicts(records, _accepted_terminals=accepted)
+    except MissingAdapter as exc:
+        raise MissingAdapter(
+            "legacy review projection requires accepted-terminal and verdict adapters"
+        ) from exc
     record_indices = {id(record): index for index, record in enumerate(records)}
     legacy: dict[str, ReviewGenerationV1] = {}
     for task_id, terminal in accepted.items():
@@ -1768,10 +1777,11 @@ def generations(records: Sequence[dict[str, object]]) -> dict[str, object]:
 
 def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ...]:
     """Project proof-valid authenticated carries whose source is already known."""
-    from .patch_identity import equivalence_receipt_is_valid
     from .review_state import (
         GENERATION_CARRY_TYPE,
+        GENERATION_PROOF_TYPE,
         GenerationCarryV1,
+        GenerationProofV1,
         patch_identity_digest,
     )
 
@@ -1781,7 +1791,18 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
         for generation_id, generation in projected.items()
     }
     carries: list[GenerationCarryV1] = []
-    for record in authenticated_review_state_records(records):
+    authenticated_rows = authenticated_review_state_records(records)
+    authenticated_ids = {id(record) for record in authenticated_rows}
+    proof_rows: dict[int, GenerationProofV1] = {}
+    for index, record in enumerate(records):
+        if id(record) not in authenticated_ids or record.get("type") != GENERATION_PROOF_TYPE:
+            continue
+        try:
+            proof_rows[index] = GenerationProofV1.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+    record_indices = {id(record): index for index, record in enumerate(records)}
+    for record in authenticated_rows:
         if record.get("type") != GENERATION_CARRY_TYPE:
             continue
         try:
@@ -1798,27 +1819,41 @@ def generation_carries(records: Sequence[dict[str, object]]) -> tuple[object, ..
         ):
             continue
         proof = carry.proof
-        proof_valid = bool(
-            equivalence_receipt_is_valid(proof)
-            and proof.get("left_identity_digest") == source_digest
-            and proof.get("right_identity_digest") == target_digest
-            and proof.get("result_tree_sha")
-            == carry.to_identity.get("candidate_tree_sha")
+        carry_index = record_indices[id(record)]
+        proof_valid = any(
+            proof_index < carry_index
+            and candidate.to_dict() == proof
+            and candidate.from_identity == carry.from_identity
+            and candidate.to_identity == carry.to_identity
+            for proof_index, candidate in proof_rows.items()
         ) or proof == {
-            "kind": "format-only-v1",
-            "from_tree": carry.from_identity.get("candidate_tree_sha"),
-            "to_tree": carry.to_identity.get("candidate_tree_sha"),
-            "verified": True,
-        } or proof == {
             "kind": "seen-content-v1",
             "patch_identity_digest": target_digest,
             "tree": carry.to_identity.get("candidate_tree_sha"),
-        }
+        } and source_digest == target_digest and (
+            carry.from_identity.get("candidate_tree_sha")
+            == carry.to_identity.get("candidate_tree_sha")
+        )
         if not proof_valid:
             continue
         carries.append(carry)
         known.setdefault(carry.generation_id, set()).add(target_digest)
     return tuple(carries)
+
+
+def generation_proofs(records: Sequence[dict[str, object]]) -> tuple[object, ...]:
+    """Project only coordinator-authenticated exact-pair kernel proof records."""
+    from .review_state import GENERATION_PROOF_TYPE, GenerationProofV1
+
+    proofs: list[GenerationProofV1] = []
+    for record in authenticated_review_state_records(records):
+        if record.get("type") != GENERATION_PROOF_TYPE:
+            continue
+        try:
+            proofs.append(GenerationProofV1.from_dict(record))
+        except (TypeError, ValueError):
+            continue
+    return tuple(proofs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1867,6 +1902,11 @@ class ReviewSlotState:
     @property
     def primary_consumed(self) -> bool:
         return self.inherited_primary_ref is not None or self._consumed("primary")
+
+    @property
+    def own_primary_consumed(self) -> bool:
+        """Whether this generation, rather than an ancestor, consumed primary."""
+        return self._consumed("primary")
 
     @property
     def delta_consumed(self) -> bool:
@@ -1973,7 +2013,7 @@ def slot_state(
             or settlement.family != reservation.family
             or settlement.slot_kind != reservation.slot_kind
             or settlement.task_id != reservation.task_id
-            or classify_review_outcome(terminal) is not settlement.outcome
+            or classify_review_outcome(terminal, records) is not settlement.outcome
         ):
             continue
         settlements.append(settlement)

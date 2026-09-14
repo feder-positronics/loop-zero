@@ -149,57 +149,82 @@ def test_archived_review_witness_rejects_identity_or_signature_damage(damage):
         authority.validate_archived_review_witness(damaged, anchor)
 
 
+@pytest.fixture
+def outcome_authentication(monkeypatch):
+    monkeypatch.setattr(
+        authority,
+        "_authenticated_attempt_terminal_ids",
+        lambda rows, **kwargs: frozenset(
+            id(row) for row in rows if row.get("ledger_authenticated") is True
+        ),
+    )
+    monkeypatch.setattr(
+        authority,
+        "_authenticated_coordinator_record_ids",
+        lambda rows: frozenset(
+            id(row) for row in rows if row.get("coordinator_authenticated") is True
+        ),
+    )
+
+
 @pytest.mark.parametrize(
-    ("terminal", "expected"),
-    [
-        (
-            {
-                "status": "completed",
-                "review_acceptance_verified": True,
-                "accepted_verdict": "pass",
-            },
-            ReviewOutcome.CONSUMED,
-        ),
-        (
-            {
-                "status": "failed",
-                "terminal_reason": "model-result",
-                "review_acceptance_verified": True,
-                "accepted_verdict": "fail",
-            },
-            ReviewOutcome.CONSUMED,
-        ),
-        (
-            {"status": "failed", "terminal_reason": "model-result"},
-            ReviewOutcome.RELEASED,
-        ),
-        (
-            {"status": "failed", "terminal_reason": "transport-disconnect"},
-            ReviewOutcome.RELEASED,
-        ),
-        (
-            {"status": "failed", "terminal_reason": "budget-exhausted"},
-            ReviewOutcome.RELEASED,
-        ),
-        (
-            {
-                "status": "failed",
-                "terminal_reason": "budget-exhausted-after-result",
-                "review_acceptance_verified": True,
-                "accepted_verdict": "pass",
-            },
-            ReviewOutcome.CONSUMED,
-        ),
-        (
-            {"status": "completed", "verification_verdict": "inconclusive"},
-            ReviewOutcome.RELEASED,
-        ),
-        ({"status": "forged", "terminal_reason": "invented"}, ReviewOutcome.UNRESOLVED),
-        (
-            {"status": "failed", "terminal_authority_proof": "forged"},
-            ReviewOutcome.UNRESOLVED,
-        ),
-    ],
+    "reason",
+    ("model-result", "transport-disconnect", "budget-exhausted"),
 )
-def test_review_outcome_classification(terminal, expected):
-    assert authority.classify_review_outcome(terminal) is expected
+def test_authenticated_infrastructure_outcomes_release(
+    outcome_authentication, reason
+):
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "status": "failed",
+        "terminal_reason": reason,
+        "ledger_authenticated": True,
+    }
+    assert authority.classify_review_outcome(terminal, [terminal]) is ReviewOutcome.RELEASED
+
+
+@pytest.mark.parametrize(
+    "reason", (None, "model-result", "budget-exhausted-after-result")
+)
+def test_coordinator_verdict_consumes(outcome_authentication, reason):
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "run_id": "run",
+        "status": "completed" if reason is None else "failed",
+        "ledger_authenticated": True,
+    }
+    if reason is not None:
+        terminal["terminal_reason"] = reason
+    verdict = {
+        "type": "verdict",
+        "task_id": "review",
+        "run_id": "run",
+        "verdict": "fail",
+        "coordinator_authenticated": True,
+    }
+    assert authority.classify_review_outcome(
+        terminal, [terminal, verdict]
+    ) is ReviewOutcome.CONSUMED
+
+
+def test_self_asserted_authentication_without_ledger_verdict_is_unresolved(
+    outcome_authentication,
+):
+    forged = {
+        "type": "attempt-terminal",
+        "task_id": "review",
+        "status": "completed",
+        "ledger_authenticated": True,
+        "review_acceptance_verified": True,
+        "accepted_verdict": "pass",
+        "verdict_authenticated": True,
+        "authenticated_verdict": {"verdict": "pass", "authenticated": True},
+    }
+    assert authority.classify_review_outcome(forged, [forged]) is ReviewOutcome.UNRESOLVED
+
+
+def test_unknown_or_unrecorded_terminal_is_unresolved(outcome_authentication):
+    terminal = {"status": "forged", "terminal_reason": "invented"}
+    assert authority.classify_review_outcome(terminal, [terminal]) is ReviewOutcome.UNRESOLVED

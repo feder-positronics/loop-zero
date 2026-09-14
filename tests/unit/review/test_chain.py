@@ -429,6 +429,27 @@ def test_legacy_primary_projects_a_consumed_content_generation(monkeypatch) -> N
     ).primary_consumed
 
 
+def test_legacy_projection_refuses_when_adapter_is_missing(monkeypatch) -> None:
+    from loopzero.kernel import authority_projection, seams
+
+    terminal = {
+        "type": "attempt-terminal",
+        "task_id": "legacy-review",
+        "snapshot_tree_sha": "b" * 40,
+        "patch_identity": {
+            "candidate_sha": "a" * 40,
+            "candidate_tree_sha": "b" * 40,
+        },
+    }
+    monkeypatch.setattr(
+        authority_projection,
+        "seam_accepted_review_terminals",
+        lambda rows: (_ for _ in ()).throw(seams.MissingAdapter("missing")),
+    )
+    with pytest.raises(seams.MissingAdapter, match="legacy review projection"):
+        authority_projection.generations([terminal])
+
+
 def test_generation_carry_is_a_tree_coverage_disjunct(monkeypatch, tmp_path) -> None:
     from loopzero.kernel import authority_projection
     from loopzero.review import _tree_coverage as coverage

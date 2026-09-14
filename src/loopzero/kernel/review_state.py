@@ -22,6 +22,7 @@ from .patch_identity import equivalence_receipt_is_valid
 from ..runners.contract import ReviewOutcome
 
 REVIEW_GENERATION_TYPE = "review-generation-v1"
+GENERATION_PROOF_TYPE = "review-generation-proof-v1"
 GENERATION_CARRY_TYPE = "generation-carry-v1"
 REVIEW_SLOT_RESERVATION_TYPE = "review-slot-reservation-v1"
 REVIEW_SLOT_SETTLEMENT_TYPE = "review-slot-settlement-v1"
@@ -32,6 +33,7 @@ GenerationTransitionKind = Literal[
 GenerationResolutionKind = Literal["same", "new", "refused"]
 ReviewFamily = Literal["delivery", "trust"]
 ReviewSlotKind = Literal["primary", "delta"]
+GenerationProofKind = Literal["patch-equivalence", "format-only"]
 
 _OID_RE = re.compile(r"[0-9a-f]{40,64}")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -279,6 +281,144 @@ class ReviewGenerationV1:
         )
 
     from_json = from_dict
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationProofV1:
+    """Coordinator-authenticated provenance from a kernel proof operation."""
+
+    proof_kind: GenerationProofKind
+    from_identity: Mapping[str, object] = field(repr=False)
+    from_tree: str
+    to_identity: Mapping[str, object] = field(repr=False)
+    to_tree: str
+    proof: Mapping[str, object] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if self.proof_kind not in {"patch-equivalence", "format-only"}:
+            raise ReviewStateError("generation proof kind is invalid")
+        source = _validate_identity(self.from_identity, self.from_tree)
+        target = _validate_identity(self.to_identity, self.to_tree)
+        proof = dict(self.proof)
+        source_digest = patch_identity_digest(source)
+        target_digest = patch_identity_digest(target)
+        if self.proof_kind == "patch-equivalence":
+            valid = bool(
+                equivalence_receipt_is_valid(proof)
+                and proof.get("left_identity_digest") == source_digest
+                and proof.get("right_identity_digest") == target_digest
+                and proof.get("result_tree_sha") == self.to_tree
+            )
+        else:
+            valid = proof == {
+                "schema_version": "format-only-v1",
+                "from_identity_digest": source_digest,
+                "from_tree": self.from_tree,
+                "to_identity_digest": target_digest,
+                "to_tree": self.to_tree,
+                "verified": True,
+            }
+        if not valid:
+            raise ReviewStateError("generation proof does not bind its identities")
+        object.__setattr__(self, "from_identity", source)
+        object.__setattr__(self, "to_identity", target)
+        object.__setattr__(self, "proof", proof)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "type": GENERATION_PROOF_TYPE,
+            "proof_kind": self.proof_kind,
+            "from_identity": dict(self.from_identity),
+            "from_tree": self.from_tree,
+            "to_identity": dict(self.to_identity),
+            "to_tree": self.to_tree,
+            "proof": dict(self.proof),
+        }
+
+    to_json = to_dict
+    to_record = to_dict
+
+    def canonical_digest(self) -> str:
+        return canonical_record_digest(self.to_dict())
+
+    @classmethod
+    def from_dict(cls, record: Mapping[str, object]) -> GenerationProofV1:
+        expected = {
+            "type",
+            "proof_kind",
+            "from_identity",
+            "from_tree",
+            "to_identity",
+            "to_tree",
+            "proof",
+        }
+        if set(record) not in (expected, expected | {"terminal_authority_proof"}):
+            raise ReviewStateError("generation proof fields are invalid")
+        if record.get("type") != GENERATION_PROOF_TYPE:
+            raise ReviewStateError("generation proof type is invalid")
+        source = record.get("from_identity")
+        target = record.get("to_identity")
+        proof = record.get("proof")
+        if not all(isinstance(value, Mapping) for value in (source, target, proof)):
+            raise ReviewStateError("generation proof evidence is invalid")
+        return cls(
+            proof_kind=cast(GenerationProofKind, record.get("proof_kind")),
+            from_identity=cast(Mapping[str, object], source),
+            from_tree=cast(str, record.get("from_tree")),
+            to_identity=cast(Mapping[str, object], target),
+            to_tree=cast(str, record.get("to_tree")),
+            proof=cast(Mapping[str, object], proof),
+        )
+
+    from_json = from_dict
+
+
+def prove_generation_carry(
+    repo: Path,
+    *,
+    from_identity: Mapping[str, object],
+    to_identity: Mapping[str, object],
+    proof_kind: GenerationProofKind,
+) -> GenerationProofV1 | None:
+    """Run the kernel prover and return the exact record to authenticate.
+
+    The coordinator must seal and append this record before passing it to
+    :func:`resolve_generation`; an unrecorded result grants no carry.
+    """
+    from . import patch_identity as patch_identity_kernel
+
+    from_tree = from_identity.get("candidate_tree_sha")
+    to_tree = to_identity.get("candidate_tree_sha")
+    if not isinstance(from_tree, str) or not isinstance(to_tree, str):
+        return None
+    if proof_kind == "patch-equivalence":
+        receipt = patch_identity_kernel.prove_patch_equivalence(
+            repo, from_identity, to_identity
+        )
+        if receipt is None:
+            return None
+        proof = receipt
+    elif proof_kind == "format-only":
+        if not patch_identity_kernel.prove_format_only(repo, from_tree, to_tree):
+            return None
+        proof = {
+            "schema_version": "format-only-v1",
+            "from_identity_digest": patch_identity_digest(from_identity),
+            "from_tree": from_tree,
+            "to_identity_digest": patch_identity_digest(to_identity),
+            "to_tree": to_tree,
+            "verified": True,
+        }
+    else:
+        raise ReviewStateError("generation proof kind is invalid")
+    return GenerationProofV1(
+        proof_kind=proof_kind,
+        from_identity=from_identity,
+        from_tree=from_tree,
+        to_identity=to_identity,
+        to_tree=to_tree,
+        proof=proof,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -551,12 +691,50 @@ def _equivalence_matches(
     )
 
 
+def _supplied_generation_proof(
+    records: Sequence[Mapping[str, object]],
+    supplied: object,
+    *,
+    proof_kind: GenerationProofKind,
+    source: Mapping[str, object],
+    target: Mapping[str, object],
+) -> GenerationProofV1 | None:
+    """Resolve only a preceding coordinator-authenticated exact-pair proof."""
+    from .authority_projection import generation_proofs
+
+    for candidate in reversed(
+        generation_proofs(cast(Sequence[dict[str, object]], records))
+    ):
+        if (
+            candidate.proof_kind == proof_kind
+            and candidate.from_identity == dict(source)
+            and candidate.to_identity == dict(target)
+            and (
+                supplied == candidate.proof
+                or supplied == candidate.to_dict()
+                or (
+                    isinstance(supplied, Mapping)
+                    and {
+                        key: value
+                        for key, value in supplied.items()
+                        if key != "terminal_authority_proof"
+                    }
+                    == candidate.to_dict()
+                )
+            )
+        ):
+            return candidate
+    return None
+
+
 def _record_maps(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     return [dict(record) for record in records if isinstance(record, Mapping)]
 
 
 def _transition_kind(
-    records: Sequence[Mapping[str, object]], predecessor_id: str
+    records: Sequence[Mapping[str, object]],
+    predecessor_id: str,
+    target_identity: Mapping[str, object],
 ) -> GenerationTransitionKind:
     """Use authenticated authority facts, never caller labels, for transition type."""
     try:
@@ -575,7 +753,18 @@ def _transition_kind(
             and record.get("generation_id") == predecessor_id
         ):
             return "owner-requested"
-        if record.get("type") == "attempt-supersession":
+        contract = record.get("task_contract")
+        recorded_generation = record.get("review_generation_id")
+        if recorded_generation is None and isinstance(contract, Mapping):
+            recorded_generation = contract.get("review_generation_id")
+        superseding_source = record.get("superseding_source_identity")
+        if (
+            record.get("type") == "attempt-supersession"
+            and recorded_generation == predecessor_id
+            and isinstance(superseding_source, Mapping)
+            and superseding_source.get("head")
+            == target_identity.get("candidate_sha")
+        ):
             return "supersession"
     return "substantive"
 
@@ -592,10 +781,10 @@ def resolve_generation(
 ) -> GenerationResolution:
     """Resolve content to an authenticated generation without running Git.
 
-    ``equivalence_proof`` must be the receipt returned by
-    :func:`patch_identity.prove_patch_equivalence`; ``format_only_proof`` is the
-    boolean returned by :func:`patch_identity.prove_format_only`.  This boundary
-    validates those existing receipt types and never re-runs either proof.
+    Each supplied proof must match an exact-pair :class:`GenerationProofV1`
+    already authenticated in ``records``. The proof operation runs separately
+    through :func:`prove_generation_carry`; this lock-held boundary never runs
+    Git and never accepts a bare boolean or self-digested receipt.
     """
     try:
         identity = _validate_identity(patch_identity, tree_sha)
@@ -606,17 +795,21 @@ def resolve_generation(
             raise ReviewStateError("repository binding is invalid")
     except ReviewStateError as exc:
         return GenerationResolution("refused", reason=f"missing-evidence:{exc}")
-    if equivalence_proof is not None and not (
-        isinstance(equivalence_proof, Mapping)
-        and equivalence_receipt_is_valid(equivalence_proof)
-    ):
+    if equivalence_proof is not None and not isinstance(equivalence_proof, Mapping):
         return GenerationResolution("refused", reason="invalid-proof")
-    if format_only_proof is not None and type(format_only_proof) is not bool:
+    if format_only_proof is not None and not isinstance(format_only_proof, Mapping):
         return GenerationResolution("refused", reason="invalid-proof")
 
     from .authority_projection import generations, generation_carries, slot_state
 
-    projected = generations(cast(Sequence[dict[str, object]], records))
+    from .seams import MissingAdapter
+
+    try:
+        projected = generations(cast(Sequence[dict[str, object]], records))
+    except MissingAdapter:
+        return GenerationResolution(
+            "refused", reason="missing-evidence:legacy projection unavailable"
+        )
     repository_generations = [
         generation for generation in projected.values()
         if generation.repository_binding == repository_binding
@@ -681,7 +874,6 @@ def resolve_generation(
     source_generation: ReviewGenerationV1 | None = None
     source_identity: Mapping[str, object] | None = None
     if equivalence_proof is not None:
-        left_digest = equivalence_proof.get("left_identity_digest")
         candidates: list[tuple[ReviewGenerationV1, Mapping[str, object]]] = []
         for generation in repository_generations:
             if generation.required_sections != sections:
@@ -697,10 +889,14 @@ def resolve_generation(
             candidates.extend(
                 (generation, candidate)
                 for candidate in identities
-                if patch_identity_digest(candidate) == left_digest
-                and _equivalence_matches(
-                    equivalence_proof, candidate, identity, tree_sha
+                if _supplied_generation_proof(
+                    records,
+                    equivalence_proof,
+                    proof_kind="patch-equivalence",
+                    source=candidate,
+                    target=identity,
                 )
+                is not None
             )
         if len({candidate[0].generation_id for candidate in candidates}) > 1:
             return GenerationResolution("refused", reason="ambiguous-lineage")
@@ -708,27 +904,50 @@ def resolve_generation(
             source_generation, source_identity = candidates[-1]
         else:
             return GenerationResolution("refused", reason="invalid-proof")
-    elif format_only_proof is True:
-        # The existing API's proof is a boolean, so it can only carry the one
-        # authenticated current head; accepting an arbitrary older head would
-        # let the caller choose lineage.
-        if repository_generations:
-            source_generation = repository_generations[-1]
-            source_identity = source_generation.patch_identity
-        else:
+    elif format_only_proof is not None:
+        candidates = []
+        carries = generation_carries(cast(Sequence[dict[str, object]], records))
+        for generation in repository_generations:
+            if generation.required_sections != sections:
+                continue
+            identities = [generation.patch_identity]
+            identities.extend(
+                carry.to_identity
+                for carry in carries
+                if carry.generation_id == generation.generation_id
+            )
+            candidates.extend(
+                (generation, candidate)
+                for candidate in identities
+                if _supplied_generation_proof(
+                    records,
+                    format_only_proof,
+                    proof_kind="format-only",
+                    source=candidate,
+                    target=identity,
+                )
+                is not None
+            )
+        if len({candidate[0].generation_id for candidate in candidates}) > 1:
+            return GenerationResolution("refused", reason="ambiguous-lineage")
+        if not candidates:
             return GenerationResolution("refused", reason="invalid-proof")
+        source_generation, source_identity = candidates[-1]
 
     if source_generation is not None and source_identity is not None:
-        proof = (
-            dict(cast(Mapping[str, object], equivalence_proof))
-            if equivalence_proof is not None
-            else {
-                "kind": "format-only-v1",
-                "from_tree": source_identity.get("candidate_tree_sha"),
-                "to_tree": tree_sha,
-                "verified": True,
-            }
+        authenticated_proof = _supplied_generation_proof(
+            records,
+            equivalence_proof if equivalence_proof is not None else format_only_proof,
+            proof_kind=(
+                "patch-equivalence"
+                if equivalence_proof is not None
+                else "format-only"
+            ),
+            source=source_identity,
+            target=identity,
         )
+        if authenticated_proof is None:
+            return GenerationResolution("refused", reason="invalid-proof")
         return GenerationResolution(
             "same",
             generation=source_generation,
@@ -736,7 +955,7 @@ def resolve_generation(
                 generation_id=source_generation.generation_id,
                 from_identity=source_identity,
                 to_identity=identity,
-                proof=proof,
+                proof=authenticated_proof.to_dict(),
                 sections=sections,
             ),
         )
@@ -791,7 +1010,7 @@ def resolve_generation(
     transition_kind: GenerationTransitionKind = (
         "initial"
         if predecessor is None
-        else _transition_kind(records, predecessor.generation_id)
+        else _transition_kind(records, predecessor.generation_id, identity)
     )
     return GenerationResolution(
         "new",
@@ -927,6 +1146,7 @@ def _reserve_review_slot(
 
 
 def reserve_review_slot(
+    repository: Path,
     records: Sequence[Mapping[str, object]],
     *,
     generation_id: str,
@@ -937,9 +1157,11 @@ def reserve_review_slot(
 ) -> ReviewSlotReservation:
     """Reserve one slot from authenticated ledger state.
 
-    The caller must follow the module-level lock/reload/sign/append/fsync
-    contract.  Returning a reservation does not itself launch inference.
+    The caller must reload before this call and sign/append/fsync the returned
+    record while retaining the same authority-ledger lock. Returning a
+    reservation does not itself launch inference.
     """
+    assert_authority_ledger_lock_held(repository)
     return _reserve_review_slot(
         records,
         generation_id=generation_id,
@@ -1018,7 +1240,7 @@ def settle_review_slot(
         raise ReviewSlotError(
             "reservation-conflict", "terminal reference belongs to another task"
         )
-    classified = classify_review_outcome(terminal)
+    classified = classify_review_outcome(terminal, records)
     if classified is not normalized_outcome:
         raise ReviewSlotError(
             "reservation-conflict", "settlement outcome does not match terminal"
@@ -1070,6 +1292,7 @@ def assert_authority_ledger_lock_held(repo: Path) -> None:
 
 __all__ = [
     "GenerationCarryV1",
+    "GenerationProofV1",
     "GenerationResolution",
     "GenerationTransition",
     "ReviewGenerationV1",
@@ -1080,6 +1303,7 @@ __all__ = [
     "assert_authority_ledger_lock_held",
     "generation_id_for",
     "patch_identity_digest",
+    "prove_generation_carry",
     "reserve_review_slot",
     "resolve_generation",
     "settle_review_slot",

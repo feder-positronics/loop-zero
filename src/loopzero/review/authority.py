@@ -76,26 +76,8 @@ CONTROL_TYPE = "delivery-control"
 _ARCHIVE_VALIDATOR: ContextVar[Callable[..., bool] | None]
 
 
-def _terminal_verdict(terminal: Mapping[str, object]) -> str | None:
-    """Return a verdict only when the terminal carries authenticated evidence."""
-    accepted = terminal.get("accepted_verdict")
-    if accepted in {"pass", "fail"} and terminal.get(
-        "review_acceptance_verified"
-    ) is True:
-        return cast(str, accepted)
-    explicit = terminal.get("authenticated_verdict")
-    if isinstance(explicit, Mapping):
-        value = explicit.get("verdict")
-        if value in {"pass", "fail"} and explicit.get("authenticated") is True:
-            return cast(str, value)
-    if terminal.get("verdict_authenticated") is True and explicit in {
-        "pass",
-        "fail",
-    }:
-        return cast(str, explicit)
-    verification = terminal.get("verification_verdict")
-    if verification in {"pass", "fail"} and terminal.get("status") == "completed":
-        return cast(str, verification)
+def _accepted_terminal_verdict(terminal: Mapping[str, object]) -> str | None:
+    """Derive a verdict from a validated accepted-terminal chain receipt."""
     receipt = terminal.get("review_chain_receipt")
     if isinstance(receipt, Mapping):
         required = receipt.get("required_sections")
@@ -119,26 +101,46 @@ def _terminal_verdict(terminal: Mapping[str, object]) -> str | None:
     return None
 
 
-def classify_review_outcome(terminal: object) -> ReviewOutcome:
-    """Map one authenticated terminal's closed semantics to slot accounting.
-
-    Cryptographic record/reference authentication is performed by the caller's
-    authority projection (and again by ``settle_review_slot``).  This function
-    fails closed for malformed, contradictory, or unknown semantic values.
-    """
+def classify_review_outcome(
+    terminal: object, records: Sequence[Mapping[str, object]] = ()
+) -> ReviewOutcome:
+    """Map ledger-authenticated terminal and verdict facts to slot accounting."""
     if not isinstance(terminal, Mapping):
         return ReviewOutcome.UNRESOLVED
-    proof = terminal.get("terminal_authority_proof")
-    if proof is not None and not isinstance(proof, Mapping):
+    mapped = cast(Sequence[dict[str, object]], records)
+    terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
+    coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
+    if id(terminal) not in terminal_ids | coordinator_ids:
         return ReviewOutcome.UNRESOLVED
     status = terminal.get("status")
     reason = terminal.get("terminal_reason")
     failure = terminal.get("failure_class")
-    verdict = _terminal_verdict(terminal)
+    task_id = terminal.get("task_id")
+    terminal_index = next(
+        (index for index, record in enumerate(records) if record is terminal), None
+    )
+    verdict: str | None = None
+    if isinstance(task_id, str) and terminal_index is not None:
+        for record in records[terminal_index + 1 :]:
+            if (
+                id(record) in coordinator_ids
+                and record.get("type") == "verdict"
+                and record.get("task_id") == task_id
+                and record.get("verdict") in {"pass", "fail"}
+                and (
+                    terminal.get("run_id") is None
+                    or record.get("run_id") == terminal.get("run_id")
+                )
+            ):
+                verdict = cast(str, record["verdict"])
+    try:
+        accepted = accepted_review_terminals(cast(Sequence[dict[str, object]], records))
+    except (DispatchError, RuntimeError, ValueError):
+        accepted = {}
+    if isinstance(task_id, str) and accepted.get(task_id) is terminal:
+        verdict = verdict or _accepted_terminal_verdict(terminal)
     verification = terminal.get("verification_verdict")
 
-    if verification == "inconclusive":
-        return ReviewOutcome.RELEASED
     if status == "completed" and verdict is not None:
         return ReviewOutcome.CONSUMED
     if reason == "model-result" or failure == "model-result":
@@ -159,6 +161,8 @@ def classify_review_outcome(terminal: object) -> ReviewOutcome:
             if verdict is not None
             else ReviewOutcome.RELEASED
         )
+    if verification == "inconclusive" and verdict is None:
+        return ReviewOutcome.RELEASED
     released_reasons = {
         "timeout",
         "transport-disconnect",

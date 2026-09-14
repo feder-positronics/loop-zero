@@ -9,16 +9,18 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from ..kernel.authority_projection import slot_state
+from ..kernel.patch_identity import PatchIdentityError, tree_diff_paths
 from ..kernel.review_state import (
     GenerationCarryV1,
     ReviewGenerationV1,
     ReviewSlotError,
     ReviewSlotReservation,
     _reserve_review_slot,
+    assert_authority_ledger_lock_held,
     resolve_generation,
 )
 
@@ -127,6 +129,7 @@ def _review_family(task: Mapping[str, object]) -> Literal["delivery", "trust"]:
 
 
 def admit_review(
+    repository: Path,
     records: Sequence[Mapping[str, object]],
     *,
     repository_binding: str,
@@ -138,10 +141,13 @@ def admit_review(
     equivalence_proof: object | None,
     format_only_proof: object | None,
     requested: RequestedReview,
-    changed_paths: Sequence[str],
+    changed_paths: Sequence[str] | None,
     security_trigger_paths: Sequence[str],
+    changed_paths_digest: str | None = None,
+    diff_sha256: str | None = None,
 ) -> Admission:
     """Resolve content, carry valid coverage, or reserve one bounded review."""
+    assert_authority_ledger_lock_held(repository)
     if requested not in {"review", "delta"}:
         return _blocked("reservation-conflict", "unknown requested review kind")
     if not isinstance(task, Mapping) or not isinstance(
@@ -174,12 +180,27 @@ def admit_review(
             "missing-evidence", "task_id and idempotency_key are required"
         )
     try:
-        changed = _canonical_paths(changed_paths, label="changed paths")
+        supplied_changed = (
+            None
+            if changed_paths is None
+            else _canonical_paths(changed_paths, label="changed paths")
+        )
         security = _canonical_paths(
             security_trigger_paths, label="security trigger paths"
         )
     except ValueError as exc:
         return _blocked("missing-evidence", str(exc))
+    if (
+        changed_paths_digest is not None
+        and diff_sha256 is not None
+        and changed_paths_digest != diff_sha256
+    ):
+        return _blocked("invalid-proof", "conflicting caller diff digests")
+    supplied_diff_digest = (
+        changed_paths_digest
+        if changed_paths_digest is not None
+        else diff_sha256
+    )
 
     resolution = resolve_generation(
         records,
@@ -197,9 +218,41 @@ def admit_review(
         )
         return _blocked(code, reason)
     generation = resolution.generation
+    carry_record = resolution.carry
+    diff_from_tree = generation.delta_from_tree
+    if diff_from_tree is None and carry_record is not None:
+        candidate = carry_record.from_identity.get("candidate_tree_sha")
+        diff_from_tree = candidate if isinstance(candidate, str) else None
+    if diff_from_tree is None:
+        base_tree = patch_identity.get("base_tree_sha")
+        diff_from_tree = base_tree if isinstance(base_tree, str) else None
+    if diff_from_tree is None:
+        if supplied_changed not in {None, ()} or supplied_diff_digest is not None:
+            return _blocked(
+                "invalid-proof", "changed paths have no kernel-verifiable source tree"
+            )
+        changed: tuple[str, ...] = ()
+        actual_diff_digest: str | None = None
+    else:
+        try:
+            changed, actual_diff_digest = tree_diff_paths(
+                repository, diff_from_tree, current_tree_sha
+            )
+        except PatchIdentityError as exc:
+            return _blocked("invalid-proof", str(exc))
+        if supplied_changed is not None and (
+            supplied_diff_digest != actual_diff_digest
+            or supplied_changed != changed
+        ):
+            return _blocked(
+                "invalid-proof",
+                "caller path scope does not match the kernel tree diff",
+                expected_diff_digest=actual_diff_digest,
+            )
     if resolution.kind == "new":
         generation = replace(
             generation,
+            delta_sha256=actual_diff_digest,
             changed_paths=changed,
             dependency_paths=tuple(
                 sorted(set(security).difference(changed))
@@ -224,7 +277,6 @@ def admit_review(
         ).primary_terminal_ref
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []
-    carry_record = resolution.carry
     if (
         carry_record is not None
         and "security" in carry_record.sections
@@ -257,7 +309,19 @@ def admit_review(
         carry_record is not None
         and set(generation.required_sections) <= set(carry_record.sections)
     )
-    if resolution.kind == "same" and has_primary and complete_carry:
+    own_primary_consumed = state.own_primary_consumed
+    inherited_coverage_complete = bool(
+        inherited_primary is not None
+        and (
+            not generation.invalidated_sections
+            or state.delta_consumed
+        )
+    )
+    if (
+        resolution.kind == "same"
+        and (own_primary_consumed or inherited_coverage_complete)
+        and complete_carry
+    ):
         receipts = state.receipts
         if inherited_primary is not None and inherited_primary not in receipts:
             receipts = (inherited_primary, *receipts)
@@ -299,12 +363,7 @@ def admit_review(
                 path_count=len(closure),
                 maximum=MAX_DELTA_SCOPE_PATHS,
             )
-        from_tree = generation.delta_from_tree
-        if from_tree is None and carry_record is not None:
-            candidate = carry_record.from_identity.get("candidate_tree_sha")
-            from_tree = candidate if isinstance(candidate, str) else None
-        if from_tree is None and resolution.kind == "same":
-            from_tree = generation.tree
+        from_tree = diff_from_tree
         if not isinstance(from_tree, str):
             return _blocked(
                 "missing-evidence",
@@ -330,21 +389,10 @@ def admit_review(
     except ReviewSlotError as exc:
         code = cast(BlockedCode, exc.code)
         return _blocked(code, str(exc), records=append_before_slot)
-    if reservation.existing:
-        outstanding = state.outstanding
-        code: BlockedCode = (
-            "slot-held"
-            if outstanding is not None
-            and outstanding.reservation_id == reservation.reservation_id
-            else "reservation-conflict"
-        )
+    if reservation.existing and reservation.conflict:
         return _blocked(
-            code,
-            (
-                "review family already has an outstanding reservation"
-                if code == "slot-held"
-                else "idempotent review reservation is already settled"
-            ),
+            "slot-held",
+            "review family already has an outstanding reservation",
             records=append_before_slot,
             reservation_id=reservation.reservation_id,
         )

@@ -376,7 +376,7 @@ def validate_retry_policy(
             from .authority import classify_review_outcome
             from ..runners.contract import ReviewOutcome
 
-            if classify_review_outcome(obligation_attempts[-1]) is not (
+            if classify_review_outcome(obligation_attempts[-1], records) is not (
                 ReviewOutcome.RELEASED
             ):
                 raise DispatchError(

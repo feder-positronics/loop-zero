@@ -934,6 +934,7 @@ def _retention_live_record_ids(
             or record_type
             in {
                 "review-generation-v1",
+                "review-generation-proof-v1",
                 "generation-carry-v1",
                 "review-slot-reservation-v1",
                 "review-slot-settlement-v1",
@@ -1494,6 +1495,7 @@ _COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
         "inconclusive-retry-authorization",
         "review-chain-advisory",
         "review-generation-v1",
+        "review-generation-proof-v1",
         "review-recovery-verification",
         "review-slot-reservation-v1",
         "review-slot-settlement-v1",

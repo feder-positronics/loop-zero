@@ -84,6 +84,10 @@ def retry_outcome(task_id, *, reason="transport-disconnect"):
 def test_retry_bound_is_per_content_obligation_across_task_ids(monkeypatch):
     first = retry_outcome("provider-one")
     monkeypatch.setattr(authority, "authenticated_retry_outcomes", lambda rows: rows)
+    monkeypatch.setattr(
+        authority, "_authenticated_attempt_terminal_ids",
+        lambda rows, **kwargs: frozenset(map(id, rows)),
+    )
     assert routing.validate_retry_policy(
         [first],
         task_id="provider-two",
@@ -114,6 +118,10 @@ def test_retry_bound_is_per_content_obligation_across_task_ids(monkeypatch):
 def test_unresolved_obligation_cannot_retry(monkeypatch):
     unresolved = retry_outcome("unknown", reason="unknown-provider-result")
     monkeypatch.setattr(authority, "authenticated_retry_outcomes", lambda rows: rows)
+    monkeypatch.setattr(
+        authority, "_authenticated_attempt_terminal_ids",
+        lambda rows, **kwargs: frozenset(map(id, rows)),
+    )
     with pytest.raises(DispatchError, match="not released"):
         routing.validate_retry_policy(
             [unresolved],
