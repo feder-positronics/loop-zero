@@ -228,6 +228,23 @@ def trust_task(
     }
 
 
+def trust_task_with_scope(patch, *, name, scope):
+    """Build one real two-claim manifest and select its caller claim scope."""
+    result = trust_task(
+        patch,
+        name=name,
+        key=name,
+        invalidated=("a" * 64, "b" * 64),
+    )
+    claim_task = dict(result["trust_claim_task"])
+    claims = claim_task["invalidated_claims"]
+    claim_task["invalidated_claims"] = [claims[index] for index in scope]
+    claim_task.pop("task_hash")
+    claim_task["task_hash"] = review_state.canonical_record_digest(claim_task)
+    result["trust_claim_task"] = claim_task
+    return result
+
+
 def test_admission_rejects_caller_supplied_launch_reason():
     result = admit(
         [],
@@ -957,6 +974,400 @@ def test_trust_retry_dispatches_the_persisted_claim_scope(release_before_retry):
     assert retry.code == "invalid-proof"
     assert retry.records_to_append == ()
     assert claim_id not in repr(retry.evidence)
+
+
+@pytest.mark.parametrize(
+    ("retry_scope", "requested", "expected_type"),
+    [
+        ((), "delta", admission.Reserved),
+        ((0,), "delta", admission.Reserved),
+        ((1,), "delta", admission.Blocked),
+        ((1,), "review", admission.Blocked),
+        ((0, 1), "delta", admission.Blocked),
+    ],
+)
+def test_released_trust_retry_uses_only_its_persisted_claim_scope(
+    retry_scope, requested, expected_type
+):
+    patch = identity("a")
+
+    primary = admission.admit_review(
+        _REPOSITORY,
+        [],
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="primary", scope=()),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(primary, admission.Reserved)
+    rows = list(primary.records_to_append)
+    append_settlement(
+        rows,
+        primary.slot,
+        ReviewOutcome.CONSUMED,
+        {**terminal("primary"), "task_contract": primary.scoped_task},
+    )
+
+    delta = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="delta", scope=(0,)),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="delta",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(delta, admission.Reserved)
+    rows.extend(delta.records_to_append)
+    append_settlement(
+        rows,
+        delta.slot,
+        ReviewOutcome.RELEASED,
+        {
+            **terminal("delta", released=True),
+            "task_contract": delta.scoped_task,
+        },
+    )
+
+    retry = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="retry", scope=retry_scope),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested=requested,
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+
+    assert isinstance(retry, expected_type)
+    persisted_claim_id = delta.scoped_task["delta_scope"][
+        "invalidated_claim_ids"
+    ][0]
+    if isinstance(retry, admission.Reserved):
+        assert retry.slot.slot_kind == "delta"
+        assert retry.scoped_task["delta_scope"]["invalidated_claim_ids"] == [
+            persisted_claim_id
+        ]
+        assert [
+            claim["claim_id"]
+            for claim in retry.scoped_task["trust_claim_task"][
+                "invalidated_claims"
+            ]
+        ] == [persisted_claim_id]
+    else:
+        assert retry.code == "invalid-proof"
+        assert retry.records_to_append == ()
+        assert persisted_claim_id not in repr(retry.evidence)
+
+
+@pytest.mark.parametrize("delivery_created_generation", [False, True])
+def test_initial_trust_scope_is_persisted_for_primary_retries(
+    delivery_created_generation,
+):
+    patch = identity("a")
+    rows = []
+    if delivery_created_generation:
+        delivery = admit_family(rows, patch, "delivery", "delivery")
+        assert isinstance(delivery, admission.Reserved)
+        rows.extend(delivery.records_to_append)
+
+    primary = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="trust-primary", scope=(0, 1)),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(primary, admission.Reserved)
+    rows.extend(primary.records_to_append)
+    expected_claim_ids = tuple(
+        claim["claim_id"]
+        for claim in primary.scoped_task["trust_claim_task"][
+            "invalidated_claims"
+        ]
+    )
+    coverage = authority_projection.family_coverages(rows)[
+        (primary.generation.generation_id, "trust")
+    ]
+    assert coverage.invalidated_claim_ids == expected_claim_ids
+
+    repeated = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="trust-primary", scope=(0, 1)),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(repeated, admission.Reserved)
+    assert repeated.slot.existing
+
+
+def test_released_trust_primary_empty_scope_uses_persisted_obligation():
+    patch = identity("a")
+    primary = admission.admit_review(
+        _REPOSITORY,
+        [],
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="primary", scope=(0, 1)),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(primary, admission.Reserved)
+    rows = list(primary.records_to_append)
+    append_settlement(
+        rows,
+        primary.slot,
+        ReviewOutcome.RELEASED,
+        {
+            **terminal("primary", released=True),
+            "task_contract": primary.scoped_task,
+        },
+    )
+
+    retry = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_scope(patch, name="retry", scope=()),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(retry, admission.Reserved)
+    persisted_ids = [
+        claim["claim_id"]
+        for claim in primary.scoped_task["trust_claim_task"][
+            "invalidated_claims"
+        ]
+    ]
+    assert list(
+        authority_projection.family_coverages(rows)[
+            (primary.generation.generation_id, "trust")
+        ].invalidated_claim_ids
+    ) == persisted_ids
+    assert [
+        claim["claim_id"]
+        for claim in retry.scoped_task["trust_claim_task"]["invalidated_claims"]
+    ] == persisted_ids
+
+
+def test_package_nonverdict_launch_excludes_an_intentless_terminal():
+    patch = identity("a")
+    launched = admit(
+        [],
+        patch,
+        review_task={
+            **task("discovery", "discovery"),
+            "review_intent": "discovery",
+            "task_contract": {"run_id": "run"},
+        },
+    )
+    assert isinstance(launched, admission.NonVerdictReviewLaunch)
+    metadata = {
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+    }
+    intentless_terminal = {
+        **metadata,
+        **terminal("discovery", tree=patch["candidate_tree_sha"]),
+        "attempt_index": 0,
+        "run_id": "run",
+        "repository_binding": "repo",
+        "patch_identity": patch,
+        "source_identity": {"head": patch["candidate_sha"]},
+        "review_lens": "code",
+        "read_only": True,
+        "work_kind": "review",
+    }
+    rows = [
+        *launched.records_to_append,
+        intentless_terminal,
+        {
+            **metadata,
+            "type": "verdict",
+            "task_id": "discovery",
+            "run_id": "run",
+            "verdict": "pass",
+        },
+    ]
+
+    for family in ("delivery", "trust"):
+        assert review_authority.authenticated_review_verdict(
+            intentless_terminal,
+            rows,
+            expected_family=family,
+            allow_missing_intent=True,
+        ) is None
+
+    delivery = admit(
+        rows,
+        patch,
+        review_task=task("delivery", "delivery"),
+        security=(),
+    )
+
+    assert isinstance(delivery, admission.Reserved)
+    assert delivery.slot.slot_kind == "primary"
+    assert authority_projection.family_coverages(rows) == {}
+
+
+def test_publication_accepts_delivery_primary_at_an_equivalent_endpoint(
+    monkeypatch,
+):
+    from loopzero.review import _tree_coverage
+
+    origin, endpoint, target = map(identity, ("a", "b", "c"))
+    trust = admit_family(
+        [], origin, "trust", "trust-origin", invalidated=("a" * 64,)
+    )
+    rows = list(trust.records_to_append)
+    append_settlement(
+        rows,
+        trust.slot,
+        ReviewOutcome.CONSUMED,
+        {**terminal("trust-origin"), "patch_identity": origin},
+    )
+    first_proof = generation_proof(origin, endpoint)
+    rows.append(first_proof)
+    trust_endpoint = admit_family(
+        rows,
+        endpoint,
+        "trust",
+        "trust-endpoint",
+        proof=first_proof,
+    )
+    assert isinstance(trust_endpoint, admission.Carry)
+    rows.extend(trust_endpoint.records_to_append)
+
+    delivery = admit_family(
+        rows,
+        endpoint,
+        "delivery",
+        "delivery-endpoint",
+        proof=first_proof,
+    )
+    assert isinstance(delivery, admission.Reserved)
+    rows.extend(delivery.records_to_append)
+    append_settlement(
+        rows,
+        delivery.slot,
+        ReviewOutcome.CONSUMED,
+        {
+            **terminal("delivery-endpoint", tree=endpoint["candidate_tree_sha"]),
+            "patch_identity": endpoint,
+            "task_contract": {**delivery.scoped_task, "review_lens": "code"},
+            "review_lens": "code",
+            "source_identity": {
+                "version": 2,
+                "ref": "refs/heads/endpoint",
+                "head": endpoint["candidate_sha"],
+            },
+        },
+    )
+    delivery_terminal = next(
+        row
+        for row in rows
+        if row.get("type") == "attempt-terminal"
+        and row.get("task_id") == "delivery-endpoint"
+    )
+
+    second_proof = generation_proof(endpoint, target)
+    rows.append(second_proof)
+    carried = admit_family(
+        rows,
+        target,
+        "delivery",
+        "delivery-target",
+        proof=second_proof,
+    )
+    assert isinstance(carried, admission.Carry)
+    assert carried.carry_record.sections == ("code",)
+    rows.extend(carried.records_to_append)
+
+    assert _tree_coverage._generation_chain_covers_tree(
+        rows,
+        delivery_terminal,
+        lens="code",
+        current_tree=target["candidate_tree_sha"],
+    )
+    monkeypatch.setattr(
+        _tree_coverage,
+        "carried_review_patch_identity",
+        lambda *args, **kwargs: target,
+    )
+    monkeypatch.setattr(
+        _tree_coverage,
+        "section_patch_equivalence",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(_tree_coverage, "load_delta_edges", lambda *args, **kwargs: {})
+    monkeypatch.setattr(
+        _tree_coverage, "mechanical_review_carry", lambda *args, **kwargs: False
+    )
+    assert _tree_coverage.review_task_covers_tree(
+        _REPOSITORY,
+        records=rows,
+        accepted_terminals={"delivery-endpoint": delivery_terminal},
+        latest_verdicts={"delivery-endpoint": {"verdict": "pass"}},
+        finding_records=[],
+        task_id="delivery-endpoint",
+        lens="code",
+        current_source={
+            "version": 2,
+            "ref": "refs/heads/target",
+            "head": target["candidate_sha"],
+        },
+        current_tree=target["candidate_tree_sha"],
+    )
 
 
 def test_amended_commit_message_reuses_settled_generation_and_slots(tmp_path):
