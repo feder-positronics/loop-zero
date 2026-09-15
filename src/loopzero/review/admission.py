@@ -698,22 +698,81 @@ def admit_review(
     current_delta_receipts = current_coverage_receipts("delta")
     if (
         family == "trust"
-        and requested == "delta"
         and prior_coverage is not None
-        and (
-            coverage.invalidated_claim_ids != invalidated_claim_ids
-            or coverage.retirement_claim_ids != retirement_claim_ids
+        and coverage.obligation_key
+        != (
+            manifest_digest,
+            claim_set_digest,
+            invalidated_claim_ids,
+            retirement_claim_ids,
         )
         and not current_primary_receipts
         and not current_delta_receipts
     ):
-        # Generation resolution preserves a pending trust obligation when a
-        # retry omits its claim scope. Do not dispatch the caller's narrower
-        # task against that persisted reservation: it could settle authority
-        # for claims the verifier never received. Once matching primary or
-        # delta evidence consumes the obligation, omission is an ordinary
-        # unchanged-content carry.
-        return _blocked("invalid-proof", "trust claim scope does not match obligation")
+        if coverage.obligation_key[:2] != (manifest_digest, claim_set_digest):
+            return _blocked(
+                "invalid-proof", "trust claim obligation does not match reservation"
+            )
+        caller_scope = (*invalidated_claim_ids, *retirement_claim_ids)
+        if caller_scope:
+            return _blocked(
+                "invalid-proof", "trust claim scope does not match obligation"
+            )
+
+        # An empty released retry inherits the exact persisted obligation. Its
+        # authenticated releasing terminal retains the package-built claim
+        # objects needed by the verifier, including retirement details that
+        # cannot be reconstructed from claim IDs alone. An outstanding retry
+        # without that evidence remains blocked.
+        terminal_by_digest = {
+            canonical_record_digest(record): record
+            for record in records
+            if isinstance(record, Mapping)
+        }
+        persisted_task: Mapping[str, object] | None = None
+        for persisted_reservation in reversed(state.reservations):
+            if persisted_reservation.coverage_digest != coverage_digest:
+                continue
+            settlement = state.settlement_for(
+                persisted_reservation.reservation_id
+            )
+            if settlement is None or state._effective_outcome(settlement).value != (
+                "released"
+            ):
+                continue
+            released_terminal = terminal_by_digest.get(settlement.terminal_ref)
+            released_contract = (
+                released_terminal.get("task_contract")
+                if isinstance(released_terminal, Mapping)
+                else None
+            )
+            if not isinstance(released_contract, Mapping):
+                continue
+            try:
+                (
+                    persisted_manifest,
+                    persisted_claim_set,
+                    persisted_invalidated,
+                    persisted_retirements,
+                    candidate_task,
+                ) = _trust_obligation(released_contract)
+            except ValueError:
+                continue
+            if (
+                persisted_manifest,
+                persisted_claim_set,
+                persisted_invalidated,
+                persisted_retirements,
+            ) == coverage.obligation_key:
+                persisted_task = candidate_task
+                break
+        if persisted_task is None:
+            return _blocked(
+                "invalid-proof", "trust claim scope does not match obligation"
+            )
+        invalidated_claim_ids = coverage.invalidated_claim_ids
+        retirement_claim_ids = coverage.retirement_claim_ids
+        trust_task = persisted_task
     inherited_primary = coverage.primary_origin_receipt
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []
@@ -979,8 +1038,17 @@ def admit_review(
             reservation_id=reservation.reservation_id,
         )
 
+    scoped_task_values = dict(task)
+    if trust_task is not None:
+        contract = scoped_task_values.get("task_contract")
+        if isinstance(contract, Mapping) and "trust_claim_task" in contract:
+            scoped_task_values["task_contract"] = {
+                **dict(contract),
+                "trust_claim_task": dict(trust_task),
+            }
+        scoped_task_values["trust_claim_task"] = dict(trust_task)
     scoped_task = {
-        **dict(task),
+        **scoped_task_values,
         "source_identity": dict(current_source_identity),
         "snapshot_tree_sha": current_tree_sha,
         "patch_identity": dict(patch_identity),

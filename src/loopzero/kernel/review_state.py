@@ -1281,6 +1281,26 @@ def resolve_generation(
             invalidated_claim_scope,
             retirement_claim_scope,
         )
+        if family == "trust" and typed.obligation_key != requested_obligation:
+            state = slot_state(
+                cast(Sequence[dict[str, object]], records),
+                generation.generation_id,
+                family,
+            )
+            coverage_digest = canonical_record_digest(typed.to_dict())
+            obligation_consumed = any(
+                reservation.coverage_digest == coverage_digest
+                and (settlement := state.settlement_for(
+                    reservation.reservation_id
+                ))
+                is not None
+                and state._effective_outcome(settlement) is ReviewOutcome.CONSUMED
+                for reservation in state.reservations
+            )
+            if not obligation_consumed:
+                # A pending or authentically released reservation remains the
+                # obligation of its retry. Caller scope cannot replace it.
+                return typed
         if (
             family == "trust"
             and typed.obligation_key[:2] == requested_obligation[:2]
@@ -1643,6 +1663,8 @@ def resolve_generation(
         invalidated_sections=sections if predecessor is not None else (),
         manifest_digest=manifest_digest,
         claim_set_digest=claim_set_digest,
+        invalidated_claim_ids=invalidated_claim_scope,
+        retirement_claim_ids=retirement_claim_scope,
     )
     transition_kind: GenerationTransitionKind = "initial"
     if link is not None:

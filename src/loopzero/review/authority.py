@@ -177,6 +177,13 @@ def authenticated_review_verdict(
     if id(terminal) not in terminal_ids | coordinator_ids and not retained:
         return None
     task_id = terminal.get("task_id")
+    if isinstance(task_id, str) and any(
+        id(record) in coordinator_ids
+        and record.get("type") == "review-nonverdict-launch-v1"
+        and record.get("task_id") == task_id
+        for record in records
+    ):
+        return None
     terminal_index = next(
         (index for index, record in enumerate(records) if record is terminal), None
     )

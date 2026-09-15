@@ -724,6 +724,67 @@ def test_legacy_terminal_intent_controls_verdict_family(
 
 
 @pytest.mark.parametrize(
+    ("historical_order", "expected_type", "projected_family"),
+    [
+        (("delivery", "trust"), admission.Reserved, "trust"),
+        (("trust", "delivery"), admission.Carry, "delivery"),
+    ],
+)
+def test_mixed_legacy_families_use_latest_terminal_conservatively(
+    historical_order, expected_type, projected_family
+):
+    patch = identity("a")
+    metadata = {
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+    }
+    rows = []
+    for family in historical_order:
+        historical_terminal = {
+            **metadata,
+            **terminal(family, tree=patch["candidate_tree_sha"]),
+            "repository_binding": "repo",
+            "patch_identity": patch,
+            "source_identity": {"head": patch["candidate_sha"]},
+            "review_lens": "code",
+            "read_only": True,
+            "work_kind": "review",
+            "review_intent": (
+                "trust-manifest-verification"
+                if family == "trust"
+                else "delivery-code-review"
+            ),
+        }
+        rows.extend(
+            [
+                historical_terminal,
+                {
+                    **metadata,
+                    "type": "verdict",
+                    "task_id": family,
+                    "verdict": "pass",
+                },
+            ]
+        )
+
+    delivery = admit(
+        rows,
+        patch,
+        review_task=task("repeat-delivery", "repeat-delivery"),
+        security=(),
+    )
+
+    assert isinstance(delivery, expected_type)
+    assert {
+        family
+        for _generation_id, family in authority_projection.family_coverages(rows)
+    } == {projected_family}
+    if isinstance(delivery, admission.Reserved):
+        assert delivery.slot.slot_kind == "primary"
+
+
+@pytest.mark.parametrize(
     ("first_family", "second_family"),
     [("delivery", "trust"), ("trust", "delivery")],
 )

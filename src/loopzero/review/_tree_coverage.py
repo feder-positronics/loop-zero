@@ -325,9 +325,11 @@ def _generation_chain_covers_tree(
 ) -> bool:
     """Use authenticated generation carries as an additional exact-tree path."""
     from ..kernel.authority_projection import (
+        _authenticated_coordinator_record_ids,
         family_coverages,
         generation_carries,
         generations,
+        slot_state,
     )
     from ..kernel.canonical import canonical_record_digest
     from ..kernel.review_state import patch_identity_digest
@@ -335,6 +337,17 @@ def _generation_chain_covers_tree(
     from .routing import review_family_for_intent
 
     contract = terminal.get("task_contract")
+    task_id = terminal.get("task_id")
+    authenticated = _authenticated_coordinator_record_ids(
+        records  # type: ignore[arg-type]
+    )
+    if isinstance(task_id, str) and any(
+        id(record) in authenticated
+        and record.get("type") == "review-nonverdict-launch-v1"
+        and record.get("task_id") == task_id
+        for record in records
+    ):
+        return False
     intent = (
         contract.get("review_intent")
         if isinstance(contract, Mapping)
@@ -363,6 +376,22 @@ def _generation_chain_covers_tree(
         else None
     )
     terminal_ref = canonical_record_digest(terminal)
+
+    def is_native_endpoint_primary(generation_id: str) -> bool:
+        from ..runners.contract import ReviewOutcome
+
+        state = slot_state(
+            records, generation_id, "delivery"  # type: ignore[arg-type]
+        )
+        return any(
+            reservation.slot_kind == "primary"
+            and (settlement := state.settlement_for(reservation.reservation_id))
+            is not None
+            and state._effective_outcome(settlement) is ReviewOutcome.CONSUMED
+            and settlement.terminal_ref == terminal_ref
+            for reservation in state.reservations
+        )
+
     candidates = [
         generation
         for generation in projected.values()
@@ -372,6 +401,7 @@ def _generation_chain_covers_tree(
         and lens in family_coverage.required_sections
         and (
             family_coverage.primary_origin_receipt == terminal_ref
+            or is_native_endpoint_primary(generation.generation_id)
             or (
                 terminal_digest is not None
                 and generation.tree == terminal_tree

@@ -1659,6 +1659,13 @@ def _legacy_review_generations(
     from ..review.routing import review_family_for_intent
 
     authenticated = _authenticated_coordinator_record_ids(records)
+    nonverdict_task_ids = {
+        record.get("task_id")
+        for record in records
+        if id(record) in authenticated
+        and record.get("type") == "review-nonverdict-launch-v1"
+        and isinstance(record.get("task_id"), str)
+    }
     d29_cutover_index = next(
         (
             index
@@ -1684,6 +1691,8 @@ def _legacy_review_generations(
     legacy: dict[str, ReviewGenerationV1] = {}
     primary_terminals: dict[str, Mapping[str, object]] = {}
     for task_id, terminal in accepted.items():
+        if task_id in nonverdict_task_ids:
+            continue
         contract = terminal.get("task_contract")
         intent = (
             contract.get("review_intent")
@@ -1826,6 +1835,8 @@ def _legacy_review_generations(
     legacy_carries: list[GenerationCarryV1] = []
     legacy_delta_refs: dict[str, list[str]] = {}
     for task_id, terminal in accepted.items():
+        if task_id in nonverdict_task_ids:
+            continue
         contract = terminal.get("task_contract")
         intent = (
             contract.get("review_intent")
