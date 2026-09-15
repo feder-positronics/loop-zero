@@ -1634,11 +1634,14 @@ def authenticated_review_state_records(
         REVIEW_SLOT_SETTLEMENT_TYPE,
     }
     authenticated = _authenticated_coordinator_record_ids(records)
-    return [
+    selected = [
         record
         for record in records
         if record.get("type") in record_types and id(record) in authenticated
     ]
+    if isinstance(records, AuthorityRecordView):
+        return records.filtered(selected)
+    return selected
 
 
 def _legacy_review_generations(

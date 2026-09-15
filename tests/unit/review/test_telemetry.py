@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero.kernel import authority_store
+from loopzero.kernel import authority_projection, authority_store
+from loopzero.kernel.gitscope import DispatchError
 from loopzero.kernel.review_state import ReviewSlotReservation, ReviewSlotSettlement
 from loopzero.review.admission import Reserved
 from loopzero.review.stats import review_stats
@@ -103,6 +104,38 @@ def _reserved(*, caller_label=False):
     )
 
 
+def _retention_state(*task_ids: str) -> dict[str, object]:
+    return {
+        "type": authority_projection.RETENTION_STATE_TYPE,
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+        "retention_state_version": authority_projection.RETENTION_STATE_VERSION,
+        **authority_projection.encode_retention_anchor_fields(
+            {
+                "task_ids": list(task_ids),
+                "work_unit_contracts": [],
+                "attempt_settlements": [],
+                "retry_outcomes": [],
+                "open_before_record_digests": [],
+            }
+        ),
+    }
+
+
+def _authenticate_all_review_rows(monkeypatch) -> None:
+    authenticate = lambda records: frozenset(map(id, records))
+    monkeypatch.setattr(
+        authority_store, "_authenticated_coordinator_record_ids", authenticate
+    )
+    monkeypatch.setattr(
+        authority_projection, "_authenticated_coordinator_record_ids", authenticate
+    )
+    monkeypatch.setattr(
+        authority_store, "delivery_controller_records", lambda rows: []
+    )
+
+
 def test_launch_rejects_caller_reason_and_hashes_paths():
     with pytest.raises(TypeError, match="reason"):
         ReviewLaunchV1(reason="initial")
@@ -195,24 +228,96 @@ def test_review_observations_survive_with_reservations_during_compaction(
     launch["schema_version"] = "telemetry-before-review-stats"
     outcome["schema_version"] = "telemetry-before-review-stats"
     rows = [reservation, launch, outcome]
-    monkeypatch.setattr(
-        authority_store,
-        "_authenticated_coordinator_record_ids",
-        lambda records: frozenset(map(id, records)),
-    )
-    monkeypatch.setattr(
-        authority_store,
-        "delivery_controller_records",
-        lambda records: [],
-    )
-    from loopzero.kernel import authority_projection
-
-    monkeypatch.setattr(
-        authority_projection,
-        "_authenticated_coordinator_record_ids",
-        lambda records: frozenset(map(id, records)),
-    )
+    _authenticate_all_review_rows(monkeypatch)
     retained = authority_store.retained_authority_projection(rows)
     assert reservation in retained
     assert launch in retained
     assert outcome in retained
+
+
+def test_review_compaction_reprojects_authenticated_retention_state(monkeypatch):
+    retained_state = _retention_state("historical-review")
+    reservation = _reserved().slot
+    settlement = ReviewSlotSettlement(
+        reservation_id=reservation.reservation_id,
+        generation_id=reservation.generation_id,
+        family=reservation.family,
+        slot_kind=reservation.slot_kind,
+        task_id=reservation.task_id,
+        outcome=ReviewOutcome.RELEASED,
+        terminal_ref="7" * 64,
+        settlement_id="rs_" + "8" * 32,
+    ).to_dict()
+    launch = ReviewLaunchV1.from_admission(
+        _reserved(), attempt_id="a1", admitted_at="2026-09-14T10:00:00Z"
+    ).to_dict()
+    outcome = {
+        **launch,
+        "type": "review-launch-outcome-v1",
+        "review_outcome": "released",
+        "terminal_at": "2026-09-14T10:00:01Z",
+    }
+    rows = [retained_state, reservation.to_dict(), settlement, launch, outcome]
+    authenticated = authority_projection.AuthorityRecordView(
+        rows, trusted_retained_ids={id(record) for record in rows}
+    )
+    _authenticate_all_review_rows(monkeypatch)
+
+    expected_projection = authority_store.authority_projection_bundle_v1(
+        authenticated
+    )
+    retained = authority_store.retained_authority_projection(authenticated)
+    compacted = authority_store._prospective_retained_view(
+        retained, source_records=authenticated
+    )
+    expected_state = authority_projection.retention_anchor_fields(compacted)
+
+    assert authority_store.authority_projection_bundle_v1(compacted) == (
+        expected_projection
+    )
+    retained_again = authority_store.retained_authority_projection(compacted)
+    compacted_again = authority_store._prospective_retained_view(
+        retained_again, source_records=compacted
+    )
+
+    assert (
+        authority_projection.retention_anchor_fields(compacted_again)
+        == expected_state
+    )
+    assert reservation.to_dict() in retained_again
+    assert settlement in retained_again
+    assert launch in retained_again
+    assert outcome in retained_again
+
+
+def test_governed_review_records_preserve_authenticated_view(monkeypatch):
+    retained_state = _retention_state("consumer-review")
+    reservation = _reserved().slot.to_dict()
+    records = authority_projection.AuthorityRecordView(
+        [retained_state, reservation],
+        trusted_retained_ids={id(retained_state), id(reservation)},
+        checkpoint_prefix={"scheme": "test-checkpoint"},
+    )
+    _authenticate_all_review_rows(monkeypatch)
+
+    review_state = authority_projection.authenticated_review_state_records(records)
+    governed = authority_store._governed_records_with_review_state(records)
+
+    assert isinstance(review_state, authority_projection.AuthorityRecordView)
+    assert review_state.trusted_retained_ids == {id(reservation)}
+    assert isinstance(governed, authority_projection.AuthorityRecordView)
+    assert governed.trusted_retained_ids == records.trusted_retained_ids
+    assert governed.checkpoint_prefix == records.checkpoint_prefix
+    assert authority_projection.authenticated_retention_state_records(governed) == [
+        retained_state
+    ]
+
+
+def test_governed_plain_records_cannot_authenticate_retention_state():
+    governed = authority_store._governed_records_with_review_state(
+        [_retention_state("untrusted-review")]
+    )
+
+    assert type(governed) is list
+    with pytest.raises(DispatchError, match="not checkpoint-authenticated"):
+        authority_projection.authenticated_retention_state_records(governed)
