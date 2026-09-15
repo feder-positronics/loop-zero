@@ -32,6 +32,7 @@ from .patch_identity import (
 from ..runners.contract import ReviewOutcome
 
 REVIEW_GENERATION_TYPE = "review-generation-v1"
+REVIEW_FAMILY_COVERAGE_TYPE = "review-family-coverage-v1"
 GENERATION_PROOF_TYPE = "review-generation-proof-v1"
 GENERATION_LINK_TYPE = "review-generation-link-v1"
 GENERATION_CARRY_TYPE = "generation-carry-v1"
@@ -340,6 +341,109 @@ class ReviewGenerationV1:
 
 
 @dataclass(frozen=True, slots=True)
+class ReviewFamilyCoverageV1:
+    """One family's policy and obligation inside a content generation.
+
+    Generation identity is shared by all review families.  Sections and trust
+    claim obligations live here so adding one family cannot mutate or conflict
+    with the content fact established by another.
+    """
+
+    generation_id: str
+    family: ReviewFamily
+    required_sections: tuple[str, ...]
+    policy_digest: str
+    primary_origin_receipt: str | None = None
+    inherited_coverage: tuple[str, ...] = ()
+    invalidated_sections: tuple[str, ...] = ()
+    manifest_digest: str | None = None
+    claim_set_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.generation_id, str) or re.fullmatch(
+            r"cg_[0-9a-f]{32}", self.generation_id
+        ) is None:
+            raise ReviewStateError("review family coverage generation is invalid")
+        if self.family not in {"delivery", "trust"}:
+            raise ReviewStateError("review family coverage family is invalid")
+        sections = _frozen_strings(self.required_sections, label="required sections")
+        if not sections:
+            raise ReviewStateError("required sections cannot be empty")
+        inherited = _frozen_strings(
+            self.inherited_coverage, label="inherited coverage"
+        )
+        invalidated = _frozen_strings(
+            self.invalidated_sections, label="invalidated sections"
+        )
+        if not (set(inherited) | set(invalidated)) <= set(sections):
+            raise ReviewStateError("family coverage names an unrequired section")
+        if self.policy_digest != _policy_digest(sections):
+            raise ReviewStateError("review family coverage policy digest is invalid")
+        if self.primary_origin_receipt is not None and not isinstance(
+            self.primary_origin_receipt, str
+        ):
+            raise ReviewStateError("review family coverage receipt is invalid")
+        obligations = (self.manifest_digest, self.claim_set_digest)
+        if self.family == "delivery" and any(value is not None for value in obligations):
+            raise ReviewStateError("delivery coverage cannot carry a trust obligation")
+        if self.family == "trust" and any(
+            not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
+            for value in obligations
+        ):
+            raise ReviewStateError("trust coverage obligation is invalid")
+        object.__setattr__(self, "required_sections", sections)
+        object.__setattr__(self, "inherited_coverage", inherited)
+        object.__setattr__(self, "invalidated_sections", invalidated)
+
+    @property
+    def obligation_key(self) -> tuple[str | None, str | None]:
+        return self.manifest_digest, self.claim_set_digest
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "type": REVIEW_FAMILY_COVERAGE_TYPE,
+            "generation_id": self.generation_id,
+            "family": self.family,
+            "required_sections": list(self.required_sections),
+            "policy_digest": self.policy_digest,
+            "primary_origin_receipt": self.primary_origin_receipt,
+            "inherited_coverage": list(self.inherited_coverage),
+            "invalidated_sections": list(self.invalidated_sections),
+            "manifest_digest": self.manifest_digest,
+            "claim_set_digest": self.claim_set_digest,
+        }
+
+    to_record = to_dict
+    to_json = to_dict
+
+    @classmethod
+    def from_dict(cls, record: Mapping[str, object]) -> ReviewFamilyCoverageV1:
+        expected = {
+            "type", "generation_id", "family", "required_sections",
+            "policy_digest", "primary_origin_receipt", "inherited_coverage",
+            "invalidated_sections", "manifest_digest", "claim_set_digest",
+        }
+        if set(record) not in (expected, expected | {"terminal_authority_proof"}):
+            raise ReviewStateError("review family coverage fields are invalid")
+        if record.get("type") != REVIEW_FAMILY_COVERAGE_TYPE or any(
+            not isinstance(record.get(name), list)
+            for name in ("required_sections", "inherited_coverage", "invalidated_sections")
+        ):
+            raise ReviewStateError("review family coverage fields are invalid")
+        return cls(
+            generation_id=cast(str, record.get("generation_id")),
+            family=cast(ReviewFamily, record.get("family")),
+            required_sections=tuple(cast(list[str], record["required_sections"])),
+            policy_digest=cast(str, record.get("policy_digest")),
+            primary_origin_receipt=cast(str | None, record.get("primary_origin_receipt")),
+            inherited_coverage=tuple(cast(list[str], record["inherited_coverage"])),
+            invalidated_sections=tuple(cast(list[str], record["invalidated_sections"])),
+            manifest_digest=cast(str | None, record.get("manifest_digest")),
+            claim_set_digest=cast(str | None, record.get("claim_set_digest")),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class GenerationProofV1:
     """Coordinator-authenticated provenance from a kernel proof operation."""
 
@@ -563,6 +667,7 @@ class GenerationCarryV1:
     to_identity: Mapping[str, object] = field(repr=False)
     proof: Mapping[str, object] = field(repr=False)
     sections: tuple[str, ...]
+    family: ReviewFamily = "delivery"
 
     def __post_init__(self) -> None:
         if not isinstance(self.generation_id, str) or not re.fullmatch(
@@ -581,6 +686,8 @@ class GenerationCarryV1:
         source = _validate_identity(self.from_identity, from_tree)
         target = _validate_identity(self.to_identity, to_tree)
         sections = _frozen_strings(self.sections, label="carry sections")
+        if self.family not in {"delivery", "trust"}:
+            raise ReviewStateError("generation carry family is invalid")
         object.__setattr__(self, "from_identity", source)
         object.__setattr__(self, "to_identity", target)
         object.__setattr__(self, "proof", dict(self.proof))
@@ -594,6 +701,7 @@ class GenerationCarryV1:
             "to_identity": dict(self.to_identity),
             "proof": dict(self.proof),
             "sections": list(self.sections),
+            "family": self.family,
         }
 
     to_json = to_dict
@@ -604,11 +712,15 @@ class GenerationCarryV1:
 
     @classmethod
     def from_dict(cls, record: Mapping[str, object]) -> GenerationCarryV1:
-        expected = {
+        legacy = {
             "type", "generation_id", "from_identity", "to_identity", "proof",
             "sections",
         }
-        if set(record) not in (expected, expected | {"terminal_authority_proof"}):
+        expected = legacy | {"family"}
+        if set(record) not in (
+            legacy, legacy | {"terminal_authority_proof"}, expected,
+            expected | {"terminal_authority_proof"},
+        ):
             raise ReviewStateError("generation carry fields are invalid")
         if record.get("type") != GENERATION_CARRY_TYPE:
             raise ReviewStateError("generation carry type is invalid")
@@ -626,6 +738,7 @@ class GenerationCarryV1:
             to_identity=cast(Mapping[str, object], target),
             proof=cast(Mapping[str, object], proof),
             sections=tuple(cast(list[str], sections)),
+            family=cast(ReviewFamily, record.get("family", "delivery")),
         )
 
     from_json = from_dict
@@ -641,6 +754,7 @@ class GenerationTransition:
 class GenerationResolution:
     kind: GenerationResolutionKind
     generation: ReviewGenerationV1 | None = None
+    coverage: ReviewFamilyCoverageV1 | None = None
     carry: GenerationCarryV1 | None = None
     transition: GenerationTransition | None = None
     reason: str | None = None
@@ -919,6 +1033,9 @@ def resolve_generation(
     required_sections: Sequence[str],
     equivalence_proof: object | None,
     format_only_proof: object | None,
+    family: ReviewFamily = "delivery",
+    manifest_digest: str | None = None,
+    claim_set_digest: str | None = None,
 ) -> GenerationResolution:
     """Resolve content to an authenticated generation without running Git.
 
@@ -932,6 +1049,16 @@ def resolve_generation(
         sections = _frozen_strings(required_sections, label="required sections")
         if not sections:
             raise ReviewStateError("required sections cannot be empty")
+        if family not in {"delivery", "trust"}:
+            raise ReviewStateError("review family is invalid")
+        obligations = (manifest_digest, claim_set_digest)
+        if family == "delivery" and any(value is not None for value in obligations):
+            raise ReviewStateError("delivery review has a trust obligation")
+        if family == "trust" and any(
+            not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None
+            for value in obligations
+        ):
+            raise ReviewStateError("trust claim obligation is missing")
         if not isinstance(repository_binding, str) or not repository_binding:
             raise ReviewStateError("repository binding is invalid")
     except ReviewStateError as exc:
@@ -948,6 +1075,7 @@ def resolve_generation(
         )
 
     from .authority_projection import (
+        family_coverages,
         generation_carries,
         generation_links,
         generations,
@@ -973,6 +1101,49 @@ def resolve_generation(
         or generation.repository_binding.startswith("legacy-")
     ]
     current_content = patch_content_digest(identity)
+    projected_coverage = family_coverages(
+        cast(Sequence[dict[str, object]], records)
+    )
+
+    def coverage_for(generation: ReviewGenerationV1) -> ReviewFamilyCoverageV1:
+        existing = projected_coverage.get((generation.generation_id, family))
+        if existing is None:
+            return ReviewFamilyCoverageV1(
+                generation_id=generation.generation_id,
+                family=family,
+                required_sections=sections,
+                policy_digest=_policy_digest(sections),
+                manifest_digest=manifest_digest,
+                claim_set_digest=claim_set_digest,
+            )
+        typed = cast(ReviewFamilyCoverageV1, existing)
+        if family == "trust" and typed.obligation_key != (
+            manifest_digest,
+            claim_set_digest,
+        ):
+            state = slot_state(
+                cast(Sequence[dict[str, object]], records),
+                generation.generation_id,
+                family,
+            )
+            return ReviewFamilyCoverageV1(
+                generation_id=generation.generation_id,
+                family=family,
+                required_sections=sections,
+                policy_digest=_policy_digest(sections),
+                primary_origin_receipt=state.primary_terminal_ref,
+                inherited_coverage=(),
+                invalidated_sections=sections,
+                manifest_digest=manifest_digest,
+                claim_set_digest=claim_set_digest,
+            )
+        return typed
+
+    def existing_obligation_is_current(generation: ReviewGenerationV1) -> bool:
+        existing = projected_coverage.get((generation.generation_id, family))
+        return existing is not None and cast(
+            ReviewFamilyCoverageV1, existing
+        ).obligation_key == (manifest_digest, claim_set_digest)
 
     # Exact content is an authenticated lookup, not a caller assertion.  It is
     # what prevents an amend, re-commit, revert, or branch rename from
@@ -987,16 +1158,22 @@ def resolve_generation(
         return GenerationResolution("refused", reason="ambiguous-lineage")
     if exact:
         generation = exact[0]
+        coverage = coverage_for(generation)
         carry = GenerationCarryV1(
             generation_id=generation.generation_id,
             from_identity=generation.patch_identity,
             to_identity=identity,
             proof=_proof_for_exact_content(identity, tree_sha),
-            sections=tuple(
-                sorted(set(generation.required_sections).intersection(sections))
+            sections=(
+                tuple(sorted(set(coverage.required_sections).intersection(sections)))
+                if existing_obligation_is_current(generation)
+                else ()
             ),
+            family=family,
         )
-        return GenerationResolution("same", generation=generation, carry=carry)
+        return GenerationResolution(
+            "same", generation=generation, coverage=coverage, carry=carry
+        )
 
     # A prior carry endpoint is equally content-addressed and cannot mint slots.
     # Preserve the sections that can actually reach that endpoint through the
@@ -1007,11 +1184,15 @@ def resolve_generation(
     )
     reachable_sections: dict[tuple[str, str], set[str]] = {
         (generation.generation_id, patch_identity_digest(generation.patch_identity)):
-        set(generation.required_sections)
+        set(cast(ReviewFamilyCoverageV1, family_coverage).required_sections)
         for generation in projected.values()
+        if (family_coverage := projected_coverage.get((generation.generation_id, family)))
+        is not None
     }
     carry_identities: dict[tuple[str, str], Mapping[str, object]] = {}
     for carry in projected_carries:
+        if carry.family != family:
+            continue
         source_key = (
             carry.generation_id,
             patch_identity_digest(carry.from_identity),
@@ -1051,14 +1232,27 @@ def resolve_generation(
         return GenerationResolution("refused", reason="ambiguous-lineage")
     if carried_exact:
         generation, source, carried_sections = carried_exact[-1]
+        coverage = coverage_for(generation)
         carry = GenerationCarryV1(
             generation_id=generation.generation_id,
             from_identity=source,
             to_identity=identity,
             proof=_proof_for_exact_content(identity, tree_sha),
             sections=tuple(sorted(set(carried_sections).intersection(sections))),
+            family=family,
         )
-        return GenerationResolution("same", generation=generation, carry=carry)
+        if not existing_obligation_is_current(generation):
+            carry = GenerationCarryV1(
+                generation_id=carry.generation_id,
+                from_identity=carry.from_identity,
+                to_identity=carry.to_identity,
+                proof=carry.proof,
+                sections=(),
+                family=family,
+            )
+        return GenerationResolution(
+            "same", generation=generation, coverage=coverage, carry=carry
+        )
 
     source_generation: ReviewGenerationV1 | None = None
     source_identity: Mapping[str, object] | None = None
@@ -1133,28 +1327,33 @@ def resolve_generation(
         )
         if authenticated_proof is None:
             return GenerationResolution("refused", reason="invalid-proof")
+        coverage = coverage_for(source_generation)
+        carried_sections = tuple(
+            sorted(
+                reachable_sections.get(
+                    (
+                        source_generation.generation_id,
+                        patch_identity_digest(source_identity),
+                    ),
+                    set(),
+                ).intersection(sections)
+            )
+        )
+        if not existing_obligation_is_current(source_generation):
+            carried_sections = ()
         return GenerationResolution(
             "same",
             generation=source_generation,
+            coverage=coverage,
             carry=GenerationCarryV1(
                 generation_id=source_generation.generation_id,
                 from_identity=source_identity,
                 to_identity=identity,
                 proof=authenticated_proof.to_dict(),
-                sections=tuple(
-                    sorted(
-                        # Proof validity is local to this hop. Coverage is not:
-                        # a proof cannot restore a section withheld on any
-                        # earlier authenticated edge into its source endpoint.
-                        reachable_sections.get(
-                            (
-                                source_generation.generation_id,
-                                patch_identity_digest(source_identity),
-                            ),
-                            set(),
-                        ).intersection(sections)
-                    )
-                ),
+                # Proof validity is local to this hop. Coverage is not: a proof
+                # cannot restore a section withheld on an earlier family edge.
+                sections=carried_sections,
+                family=family,
             ),
         )
 
@@ -1191,16 +1390,26 @@ def resolve_generation(
         predecessor_slots = slot_state(
             cast(Sequence[dict[str, object]], records),
             predecessor.generation_id,
-            "delivery",
+            family,
+        )
+        predecessor_coverage = projected_coverage.get(
+            (predecessor.generation_id, family)
         )
         predecessor_is_covered = bool(
+            predecessor_coverage is not None
+            and cast(ReviewFamilyCoverageV1, predecessor_coverage).obligation_key
+            == (manifest_digest, claim_set_digest)
+            and (
             predecessor_slots.own_primary_consumed
             or (
                 predecessor_slots.inherited_primary_ref is not None
                 and (
-                    not predecessor.invalidated_sections
+                    not cast(
+                        ReviewFamilyCoverageV1, predecessor_coverage
+                    ).invalidated_sections
                     or predecessor_slots.delta_consumed
                 )
+            )
             )
         )
         primary_receipt = (
@@ -1210,7 +1419,13 @@ def resolve_generation(
         )
         if primary_receipt is not None:
             inherited = tuple(
-                sorted(set(predecessor.required_sections).intersection(sections))
+                sorted(
+                    set(
+                        cast(
+                            ReviewFamilyCoverageV1, predecessor_coverage
+                        ).required_sections
+                    ).intersection(sections)
+                )
             )
     generation = ReviewGenerationV1(
         repository_binding=repository_binding,
@@ -1240,6 +1455,17 @@ def resolve_generation(
         inherited_coverage=inherited,
         invalidated_sections=sections if predecessor is not None else (),
     )
+    coverage = ReviewFamilyCoverageV1(
+        generation_id=generation.generation_id,
+        family=family,
+        required_sections=sections,
+        policy_digest=_policy_digest(sections),
+        primary_origin_receipt=primary_receipt,
+        inherited_coverage=inherited,
+        invalidated_sections=sections if predecessor is not None else (),
+        manifest_digest=manifest_digest,
+        claim_set_digest=claim_set_digest,
+    )
     transition_kind: GenerationTransitionKind = "initial"
     if link is not None:
         transition_kind = link.transition_kind
@@ -1264,6 +1490,7 @@ def resolve_generation(
     return GenerationResolution(
         "new",
         generation=generation,
+        coverage=coverage,
         transition=GenerationTransition(transition_kind, predecessor_id),
     )
 
@@ -1622,6 +1849,7 @@ __all__ = [
     "GenerationResolution",
     "GenerationTransition",
     "ReviewGenerationV1",
+    "ReviewFamilyCoverageV1",
     "ReviewSlotError",
     "ReviewSlotReservation",
     "ReviewSlotSettlement",

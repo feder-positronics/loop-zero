@@ -133,6 +133,41 @@ def task(name="review", key="key"):
     }
 
 
+def trust_task(
+    patch,
+    *,
+    name="trust",
+    key="trust",
+    manifest="6" * 64,
+    claim_set="7" * 64,
+    invalidated=("a" * 64,),
+    retirements=(),
+):
+    payload = {
+        "generation_ref": review_state.generation_id_for(
+            "repo", patch, patch["candidate_tree_sha"], ("trust",)
+        ),
+        "source_identity": review_state.canonical_record_digest(
+            {"head": patch["candidate_sha"]}
+        ),
+        "tree_sha": patch["candidate_tree_sha"],
+        "manifest_sha256": manifest,
+        "claim_set_digest": claim_set,
+        "invalidated_claims": [
+            {"claim_id": f"tc_{identity}"} for identity in invalidated
+        ],
+        "retirements": [
+            {"claim_id": f"tc_{identity}"} for identity in retirements
+        ],
+    }
+    payload["task_hash"] = review_state.canonical_record_digest(payload)
+    return {
+        **task(name, key),
+        "review_intent": "trust-manifest-verification",
+        "trust_claim_task": payload,
+    }
+
+
 def test_admission_rejects_caller_supplied_launch_reason():
     result = admit(
         [],
@@ -172,10 +207,7 @@ def test_all_launch_reasons_are_observable_through_admission(monkeypatch):
     trust = admit(
         [],
         identity("c"),
-        review_task={
-            **task("trust", "trust"),
-            "review_intent": "trust-manifest-verification",
-        },
+        review_task=trust_task(identity("c")),
     )
     assert isinstance(trust, admission.Reserved)
     assert trust.launch_reason == "trust-verification"
@@ -204,10 +236,9 @@ def test_all_launch_reasons_are_observable_through_admission(monkeypatch):
     trust_delta = admit(
         trust_rows,
         trust_target,
-        review_task={
-            **task("trust-delta", "trust-delta"),
-            "review_intent": "trust-manifest-verification",
-        },
+        review_task=trust_task(
+            trust_target, name="trust-delta", key="trust-delta"
+        ),
         requested="delta",
     )
     assert isinstance(trust_delta, admission.Reserved)
@@ -474,6 +505,7 @@ def test_primary_reservation_scopes_generation_fields():
     assert result.scoped_task["review_generation_id"] == result.generation.generation_id
     assert [row["type"] for row in result.records_to_append] == [
         "review-generation-v1",
+        "review-family-coverage-v1",
         "review-slot-reservation-v1",
     ]
 
@@ -795,6 +827,53 @@ def test_admission_resolution_and_publication_agree_per_section_on_proof_hops():
             )
 
 
+def test_withheld_delivery_section_does_not_withhold_trust_family_carry():
+    original = identity("a")
+    delivery = admit_all_sections([], original, "delivery", requested="review")
+    rows = list(delivery.records_to_append)
+    append_settlement(rows, delivery.slot, ReviewOutcome.CONSUMED, terminal("delivery"))
+    trust = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo", task=trust_task(original),
+        current_source_identity={"head": original["candidate_sha"]},
+        current_tree_sha=original["candidate_tree_sha"], patch_identity=original,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(trust, admission.Reserved)
+    rows.extend(trust.records_to_append)
+    append_settlement(rows, trust.slot, ReviewOutcome.CONSUMED, terminal("trust"))
+
+    target = identity("b")
+    proof = generation_proof(
+        original, target, overlap=("security/policy.py",)
+    )
+    rows.append(proof)
+    delivery_delta = admit_all_sections(
+        rows, target, "delivery-delta", proof=proof
+    )
+    assert isinstance(delivery_delta, admission.Reserved)
+    rows.extend(delivery_delta.records_to_append)
+    trust_carry = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo",
+        task=trust_task(target, name="trust-carry", key="trust-carry"),
+        current_source_identity={"head": target["candidate_sha"]},
+        current_tree_sha=target["candidate_tree_sha"], patch_identity=target,
+        required_sections=("trust",), equivalence_proof=proof,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(trust_carry, admission.Carry)
+    assert trust_carry.carry_record.family == "trust"
+    assert trust_carry.carry_record.sections == ("trust",)
+    delivery_carry = next(
+        row for row in delivery_delta.records_to_append
+        if row["type"] == "generation-carry-v1"
+    )
+    assert delivery_carry["family"] == "delivery"
+    assert delivery_carry["sections"] == ["code"]
+
+
 def test_every_blocked_code_is_reachable():
     patch = identity("a")
     stale = admission.admit_review(
@@ -952,6 +1031,183 @@ def test_caller_family_labels_cannot_open_a_second_pool():
     )
     assert isinstance(spoofed, admission.Carry)
     assert spoofed.generation.generation_id == generation.generation_id
+
+
+@pytest.mark.parametrize("first_family", ["delivery", "trust"])
+def test_delivery_and_trust_own_independent_coverage_on_identical_content(first_family):
+    patch = identity("a")
+    first_task = task("delivery", "delivery")
+    second_task = trust_task(patch)
+    first_sections = ("code",)
+    second_sections = ("trust",)
+    if first_family == "trust":
+        first_task, second_task = second_task, first_task
+        first_sections, second_sections = second_sections, first_sections
+
+    first = admission.admit_review(
+        _REPOSITORY, [], repository_binding="repo", task=first_task,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=first_sections, equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(first, admission.Reserved)
+    rows = list(first.records_to_append)
+    append_settlement(
+        rows, first.slot, ReviewOutcome.CONSUMED,
+        terminal(first.slot.task_id, tree=patch["candidate_tree_sha"]),
+    )
+    second = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo", task=second_task,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=second_sections, equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+
+    assert isinstance(second, admission.Reserved)
+    assert second.slot.slot_kind == "primary"
+    assert second.slot.family != first.slot.family
+    assert second.generation.generation_id == first.generation.generation_id
+    assert second.scoped_task["required_sections"] == list(second_sections)
+
+
+def test_trust_carry_key_binds_manifest_and_claim_set_on_the_same_tree():
+    patch = identity("a")
+    first = admission.admit_review(
+        _REPOSITORY, [], repository_binding="repo", task=trust_task(patch),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(first, admission.Reserved)
+    rows = list(first.records_to_append)
+    append_settlement(
+        rows, first.slot, ReviewOutcome.CONSUMED,
+        terminal("trust", tree=patch["candidate_tree_sha"]),
+    )
+
+    carried = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo", task=trust_task(patch, name="same", key="same"),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(carried, admission.Carry)
+
+    changed = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo",
+        task=trust_task(
+            patch, name="changed", key="changed", manifest="8" * 64,
+            claim_set="9" * 64, invalidated=("b" * 64,),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(changed, admission.Reserved)
+    assert changed.slot.slot_kind == "delta"
+    assert changed.scoped_task["delta_scope"]["invalidated_claim_ids"] == [
+        "tc_" + "b" * 64
+    ]
+
+
+def test_manifest_only_retirement_is_a_trust_delta():
+    patch = identity("a")
+    first_task = trust_task(
+        patch, invalidated=("a" * 64, "b" * 64), claim_set="7" * 64
+    )
+    first = admission.admit_review(
+        _REPOSITORY, [], repository_binding="repo", task=first_task,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    rows = list(first.records_to_append)
+    append_settlement(rows, first.slot, ReviewOutcome.CONSUMED, terminal("trust"))
+    retired = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo",
+        task=trust_task(
+            patch, name="retire", key="retire", manifest="8" * 64,
+            claim_set="9" * 64, invalidated=(), retirements=("b" * 64,),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(retired, admission.Reserved)
+    assert retired.slot.slot_kind == "delta"
+    assert retired.scoped_task["delta_scope"]["retirement_claim_ids"] == [
+        "tc_" + "b" * 64
+    ]
+
+
+@pytest.mark.parametrize("intent", ["discovery", "resolution-adjudication"])
+def test_package_declared_nonverdict_intents_launch_without_slot_authority(intent):
+    patch = identity("a")
+    result = admit(
+        [], patch,
+        review_task={**task(intent, intent), "review_intent": intent},
+    )
+    assert isinstance(result, admission.NonVerdictReviewLaunch)
+    assert result.family is None
+    assert [row["type"] for row in result.records_to_append] == [
+        "review-nonverdict-launch-v1"
+    ]
+    assert result.launch_record["task_id"] == intent
+    assert result.launch_record["attempt_index"] == 0
+
+
+def test_unknown_or_contradictory_intent_cannot_bypass_delivery_admission():
+    patch = identity("a")
+    unknown = admit(
+        [], patch,
+        review_task={**task("unknown", "unknown"), "review_intent": "free-label"},
+    )
+    assert isinstance(unknown, admission.Blocked)
+    assert unknown.code == "unknown-intent"
+
+    bypass = admit(
+        [], patch,
+        review_task={
+            **task("bypass", "bypass"),
+            "review_intent": "discovery",
+            "task_contract": {"review_intent": "delivery-code-review"},
+        },
+    )
+    assert isinstance(bypass, admission.Blocked)
+    assert bypass.code == "unknown-intent"
+
+
+def test_nonverdict_terminal_can_never_supply_delivery_coverage():
+    from loopzero.review import _tree_coverage
+
+    patch = identity("a")
+    delivery = admit([], patch)
+    rows = list(delivery.records_to_append)
+    forged_terminal = {
+        **terminal("discovery", tree=patch["candidate_tree_sha"]),
+        "patch_identity": patch,
+        "task_contract": {"review_intent": "discovery"},
+    }
+    assert not _tree_coverage._generation_chain_covers_tree(
+        rows,
+        forged_terminal,
+        lens="code",
+        current_tree=patch["candidate_tree_sha"],
+    )
 
 
 def test_seen_content_with_changed_sections_cannot_receive_a_fresh_primary():

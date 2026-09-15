@@ -25,7 +25,7 @@ from .risk import (
 from ..kernel.worktree_lease import identities_match
 from ..kernel.run_log import load_entries
 from ..kernel.run_identity import run_delivery_contract
-from ..kernel.gitscope import primary_repo_root
+from ..kernel.gitscope import DispatchError, primary_repo_root
 from ..kernel import settings as kernel_settings
 
 _TREE_SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -324,14 +324,32 @@ def _generation_chain_covers_tree(
     current_tree: str,
 ) -> bool:
     """Use authenticated generation carries as an additional exact-tree path."""
-    from ..kernel.authority_projection import generation_carries, generations
+    from ..kernel.authority_projection import (
+        family_coverages,
+        generation_carries,
+        generations,
+    )
     from ..kernel.canonical import canonical_record_digest
     from ..kernel.review_state import patch_identity_digest
     from ..kernel.seams import MissingAdapter
+    from .routing import review_family_for_intent
+
+    contract = terminal.get("task_contract")
+    intent = (
+        contract.get("review_intent")
+        if isinstance(contract, Mapping)
+        else terminal.get("review_intent")
+    )
+    try:
+        if ("delivery" if intent is None else review_family_for_intent(intent)) != "delivery":
+            return False
+    except DispatchError:
+        return False
 
     try:
         projected = generations(records)  # type: ignore[arg-type]
         carries = generation_carries(records)  # type: ignore[arg-type]
+        coverage = family_coverages(records)  # type: ignore[arg-type]
     except MissingAdapter:
         # Pre-cutover ledgers need consumer adapters for their compatibility
         # projection. Missing adapters withhold coverage; they do not make the
@@ -348,9 +366,12 @@ def _generation_chain_covers_tree(
     candidates = [
         generation
         for generation in projected.values()
-        if lens in generation.required_sections
+        if (
+            family_coverage := coverage.get((generation.generation_id, "delivery"))
+        ) is not None
+        and lens in family_coverage.required_sections
         and (
-            generation.primary_origin_receipt == terminal_ref
+            family_coverage.primary_origin_receipt == terminal_ref
             or (
                 terminal_digest is not None
                 and generation.tree == terminal_tree
@@ -373,6 +394,7 @@ def _generation_chain_covers_tree(
                 str(carry.to_identity["candidate_tree_sha"])
                 for carry in carries
                 if carry.generation_id == generation_id
+                and getattr(carry, "family", "delivery") == "delivery"
                 and lens in carry.sections
                 and carry.from_identity.get("candidate_tree_sha") in reachable
                 and isinstance(carry.to_identity.get("candidate_tree_sha"), str)
