@@ -113,7 +113,10 @@ def _governed_records_with_review_state(
         if record.get("type") in {"review-launch-v1", "review-launch-outcome-v1"}
         and record.get("reservation_id") in reservation_ids
     )
-    return [record for record in records if id(record) in selected]
+    governed = [record for record in records if id(record) in selected]
+    if isinstance(records, AuthorityRecordView):
+        return records.filtered(governed)
+    return governed
 
 
 def worktree_branch(worktree: Path) -> str:
