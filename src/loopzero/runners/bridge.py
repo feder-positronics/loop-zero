@@ -604,14 +604,17 @@ def _claude_subscription_environment() -> dict[str, str]:
             os.close(int(raw_fd))
         except (OSError, ValueError):
             pass
-    from .claude import ELIGIBLE_SUBSCRIPTION_TYPES, REQUIRED_SCOPES, TOKEN_PATTERN
+    from .claude import (
+        ELIGIBLE_SUBSCRIPTION_TYPES,
+        REQUIRED_SCOPES,
+        TOKEN_SNAPSHOT_SOURCES,
+        is_valid_setup_token,
+    )
 
     token = payload.get("claudeCodeOauthToken") if isinstance(payload, dict) else None
     if token is not None and (
-        not isinstance(token, str)
-        or TOKEN_PATTERN.fullmatch(token) is None
-        or payload.get("source")
-        not in {"token-env", "token-file", "token-file(default)"}
+        not is_valid_setup_token(token)
+        or payload.get("source") not in TOKEN_SNAPSHOT_SOURCES
     ):
         raise BridgeInputError("provider credential descriptor is invalid")
     if token is None and isinstance(payload, dict):

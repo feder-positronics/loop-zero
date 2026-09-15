@@ -93,10 +93,11 @@ Malformed protocol remains a protocol failure even after a signal.
 Create a GitHub Actions environment named `nightly-conformance`, restrict its
 deployment branches to `main`, and configure **no required reviewers** so the
 scheduled job runs unattended. Configure these environment secrets (not
-repository-level secrets) with the native subscription-login credential JSON
-expected by the corresponding runner broker:
+repository-level secrets) with the credential expected by the corresponding
+runner broker:
 
-- `LOOPZERO_CONFORMANCE_CLAUDE_CREDENTIAL`
+- `LOOPZERO_CONFORMANCE_CLAUDE_CREDENTIAL`: the single-line output from
+  `claude setup-token`, not browser-login OAuth JSON
 - `LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL`
 - `LOOPZERO_CONFORMANCE_CURSOR_CREDENTIAL`
 
@@ -111,7 +112,9 @@ validation bubble, and an access-only snapshot that can no longer cover a
 launch becomes cleanly unavailable without any refresh attempt. Neither file
 is placed in the checkout or artifacts, and credential contents are never
 printed; the seal reports only its bounded source kind (for example,
-`oauth-file` or `token-file(default)`). The remaining risk is explicit:
+`oauth-file`, `setup-token-file`, or `token-file(default)`). See
+[nightly conformance credentials](docs/nightly-conformance.md) for the exact
+Claude snapshot shape and secret rationale. The remaining risk is explicit:
 checked-out code on `main` can read
 and exfiltrate the short-lived access token while the network-enabled live job
 runs. The GitHub environment limits secret scope, but is not a per-run human

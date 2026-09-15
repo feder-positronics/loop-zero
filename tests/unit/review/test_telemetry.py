@@ -33,6 +33,7 @@ from loopzero.runners.contract import (
         ("claude-oauth", "subscription"),
         ("CLAUDE_CODE_OAUTH_TOKEN", "subscription"),
         ("sk-ant-oat01-" + "x" * 80, "subscription"),
+        ("setup-token-file", "subscription"),
         ("token-env", "subscription"),
         ("token-file", "subscription"),
         ("token-file(default)", "subscription"),

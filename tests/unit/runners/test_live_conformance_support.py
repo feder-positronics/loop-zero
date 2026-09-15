@@ -42,6 +42,13 @@ def _codex_access_only() -> bytes:
     }).encode()
 
 
+def _claude_setup_token_access_only() -> bytes:
+    return json.dumps({
+        "claudeCodeOauthToken": "sk-ant-oat01-" + "x" * 80,
+        "source": "setup-token-file",
+    }).encode()
+
+
 def test_live_workspace_is_writable_beside_a_read_only_checkout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -504,6 +511,73 @@ def test_live_preflight_seals_once_and_scenarios_use_access_only_source(
     assert "LOOPZERO_LIVE_CREDENTIAL_PATH" not in os.environ
 
 
+def test_sealed_claude_setup_token_drives_run_cli_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credential = tmp_path / "credential.json"
+    credential.write_bytes(_claude_setup_token_access_only())
+    credential.chmod(0o600)
+    fake_cli = tmp_path / "claude"
+    fake_cli.write_text(
+        f"#!{sys.executable}\nprint('2.1.269 (Claude Code)')\n",
+        encoding="utf-8",
+    )
+    fake_cli.chmod(0o700)
+    fake_bridge = tmp_path / "bridge.py"
+    fake_bridge.write_text(
+        """import json
+import os
+
+fd = int(os.environ["LOOPZERO_CLAUDE_AUTH_FD"])
+payload = json.loads(os.pread(fd, 1024 * 1024, 0))
+valid = set(payload) == {"claudeCodeOauthToken", "source"}
+valid = valid and payload["source"] == "setup-token-file"
+print(json.dumps(
+    {"type": "readiness", "status": "ready"}
+    if valid
+    else {"type": "readiness", "status": "failed", "failure": "model-unsupported"}
+))
+""",
+        encoding="utf-8",
+    )
+    settings = RuntimeSettings(
+        tooling_root=REPO,
+        toolchain_interpreter=Path(sys.executable),
+        bridge_path=fake_bridge,
+        state_root=str(tmp_path / "state"),
+        claude_cli_path=fake_cli,
+    )
+    monkeypatch.setenv("LOOPZERO_LIVE_CREDENTIAL_PATH", str(credential))
+    launches: list[tuple[str, ...]] = []
+
+    def wrapper(spec):
+        launches.append(spec.argv)
+        return spec.argv
+
+    with settings.use():
+        runner = live.RealProcess(wrapper, "claude", "diagnose")
+        adapter = live.claude.ClaudeAdapter(
+            run_cli=runner,
+            run_probe=runner,
+            sdk_available=lambda *_args: True,
+        )
+        readiness = live._probe_with_credential(
+            "claude",
+            adapter,
+            live._request("claude", "success", tmp_path, 5),
+            timeout_s=5,
+            settings=settings,
+            wrapper=wrapper,
+        )
+
+    assert readiness.ready
+    assert launches == [
+        (sys.executable, "-I", str(fake_bridge)),
+        (str(fake_cli), "--version"),
+    ]
+    assert not runner.scenario_started
+
+
 def test_live_failed_seal_stops_before_readiness_or_scenario_broker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -838,6 +912,10 @@ def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> 
     broker_body = workflow[broker_step:seal_step]
     assert "GITHUB_SHA" not in broker_body
     assert "git rev-parse HEAD" not in broker_body
+    assert (
+        "# Use a setup token: unlike browser OAuth, it does not rotate between CI runs."
+        in workflow
+    )
     assert "$RUNNER_TEMP/loopzero-live/broker-venv" in workflow
     assert seal_step < source_delete < validation_step < bwrap
     assert '--ro-bind "$SNAPSHOT" /run/loopzero-credential.json' in validation_body

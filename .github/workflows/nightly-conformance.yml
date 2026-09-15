@@ -26,6 +26,7 @@ jobs:
         include:
           - runtime: claude
             version: "2.1.269"
+            # Use a setup token: unlike browser OAuth, it does not rotate between CI runs.
             secret: LOOPZERO_CONFORMANCE_CLAUDE_CREDENTIAL
           - runtime: codex
             version: "0.154.0"

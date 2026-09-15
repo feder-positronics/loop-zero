@@ -2386,11 +2386,14 @@ def claude_subscription_credential(
     claude_binary: Path | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
     allow_token_fallback: bool = True,
+    raw_token_source: str = "token-file",
 ) -> Iterator[int]:
     """Prefer renewable OAuth; otherwise lend a validated access-only token."""
 
     if credential_path is not None:
-        token_descriptor = _explicit_token_snapshot(credential_path)
+        token_descriptor = _explicit_token_snapshot(
+            credential_path, raw_source=raw_token_source
+        )
         if token_descriptor is not None:
             try:
                 yield token_descriptor
@@ -2432,6 +2435,40 @@ from pathlib import Path
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 TOKEN_FILE_ENV = DEFAULT_SETTINGS.env_name("CLAUDE_TOKEN_FILE")
 TOKEN_PATTERN = re.compile(r"sk-ant-oat01-[A-Za-z0-9_-]{40,512}")
+TOKEN_SNAPSHOT_SOURCES = frozenset(
+    {"setup-token-file", "token-env", "token-file", "token-file(default)"}
+)
+
+
+def is_valid_setup_token(token: object) -> bool:
+    """Apply the one setup-token shape contract shared by every token path."""
+    return isinstance(token, str) and TOKEN_PATTERN.fullmatch(token) is not None
+
+
+def _setup_token_from_payload(payload: bytes) -> str:
+    """Decode one raw setup-token line, allowing only one trailing newline."""
+    try:
+        token = payload.decode("ascii").removesuffix("\n")
+    except UnicodeDecodeError:
+        raise UnsafeClaudeCredential(
+            "Claude long-lived token is malformed"
+        ) from None
+    if not is_valid_setup_token(token):
+        raise UnsafeClaudeCredential("Claude long-lived token is malformed")
+    return token
+
+
+def explicit_credential_source_kind(path: Path) -> str:
+    """Classify a seal source by content without admitting sealed token JSON."""
+    payload = _read_private_payload(path, single_link=True)
+    try:
+        decoded = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        _setup_token_from_payload(payload)
+        return "setup-token-file"
+    if isinstance(decoded, dict) and "claudeCodeOauthToken" in decoded:
+        raise UnsafeClaudeCredential("Claude explicit credential is invalid")
+    return "oauth-file"
 
 
 def _token_snapshot_payload(token: str, *, source: str) -> bytes:
@@ -2440,22 +2477,19 @@ def _token_snapshot_payload(token: str, *, source: str) -> bytes:
     ).encode()
 
 
-def _explicit_token_snapshot(path: Path) -> int | None:
+def _explicit_token_snapshot(
+    path: Path, *, raw_source: str = "token-file"
+) -> int | None:
     """Recognize raw token files and already-sealed access-only token JSON."""
     payload = _read_private_payload(path, single_link=True)
     try:
         decoded = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError):
-        try:
-            token = payload.decode("ascii").removesuffix("\n")
-        except UnicodeDecodeError:
-            raise UnsafeClaudeCredential(
-                "Claude long-lived token is malformed"
-            ) from None
-        if TOKEN_PATTERN.fullmatch(token) is None:
-            raise UnsafeClaudeCredential("Claude long-lived token is malformed")
+        if raw_source not in {"setup-token-file", "token-file"}:
+            raise ValueError("Claude raw token source is invalid")
+        token = _setup_token_from_payload(payload)
         _validate_remote_token(token)
-        return _snapshot_descriptor(_token_snapshot_payload(token, source="token-file"))
+        return _snapshot_descriptor(_token_snapshot_payload(token, source=raw_source))
     if not isinstance(decoded, dict) or "claudeCodeOauthToken" not in decoded:
         return None
     if set(decoded) != {"claudeCodeOauthToken", "source"}:
@@ -2463,9 +2497,8 @@ def _explicit_token_snapshot(path: Path) -> int | None:
     token = decoded["claudeCodeOauthToken"]
     source = decoded.get("source")
     if (
-        not isinstance(token, str)
-        or TOKEN_PATTERN.fullmatch(token) is None
-        or source not in {"token-env", "token-file", "token-file(default)"}
+        not is_valid_setup_token(token)
+        or source not in TOKEN_SNAPSHOT_SOURCES
     ):
         raise UnsafeClaudeCredential("Claude token snapshot is invalid")
     return _snapshot_descriptor(_token_snapshot_payload(token, source=source))
@@ -2578,7 +2611,7 @@ def token_snapshot() -> int | None:
         source = "token-env"
     if token is None:
         raise ClaudeCredentialUnavailable("Claude long-lived token is unavailable")
-    if TOKEN_PATTERN.fullmatch(token) is None:
+    if not is_valid_setup_token(token):
         raise UnsafeClaudeCredential("Claude long-lived token is malformed")
     _validate_remote_token(token)
     return _snapshot_descriptor(_token_snapshot_payload(token, source=source))
@@ -2601,8 +2634,10 @@ def snapshot_token(fd: int) -> str | None:
     if "claudeCodeOauthToken" not in decoded:
         return None
     token = decoded["claudeCodeOauthToken"]
-    if (not isinstance(token, str) or TOKEN_PATTERN.fullmatch(token) is None
-            or decoded.get("source") not in {"token-env", "token-file", "token-file(default)"}):
+    if (
+        not is_valid_setup_token(token)
+        or decoded.get("source") not in TOKEN_SNAPSHOT_SOURCES
+    ):
         raise UnsafeClaudeCredential("Claude token snapshot is invalid")
     return token
 

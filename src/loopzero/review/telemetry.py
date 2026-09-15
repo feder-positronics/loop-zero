@@ -402,6 +402,7 @@ def billing_mode_for_credential_kind(kind: str | None) -> BillingMode:
         "subscription",
         "claude-oauth",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        "setup-token-file",
         "token-env",
         "token-file",
         "token-file(default)",

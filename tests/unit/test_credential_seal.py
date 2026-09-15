@@ -128,15 +128,17 @@ def test_entry_point_can_seal_from_normal_host_discovery(
     assert captured.err == ""
 
 
+@pytest.mark.parametrize("suffix", ["", "\n"], ids=["no-newline", "newline"])
 def test_entry_point_accepts_an_explicit_raw_claude_token_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    suffix: str,
 ) -> None:
     tmp_path.chmod(0o700)
-    token = "sk-ant-oat01-" + "x" * 80
-    source = tmp_path / "claude-token"
-    source.write_text(token + "\n", encoding="ascii")
+    token = "sk-ant-oat01-canary_" + "x" * 73
+    source = tmp_path / ".credentials.json"
+    source.write_text(token + suffix, encoding="ascii")
     source.chmod(0o600)
     output = tmp_path / "snapshot.json"
     monkeypatch.setattr(
@@ -151,11 +153,142 @@ def test_entry_point_accepts_an_explicit_raw_claude_token_file(
     ) == 0
     assert json.loads(output.read_bytes()) == {
         "claudeCodeOauthToken": token,
-        "source": "token-file",
+        "source": "setup-token-file",
+    }
+    assert set(json.loads(output.read_bytes())) == {
+        "claudeCodeOauthToken",
+        "source",
+    }
+    assert b"refresh" not in output.read_bytes().lower()
+    assert stat.S_IMODE(tmp_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert {path.name for path in tmp_path.iterdir()} == {
+        source.name,
+        output.name,
     }
     captured = capsys.readouterr()
-    assert captured.out == "credential source: token-file\n"
+    assert captured.out == "credential source: setup-token-file\n"
     assert captured.err == ""
+    assert token not in captured.out + captured.err
+
+
+def test_entry_point_keeps_explicit_claude_oauth_source_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "claude-token"
+    oauth = {
+        "claudeAiOauth": {
+            "accessToken": "oauth-access",
+            "refreshToken": "oauth-refresh",
+            "expiresAt": 10**15,
+            "refreshTokenExpiresAt": 10**15,
+            "scopes": [
+                "user:inference",
+                "user:profile",
+                "user:sessions:claude_code",
+            ],
+            "subscriptionType": "max",
+        }
+    }
+    source.write_text(json.dumps(oauth), encoding="utf-8")
+    source.chmod(0o600)
+    output = tmp_path / "snapshot.json"
+    monkeypatch.setattr(
+        credential_seal, "_host_refresh_wrapper", lambda: (lambda spec: spec.argv)
+    )
+
+    assert credential_seal.main(
+        ["claude", "--source", str(source), "--out", str(output)]
+    ) == 0
+
+    sealed = json.loads(output.read_bytes())
+    assert sealed == {
+        "claudeAiOauth": {
+            **oauth["claudeAiOauth"],
+            "refreshToken": "oauth-access",
+        }
+    }
+    captured = capsys.readouterr()
+    assert captured.out == "credential source: oauth-file\n"
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize(
+    ("contents", "mode", "error_class"),
+    [
+        (
+            json.dumps(
+                {
+                    "claudeAiOauth": {"accessToken": "oauth-access"},
+                    "claudeCodeOauthToken": "sk-ant-oat01-" + "x" * 80,
+                }
+            ),
+            0o600,
+            "UnsafeClaudeCredential",
+        ),
+        ("sk-ant-oat01-" + "x" * 80 + " ", 0o600, "UnsafeClaudeCredential"),
+        ("sk-ant-oat01-" + "x" * 39, 0o600, "UnsafeClaudeCredential"),
+        ("sk-ant-api03-" + "x" * 80, 0o600, "UnsafeClaudeCredential"),
+        (
+            json.dumps(
+                {
+                    "claudeCodeOauthToken": "sk-ant-oat01-" + "x" * 80,
+                    "source": "setup-token-file",
+                }
+            ),
+            0o600,
+            "UnsafeClaudeCredential",
+        ),
+        ("sk-ant-oat01-" + "x" * 80, 0o644, "CredentialSealError"),
+    ],
+    ids=[
+        "token-and-oauth",
+        "trailing-space",
+        "truncated-token",
+        "api-key",
+        "json-token-object",
+        "world-readable-source",
+    ],
+)
+def test_entry_point_rejects_non_setup_token_sources_content_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    contents: str,
+    mode: int,
+    error_class: str,
+) -> None:
+    tmp_path.chmod(0o700)
+    source = tmp_path / "source"
+    source.write_text(contents, encoding="ascii")
+    source.chmod(mode)
+    monkeypatch.setattr(
+        credential_seal.claude,
+        "_validate_remote_token",
+        lambda _token: pytest.fail("invalid token reached remote validation"),
+    )
+    monkeypatch.setattr(
+        credential_seal, "_host_refresh_wrapper", lambda: (lambda spec: spec.argv)
+    )
+
+    assert credential_seal.main(
+        [
+            "claude",
+            "--source",
+            str(source),
+            "--out",
+            str(tmp_path / "snapshot.json"),
+        ]
+    ) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"credential sealing failed: {error_class}\n"
+    assert contents not in captured.err
+    assert not (tmp_path / "snapshot.json").exists()
 
 
 def test_entry_point_rejects_unsafe_input_and_never_prints_credential(

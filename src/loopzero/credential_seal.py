@@ -197,10 +197,8 @@ def _validate_access_only(vendor: str, payload: bytes) -> None:
             token = decoded.get("claudeCodeOauthToken")
             valid = (
                 set(decoded) == {"claudeCodeOauthToken", "source"}
-                and isinstance(token, str)
-                and claude.TOKEN_PATTERN.fullmatch(token) is not None
-                and decoded.get("source")
-                in {"token-env", "token-file", "token-file(default)"}
+                and claude.is_valid_setup_token(token)
+                and decoded.get("source") in claude.TOKEN_SNAPSHOT_SOURCES
             )
     elif vendor == "codex" and isinstance(decoded, dict):
         tokens = decoded.get("tokens")
@@ -277,6 +275,11 @@ def seal_credential(
     if vendor not in VENDORS:
         raise CredentialSealError("credential vendor is invalid")
     source, output = _validate_paths(source, output)
+    claude_source_kind = (
+        claude.explicit_credential_source_kind(source)
+        if vendor == "claude" and source is not None
+        else None
+    )
     wrapper = sandbox_wrapper or _host_refresh_wrapper()
     runtime_value = os.environ.get("LOOPZERO_LIVE_CLI_PATH")
     runtime = Path(runtime_value).resolve(strict=True) if runtime_value else None
@@ -303,11 +306,13 @@ def seal_credential(
         kwargs.update(
             claude_binary=runtime,
             sandbox_wrapper=wrapper,
-            # Normal host discovery may deliberately use the independently
-            # validated long-lived token source. Explicit CI credential files
-            # remain OAuth-only and fail closed.
+            # A CI secret cannot retain a rotated OAuth refresh token between
+            # runs. Accept an explicitly validated, non-rotating setup token as
+            # access-only material while keeping unrelated fallback disabled.
             allow_token_fallback=source is None,
         )
+        if claude_source_kind == "setup-token-file":
+            kwargs["raw_token_source"] = claude_source_kind
     elif vendor == "codex":
         kwargs["sandbox_wrapper"] = wrapper
     with settings.use(), (broker or _broker_for(vendor))(**kwargs) as descriptor:
@@ -317,6 +322,8 @@ def seal_credential(
             if vendor == "claude"
             else f"{vendor}-auth-file"
         )
+        if claude_source_kind is not None and source_kind != claude_source_kind:
+            raise CredentialSealError("broker returned an unexpected source")
     _validate_access_only(vendor, payload)
     _write_snapshot(output, payload)
     return source_kind
