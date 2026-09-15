@@ -61,8 +61,21 @@ Reviewed examples are in [examples/renew-codex-nightly.sh](examples/renew-codex-
 [examples/loopzero-codex-renew.timer](examples/loopzero-codex-renew.timer).
 
 1. Install the reviewed wheel and its `codex` extra in a dedicated environment
-   outside any checkout, for example `$HOME/.local/share/loopzero-renew`.
-   The refresh command needs Linux user namespaces and `bwrap`.
+   outside any checkout. Use a system Python under `/usr` (version 3.12 or later)
+   with **copied executables** so the refresh bridge retains the environment's
+   SDK imports and stays within the sandbox's runtime mounts:
+
+   ```sh
+   /usr/bin/python3 -m venv --without-pip --copies "$HOME/.local/share/loopzero-renew"
+   uv pip install --python "$HOME/.local/share/loopzero-renew/bin/python" \
+     '/absolute/path/to/loopzero-VERSION-py3-none-any.whl[codex]'
+   ```
+
+   Replace the wheel placeholder with a wheel built from the reviewed renewal
+   commit; the released v0.4.3 wheel does not contain this command. The refresh
+   command needs Linux user namespaces and `bwrap`. Managed-Python environments
+   and symlinked interpreters need further work, tracked in
+   [#62](https://github.com/feder-positronics/loop-zero/issues/62).
 2. Authenticate `gh` on this host with permission to update the repository's
    `nightly-conformance` environment secret. Use a dedicated CI vendor account
    where possible; keep its native login on this host only.
@@ -91,6 +104,11 @@ credential. A forced kill during refresh can leave refresh-capable material in
 the private host state directory until the runtime directory is removed. Never
 archive or upload the staging directory; only the validated snapshot is suitable
 for GitHub.
+
+If the vendor returns an access token too short for the 72-hour horizon, renewal
+refuses to export it. Preserving the vendor's rotated host login in that failure
+case remains a liveness follow-up in
+[#63](https://github.com/feder-positronics/loop-zero/issues/63).
 
 The workflow continues to validate and seal the snapshot before launching
 checked-out code. It fails if the access token no longer covers the job; it
