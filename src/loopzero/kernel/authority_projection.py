@@ -1758,6 +1758,15 @@ def _legacy_review_generations(
             lens = terminal.get("review_lens")
             raw_sections = [lens] if isinstance(lens, str) and lens else ["code"]
         sections = tuple(sorted(set(raw_sections)))
+        if family == "trust":
+            # The pre-cutover trust preset authenticated its intent but emitted
+            # neither trust sections nor a trust lens. Intent is the family
+            # authority, so project those terminals into trust coverage.
+            sections = ("trust",)
+        elif sections == ("trust",):
+            # An explicit delivery intent cannot mint trust coverage through a
+            # contradictory historical section label.
+            continue
         source = terminal.get("source_identity")
         accumulator = getattr(records, "accumulator_head", None)
         binding = getattr(accumulator, "repository_binding", None)

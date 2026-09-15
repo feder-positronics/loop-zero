@@ -155,13 +155,17 @@ def authenticated_review_verdict(
     records: Sequence[Mapping[str, object]] = (),
     *,
     expected_family: str | None = None,
+    allow_missing_intent: bool = False,
 ) -> str | None:
     """Return the authenticated pass/fail fact carried by one terminal."""
     if not isinstance(terminal, Mapping):
         return None
     valid_family, terminal_family = _terminal_verdict_family(
-        terminal, require_intent=expected_family is not None
+        terminal,
+        require_intent=expected_family is not None and not allow_missing_intent,
     )
+    if valid_family and terminal_family is None and allow_missing_intent:
+        terminal_family = expected_family
     if not valid_family or (
         expected_family is not None and terminal_family != expected_family
     ):

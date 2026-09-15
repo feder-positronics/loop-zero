@@ -1360,23 +1360,6 @@ def resolve_generation(
         is not None
     }
     carry_identities: dict[tuple[str, str], Mapping[str, object]] = {}
-    for carry in projected_carries:
-        if carry.family != family:
-            continue
-        source_key = (
-            carry.generation_id,
-            patch_identity_digest(carry.from_identity),
-        )
-        target_key = (
-            carry.generation_id,
-            patch_identity_digest(carry.to_identity),
-        )
-        carried_sections = reachable_sections.get(source_key, set()).intersection(
-            carry.sections
-        )
-        reachable_sections.setdefault(target_key, set()).update(carried_sections)
-        carry_identities[target_key] = carry.to_identity
-
     terminal_by_digest = {
         canonical_record_digest(record): record
         for record in records
@@ -1419,6 +1402,27 @@ def resolve_generation(
             cast(ReviewFamilyCoverageV1, family_coverage).required_sections
         )
         carry_identities[key] = terminal_identity
+
+    # A primary completed at a carried endpoint is a coverage source for every
+    # later authenticated edge. Seed those endpoints before walking the carry
+    # graph so B's own primary can flow through B -> C. Each edge still
+    # intersects its recorded sections, preserving earlier withholding.
+    for carry in projected_carries:
+        if carry.family != family:
+            continue
+        source_key = (
+            carry.generation_id,
+            patch_identity_digest(carry.from_identity),
+        )
+        target_key = (
+            carry.generation_id,
+            patch_identity_digest(carry.to_identity),
+        )
+        carried_sections = reachable_sections.get(source_key, set()).intersection(
+            carry.sections
+        )
+        reachable_sections.setdefault(target_key, set()).update(carried_sections)
+        carry_identities[target_key] = carry.to_identity
 
     carried_exact: list[
         tuple[ReviewGenerationV1, Mapping[str, object], tuple[str, ...]]

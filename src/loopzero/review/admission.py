@@ -696,6 +696,24 @@ def admit_review(
 
     current_primary_receipts = current_coverage_receipts("primary")
     current_delta_receipts = current_coverage_receipts("delta")
+    if (
+        family == "trust"
+        and requested == "delta"
+        and prior_coverage is not None
+        and (
+            coverage.invalidated_claim_ids != invalidated_claim_ids
+            or coverage.retirement_claim_ids != retirement_claim_ids
+        )
+        and not current_primary_receipts
+        and not current_delta_receipts
+    ):
+        # Generation resolution preserves a pending trust obligation when a
+        # retry omits its claim scope. Do not dispatch the caller's narrower
+        # task against that persisted reservation: it could settle authority
+        # for claims the verifier never received. Once matching primary or
+        # delta evidence consumes the obligation, omission is an ordinary
+        # unchanged-content carry.
+        return _blocked("invalid-proof", "trust claim scope does not match obligation")
     inherited_primary = coverage.primary_origin_receipt
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []
@@ -841,7 +859,8 @@ def admit_review(
             verdict = authenticated_review_verdict(
                 terminal_by_digest.get(receipt),
                 records,
-                expected_family=(None if legacy_delivery else family),
+                expected_family=family,
+                allow_missing_intent=legacy_delivery,
             )
             if verdict not in {"pass", "fail"}:
                 return _blocked(

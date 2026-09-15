@@ -64,9 +64,14 @@ delivery or trust section policy inside a generation, and generation carries
 name the family whose sections move across a proven content-equivalence edge.
 Trust coverage binds the package-normalized manifest content, claim set, and
 invalidated or retired claim identities until matching evidence settles them.
+Retries that omit unresolved claim identities are refused before dispatch.
+An authenticated primary completed at an equivalent endpoint supplies coverage
+through later carry edges, subject to every edge's recorded section filter.
 Each reservation binds the exact family-coverage digest it can settle. Native
 settlement accepts only an authenticated verdict-family terminal bound to that
-reservation and generation. The
+reservation and generation. Legacy terminal families come from authenticated
+intent; absent intent retains delivery compatibility, while trust and
+non-verdict intents cannot supply delivery authority. The
 retained authority projection uses the closed registry in
 `authority_families.py`: registered extension rows survive only while their
 generation, reservation, or `(run_id, task_id, attempt_index)` anchor survives.
