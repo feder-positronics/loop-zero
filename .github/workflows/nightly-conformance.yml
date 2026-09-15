@@ -61,7 +61,7 @@ jobs:
           UV_CACHE_DIR="$UV_CACHE_ROOT" UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
             uv sync --locked --python 3.13 --group dev --no-install-project
 
-      - name: Build and install pinned release credential broker
+      - name: Build and install the credential broker from the revision under test
         env:
           RUNTIME: ${{ matrix.runtime }}
         run: |
@@ -70,7 +70,13 @@ jobs:
           RELEASE_SOURCE="$ROOT/release-source"
           WHEEL_DIR="$ROOT/release-wheel"
           BROKER_VENV="$ROOT/broker-venv"
-          RELEASE_SHA=$(git rev-parse 'refs/remotes/origin/release/0.3^{commit}')
+          # The broker seals the credential on the host before any sandbox
+          # starts, so it must be the same code this run tests. Building it
+          # from a fixed release branch let the nightly run an older seal
+          # than main for days (the doctor-based refresh in PR #36 was never
+          # exercised here until this changed).
+          RELEASE_SHA=$(git rev-parse "$GITHUB_SHA^{commit}")
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           install -d -m 700 "$RELEASE_SOURCE" "$WHEEL_DIR"
           git archive --format=tar "$RELEASE_SHA" | tar -xf - -C "$RELEASE_SOURCE"
           UV_CACHE_DIR="$ROOT/uv-cache" uv build --wheel \
