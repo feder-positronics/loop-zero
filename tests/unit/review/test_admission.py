@@ -245,6 +245,28 @@ def trust_task_with_scope(patch, *, name, scope):
     return result
 
 
+def trust_task_with_manifest_scope(patch, *, name, claims, scope, retirements=()):
+    """Build a normalized manifest while selecting its current caller scope."""
+    result = trust_task(
+        patch,
+        name=name,
+        key=name,
+        invalidated=claims,
+        retirements=retirements,
+    )
+    claim_task = dict(result["trust_claim_task"])
+    selected_text = {f"claim-{label * 64}" for label in scope}
+    claim_task["invalidated_claims"] = [
+        claim
+        for claim in claim_task["invalidated_claims"]
+        if claim["text"] in selected_text
+    ]
+    claim_task.pop("task_hash")
+    claim_task["task_hash"] = review_state.canonical_record_digest(claim_task)
+    result["trust_claim_task"] = claim_task
+    return result
+
+
 def test_admission_rejects_caller_supplied_launch_reason():
     result = admit(
         [],
@@ -1433,6 +1455,129 @@ def test_manifest_edit_after_released_trust_delta_reserves_changed_obligation(
     assert isinstance(changed, admission.Reserved)
     assert changed.slot.slot_kind == "delta"
     assert changed.slot.coverage_digest != released.slot.coverage_digest
+
+
+@pytest.mark.parametrize("requested", ["review", "delta"])
+def test_changed_manifest_retry_cannot_drop_a_released_claim_obligation(requested):
+    patch = identity("a")
+    primary = admission.admit_review(
+        _REPOSITORY,
+        [],
+        repository_binding="repo",
+        task=trust_task_with_manifest_scope(
+            patch,
+            name="primary-ab",
+            claims=("a" * 64, "b" * 64),
+            scope=("a", "b"),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(primary, admission.Reserved)
+    rows = list(primary.records_to_append)
+    append_settlement(
+        rows, primary.slot, ReviewOutcome.CONSUMED, terminal("primary-ab")
+    )
+
+    released = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_manifest_scope(
+            patch,
+            name="released-a",
+            claims=("a" * 64, "b" * 64),
+            scope=("a",),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="delta",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(released, admission.Reserved)
+    rows.extend(released.records_to_append)
+    append_settlement(
+        rows,
+        released.slot,
+        ReviewOutcome.RELEASED,
+        {
+            **terminal("released-a", released=True),
+            "task_contract": released.scoped_task,
+        },
+    )
+
+    retry = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_manifest_scope(
+            patch,
+            name="retry-c",
+            claims=("a" * 64, "b" * 64, "c" * 64),
+            scope=("c",),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested=requested,
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(retry, admission.Reserved)
+    rows.extend(retry.records_to_append)
+    append_settlement(
+        rows,
+        retry.slot,
+        ReviewOutcome.CONSUMED,
+        {**terminal("retry-c"), "task_contract": retry.scoped_task},
+    )
+
+    later = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_manifest_scope(
+            patch,
+            name="later-abc",
+            claims=("a" * 64, "b" * 64, "c" * 64),
+            scope=(),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+
+    expected = {
+        TrustClaim("actors_assets", f"claim-{'a' * 64}", ()).claim_id,
+        TrustClaim("actors_assets", f"claim-{'c' * 64}", ()).claim_id,
+    }
+    assert set(retry.scoped_task["delta_scope"]["invalidated_claim_ids"]) == expected
+    assert {
+        claim["claim_id"]
+        for claim in retry.scoped_task["trust_claim_task"]["invalidated_claims"]
+    } == expected
+    assert isinstance(later, admission.Carry)
 
 
 def test_released_retry_rebuilds_trust_task_for_current_equivalent_endpoint():
