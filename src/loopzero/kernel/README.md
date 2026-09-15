@@ -62,7 +62,10 @@ review evidence. Composition-root registration remains TODO(A4).
 Review generations identify content. `review-family-coverage-v1` rows bind the
 delivery or trust section policy inside a generation, and generation carries
 name the family whose sections move across a proven content-equivalence edge.
-Trust coverage also binds the manifest and normalized claim-set digests. The
+Trust coverage binds the package-normalized manifest content and claim set, and
+each reservation binds the exact family-coverage digest it can settle. Native
+settlement accepts only an authenticated verdict-family terminal whose family
+matches that reservation. The
 retained authority projection uses the closed registry in
 `authority_families.py`: registered extension rows survive only while their
 generation, reservation, or attempt anchor survives; an unregistered governed
