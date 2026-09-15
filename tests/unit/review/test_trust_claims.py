@@ -422,6 +422,63 @@ def test_composition_rejects_extra_missing_and_forged_fresh_results(mutation):
         compose(legacy(raw), task, results)
 
 
+def test_composition_requires_every_carried_forward_unfinished_claim():
+    prior_raw = manifest(
+        {"text": "claim-a", "paths": ["src/a.py"]},
+        {"text": "claim-b", "paths": ["src/b.py"]},
+        risk_paths=(),
+    )
+    prior = legacy(prior_raw)
+    current = normalize_manifest(
+        manifest(
+            *prior_raw["actors_assets"],
+            {"text": "claim-c", "paths": ["src/c.py"]},
+            risk_paths=(),
+        )
+    )
+    ordinary = invalidate_claims(
+        prior,
+        current,
+        changed_paths=(),
+        base_moved=False,
+        risk_paths_added=(),
+    )
+    by_text = {claim.text: claim.claim_id for claim in current.claims}
+    unfinished = by_text["claim-a"]
+    forced = replace(
+        ordinary,
+        fresh_claim_ids=(*ordinary.fresh_claim_ids, unfinished),
+        carried_claims={
+            identity: binding
+            for identity, binding in ordinary.carried_claims.items()
+            if identity != unfinished
+        },
+        causes={**ordinary.causes, unfinished: "prior-inconclusive"},
+    )
+    task = build_trust_claim_task(
+        current,
+        forced,
+        generation_ref="generation",
+        source_identity="source-2",
+        tree_sha="2" * 40,
+        manifest_sha256="b" * 64,
+        delta_from_tree_sha=prior.tree_sha,
+        changed_paths=(),
+    )
+    assert task is not None
+    restored = type(task).from_mapping(
+        task.to_dict(), claim_set=current, previous=prior
+    )
+    only_new = fresh(restored)
+    only_new.pop(unfinished)
+    with pytest.raises(TrustClaimError, match="missing claims"):
+        compose(prior, restored, only_new)
+
+    receipt, aggregate = compose(prior, restored, fresh(restored))
+    assert aggregate == "pass"
+    assert receipt.claims[unfinished].carried_from is None
+
+
 def test_aggregate_pass_fail_inconclusive_and_uncovered_risk_path():
     raw = manifest({"text": "claim", "paths": ["src/auth.py"]})
     prior = legacy(raw)

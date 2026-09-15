@@ -942,7 +942,11 @@ class TrustClaimTaskV1:
             base_moved=raw["base_moved"],  # type: ignore[arg-type]
             risk_paths_added=raw["risk_paths_added"],  # type: ignore[arg-type]
         )
-        if {claim.claim_id for claim in invalidated} != set(expected.fresh_claim_ids):
+        invalidated_ids = {claim.claim_id for claim in invalidated}
+        expected_fresh = set(expected.fresh_claim_ids)
+        if not expected_fresh <= invalidated_ids or not invalidated_ids <= set(
+            claim_set.by_id
+        ):
             raise TrustClaimError("trust claim invalidated set is invalid")
         expected_retired = {
             identity: previous._claim_set.by_id[identity]
@@ -950,7 +954,11 @@ class TrustClaimTaskV1:
         }
         if {claim.claim_id: claim for claim in retirements} != expected_retired:
             raise TrustClaimError("trust claim retirements are invalid")
-        carried = expected.carried_claims
+        carried = {
+            identity: binding
+            for identity, binding in expected.carried_claims.items()
+            if identity not in invalidated_ids
+        }
         task = cls(
             generation_ref=raw["generation_ref"],  # type: ignore[arg-type]
             source_identity=raw["source_identity"],  # type: ignore[arg-type]
@@ -977,7 +985,10 @@ class TrustClaimTaskV1:
             raise TrustClaimError(
                 "trust claim delta tree does not match the previous receipt"
             )
-        if task.carried_receipt_digests != expected.carried_receipt_digests:
+        expected_carried_receipts = (
+            (previous.receipt_digest,) if carried else ()
+        )
+        if task.carried_receipt_digests != expected_carried_receipts:
             raise TrustClaimError("trust claim carried receipt binding is invalid")
         return task
 
@@ -1175,17 +1186,29 @@ def _validate_task_obligations(
         base_moved=task.base_moved,
         risk_paths_added=task.risk_paths_added,
     )
-    if {claim.claim_id for claim in task.invalidated_claims} != set(
-        expected.fresh_claim_ids
+    invalidated_ids = {claim.claim_id for claim in task.invalidated_claims}
+    expected_fresh = set(expected.fresh_claim_ids)
+    if not expected_fresh <= invalidated_ids or not invalidated_ids <= set(
+        task._claim_set.by_id
     ):
         raise TrustClaimError("trust claim invalidated set is invalid")
     if {claim.claim_id: claim for claim in task.retirements} != {
         claim.claim_id: claim for claim in expected._retired_claims
     }:
         raise TrustClaimError("trust claim retirements are invalid")
-    if dict(task._carried_claims) != dict(expected.carried_claims):
+    expected_carried = {
+        identity: binding
+        for identity, binding in expected.carried_claims.items()
+        if identity not in invalidated_ids
+    }
+    if dict(task._carried_claims) != expected_carried:
         raise TrustClaimError("trust claim carried set is invalid")
-    if task.carried_receipt_digests != expected.carried_receipt_digests:
+    expected_carried_receipts = (
+        (previous.receipt_digest,)
+        if previous is not None and expected_carried
+        else ()
+    )
+    if task.carried_receipt_digests != expected_carried_receipts:
         raise TrustClaimError("trust claim carried receipt binding is invalid")
     return expected
 

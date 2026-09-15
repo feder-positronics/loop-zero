@@ -70,8 +70,9 @@ empty released retry recovers claim identities from the reservation's coverage
 row. Current invalidated claim payloads come from the normalized current
 manifest; retirement payloads still require authenticated historical task
 evidence. The recovered task is always rebuilt for the current source, tree and
-endpoint. A changed normalized manifest after release establishes a new delta
-obligation.
+endpoint. A changed normalized manifest after release reconciles the unfinished
+scope with the complete current manifest and unions it into the new delta
+obligation; removed unfinished claims become retirement work.
 An authenticated primary completed at an equivalent endpoint supplies coverage
 through later carry edges, subject to every edge's recorded section filter.
 Each reservation binds the exact family-coverage digest it can settle. Native

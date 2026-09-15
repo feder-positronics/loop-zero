@@ -1115,6 +1115,7 @@ def resolve_generation(
     claim_set_digest: str | None = None,
     invalidated_claim_ids: Sequence[str] = (),
     retirement_claim_ids: Sequence[str] = (),
+    current_claim_ids: Sequence[str] | None = None,
 ) -> GenerationResolution:
     """Resolve content to an authenticated generation without running Git.
 
@@ -1144,10 +1145,24 @@ def resolve_generation(
         retirement_claim_scope = _frozen_strings(
             retirement_claim_ids, label="retirement claim identities"
         )
+        current_claim_scope = (
+            None
+            if current_claim_ids is None
+            else _frozen_strings(
+                current_claim_ids, label="current trust claim identities"
+            )
+        )
         if family == "delivery" and (
-            invalidated_claim_scope or retirement_claim_scope
+            invalidated_claim_scope
+            or retirement_claim_scope
+            or current_claim_scope is not None
         ):
             raise ReviewStateError("delivery review has a trust claim scope")
+        if family == "trust" and current_claim_scope is not None and (
+            not set(invalidated_claim_scope) <= set(current_claim_scope)
+            or set(retirement_claim_scope).intersection(current_claim_scope)
+        ):
+            raise ReviewStateError("trust claim scope does not match the manifest")
         if not isinstance(repository_binding, str) or not repository_binding:
             raise ReviewStateError("repository binding is invalid")
     except ReviewStateError as exc:
@@ -1257,6 +1272,8 @@ def resolve_generation(
         return receipt, inherited
 
     def coverage_for(generation: ReviewGenerationV1) -> ReviewFamilyCoverageV1:
+        requested_invalidated = invalidated_claim_scope
+        requested_retirements = retirement_claim_scope
         existing = projected_coverage.get((generation.generation_id, family))
         if existing is None:
             primary_receipt, inherited = predecessor_baseline(
@@ -1272,15 +1289,15 @@ def resolve_generation(
                 invalidated_sections=sections if primary_receipt is not None else (),
                 manifest_digest=manifest_digest,
                 claim_set_digest=claim_set_digest,
-                invalidated_claim_ids=invalidated_claim_scope,
-                retirement_claim_ids=retirement_claim_scope,
+                invalidated_claim_ids=requested_invalidated,
+                retirement_claim_ids=requested_retirements,
             )
         typed = cast(ReviewFamilyCoverageV1, existing)
         requested_obligation = (
             manifest_digest,
             claim_set_digest,
-            invalidated_claim_scope,
-            retirement_claim_scope,
+            requested_invalidated,
+            requested_retirements,
         )
         if family == "trust" and typed.obligation_key != requested_obligation:
             state = slot_state(
@@ -1307,11 +1324,45 @@ def resolve_generation(
                 # a package-derived manifest/claim-set change is a new delta
                 # obligation rather than a substituted retry scope.
                 return typed
+            if (
+                not obligation_consumed
+                and current_claim_scope is not None
+                and typed._claim_scope_bound
+            ):
+                # Release frees the execution slot, not its unfinished claim
+                # obligation. Reconcile that obligation with the complete
+                # normalized current manifest before accepting a changed
+                # manifest: claims still present remain invalidations and
+                # claims no longer present become retirement work.
+                current_ids = set(current_claim_scope)
+                unfinished = set(typed.invalidated_claim_ids).union(
+                    typed.retirement_claim_ids
+                )
+                requested_invalidated = tuple(
+                    sorted(
+                        set(requested_invalidated).union(
+                            unfinished.intersection(current_ids)
+                        )
+                    )
+                )
+                requested_retirements = tuple(
+                    sorted(
+                        set(requested_retirements).union(
+                            unfinished.difference(current_ids)
+                        )
+                    )
+                )
+                requested_obligation = (
+                    manifest_digest,
+                    claim_set_digest,
+                    requested_invalidated,
+                    requested_retirements,
+                )
         if (
             family == "trust"
             and typed.obligation_key[:2] == requested_obligation[:2]
             and (typed.invalidated_claim_ids or typed.retirement_claim_ids)
-            and not (invalidated_claim_scope or retirement_claim_scope)
+            and not (requested_invalidated or requested_retirements)
         ):
             return typed
         if family == "trust" and typed.obligation_key != requested_obligation:
@@ -1330,8 +1381,8 @@ def resolve_generation(
                 invalidated_sections=sections,
                 manifest_digest=manifest_digest,
                 claim_set_digest=claim_set_digest,
-                invalidated_claim_ids=invalidated_claim_scope,
-                retirement_claim_ids=retirement_claim_scope,
+                invalidated_claim_ids=requested_invalidated,
+                retirement_claim_ids=requested_retirements,
             )
         return typed
 

@@ -1428,7 +1428,10 @@ def test_manifest_edit_after_released_trust_delta_reserves_changed_obligation(
         rows,
         released.slot,
         ReviewOutcome.RELEASED,
-        terminal("released-delta", released=True),
+        {
+            **terminal("released-delta", released=True),
+            "task_contract": released.scoped_task,
+        },
     )
 
     changed = admission.admit_review(
@@ -1455,6 +1458,16 @@ def test_manifest_edit_after_released_trust_delta_reserves_changed_obligation(
     assert isinstance(changed, admission.Reserved)
     assert changed.slot.slot_kind == "delta"
     assert changed.slot.coverage_digest != released.slot.coverage_digest
+    assert changed.scoped_task["delta_scope"]["invalidated_claim_ids"] == [
+        changed.scoped_task["trust_claim_task"]["invalidated_claims"][0][
+            "claim_id"
+        ]
+    ]
+    assert changed.scoped_task["delta_scope"]["retirement_claim_ids"] == [
+        released.scoped_task["trust_claim_task"]["invalidated_claims"][0][
+            "claim_id"
+        ]
+    ]
 
 
 @pytest.mark.parametrize("requested", ["review", "delta"])
@@ -1578,6 +1591,183 @@ def test_changed_manifest_retry_cannot_drop_a_released_claim_obligation(requeste
         for claim in retry.scoped_task["trust_claim_task"]["invalidated_claims"]
     } == expected
     assert isinstance(later, admission.Carry)
+
+
+def test_released_retirement_is_reconciled_with_a_later_manifest_change():
+    patch = identity("a")
+
+    def call(rows, review_task, *, requested):
+        return admission.admit_review(
+            _REPOSITORY,
+            rows,
+            repository_binding="repo",
+            task=review_task,
+            current_source_identity={"head": patch["candidate_sha"]},
+            current_tree_sha=patch["candidate_tree_sha"],
+            patch_identity=patch,
+            required_sections=("trust",),
+            equivalence_proof=None,
+            format_only_proof=None,
+            requested=requested,
+            changed_paths=None,
+            security_trigger_paths=(),
+        )
+
+    primary = call(
+        [],
+        trust_task_with_manifest_scope(
+            patch,
+            name="primary-abc",
+            claims=("a" * 64, "b" * 64, "c" * 64),
+            scope=("a", "b", "c"),
+        ),
+        requested="review",
+    )
+    assert isinstance(primary, admission.Reserved)
+    rows = list(primary.records_to_append)
+    append_settlement(
+        rows, primary.slot, ReviewOutcome.CONSUMED, terminal("primary-abc")
+    )
+
+    retired_b = call(
+        rows,
+        trust_task_with_manifest_scope(
+            patch,
+            name="retire-b",
+            claims=("a" * 64, "c" * 64),
+            scope=(),
+            retirements=("b" * 64,),
+        ),
+        requested="delta",
+    )
+    assert isinstance(retired_b, admission.Reserved)
+    rows.extend(retired_b.records_to_append)
+    append_settlement(
+        rows,
+        retired_b.slot,
+        ReviewOutcome.RELEASED,
+        {
+            **terminal("retire-b", released=True),
+            "task_contract": retired_b.scoped_task,
+        },
+    )
+
+    retry = call(
+        rows,
+        trust_task_with_manifest_scope(
+            patch,
+            name="retire-c",
+            claims=("a" * 64,),
+            scope=(),
+            retirements=("c" * 64,),
+        ),
+        requested="delta",
+    )
+
+    assert isinstance(retry, admission.Reserved)
+    expected = {
+        TrustClaim("actors_assets", f"claim-{'b' * 64}", ()).claim_id,
+        TrustClaim("actors_assets", f"claim-{'c' * 64}", ()).claim_id,
+    }
+    assert set(retry.scoped_task["delta_scope"]["retirement_claim_ids"]) == expected
+    assert {
+        claim["claim_id"]
+        for claim in retry.scoped_task["trust_claim_task"]["retirements"]
+    } == expected
+
+
+def test_claim_obligation_survives_two_released_attempts():
+    patch = identity("a")
+
+    def call(rows, name, scope):
+        return admission.admit_review(
+            _REPOSITORY,
+            rows,
+            repository_binding="repo",
+            task=trust_task_with_manifest_scope(
+                patch,
+                name=name,
+                claims=("a" * 64, "b" * 64),
+                scope=scope,
+            ),
+            current_source_identity={"head": patch["candidate_sha"]},
+            current_tree_sha=patch["candidate_tree_sha"],
+            patch_identity=patch,
+            required_sections=("trust",),
+            equivalence_proof=None,
+            format_only_proof=None,
+            requested="review" if name == "primary" else "delta",
+            changed_paths=None,
+            security_trigger_paths=(),
+        )
+
+    primary = call([], "primary", ("a", "b"))
+    assert isinstance(primary, admission.Reserved)
+    rows = list(primary.records_to_append)
+    append_settlement(rows, primary.slot, ReviewOutcome.CONSUMED, terminal("primary"))
+
+    first = call(rows, "first-a", ("a",))
+    assert isinstance(first, admission.Reserved)
+    rows.extend(first.records_to_append)
+    append_settlement(
+        rows,
+        first.slot,
+        ReviewOutcome.RELEASED,
+        {**terminal("first-a", released=True), "task_contract": first.scoped_task},
+    )
+
+    second = call(rows, "second-a", ())
+    assert isinstance(second, admission.Reserved)
+    expected = first.scoped_task["delta_scope"]["invalidated_claim_ids"]
+    assert second.scoped_task["delta_scope"]["invalidated_claim_ids"] == expected
+    rows.extend(second.records_to_append)
+    append_settlement(
+        rows,
+        second.slot,
+        ReviewOutcome.RELEASED,
+        {**terminal("second-a", released=True), "task_contract": second.scoped_task},
+    )
+
+    third = call(rows, "third-a", ())
+    assert isinstance(third, admission.Blocked)
+    assert third.code == "retries-exhausted"
+    coverage = authority_projection.family_coverages(rows)[
+        (primary.generation.generation_id, "trust")
+    ]
+    assert list(coverage.invalidated_claim_ids) == expected
+
+
+def test_delivery_release_does_not_carry_across_a_later_diff():
+    rows, root = primary_history()
+    middle_patch = identity("b")
+    link_generation(rows, root, middle_patch)
+    middle = admit(
+        rows,
+        middle_patch,
+        review_task=task("middle-delta", "middle-delta"),
+        requested="delta",
+    )
+    assert isinstance(middle, admission.Reserved)
+    rows.extend(middle.records_to_append)
+    append_settlement(
+        rows,
+        middle.slot,
+        ReviewOutcome.RELEASED,
+        terminal("middle-delta", tree=middle.generation.tree, released=True),
+    )
+
+    successor_patch = identity("c")
+    link_generation(rows, middle.generation, successor_patch)
+    successor = admit(
+        rows,
+        successor_patch,
+        review_task=task("successor-primary", "successor-primary"),
+        requested="review",
+    )
+
+    assert isinstance(successor, admission.Reserved)
+    assert successor.slot.slot_kind == "primary"
+    assert successor.generation.primary_origin_receipt is None
 
 
 def test_released_retry_rebuilds_trust_task_for_current_equivalent_endpoint():

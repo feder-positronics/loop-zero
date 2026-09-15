@@ -261,7 +261,14 @@ def _bound_task_family(
 
 def _trust_obligation(
     task: Mapping[str, object],
-) -> tuple[str, str, tuple[str, ...], tuple[str, ...], Mapping[str, object]]:
+) -> tuple[
+    str,
+    str,
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    Mapping[str, object],
+]:
     contract = task.get("task_contract")
     raw = (
         contract.get("trust_claim_task")
@@ -396,6 +403,7 @@ def _trust_obligation(
         cast(str, claim_set),
         invalidated,
         retirements,
+        tuple(sorted(normalized_manifest.by_id)),
         typed_task.to_dict(),
     )
 
@@ -528,6 +536,7 @@ def admit_review(
     claim_set_digest: str | None = None
     invalidated_claim_ids: tuple[str, ...] = ()
     retirement_claim_ids: tuple[str, ...] = ()
+    current_claim_ids: tuple[str, ...] | None = None
     trust_task: Mapping[str, object] | None = None
     if family == "trust":
         try:
@@ -536,6 +545,7 @@ def admit_review(
                 claim_set_digest,
                 invalidated_claim_ids,
                 retirement_claim_ids,
+                current_claim_ids,
                 trust_task,
             ) = _trust_obligation(task)
         except ValueError as exc:
@@ -574,6 +584,7 @@ def admit_review(
         claim_set_digest=claim_set_digest,
         invalidated_claim_ids=invalidated_claim_ids,
         retirement_claim_ids=retirement_claim_ids,
+        current_claim_ids=current_claim_ids,
     )
     if resolution.kind == "refused" or resolution.generation is None:
         reason = str(resolution.reason or "missing-evidence")
@@ -696,16 +707,16 @@ def admit_review(
 
     current_primary_receipts = current_coverage_receipts("primary")
     current_delta_receipts = current_coverage_receipts("delta")
+    requested_obligation = (
+        manifest_digest,
+        claim_set_digest,
+        invalidated_claim_ids,
+        retirement_claim_ids,
+    )
     if (
         family == "trust"
         and prior_coverage is not None
-        and coverage.obligation_key
-        != (
-            manifest_digest,
-            claim_set_digest,
-            invalidated_claim_ids,
-            retirement_claim_ids,
-        )
+        and coverage.obligation_key != requested_obligation
         and not current_primary_receipts
         and not current_delta_receipts
     ):
@@ -713,8 +724,35 @@ def admit_review(
             return _blocked(
                 "invalid-proof", "trust claim obligation does not match reservation"
             )
-        caller_scope = (*invalidated_claim_ids, *retirement_claim_ids)
-        if caller_scope:
+        prior_coverage_digest = canonical_record_digest(prior_coverage.to_dict())
+        manifest_changed = prior_coverage.obligation_key[:2] != (
+            manifest_digest,
+            claim_set_digest,
+        )
+        current_ids = set(current_claim_ids or ())
+        unfinished = set(prior_coverage.invalidated_claim_ids).union(
+            prior_coverage.retirement_claim_ids
+        )
+        carried_invalidated = unfinished.intersection(current_ids)
+        carried_retirements = unfinished.difference(current_ids)
+        expected_invalidated = set(invalidated_claim_ids).union(
+            carried_invalidated
+        )
+        expected_retirements = set(retirement_claim_ids).union(
+            carried_retirements
+        )
+        changed_manifest_reconciliation = bool(
+            manifest_changed
+            and set(coverage.invalidated_claim_ids) == expected_invalidated
+            and set(coverage.retirement_claim_ids) == expected_retirements
+        )
+        empty_same_manifest_retry = bool(
+            not manifest_changed
+            and not invalidated_claim_ids
+            and not retirement_claim_ids
+            and coverage.obligation_key == prior_coverage.obligation_key
+        )
+        if not (changed_manifest_reconciliation or empty_same_manifest_retry):
             return _blocked(
                 "invalid-proof", "trust claim scope does not match obligation"
             )
@@ -733,8 +771,13 @@ def admit_review(
         }
         persisted_task: Mapping[str, object] | None = None
         released_reservation_found = False
+        released_coverage_digest = (
+            prior_coverage_digest
+            if changed_manifest_reconciliation
+            else coverage_digest
+        )
         for persisted_reservation in reversed(state.reservations):
-            if persisted_reservation.coverage_digest != coverage_digest:
+            if persisted_reservation.coverage_digest != released_coverage_digest:
                 continue
             settlement = state.settlement_for(
                 persisted_reservation.reservation_id
@@ -758,16 +801,23 @@ def admit_review(
                     persisted_claim_set,
                     persisted_invalidated,
                     persisted_retirements,
+                    _persisted_current_claim_ids,
                     candidate_task,
                 ) = _trust_obligation(released_contract)
             except ValueError:
                 continue
-            if (
+            persisted_obligation = (
                 persisted_manifest,
                 persisted_claim_set,
                 persisted_invalidated,
                 persisted_retirements,
-            ) == coverage.obligation_key:
+            )
+            expected_persisted_obligation = (
+                prior_coverage.obligation_key
+                if changed_manifest_reconciliation
+                else coverage.obligation_key
+            )
+            if persisted_obligation == expected_persisted_obligation:
                 persisted_task = candidate_task
                 break
         raw_manifest = (
@@ -791,12 +841,27 @@ def admit_review(
             for claim_id in coverage.invalidated_claim_ids
             if claim_id in current_claims
         ]
+        current_retirement_rows = (
+            current_trust_task.get("retirements", [])
+            if isinstance(current_trust_task, Mapping)
+            else []
+        )
         persisted_retirements = {
             row.get("claim_id"): dict(row)
             for row in (
-                persisted_task.get("retirements", [])
-                if isinstance(persisted_task, Mapping)
-                else []
+                *cast(Sequence[object], current_retirement_rows),
+                *cast(
+                    Sequence[object],
+                    persisted_task.get("retirements", [])
+                    if isinstance(persisted_task, Mapping)
+                    else [],
+                ),
+                *cast(
+                    Sequence[object],
+                    persisted_task.get("invalidated_claims", [])
+                    if isinstance(persisted_task, Mapping)
+                    else [],
+                ),
             )
             if isinstance(row, Mapping) and isinstance(row.get("claim_id"), str)
         }
@@ -819,6 +884,8 @@ def admit_review(
             "invalidated_claims": invalidated_rows,
             "retirements": retirement_rows,
         }
+        if set(coverage.invalidated_claim_ids) == set(current_claim_ids or ()):
+            rebuilt_task["carried_receipt_digests"] = []
         rebuilt_task.pop("task_hash", None)
         rebuilt_task["task_hash"] = canonical_record_digest(rebuilt_task)
         invalidated_claim_ids = coverage.invalidated_claim_ids
