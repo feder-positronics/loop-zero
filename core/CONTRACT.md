@@ -192,6 +192,10 @@ exactly or by path-component prefix, by a passing claim that declares that
 coverage. Claims without declared paths provide no risk-path coverage.
 Retirement verdicts remain bound in the receipt; any failed or inconclusive
 retirement prevents reuse of that receipt as a pass.
+A released trust attempt leaves every unverified claim and retirement open. A
+later task for that generation must include those claim identities alongside
+newly invalidated work, and composition cannot pass without fresh verdicts for
+the complete open set.
 A legacy whole-manifest pass remains reusable at its exact source identity,
 tree, and manifest digest because that pass judged the inventory as a whole,
 even when its projected claims do not declare enough paths to cover the risk

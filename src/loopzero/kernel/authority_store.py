@@ -25,6 +25,7 @@ from typing import cast
 
 
 from . import ledger as authority_ledger
+from .authority_families import GOVERNED_RECORD_FAMILIES, governed_record_family
 from .seams import passing_archive_anchor, passing_archive_ancestry, validate_archived_review_witness
 from .authority import (
     authenticated_gone_owner_abort,
@@ -1017,6 +1018,139 @@ def _retention_live_record_ids(
             )
         ):
             selected.add(id(record))
+    extension_ids = {
+        id(record)
+        for record in records
+        if (rule := governed_record_family(record.get("type"))) is not None
+        and rule.anchor != "policy"
+    }
+    selected.difference_update(extension_ids)
+    generation_anchors = {
+        record.get("generation_id")
+        for record in records
+        if id(record) in selected and record.get("type") == "review-generation-v1"
+    }
+    reservation_anchors = {
+        record.get("reservation_id")
+        for record in records
+        if id(record) in selected
+        and record.get("type") == "review-slot-reservation-v1"
+    }
+
+    def attempt_reference(
+        record: Mapping[str, object],
+    ) -> tuple[object, object, object]:
+        task_id = record.get("task_id")
+        attempt_index = record.get("attempt_index")
+        if attempt_index is None and isinstance(task_id, str):
+            attempt_id = record.get("attempt_id")
+            if isinstance(attempt_id, str):
+                prefix, separator, suffix = attempt_id.rpartition(":")
+                if separator and prefix == task_id and suffix.isdigit():
+                    attempt_index = int(suffix)
+        return record.get("run_id"), task_id, attempt_index
+
+    attempt_anchors = {
+        attempt_reference(record)
+        for record in records
+        if id(record) in selected
+        and record.get("type") in {"attempt-start", "attempt-terminal", "attempt-abort"}
+    }
+    recorded_attempts = {
+        attempt_reference(record)
+        for record in records
+        if record.get("type") in {"attempt-start", "attempt-terminal", "attempt-abort"}
+    }
+    # A no-family launch is the durable pending-attempt anchor until the
+    # consumer appends its start. Without this bridge, size compaction in the
+    # launch/start window silently erases admission telemetry.
+    attempt_anchors.update(
+        attempt_reference(record)
+        for record in records
+        if record.get("type") == "review-nonverdict-launch-v1"
+        and attempt_reference(record) not in recorded_attempts
+    )
+
+    from .authority_projection import generation_carries, generations
+    from ..review.trust_claims import TrustClaimError, TrustClaimReceiptV1
+
+    projected_generations = generations(records)
+    generation_endpoints = {
+        (
+            generation_id,
+            canonical_record_digest(dict(generation.patch_identity)),
+            generation.tree,
+        )
+        for generation_id, generation in projected_generations.items()
+        if generation_id in generation_anchors
+    }
+    generation_endpoints.update(
+        (
+            carry.generation_id,
+            canonical_record_digest(dict(carry.to_identity)),
+            carry.to_identity.get("candidate_tree_sha"),
+        )
+        for carry in generation_carries(records)
+        if carry.generation_id in generation_anchors
+    )
+
+    def trust_generation_is_live(record: Mapping[str, object]) -> bool:
+        raw_receipt = record.get("trust_claim_receipt")
+        source_identity = record.get("source_identity")
+        patch_identity = record.get("patch_identity")
+        if (
+            not isinstance(raw_receipt, Mapping)
+            or not isinstance(source_identity, Mapping)
+            or not isinstance(patch_identity, Mapping)
+        ):
+            return False
+        try:
+            receipt = TrustClaimReceiptV1.from_mapping(raw_receipt)
+        except (TrustClaimError, TypeError, ValueError):
+            return False
+        if (
+            receipt.source_identity
+            != canonical_record_digest(dict(source_identity))
+            or receipt.tree_sha != record.get("snapshot_tree_sha")
+            or patch_identity.get("candidate_tree_sha") != receipt.tree_sha
+        ):
+            return False
+        endpoint = (
+            canonical_record_digest(dict(patch_identity)),
+            receipt.tree_sha,
+        )
+        return any(
+            (identity_digest, tree) == endpoint
+            for _generation_id, identity_digest, tree in generation_endpoints
+        )
+
+    def reference(record: Mapping[str, object], path: tuple[str, ...]) -> object:
+        value: object = record
+        for name in path:
+            if not isinstance(value, Mapping):
+                return None
+            value = value.get(name)
+        return value
+
+    for record in records:
+        rule = governed_record_family(record.get("type"))
+        if rule is None or rule.anchor == "policy":
+            continue
+        keep = (
+            rule.anchor == "generation"
+            and reference(record, rule.reference_path) in generation_anchors
+        ) or (
+            rule.anchor == "trust-generation"
+            and trust_generation_is_live(record)
+        ) or (
+            rule.anchor == "reservation"
+            and reference(record, rule.reference_path) in reservation_anchors
+        ) or (
+            rule.anchor == "attempt"
+            and attempt_reference(record) in attempt_anchors
+        )
+        if keep:
+            selected.add(id(record))
     return frozenset(selected)
 
 
@@ -1439,17 +1573,14 @@ def retained_authority_projection(
 ) -> list[dict[str, object]]:
     """Return the deterministic dependency seed for the current authority policy."""
     governed = _governed_records_with_review_state(records)
-    unknown = sorted(
-        {
-            str(record.get("type"))
-            for record in governed
-            if record.get("type") not in _COMPACTABLE_AUTHORITY_RECORD_TYPES
-        }
+    unknown = any(
+        record.get("type") not in GOVERNED_RECORD_FAMILIES
+        for record in governed
     )
     if unknown:
         raise DispatchError(
-            "authority compaction does not know current-policy record families: "
-            + ", ".join(unknown)
+            "DispatchError: authority compaction found an unregistered "
+            "current-policy record family"
         )
     active_runs = frozenset(active_run_ids)
     live_ids = _retention_live_record_ids(governed, active_run_ids=active_runs)
@@ -1536,42 +1667,7 @@ def retained_authority_projection_once(
     ]
 
 
-_COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
-    {
-        "alias-availability",
-        "attempt-abort",
-        "attempt-checkpoint",
-        "attempt-cleanup-failure",
-        "attempt-owner",
-        "attempt-patch-identity-carry",
-        "attempt-progress",
-        "attempt-recovery",
-        "attempt-start",
-        "attempt-supersession",
-        "attempt-terminal",
-        "coordinator-authority-cutover",
-        "delivery-control",
-        "deposit-verification",
-        "evidence-cleanup",
-        "evidence-cleanup-friction",
-        "inline",
-        "inconclusive-retry-authorization",
-        "review-chain-advisory",
-        "review-generation-v1",
-        "review-generation-proof-v1",
-        "review-generation-link-v1",
-        "review-recovery-verification",
-        "review-slot-reservation-v1",
-        "review-slot-settlement-v1",
-        "review-launch-v1",
-        "review-launch-outcome-v1",
-        RETENTION_STATE_TYPE,
-        "route",
-        "scratch-cleanup",
-        "verdict",
-        "generation-carry-v1",
-    }
-)
+_COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(GOVERNED_RECORD_FAMILIES)
 
 
 @dataclass(frozen=True)

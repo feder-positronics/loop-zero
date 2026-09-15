@@ -133,32 +133,59 @@ def resolve(rows, patch, *, equivalence_proof=None, format_only_proof=None):
     )
 
 
-def consumed_terminal(task_id, tree=None):
-    return {
+def consumed_terminal(task_id, tree=None, reservation=None):
+    terminal = {
         "type": "attempt-terminal",
         "task_id": task_id,
         "status": "completed",
         "review_acceptance_verified": True,
         "accepted_verdict": "pass",
         "snapshot_tree_sha": tree,
+        "review_intent": "delivery-code-review",
+        "review_family": "delivery",
     }
+    if reservation is not None:
+        terminal.update(
+            review_reservation_id=reservation.reservation_id,
+            review_generation_id=reservation.generation_id,
+        )
+    return terminal
 
 
-def released_terminal(task_id, tree=None):
-    return {
+def released_terminal(task_id, tree=None, reservation=None):
+    terminal = {
         "type": "attempt-terminal",
         "task_id": task_id,
         "status": "infrastructure-failure",
         "terminal_reason": "transport-disconnect",
         "snapshot_tree_sha": tree,
+        "review_intent": "delivery-code-review",
+        "review_family": "delivery",
     }
+    if reservation is not None:
+        terminal.update(
+            review_reservation_id=reservation.reservation_id,
+            review_generation_id=reservation.generation_id,
+        )
+    return terminal
 
 
 def settle(rows, reservation, terminal, outcome):
     if reservation.to_dict() not in rows:
         rows.append(reservation.to_dict())
     generation = authority_projection.generations(rows)[reservation.generation_id]
-    terminal = {**terminal, "snapshot_tree_sha": terminal.get("snapshot_tree_sha") or generation.tree}
+    terminal = {
+        **terminal,
+        "snapshot_tree_sha": terminal.get("snapshot_tree_sha") or generation.tree,
+        "review_family": reservation.family,
+        "review_reservation_id": reservation.reservation_id,
+        "review_generation_id": reservation.generation_id,
+        "review_intent": (
+            "trust-manifest-verification"
+            if reservation.family == "trust"
+            else "delivery-code-review"
+        ),
+    }
     rows.append(terminal)
     if outcome is ReviewOutcome.CONSUMED:
         rows.append({
@@ -526,7 +553,7 @@ def test_competing_reservers_get_same_reference_and_second_primary_is_refused():
     assert competing.existing and competing.conflict
 
     settle(rows, first, consumed_terminal("review-one"), ReviewOutcome.CONSUMED)
-    with pytest.raises(review_state.ReviewSlotError, match="consumed"):
+    with pytest.raises(review_state.ReviewSlotError, match="ReviewSlotError"):
         review_state.reserve_review_slot(
             _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
             slot_kind="primary", task_id="review-three", idempotency_key="key-three",
@@ -536,7 +563,7 @@ def test_competing_reservers_get_same_reference_and_second_primary_is_refused():
 def test_delta_requires_one_settled_primary_and_settlement_is_idempotent():
     generation = resolve([], identity("a", "1" * 40)).generation
     rows = [generation.to_dict()]
-    with pytest.raises(review_state.ReviewSlotError, match="exactly one"):
+    with pytest.raises(review_state.ReviewSlotError, match="ReviewSlotError"):
         review_state.reserve_review_slot(
             _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
             slot_kind="delta", task_id="delta", idempotency_key="delta-key",
@@ -545,7 +572,7 @@ def test_delta_requires_one_settled_primary_and_settlement_is_idempotent():
         _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
         slot_kind="primary", task_id="primary", idempotency_key="primary-key",
     )
-    terminal = consumed_terminal("primary", generation.tree)
+    terminal = consumed_terminal("primary", generation.tree, primary)
     rows.extend((primary.to_dict(), terminal))
     rows.append({"type": "verdict", "task_id": "primary", "verdict": "pass"})
     settlement = review_state.settle_review_slot(
@@ -601,6 +628,64 @@ def test_released_slot_is_reusable_once_and_unresolved_never_frees():
     )
     assert held.reservation_id == reservation.reservation_id
     assert held.conflict
+
+
+def test_released_delta_allows_one_fail_closed_primary_reverification():
+    generation = resolve([], identity("a", "1" * 40)).generation
+    rows = [generation.to_dict()]
+    primary = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="primary",
+        task_id="primary",
+        idempotency_key="primary",
+    )
+    settle(rows, primary, consumed_terminal("primary"), ReviewOutcome.CONSUMED)
+    released = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="delta",
+        task_id="released",
+        idempotency_key="released",
+    )
+    settle(rows, released, released_terminal("released"), ReviewOutcome.RELEASED)
+    retry = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="delta",
+        task_id="retry",
+        idempotency_key="retry",
+    )
+    settle(rows, retry, consumed_terminal("retry"), ReviewOutcome.CONSUMED)
+
+    with pytest.raises(review_state.ReviewSlotError) as ordinary_primary:
+        review_state.reserve_review_slot(
+            _REPOSITORY,
+            rows,
+            generation_id=generation.generation_id,
+            family="delivery",
+            slot_kind="primary",
+            task_id="ordinary",
+            idempotency_key="ordinary",
+        )
+    assert ordinary_primary.value.code == "slots-exhausted"
+
+    guarded = review_state._reserve_review_slot(
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="primary",
+        task_id="guarded",
+        idempotency_key="guarded",
+        released_retry_reverification=True,
+    )
+    assert guarded.slot_kind == "primary"
 
 
 def test_idempotency_key_is_reusable_only_for_an_unsettled_reservation():
@@ -679,7 +764,7 @@ def test_unresolved_settlement_resolves_from_a_late_verdict_without_a_second_row
         _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
         slot_kind="primary", task_id="late", idempotency_key="late-key",
     )
-    terminal = consumed_terminal("late", generation.tree)
+    terminal = consumed_terminal("late", generation.tree, reservation)
     rows.extend((reservation.to_dict(), terminal))
     settlement = review_state.settle_review_slot(
         _REPOSITORY,
@@ -727,7 +812,7 @@ def test_released_settlement_is_consumed_by_a_late_authenticated_verdict():
         _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
         slot_kind="primary", task_id="late-release", idempotency_key="late-release",
     )
-    terminal = released_terminal("late-release", generation.tree)
+    terminal = released_terminal("late-release", generation.tree, reservation)
     rows.extend((reservation.to_dict(), terminal))
     settlement = review_state.settle_review_slot(
         _REPOSITORY,
@@ -758,10 +843,10 @@ def test_settlement_rejects_terminal_from_outside_generation_tree():
         _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
         slot_kind="primary", task_id="wrong-tree", idempotency_key="wrong-tree",
     )
-    terminal = consumed_terminal("wrong-tree", "f" * 40)
+    terminal = consumed_terminal("wrong-tree", "f" * 40, reservation)
     rows.extend((reservation.to_dict(), terminal))
     rows.append({"type": "verdict", "task_id": "wrong-tree", "verdict": "pass"})
-    with pytest.raises(review_state.ReviewSlotError, match="outside"):
+    with pytest.raises(review_state.ReviewSlotError, match="ReviewSlotError"):
         review_state.settle_review_slot(
             _REPOSITORY,
             rows, reservation=reservation, outcome=ReviewOutcome.CONSUMED,
@@ -808,7 +893,7 @@ def test_projection_never_drops_a_settlement_with_missing_terminal_evidence():
         _REPOSITORY, rows, generation_id=generation.generation_id, family="delivery",
         slot_kind="primary", task_id="missing-terminal", idempotency_key="missing",
     )
-    terminal = consumed_terminal("missing-terminal", generation.tree)
+    terminal = consumed_terminal("missing-terminal", generation.tree, reservation)
     complete = [*rows, reservation.to_dict(), terminal]
     complete.append({
         "type": "verdict", "task_id": "missing-terminal", "verdict": "pass"
@@ -834,6 +919,27 @@ def test_lock_assertion_uses_authority_ledger_lock(tmp_path):
         review_state.assert_authority_ledger_lock_held(unlocked)
     with authority_store.authority_ledger_lock(unlocked):
         review_state.assert_authority_ledger_lock_held(unlocked)
+
+
+def test_legacy_family_coverage_keeps_its_original_digest_shape():
+    generation = resolve([], identity("a", "1" * 40)).generation
+    current = review_state.ReviewFamilyCoverageV1(
+        generation_id=generation.generation_id,
+        family="trust",
+        required_sections=("trust",),
+        policy_digest=hashlib.sha256(
+            b'["review-generation-policy-v1",["trust"]]'
+        ).hexdigest(),
+        manifest_digest="2" * 64,
+        claim_set_digest="3" * 64,
+    ).to_dict()
+    legacy = {
+        key: value
+        for key, value in current.items()
+        if key not in {"invalidated_claim_ids", "retirement_claim_ids"}
+    }
+
+    assert review_state.ReviewFamilyCoverageV1.from_dict(legacy).to_dict() == legacy
 
 
 def test_reservation_api_refuses_without_authority_lock(tmp_path):

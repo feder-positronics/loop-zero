@@ -7,6 +7,8 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+from typing import Literal
 
 from ..config import EFFORTS, Profile
 from ..kernel.gitscope import DispatchError
@@ -275,9 +277,26 @@ def verifier_identity_is_independent(
     return bool(verifier_models) and normalized_worker not in verifier_models
 
 
-REVIEW_INTENTS = (
-    "discovery", "resolution-adjudication", "trust-manifest-verification", "delivery-code-review"
+ReviewFamily = Literal["delivery", "trust"]
+
+# Review intent is authority policy. Consumers select from this closed table;
+# an arbitrary caller label can never create a no-family admission path.
+REVIEW_INTENT_FAMILIES: Mapping[str, ReviewFamily | None] = MappingProxyType(
+    {
+        "discovery": None,
+        "resolution-adjudication": None,
+        "trust-manifest-verification": "trust",
+        "delivery-code-review": "delivery",
+    }
 )
+REVIEW_INTENTS = tuple(REVIEW_INTENT_FAMILIES)
+
+
+def review_family_for_intent(intent: object) -> ReviewFamily | None:
+    """Return the package-owned slot family for a declared review intent."""
+    if not isinstance(intent, str) or intent not in REVIEW_INTENT_FAMILIES:
+        raise DispatchError("review intent is not declared by package policy")
+    return REVIEW_INTENT_FAMILIES[intent]
 MODEL_VERIFIED_REVIEW_INTENTS = frozenset(REVIEW_INTENTS)
 REVIEW_LENSES = ("code", "security")
 NON_MODEL_VERIFIER_ALIASES = ("human",)
@@ -450,8 +469,9 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "CommandResult", "EnginePreflight", "RoutingDecision", "RoutingSettings",
+    "CommandResult", "EnginePreflight", "REVIEW_INTENT_FAMILIES", "REVIEW_INTENTS",
+    "ReviewFamily", "RoutingDecision", "RoutingSettings",
     "configure", "effective_attempt_alias", "model_verifier_aliases", "route",
-    "resolve_tier_default", "supersession_reason_matches_terminal",
+    "resolve_tier_default", "review_family_for_intent", "supersession_reason_matches_terminal",
     "validate_retry_policy", "verifier_identity_is_independent",
 ]
