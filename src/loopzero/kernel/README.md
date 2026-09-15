@@ -59,6 +59,15 @@ retained projections and archive validation. `ADAPTER_NAMES` lists the complete
 surface. A missing adapter raises `MissingAdapter`; it never means accepted
 review evidence. Composition-root registration remains TODO(A4).
 
+Review generations identify content. `review-family-coverage-v1` rows bind the
+delivery or trust section policy inside a generation, and generation carries
+name the family whose sections move across a proven content-equivalence edge.
+Trust coverage also binds the manifest and normalized claim-set digests. The
+retained authority projection uses the closed registry in
+`authority_families.py`: registered extension rows survive only while their
+generation, reservation, or attempt anchor survives; an unregistered governed
+record type still stops compaction before authority can be lost.
+
 `job.sh` uses `LOOPZERO_PYTHON` for the approved installed-package interpreter.
 The interpreter must be a symlink-free executable outside the consumer
 repository and every linked worktree.
