@@ -78,14 +78,19 @@ Reviewed examples are in [examples/renew-codex-nightly.sh](examples/renew-codex-
    operation while logged out, configure user lingering with the host operator.
 
 The timer runs hourly with up to five minutes of jitter and catches a missed run
-when the user manager restarts. The script stages only access-only output under
-`XDG_RUNTIME_DIR`, uploads it on stdin, suppresses provider output, and removes
-the staging directory on success, failure or a catchable termination signal.
+when the user manager restarts. The script creates a private staging directory
+under `XDG_RUNTIME_DIR`, uploads only `snapshot.json` on stdin, suppresses provider
+output, and removes the staging directory on success, failure or a catchable
+termination signal. During refresh, the broker also uses a private state directory
+inside that staging directory; it can temporarily contain a refresh-capable
+rotated login. This state stays on the owning host and is never uploaded.
 An upload failure leaves the previous GitHub secret unchanged; the next hourly
 run retries. Monitor failed services: suspension, a revoked login, or more than
 72 hours without a successful renewal can leave the nightly without a usable
-credential. A forced kill can leave an access-only file until the runtime
-directory is removed; it never stages the host login for upload.
+credential. A forced kill during refresh can leave refresh-capable material in
+the private host state directory until the runtime directory is removed. Never
+archive or upload the staging directory; only the validated snapshot is suitable
+for GitHub.
 
 The workflow continues to validate and seal the snapshot before launching
 checked-out code. It fails if the access token no longer covers the job; it
