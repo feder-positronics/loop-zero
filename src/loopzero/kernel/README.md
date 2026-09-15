@@ -66,8 +66,12 @@ Trust coverage binds the package-normalized manifest content, claim set, and
 invalidated or retired claim identities until matching evidence settles them.
 A trust primary persists its initial claim scope. A retry cannot replace an
 unresolved scope: a non-empty caller scope must equal the persisted one, and an
-empty released retry inherits the exact package-built scope from its
-authenticated releasing terminal or is refused before dispatch.
+empty released retry recovers claim identities from the reservation's coverage
+row. Current invalidated claim payloads come from the normalized current
+manifest; retirement payloads still require authenticated historical task
+evidence. The recovered task is always rebuilt for the current source, tree and
+endpoint. A changed normalized manifest after release establishes a new delta
+obligation.
 An authenticated primary completed at an equivalent endpoint supplies coverage
 through later carry edges, subject to every edge's recorded section filter.
 Each reservation binds the exact family-coverage digest it can settle. Native
@@ -75,10 +79,11 @@ settlement accepts only an authenticated verdict-family terminal bound to that
 reservation and generation. Legacy terminal families come from authenticated
 intent; absent intent retains delivery compatibility, while trust and
 non-verdict intents cannot supply delivery authority. A package non-verdict
-launch also excludes an intent-less terminal with the same task ID from every
-verdict and coverage family. When identical pre-cutover content has both trust
-and delivery primaries, the later accepted terminal is the compatibility seed
-and the other family conservatively requires a fresh primary. The
+launch also excludes a terminal with the same task ID from every verdict and
+coverage family before public exact-tree or equivalence alternatives run. When
+identical pre-cutover content has both trust and delivery primaries, both
+family coverages and their consumed primary receipts survive on the shared
+synthetic content generation regardless of record order. The
 retained authority projection uses the closed registry in
 `authority_families.py`: registered extension rows survive only while their
 generation, reservation, or `(run_id, task_id, attempt_index)` anchor survives.

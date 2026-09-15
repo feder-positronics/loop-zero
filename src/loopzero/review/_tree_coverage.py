@@ -325,7 +325,6 @@ def _generation_chain_covers_tree(
 ) -> bool:
     """Use authenticated generation carries as an additional exact-tree path."""
     from ..kernel.authority_projection import (
-        _authenticated_coordinator_record_ids,
         family_coverages,
         generation_carries,
         generations,
@@ -338,15 +337,7 @@ def _generation_chain_covers_tree(
 
     contract = terminal.get("task_contract")
     task_id = terminal.get("task_id")
-    authenticated = _authenticated_coordinator_record_ids(
-        records  # type: ignore[arg-type]
-    )
-    if isinstance(task_id, str) and any(
-        id(record) in authenticated
-        and record.get("type") == "review-nonverdict-launch-v1"
-        and record.get("task_id") == task_id
-        for record in records
-    ):
+    if _authenticated_nonverdict_task(records, task_id):
         return False
     intent = (
         contract.get("review_intent")
@@ -437,6 +428,25 @@ def _generation_chain_covers_tree(
     return any(
         carry_chain_covers(generation.generation_id)
         for generation in candidates
+    )
+
+
+def _authenticated_nonverdict_task(
+    records: Sequence[Mapping[str, object]], task_id: object
+) -> bool:
+    """Return whether package authority declared this task non-verdict."""
+    if not isinstance(task_id, str):
+        return False
+    from ..kernel.authority_projection import _authenticated_coordinator_record_ids
+
+    authenticated = _authenticated_coordinator_record_ids(
+        records  # type: ignore[arg-type]
+    )
+    return any(
+        id(record) in authenticated
+        and record.get("type") == "review-nonverdict-launch-v1"
+        and record.get("task_id") == task_id
+        for record in records
     )
 
 
@@ -538,6 +548,11 @@ def review_task_covers_tree(
     runner: CommandRunner | None = None,
 ) -> bool:
     """Evaluate one accepted task with the exact publication coverage predicate."""
+    # Non-verdict authority is unconditional. Check it before exact-tree,
+    # source-identity, mechanical, or equivalence alternatives can publish a
+    # relabeled terminal.
+    if _authenticated_nonverdict_task(records, task_id):
+        return False
     terminal = accepted_terminals.get(task_id)
     if (
         terminal is None

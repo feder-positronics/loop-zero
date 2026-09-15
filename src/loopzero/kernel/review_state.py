@@ -1211,44 +1211,45 @@ def resolve_generation(
             predecessor_id,
             family,
         )
-        if family == "trust":
-            coverage_digest = canonical_record_digest(typed.to_dict())
+        coverage_digest = canonical_record_digest(typed.to_dict())
 
-            def consumed_receipt(slot_kind: ReviewSlotKind) -> str | None:
-                for reservation in reversed(predecessor_state.reservations):
-                    if (
-                        reservation.slot_kind != slot_kind
-                        or reservation.coverage_digest != coverage_digest
-                    ):
-                        continue
-                    settlement = predecessor_state.settlement_for(
-                        reservation.reservation_id
-                    )
-                    if settlement is not None and predecessor_state._effective_outcome(
-                        settlement
-                    ) is ReviewOutcome.CONSUMED:
-                        return cast(str, settlement.terminal_ref)
-                return None
+        def consumed_receipt(slot_kind: ReviewSlotKind) -> str | None:
+            for reservation in reversed(predecessor_state.reservations):
+                if (
+                    reservation.slot_kind != slot_kind
+                    or reservation.coverage_digest != coverage_digest
+                ):
+                    continue
+                settlement = predecessor_state.settlement_for(
+                    reservation.reservation_id
+                )
+                if settlement is not None and predecessor_state._effective_outcome(
+                    settlement
+                ) is ReviewOutcome.CONSUMED:
+                    return cast(str, settlement.terminal_ref)
+            return None
 
-            own_primary_ref = consumed_receipt("primary")
-            current_delta_consumed = consumed_receipt("delta") is not None
-            covered = own_primary_ref is not None or (
-                predecessor_state.inherited_primary_ref is not None
-                and (
-                    not typed.invalidated_sections or current_delta_consumed
-                )
-            )
-            receipt = own_primary_ref or predecessor_state.inherited_primary_ref
-        else:
-            covered = predecessor_state.own_primary_consumed or (
-                predecessor_state.inherited_primary_ref is not None
-                and (
-                    not typed.invalidated_sections
-                    or predecessor_state.delta_consumed
-                )
-            )
-            receipt = predecessor_state.primary_terminal_ref
-        if not covered:
+        # A later coverage row may describe a consumed delta while naming the
+        # primary receipt established by an earlier row. Follow that origin
+        # receipt through the authenticated slot state instead of requiring the
+        # primary reservation itself to bind the latest coverage digest.
+        current_primary = consumed_receipt("primary")
+        state_primary = predecessor_state.primary_terminal_ref
+        receipt = (
+            current_primary
+            if current_primary is not None
+            else typed.primary_origin_receipt
+            if typed.primary_origin_receipt is not None
+            and typed.primary_origin_receipt == state_primary
+            and predecessor_state.primary_consumed
+            else None
+        )
+        current_delta_consumed = consumed_receipt("delta") is not None
+        if receipt is None or (
+            typed.invalidated_sections
+            and not current_delta_consumed
+            and not predecessor_state.inherited_delta_consumed
+        ):
             return None, ()
         inherited = tuple(
             sorted(set(typed.required_sections).intersection(sections))
@@ -1297,9 +1298,14 @@ def resolve_generation(
                 and state._effective_outcome(settlement) is ReviewOutcome.CONSUMED
                 for reservation in state.reservations
             )
-            if not obligation_consumed:
-                # A pending or authentically released reservation remains the
-                # obligation of its retry. Caller scope cannot replace it.
+            if state.outstanding is not None or (
+                not obligation_consumed
+                and typed.obligation_key[:2] == requested_obligation[:2]
+            ):
+                # A pending reservation remains authoritative. After release,
+                # the same manifest obligation must retain its exact scope, but
+                # a package-derived manifest/claim-set change is a new delta
+                # obligation rather than a substituted retry scope.
                 return typed
         if (
             family == "trust"

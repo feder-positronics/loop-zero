@@ -719,17 +719,20 @@ def admit_review(
                 "invalid-proof", "trust claim scope does not match obligation"
             )
 
-        # An empty released retry inherits the exact persisted obligation. Its
-        # authenticated releasing terminal retains the package-built claim
-        # objects needed by the verifier, including retirement details that
-        # cannot be reconstructed from claim IDs alone. An outstanding retry
-        # without that evidence remains blocked.
+        # An empty released retry inherits the exact persisted obligation.
+        # Coverage supplies the claim identities and the normalized current
+        # manifest supplies invalidated claim payloads. A releasing terminal's
+        # package task is consulted only for retirement payloads, which cannot
+        # be reconstructed from the current manifest. Pending retries remain
+        # blocked rather than silently inheriting caller-omitted scope.
+        current_trust_task = trust_task
         terminal_by_digest = {
             canonical_record_digest(record): record
             for record in records
             if isinstance(record, Mapping)
         }
         persisted_task: Mapping[str, object] | None = None
+        released_reservation_found = False
         for persisted_reservation in reversed(state.reservations):
             if persisted_reservation.coverage_digest != coverage_digest:
                 continue
@@ -740,6 +743,7 @@ def admit_review(
                 "released"
             ):
                 continue
+            released_reservation_found = True
             released_terminal = terminal_by_digest.get(settlement.terminal_ref)
             released_contract = (
                 released_terminal.get("task_contract")
@@ -766,13 +770,60 @@ def admit_review(
             ) == coverage.obligation_key:
                 persisted_task = candidate_task
                 break
-        if persisted_task is None:
+        raw_manifest = (
+            task.get("task_contract", {}).get("trust_claim_manifest")
+            if isinstance(task.get("task_contract"), Mapping)
+            and "trust_claim_manifest" in task["task_contract"]
+            else task.get("trust_claim_manifest")
+        )
+        try:
+            from .trust_claims import normalize_manifest
+
+            current_claims = (
+                normalize_manifest(cast(Mapping[object, object], raw_manifest)).by_id
+                if isinstance(raw_manifest, Mapping)
+                else {}
+            )
+        except (TypeError, ValueError):
+            current_claims = {}
+        invalidated_rows = [
+            current_claims[claim_id].to_dict()
+            for claim_id in coverage.invalidated_claim_ids
+            if claim_id in current_claims
+        ]
+        persisted_retirements = {
+            row.get("claim_id"): dict(row)
+            for row in (
+                persisted_task.get("retirements", [])
+                if isinstance(persisted_task, Mapping)
+                else []
+            )
+            if isinstance(row, Mapping) and isinstance(row.get("claim_id"), str)
+        }
+        retirement_rows = [
+            persisted_retirements[claim_id]
+            for claim_id in coverage.retirement_claim_ids
+            if claim_id in persisted_retirements
+        ]
+        if (
+            not released_reservation_found
+            or current_trust_task is None
+            or len(invalidated_rows) != len(coverage.invalidated_claim_ids)
+            or len(retirement_rows) != len(coverage.retirement_claim_ids)
+        ):
             return _blocked(
                 "invalid-proof", "trust claim scope does not match obligation"
             )
+        rebuilt_task = {
+            **dict(current_trust_task),
+            "invalidated_claims": invalidated_rows,
+            "retirements": retirement_rows,
+        }
+        rebuilt_task.pop("task_hash", None)
+        rebuilt_task["task_hash"] = canonical_record_digest(rebuilt_task)
         invalidated_claim_ids = coverage.invalidated_claim_ids
         retirement_claim_ids = coverage.retirement_claim_ids
-        trust_task = persisted_task
+        trust_task = rebuilt_task
     inherited_primary = coverage.primary_origin_receipt
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []

@@ -534,7 +534,16 @@ _slot_projection_cache: dict[
 ] = {}
 _legacy_delta_projection_cache: dict[
     tuple[object, ...],
-    tuple[object, tuple[tuple[object, ...], dict[str, tuple[str, ...]]]],
+    tuple[
+        object,
+        tuple[
+            tuple[object, ...],
+            dict[tuple[str, str], tuple[str, ...]],
+        ],
+    ],
+] = {}
+_legacy_family_coverage_cache: dict[
+    tuple[object, ...], tuple[object, dict[tuple[str, str], object]]
 ] = {}
 
 
@@ -1652,6 +1661,7 @@ def _legacy_review_generations(
     """Synthesize conservative content generations for accepted old terminals."""
     from .review_state import (
         GenerationCarryV1,
+        ReviewFamilyCoverageV1,
         ReviewGenerationV1,
         generation_id_for,
         patch_identity_digest,
@@ -1689,7 +1699,10 @@ def _legacy_review_generations(
         ) from exc
     record_indices = {id(record): index for index, record in enumerate(records)}
     legacy: dict[str, ReviewGenerationV1] = {}
-    primary_terminals: dict[str, Mapping[str, object]] = {}
+    legacy_coverages: dict[tuple[str, str], ReviewFamilyCoverageV1] = {}
+    primary_terminals: dict[
+        tuple[str, str], Mapping[str, object]
+    ] = {}
     for task_id, terminal in accepted.items():
         if task_id in nonverdict_task_ids:
             continue
@@ -1801,7 +1814,7 @@ def _legacy_review_generations(
                 separators=(",", ":"),
             ).encode()
         ).hexdigest()
-        legacy[generation_id] = ReviewGenerationV1(
+        candidate_generation = ReviewGenerationV1(
             repository_binding=binding,
             lineage_id="rl_" + hashlib.sha256(
                 json.dumps(
@@ -1830,10 +1843,26 @@ def _legacy_review_generations(
             inherited_coverage=sections,
             invalidated_sections=(),
         )
-        primary_terminals[generation_id] = terminal
+        # Generation identity is content-only. Historical delivery and trust
+        # primaries on the same content therefore share one synthetic
+        # generation while retaining independent family coverage and receipts.
+        legacy.setdefault(generation_id, candidate_generation)
+        terminal_ref = canonical_record_digest(terminal)
+        legacy_coverages[(generation_id, family)] = ReviewFamilyCoverageV1(
+            generation_id=generation_id,
+            family=family,
+            required_sections=sections,
+            policy_digest=policy_digest,
+            primary_origin_receipt=terminal_ref,
+            inherited_coverage=sections,
+            invalidated_sections=(),
+            manifest_digest=("0" * 64 if family == "trust" else None),
+            claim_set_digest=("0" * 64 if family == "trust" else None),
+        )
+        primary_terminals[(generation_id, family)] = terminal
 
     legacy_carries: list[GenerationCarryV1] = []
-    legacy_delta_refs: dict[str, list[str]] = {}
+    legacy_delta_refs: dict[tuple[str, str], list[str]] = {}
     for task_id, terminal in accepted.items():
         if task_id in nonverdict_task_ids:
             continue
@@ -1906,7 +1935,9 @@ def _legacy_review_generations(
                 "patch_id_verbatim": candidate_sha,
             }
         candidates: list[tuple[str, ReviewGenerationV1]] = []
-        for generation_id, primary in primary_terminals.items():
+        for (generation_id, primary_family), primary in primary_terminals.items():
+            if primary_family != family:
+                continue
             if record_indices.get(id(primary), len(records)) >= terminal_index:
                 continue
             generation = legacy[generation_id]
@@ -1951,8 +1982,9 @@ def _legacy_review_generations(
         ):
             lens = terminal.get("review_lens")
             raw_sections = [lens] if isinstance(lens, str) and lens else ["code"]
+        primary_coverage = legacy_coverages[(generation_id, family)]
         sections = tuple(
-            sorted(set(generation.required_sections).intersection(raw_sections))
+            sorted(set(primary_coverage.required_sections).intersection(raw_sections))
         )
         if not sections:
             continue
@@ -1964,14 +1996,14 @@ def _legacy_review_generations(
                 to_identity=identity,
                 proof={
                     "kind": "legacy-delta-review-v1",
-                    "primary_terminal_ref": generation.primary_origin_receipt,
+                    "primary_terminal_ref": primary_coverage.primary_origin_receipt,
                     "delta_terminal_ref": delta_ref,
                 },
                 sections=sections,
                 family=family,
             )
         )
-        legacy_delta_refs.setdefault(generation_id, []).append(delta_ref)
+        legacy_delta_refs.setdefault((generation_id, family), []).append(delta_ref)
 
     cache_key = _authentication_cache_key(records)
     _review_cache_store(
@@ -1986,12 +2018,20 @@ def _legacy_review_generations(
             },
         ),
     )
+    _review_cache_store(
+        _legacy_family_coverage_cache,
+        cache_key,
+        records,
+        dict(legacy_coverages),
+    )
     return cast(dict[str, object], legacy)
 
 
 def _legacy_delta_projection(
     records: Sequence[dict[str, object]],
-) -> tuple[tuple[object, ...], dict[str, tuple[str, ...]]]:
+) -> tuple[
+    tuple[object, ...], dict[tuple[str, str], tuple[str, ...]]
+]:
     """Return authenticated historical delta endpoints and their receipts."""
     cache_key = _authentication_cache_key(records)
     cached = _legacy_delta_projection_cache.get(cache_key)
@@ -1999,6 +2039,17 @@ def _legacy_delta_projection(
         _legacy_review_generations(records)
         cached = _legacy_delta_projection_cache.get(cache_key)
     return cached[1] if cached is not None else ((), {})
+
+
+def _legacy_family_coverages(
+    records: Sequence[dict[str, object]],
+) -> dict[tuple[str, str], object]:
+    cache_key = _authentication_cache_key(records)
+    cached = _legacy_family_coverage_cache.get(cache_key)
+    if cached is None:
+        _legacy_review_generations(records)
+        cached = _legacy_family_coverage_cache.get(cache_key)
+    return dict(cached[1]) if cached is not None else {}
 
 
 def generations(records: Sequence[dict[str, object]]) -> dict[str, object]:
@@ -2075,8 +2126,36 @@ def family_coverages(
     )
 
     projected_generations = generations(records)
+    authenticated_rows = authenticated_review_state_records(records)
+    native_generation_ids: set[str] = set()
+    for record in authenticated_rows:
+        if record.get("type") != REVIEW_GENERATION_TYPE:
+            continue
+        try:
+            native_generation_ids.add(
+                ReviewGenerationV1.from_dict(record).generation_id
+            )
+        except (TypeError, ValueError):
+            continue
+    legacy_coverages = _legacy_family_coverages(records)
     result: dict[tuple[str, str], ReviewFamilyCoverageV1] = {}
     for generation in projected_generations.values():
+        legacy_for_generation = {
+            key: coverage
+            for key, coverage in legacy_coverages.items()
+            if key[0] == generation.generation_id
+        }
+        if (
+            generation.generation_id not in native_generation_ids
+            and legacy_for_generation
+        ):
+            result.update(
+                cast(
+                    dict[tuple[str, str], ReviewFamilyCoverageV1],
+                    legacy_for_generation,
+                )
+            )
+            continue
         family = "trust" if generation.required_sections == ("trust",) else "delivery"
         policy_digest = getattr(generation, "policy_digest", None)
         if not isinstance(policy_digest, str):
@@ -2101,7 +2180,7 @@ def family_coverages(
             manifest_digest=("0" * 64 if family == "trust" else None),
             claim_set_digest=("0" * 64 if family == "trust" else None),
         )
-    for record in authenticated_review_state_records(records):
+    for record in authenticated_rows:
         if record.get("type") == REVIEW_GENERATION_TYPE:
             # Released D29 rows stored coverage on the generation.  Preserve it
             # as a conservative family seed; new rows use the dedicated type.
@@ -2524,7 +2603,7 @@ def slot_state(
             if coverage is not None:
                 inherited = coverage.primary_origin_receipt
                 legacy_carries, delta_refs = _legacy_delta_projection(records)
-                inherited_deltas = delta_refs.get(generation_id, ())
+                inherited_deltas = delta_refs.get((generation_id, family), ())
                 inherited_delta_consumed = any(
                     carry.generation_id == generation_id
                     and carry.family == family
@@ -2537,23 +2616,48 @@ def slot_state(
                 (generation.predecessor_id, family)
             )
             predecessor_state = slot_state(records, generation.predecessor_id, family)
-            predecessor_complete = bool(
-                predecessor_state.own_primary_consumed
-                or (
-                    predecessor_state.inherited_primary_ref is not None
-                    and predecessor is not None
-                    and predecessor_coverage is not None
-                    and (
-                        not predecessor_coverage.invalidated_sections
-                        or predecessor_state.delta_consumed
-                    )
+            candidate = None
+            if predecessor is not None and predecessor_coverage is not None:
+                coverage_digest = canonical_record_digest(
+                    predecessor_coverage.to_dict()
                 )
-            )
-            candidate = (
-                predecessor_state.primary_terminal_ref
-                if predecessor_complete
-                else None
-            )
+
+                def consumed_receipt(slot_kind: str) -> str | None:
+                    for reservation in reversed(predecessor_state.reservations):
+                        if (
+                            reservation.slot_kind != slot_kind
+                            or reservation.coverage_digest != coverage_digest
+                        ):
+                            continue
+                        settlement = predecessor_state.settlement_for(
+                            reservation.reservation_id
+                        )
+                        if (
+                            settlement is not None
+                            and predecessor_state._effective_outcome(settlement)
+                            is ReviewOutcome.CONSUMED
+                        ):
+                            return cast(str, settlement.terminal_ref)
+                    return None
+
+                current_primary = consumed_receipt("primary")
+                state_primary = predecessor_state.primary_terminal_ref
+                candidate = (
+                    current_primary
+                    if current_primary is not None
+                    else predecessor_coverage.primary_origin_receipt
+                    if predecessor_coverage.primary_origin_receipt is not None
+                    and predecessor_coverage.primary_origin_receipt == state_primary
+                    and predecessor_state.primary_consumed
+                    else None
+                )
+                if (
+                    candidate is not None
+                    and predecessor_coverage.invalidated_sections
+                    and consumed_receipt("delta") is None
+                    and not predecessor_state.inherited_delta_consumed
+                ):
+                    candidate = None
             if coverage is not None and coverage.primary_origin_receipt == candidate:
                 inherited = candidate
     result = ReviewSlotState(
