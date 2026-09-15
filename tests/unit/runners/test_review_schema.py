@@ -3,6 +3,8 @@ from copy import deepcopy
 import jsonschema
 import pytest
 
+from loopzero.runners import TRUST_CLAIM_ID_PATTERN, trust_claim_verdicts_schema
+
 from loopzero.kernel.gitscope import DispatchError
 from loopzero.review.authority import normalize_review_result
 from loopzero.runners._review_schema import (
@@ -10,6 +12,14 @@ from loopzero.runners._review_schema import (
     validate_trust_claim_result,
 )
 from loopzero.runners.contract import governed_result_schema
+
+
+def test_trust_claim_schema_and_identity_pattern_have_a_public_stable_surface():
+    bounded = {"type": "string", "minLength": 1, "maxLength": 4000}
+    schema = trust_claim_verdicts_schema(bounded_string=bounded)
+    assert schema["items"]["properties"]["claim_id"]["pattern"] == (
+        TRUST_CLAIM_ID_PATTERN
+    )
 
 
 CLAIM_A = "tc_" + "a" * 64

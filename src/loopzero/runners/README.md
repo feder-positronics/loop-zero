@@ -7,6 +7,10 @@ are merged into their vendor module; names and call signatures are unchanged,
 and importing callers use the new module path.
 `contract.py` includes the names formerly in `contracts.py` and
 `governed_result.py`; `_review_schema.py` holds their unchanged schema helpers.
+Consumers may import `trust_claim_verdicts_schema` and
+`TRUST_CLAIM_ID_PATTERN` from `loopzero.runners`. These two names are the stable
+public contract for strict trust-claim result adapters; the underscore module
+remains private.
 
 Configure a consumer and obtain a filesystem wrapper from the kernel before
 constructing adapters or calling credential helpers. Default adapter
