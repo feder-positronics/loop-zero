@@ -269,11 +269,14 @@ def seal_credential(
     output: Path,
     broker: Callable[..., ContextManager[int]] | None = None,
     sandbox_wrapper: SandboxWrapper | None = None,
+    requested_runtime_s: int = SEALED_RUNTIME_S,
 ) -> str:
     """Validate/refresh *source* and atomically create access-only *output*."""
 
     if vendor not in VENDORS:
         raise CredentialSealError("credential vendor is invalid")
+    if type(requested_runtime_s) is not int or not 0 < requested_runtime_s <= 7 * 86400:
+        raise CredentialSealError("credential validity interval is invalid")
     source, output = _validate_paths(source, output)
     claude_source_kind = (
         claude.explicit_credential_source_kind(source)
@@ -299,7 +302,7 @@ def seal_credential(
         codex_cli_path=runtime if vendor == "codex" else None,
         cursor_cli_path=runtime if vendor == "cursor" else None,
     )
-    kwargs: dict[str, object] = {"requested_runtime_s": SEALED_RUNTIME_S}
+    kwargs: dict[str, object] = {"requested_runtime_s": requested_runtime_s}
     if source is not None:
         kwargs["credential_path"] = source
     if vendor == "claude":

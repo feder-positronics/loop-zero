@@ -22,8 +22,77 @@ starts, and only the snapshot is mounted read-only in the validation bubble.
 Explicit Claude OAuth files remain supported for operator-owned hosts where the
 CLI can safely persist rotation; their sealing and refresh path is unchanged.
 
-The Codex and Cursor environment secrets remain their native subscription-login
-credential JSON:
+## Codex host renewal
 
-- `LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL`
-- `LOOPZERO_CONFORMANCE_CURSOR_CREDENTIAL`
+`LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL` must contain an **access-only snapshot**,
+never the host's native login file. The snapshot retains the native JSON shape
+for CLI compatibility, but its `refresh_token` field contains the access token;
+it cannot refresh. The owning host keeps the real refresh token, and the existing
+broker asks the pinned vendor CLI to refresh and persist rotation there.
+
+From an installed, reviewed loopzero wheel with the `codex` extra, run:
+
+```sh
+umask 077
+stage=$(mktemp -d "$XDG_RUNTIME_DIR/loopzero-renew.XXXXXXXX")
+trap 'rm -rf -- "$stage"' EXIT
+loopzero accounts renew ci --source "$HOME/.codex/auth.json" --out "$stage/snapshot.json"
+gh secret set LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL \
+  --repo feder-positronics/loop-zero --env nightly-conformance < "$stage/snapshot.json"
+```
+
+The source must be an explicit absolute path to a regular mode-0600 file outside
+repositories. The output must be new, in an owner-only mode-0700 directory outside
+repositories. Neither credential is printed. `ci` is an operator label only;
+this command does not yet resolve declared accounts or produce a signed account
+alias (credential harness steps 3–4). No ambient credential discovery occurs.
+
+Renewal demands 72 hours of remaining access-token validity plus the broker's
+five-minute safety margin. It refreshes only below that horizon. A revoked login,
+an insufficient refreshed lifetime, or a short-lived access-only source fails
+closed, leaving no new snapshot to upload. A sufficiently fresh host login is
+sealed without a network call. The broker still serializes refresh and verifies
+the account and source before installing the vendor's replacement.
+
+### User systemd timer
+
+Reviewed examples are in [examples/renew-codex-nightly.sh](examples/renew-codex-nightly.sh),
+[examples/loopzero-codex-renew.service](examples/loopzero-codex-renew.service), and
+[examples/loopzero-codex-renew.timer](examples/loopzero-codex-renew.timer).
+
+1. Install the reviewed wheel and its `codex` extra in a dedicated environment
+   outside any checkout, for example `$HOME/.local/share/loopzero-renew`.
+   The refresh command needs Linux user namespaces and `bwrap`.
+2. Authenticate `gh` on this host with permission to update the repository's
+   `nightly-conformance` environment secret. Use a dedicated CI vendor account
+   where possible; keep its native login on this host only.
+3. Copy the script to `$HOME/.local/libexec/renew-codex-nightly.sh` and the two
+   units to `$HOME/.config/systemd/user/`. Edit `ExecStart` for the installed
+   loopzero and gh executable paths, source login, repository, environment and
+   secret. These arguments contain paths and labels only, never token material.
+4. Run `systemctl --user daemon-reload`, then
+   `systemctl --user start loopzero-codex-renew.service`. This uploads a snapshot;
+   check `systemctl --user status loopzero-codex-renew.service` for success.
+5. Enable scheduling with
+   `systemctl --user enable --now loopzero-codex-renew.timer`. For unattended
+   operation while logged out, configure user lingering with the host operator.
+
+The timer runs hourly with up to five minutes of jitter and catches a missed run
+when the user manager restarts. The script stages only access-only output under
+`XDG_RUNTIME_DIR`, uploads it on stdin, suppresses provider output, and removes
+the staging directory on success, failure or a catchable termination signal.
+An upload failure leaves the previous GitHub secret unchanged; the next hourly
+run retries. Monitor failed services: suspension, a revoked login, or more than
+72 hours without a successful renewal can leave the nightly without a usable
+credential. A forced kill can leave an access-only file until the runtime
+directory is removed; it never stages the host login for upload.
+
+The workflow continues to validate and seal the snapshot before launching
+checked-out code. It fails if the access token no longer covers the job; it
+cannot refresh on GitHub.
+
+### Cursor
+
+Cursor remains non-blocking under #35. Its host-renewal mechanism is not provided
+by this Codex command; do not use it to upload a Cursor native login containing
+refresh capability. Completing Cursor renewal remains part of #32 step 2.

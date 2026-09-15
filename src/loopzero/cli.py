@@ -1,7 +1,7 @@
 """``loopzero`` command line.
 
 Subcommands present in this release: ``init``, ``sync``, ``status``,
-``policy lint``, ``doctor``, ``checks``, ``review-stats``. Later releases add ``worktree``,
+``policy lint``, ``doctor``, ``checks``, ``review-stats``, ``accounts renew``. Later releases add ``worktree``,
 ``job``, ``ledger``, ``dispatch``, ``review``, ``delivery`` and ``evidence``
 as their modules land. Exit code 0 means the command produced its result; a
 report command's exit code never asserts that a policy passed unless the
@@ -278,6 +278,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_accounts_renew(args: argparse.Namespace) -> int:
+    """Re-seal a Codex host login for the next three days of nightly runs."""
+    from .credential_seal import seal_credential
+
+    try:
+        seal_credential(
+            "codex", source=args.source, output=args.out,
+            requested_runtime_s=3 * 86400,
+        )
+    except Exception as exc:
+        print(f"account renewal failed: {type(exc).__name__}", file=sys.stderr)
+        return 1
+    print("account snapshot renewed")
+    return 0
+
+
 def cmd_checks(args: argparse.Namespace) -> int:
     profile = load_profile(Path(args.root))
     try:
@@ -431,6 +447,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", help="report required host tools")
     p.set_defaults(func=cmd_doctor)
+
+    accounts = sub.add_parser("accounts", help="host credential commands").add_subparsers(
+        dest="accounts_command", required=True,
+    )
+    p = accounts.add_parser("renew", help="seal a Codex access-only snapshot valid for 72 hours")
+    p.add_argument("label", help="operator label (not a signed account alias)")
+    p.add_argument("--source", type=Path, required=True, help="absolute path to the host's mode-0600 Codex login")
+    p.add_argument("--out", type=Path, required=True, help="new snapshot in a mode-0700 directory outside repositories")
+    p.set_defaults(func=cmd_accounts_renew)
 
     p = sub.add_parser("checks", help="read-only in-package check-policy report")
     p.add_argument("--results", help="JSON results file keyed by exact check name")
