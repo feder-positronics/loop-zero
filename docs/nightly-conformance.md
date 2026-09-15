@@ -61,21 +61,27 @@ Reviewed examples are in [examples/renew-codex-nightly.sh](examples/renew-codex-
 [examples/loopzero-codex-renew.timer](examples/loopzero-codex-renew.timer).
 
 1. Install the reviewed wheel and its `codex` extra in a dedicated environment
-   outside any checkout. Use a system Python under `/usr` (version 3.12 or later)
-   with **copied executables** so the refresh bridge retains the environment's
-   SDK imports and stays within the sandbox's runtime mounts:
+   outside any checkout. Use Python 3.12 or later, either a system installation
+   under `/usr` or a managed CPython installation (for example, uv). Venvs with
+   copied or symlinked executables retain their SDK imports during refresh:
 
    ```sh
-   /usr/bin/python3 -m venv --without-pip --copies "$HOME/.local/share/loopzero-renew"
+   /usr/bin/python3 -m venv --without-pip "$HOME/.local/share/loopzero-renew"
    uv pip install --python "$HOME/.local/share/loopzero-renew/bin/python" \
      '/absolute/path/to/loopzero-VERSION-py3-none-any.whl[codex]'
    ```
 
    Replace the wheel placeholder with a wheel built from the reviewed renewal
    commit; the released v0.4.3 wheel does not contain this command. The refresh
-   command needs Linux user namespaces and `bwrap`. Managed-Python environments
-   and symlinked interpreters need further work, tracked in
-   [#62](https://github.com/feder-positronics/loop-zero/issues/62).
+   command needs Linux user namespaces and `bwrap`. To use managed Python,
+   replace the venv creation command with
+   `uv venv --python 3.12 "$HOME/.local/share/loopzero-renew"`.
+   The trusted sealer preserves the venv interpreter identity and mounts its
+   environment plus the running Python's `sys.base_prefix` and
+   `sys.base_exec_prefix` read-only. This exposes the selected installation's
+   standard library and extension modules without mounting its shared managed
+   runtime directory or the host home. Keep the venv and its base installation
+   available together; install SDKs in that venv.
 2. Authenticate `gh` on this host with permission to update the repository's
    `nightly-conformance` environment secret. Use a dedicated CI vendor account
    where possible; keep its native login on this host only.
