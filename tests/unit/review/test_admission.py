@@ -17,7 +17,7 @@ import pytest
 # tests/unit/review/test_admission.py::test_native_delivery_settlement_rejects_nonverdict_and_cross_family_terminals
 # tests/unit/review/test_admission.py::test_caller_rehashed_stale_trust_digests_cannot_carry_old_receipt
 # tests/unit/review/test_admission.py::test_package_declared_nonverdict_intents_launch_without_slot_authority`.
-# All fourteen parametrized cases failed on 6215393.
+# All sixteen parametrized cases failed on 6215393.
 
 from loopzero.kernel import (
     authority_projection,
@@ -896,7 +896,16 @@ def test_admission_resolution_and_publication_agree_per_section_on_proof_hops():
 
 
 @pytest.mark.parametrize("requested", ["review", "delta"])
-def test_base_motion_invalidates_trust_carry_for_both_requested_kinds(requested):
+@pytest.mark.parametrize(
+    ("overlap", "invalidated"),
+    [
+        (("security/policy.py",), ()),
+        ((), ("a" * 64,)),
+    ],
+)
+def test_base_motion_invalidates_trust_carry_for_both_requested_kinds(
+    requested, overlap, invalidated
+):
     original = identity("a")
     delivery = admit_all_sections([], original, "delivery", requested="review")
     rows = list(delivery.records_to_append)
@@ -914,17 +923,18 @@ def test_base_motion_invalidates_trust_carry_for_both_requested_kinds(requested)
     append_settlement(rows, trust.slot, ReviewOutcome.CONSUMED, terminal("trust"))
 
     target = identity("b")
-    proof = generation_proof(
-        original, target, overlap=("security/policy.py",)
-    )
+    proof = generation_proof(original, target, overlap=overlap)
     rows.append(proof)
     delivery_delta = admit_all_sections(
         rows, target, "delivery-delta", proof=proof
     )
-    assert isinstance(delivery_delta, admission.Reserved)
+    assert isinstance(delivery_delta, admission.Reserved | admission.Carry)
     rows.extend(delivery_delta.records_to_append)
     target_trust_task = trust_task(
-        target, name="trust-carry", key="trust-carry"
+        target,
+        name="trust-carry",
+        key="trust-carry",
+        invalidated=invalidated,
     )
     trust_delta = admission.admit_review(
         _REPOSITORY, rows, repository_binding="repo",
@@ -939,14 +949,17 @@ def test_base_motion_invalidates_trust_carry_for_both_requested_kinds(requested)
     assert trust_delta.slot.family == "trust"
     assert trust_delta.slot.slot_kind == "delta"
     assert trust_delta.scoped_task["delta_scope"]["invalidated_claim_ids"] == [
-        target_trust_task["trust_claim_task"]["invalidated_claims"][0]["claim_id"]
+        row["claim_id"]
+        for row in target_trust_task["trust_claim_task"]["invalidated_claims"]
     ]
     delivery_carry = next(
         row for row in delivery_delta.records_to_append
         if row["type"] == "generation-carry-v1"
     )
     assert delivery_carry["family"] == "delivery"
-    assert delivery_carry["sections"] == ["code"]
+    assert delivery_carry["sections"] == (
+        ["code"] if overlap else ["code", "security"]
+    )
 
     # Parent proof (6215393): running this node after copying it onto the
     # reviewed head returns Carry for both parameters, so both cases fail.
