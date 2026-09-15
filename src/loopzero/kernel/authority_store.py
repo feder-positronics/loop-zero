@@ -25,6 +25,7 @@ from typing import cast
 
 
 from . import ledger as authority_ledger
+from .authority_families import GOVERNED_RECORD_FAMILIES, governed_record_family
 from .seams import passing_archive_anchor, passing_archive_ancestry, validate_archived_review_witness
 from .authority import (
     authenticated_gone_owner_abort,
@@ -1017,6 +1018,67 @@ def _retention_live_record_ids(
             )
         ):
             selected.add(id(record))
+    extension_ids = {
+        id(record)
+        for record in records
+        if (rule := governed_record_family(record.get("type"))) is not None
+        and rule.anchor != "policy"
+    }
+    selected.difference_update(extension_ids)
+    generation_anchors = {
+        record.get("generation_id")
+        for record in records
+        if id(record) in selected and record.get("type") == "review-generation-v1"
+    }
+    reservation_anchors = {
+        record.get("reservation_id")
+        for record in records
+        if id(record) in selected
+        and record.get("type") == "review-slot-reservation-v1"
+    }
+
+    def attempt_reference(record: Mapping[str, object]) -> tuple[object, object]:
+        task_id = record.get("task_id")
+        attempt_index = record.get("attempt_index")
+        if attempt_index is None and isinstance(task_id, str):
+            attempt_id = record.get("attempt_id")
+            if isinstance(attempt_id, str):
+                prefix, separator, suffix = attempt_id.rpartition(":")
+                if separator and prefix == task_id and suffix.isdigit():
+                    attempt_index = int(suffix)
+        return task_id, attempt_index
+
+    attempt_anchors = {
+        attempt_reference(record)
+        for record in records
+        if id(record) in selected
+        and record.get("type") in {"attempt-start", "attempt-terminal", "attempt-abort"}
+    }
+
+    def reference(record: Mapping[str, object], path: tuple[str, ...]) -> object:
+        value: object = record
+        for name in path:
+            if not isinstance(value, Mapping):
+                return None
+            value = value.get(name)
+        return value
+
+    for record in records:
+        rule = governed_record_family(record.get("type"))
+        if rule is None or rule.anchor == "policy":
+            continue
+        keep = (
+            rule.anchor == "generation"
+            and reference(record, rule.reference_path) in generation_anchors
+        ) or (
+            rule.anchor == "reservation"
+            and reference(record, rule.reference_path) in reservation_anchors
+        ) or (
+            rule.anchor == "attempt"
+            and attempt_reference(record) in attempt_anchors
+        )
+        if keep:
+            selected.add(id(record))
     return frozenset(selected)
 
 
@@ -1443,7 +1505,7 @@ def retained_authority_projection(
         {
             str(record.get("type"))
             for record in governed
-            if record.get("type") not in _COMPACTABLE_AUTHORITY_RECORD_TYPES
+            if record.get("type") not in GOVERNED_RECORD_FAMILIES
         }
     )
     if unknown:
@@ -1536,42 +1598,7 @@ def retained_authority_projection_once(
     ]
 
 
-_COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(
-    {
-        "alias-availability",
-        "attempt-abort",
-        "attempt-checkpoint",
-        "attempt-cleanup-failure",
-        "attempt-owner",
-        "attempt-patch-identity-carry",
-        "attempt-progress",
-        "attempt-recovery",
-        "attempt-start",
-        "attempt-supersession",
-        "attempt-terminal",
-        "coordinator-authority-cutover",
-        "delivery-control",
-        "deposit-verification",
-        "evidence-cleanup",
-        "evidence-cleanup-friction",
-        "inline",
-        "inconclusive-retry-authorization",
-        "review-chain-advisory",
-        "review-generation-v1",
-        "review-generation-proof-v1",
-        "review-generation-link-v1",
-        "review-recovery-verification",
-        "review-slot-reservation-v1",
-        "review-slot-settlement-v1",
-        "review-launch-v1",
-        "review-launch-outcome-v1",
-        RETENTION_STATE_TYPE,
-        "route",
-        "scratch-cleanup",
-        "verdict",
-        "generation-carry-v1",
-    }
-)
+_COMPACTABLE_AUTHORITY_RECORD_TYPES = frozenset(GOVERNED_RECORD_FAMILIES)
 
 
 @dataclass(frozen=True)

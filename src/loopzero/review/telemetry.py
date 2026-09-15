@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
 REVIEW_LAUNCH_TYPE = "review-launch-v1"
 REVIEW_LAUNCH_OUTCOME_TYPE = "review-launch-outcome-v1"
+REVIEW_NONVERDICT_LAUNCH_TYPE = "review-nonverdict-launch-v1"
 REVIEW_LAUNCH_REASONS = frozenset(
     {
         "initial",
@@ -110,6 +111,8 @@ class ReviewLaunchV1:
 
     reservation_id: str
     attempt_id: str
+    task_id: str
+    attempt_index: int
     _reason: LaunchReason = field(repr=False)
     _secondary_triggers: tuple[LaunchReason, ...] = field(repr=False)
     invalidation_causes: Mapping[str, str]
@@ -136,6 +139,14 @@ class ReviewLaunchV1:
             raise ReviewTelemetryError("review launch reservation id is invalid")
         if not isinstance(self.attempt_id, str) or not self.attempt_id:
             raise ReviewTelemetryError("review launch attempt id is invalid")
+        if not isinstance(self.task_id, str) or not self.task_id:
+            raise ReviewTelemetryError("review launch task id is invalid")
+        if (
+            isinstance(self.attempt_index, bool)
+            or not isinstance(self.attempt_index, int)
+            or self.attempt_index < 0
+        ):
+            raise ReviewTelemetryError("review launch attempt index is invalid")
         if self._reason not in REVIEW_LAUNCH_REASONS:
             raise ReviewTelemetryError("review launch reason is invalid")
         secondary = tuple(dict.fromkeys(self._secondary_triggers))
@@ -199,6 +210,8 @@ class ReviewLaunchV1:
         admitted: Reserved,
         *,
         attempt_id: str,
+        task_id: str | None = None,
+        attempt_index: int | None = None,
         admitted_at: datetime | str | None = None,
         invalidation: Invalidation | None = None,
         quota_state: Mapping[str, object] | None = None,
@@ -256,9 +269,23 @@ class ReviewLaunchV1:
             None,
         )
         causes = dict(invalidation.causes) if invalidation is not None else {}
+        resolved_task_id = task_id or _task_value(task, "task_id") or admitted.slot.task_id
+        raw_attempt_index = (
+            attempt_index
+            if attempt_index is not None
+            else _task_value(task, "attempt_index")
+        )
+        if raw_attempt_index is None and isinstance(resolved_task_id, str):
+            prefix, separator, suffix = attempt_id.rpartition(":")
+            if separator and prefix == resolved_task_id and suffix.isdigit():
+                raw_attempt_index = int(suffix)
+        if raw_attempt_index is None:
+            raw_attempt_index = 0
         return cls(
             reservation_id=admitted.slot.reservation_id,
             attempt_id=attempt_id,
+            task_id=cast(str, resolved_task_id),
+            attempt_index=cast(int, raw_attempt_index),
             _reason=admitted.launch_reason,
             _secondary_triggers=admitted.secondary_triggers,
             invalidation_causes=causes,
@@ -301,6 +328,8 @@ class ReviewLaunchV1:
             "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
             "reservation_id": self.reservation_id,
             "attempt_id": self.attempt_id,
+            "task_id": self.task_id,
+            "attempt_index": self.attempt_index,
             "reason": self.reason,
             "secondary_triggers": list(self.secondary_triggers),
             "invalidation_causes": dict(self.invalidation_causes),
@@ -331,6 +360,8 @@ class ReviewLaunchV1:
         fields = {
             "reservation_id",
             "attempt_id",
+            "task_id",
+            "attempt_index",
             "reason",
             "secondary_triggers",
             "invalidation_causes",
@@ -363,6 +394,8 @@ class ReviewLaunchV1:
         return cls(
             reservation_id=cast(str, record["reservation_id"]),
             attempt_id=cast(str, record["attempt_id"]),
+            task_id=cast(str, record["task_id"]),
+            attempt_index=cast(int, record["attempt_index"]),
             _reason=cast("LaunchReason", record["reason"]),
             _secondary_triggers=tuple(
                 cast(list["LaunchReason"], record["secondary_triggers"])
@@ -433,6 +466,8 @@ class ReviewLaunchOutcomeV1:
 
     reservation_id: str
     attempt_id: str
+    task_id: str
+    attempt_index: int
     review_outcome: ReviewOutcome
     failure_class: str | None
     elapsed_seconds: float | None
@@ -453,6 +488,14 @@ class ReviewLaunchOutcomeV1:
             raise ReviewTelemetryError("review outcome reservation id is invalid")
         if not isinstance(self.attempt_id, str) or not self.attempt_id:
             raise ReviewTelemetryError("review outcome attempt id is invalid")
+        if not isinstance(self.task_id, str) or not self.task_id:
+            raise ReviewTelemetryError("review outcome task id is invalid")
+        if (
+            isinstance(self.attempt_index, bool)
+            or not isinstance(self.attempt_index, int)
+            or self.attempt_index < 0
+        ):
+            raise ReviewTelemetryError("review outcome attempt index is invalid")
         if self.elapsed_seconds is not None and (
             isinstance(self.elapsed_seconds, bool)
             or not isinstance(self.elapsed_seconds, int | float)
@@ -523,6 +566,8 @@ class ReviewLaunchOutcomeV1:
         return cls(
             reservation_id=launch.reservation_id,
             attempt_id=launch.attempt_id,
+            task_id=launch.task_id,
+            attempt_index=launch.attempt_index,
             review_outcome=settlement.outcome,
             failure_class=(
                 None
@@ -547,6 +592,8 @@ class ReviewLaunchOutcomeV1:
             "runtime_contract_version": RUNTIME_CONTRACT_VERSION,
             "reservation_id": self.reservation_id,
             "attempt_id": self.attempt_id,
+            "task_id": self.task_id,
+            "attempt_index": self.attempt_index,
             "review_outcome": self.review_outcome.value,
             "failure_class": self.failure_class,
             "elapsed_seconds": self.elapsed_seconds,
@@ -567,6 +614,8 @@ class ReviewLaunchOutcomeV1:
         fields = {
             "reservation_id",
             "attempt_id",
+            "task_id",
+            "attempt_index",
             "review_outcome",
             "failure_class",
             "elapsed_seconds",
@@ -588,6 +637,8 @@ class ReviewLaunchOutcomeV1:
         return cls(
             reservation_id=cast(str, record["reservation_id"]),
             attempt_id=cast(str, record["attempt_id"]),
+            task_id=cast(str, record["task_id"]),
+            attempt_index=cast(int, record["attempt_index"]),
             review_outcome=ReviewOutcome(cast(str, record["review_outcome"])),
             failure_class=cast(str | None, record["failure_class"]),
             elapsed_seconds=cast(float | None, record["elapsed_seconds"]),
@@ -607,6 +658,7 @@ __all__ = [
     "REVIEW_LAUNCH_OUTCOME_TYPE",
     "REVIEW_LAUNCH_REASONS",
     "REVIEW_LAUNCH_TYPE",
+    "REVIEW_NONVERDICT_LAUNCH_TYPE",
     "BillingMode",
     "ReviewLaunchOutcomeV1",
     "ReviewLaunchV1",

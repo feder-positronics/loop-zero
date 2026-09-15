@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -5,7 +6,12 @@ import pytest
 
 from loopzero.kernel import authority_projection, authority_store
 from loopzero.kernel.gitscope import DispatchError
-from loopzero.kernel.review_state import ReviewSlotReservation, ReviewSlotSettlement
+from loopzero.kernel.review_state import (
+    ReviewGenerationV1,
+    ReviewSlotReservation,
+    ReviewSlotSettlement,
+    generation_id_for,
+)
 from loopzero.review.admission import Reserved
 from loopzero.review.stats import review_stats
 from loopzero.review.telemetry import (
@@ -311,6 +317,87 @@ def test_governed_review_records_preserve_authenticated_view(monkeypatch):
     assert authority_projection.authenticated_retention_state_records(governed) == [
         retained_state
     ]
+
+
+def test_registered_consumer_families_compact_with_their_anchors(monkeypatch):
+    patch = _reserved().scoped_task["patch_identity"]
+    generation_id = generation_id_for(
+        "repo", patch, patch["candidate_tree_sha"], ("trust",)
+    )
+    generation = ReviewGenerationV1(
+        repository_binding="repo",
+        lineage_id="rl_" + "1" * 32,
+        generation_id=generation_id,
+        predecessor_id=None,
+        patch_identity=patch,
+        tree=patch["candidate_tree_sha"],
+        required_sections=("trust",),
+        policy_digest=hashlib.sha256(
+            b'["review-generation-policy-v1",["trust"]]'
+        ).hexdigest(),
+        delta_from_tree=None,
+        delta_sha256=None,
+        changed_paths=(),
+        dependency_paths=(),
+        primary_origin_receipt=None,
+        inherited_coverage=(),
+        invalidated_sections=(),
+    ).to_dict()
+    metadata = {
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+    }
+    start = {
+        **metadata,
+        "type": "attempt-start",
+        "task_id": "discovery-task",
+        "attempt_index": 0,
+        "attempt_id": "discovery-task:0",
+        "run_id": "active-run",
+        "review_intent": "discovery",
+    }
+    nonverdict = {
+        **metadata,
+        "type": "review-nonverdict-launch-v1",
+        "task_id": "discovery-task",
+        "attempt_id": "discovery-task:0",
+        "intent": "discovery",
+    }
+    trust_receipt = {
+        **metadata,
+        "type": "trust-claim-receipt-v1",
+        "task_id": "trust-task",
+        "trust_claim_receipt": {"generation_ref": generation_id},
+    }
+    rows = [generation, start, nonverdict, trust_receipt]
+    _authenticate_all_review_rows(monkeypatch)
+
+    retained = authority_store.retained_authority_projection(
+        rows, active_run_ids={"active-run"}
+    )
+    assert generation in retained
+    assert start in retained
+    assert nonverdict in retained
+    assert trust_receipt in retained
+
+    without_anchors = authority_store.retained_authority_projection(
+        [nonverdict, trust_receipt]
+    )
+    assert nonverdict not in without_anchors
+    assert trust_receipt not in without_anchors
+
+
+def test_unregistered_governed_family_still_refuses_compaction(monkeypatch):
+    _authenticate_all_review_rows(monkeypatch)
+    unknown = {
+        "type": "consumer-invented-authority-v1",
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+    }
+    with pytest.raises(DispatchError, match="does not know current-policy"):
+        authority_store.retained_authority_projection([unknown])
 
 
 def test_governed_plain_records_cannot_authenticate_retention_state():

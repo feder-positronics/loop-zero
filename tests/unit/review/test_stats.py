@@ -287,3 +287,73 @@ def test_since_keeps_attempts_with_unrecorded_timestamps():
     result = review_stats(rows, since="2026-09-14T00:00:00Z")
     assert result.totals.starts == 1
     assert result.per_pr["unrecorded"].starts == 1
+
+
+def test_launch_start_terminal_and_outcome_join_as_one_attempt():
+    common = {
+        "task_id": "joined-review",
+        "attempt_index": 2,
+        "attempt_id": "joined-review:2",
+        "review_intent": "delivery-code-review",
+        "pr_number": 4409,
+        "engine": "codex",
+    }
+    rows = [
+        {
+            **common,
+            "type": "review-launch-v1",
+            "reservation_id": "rr_joined",
+            "reason": "initial",
+            "source_identity_digest": "1" * 64,
+            "patch_identity_digest": "2" * 64,
+            "manifest_digest": None,
+            "fresh_claim_count": 0,
+            "carried_claim_count": 0,
+            "admitted_at": "2026-09-14T10:00:00+00:00",
+        },
+        {**common, "type": "attempt-start", "run_id": "run"},
+        {
+            **common,
+            "type": "attempt-terminal",
+            "run_id": "run",
+            "status": "completed",
+            "duration_s": 60,
+            "accepted_verdict": "pass",
+        },
+        {**common, "type": "verdict", "run_id": "run", "verdict": "pass"},
+        {
+            **common,
+            "type": "review-launch-outcome-v1",
+            "reservation_id": "rr_joined",
+            "review_outcome": "consumed",
+            "elapsed_seconds": 60,
+            "cost_source": "unknown",
+            "terminal_at": "2026-09-14T10:01:00+00:00",
+        },
+    ]
+
+    totals = review_stats(rows).totals
+    assert totals.starts == 1
+    assert totals.terminals == 1
+    assert totals.verdicts == 1
+    assert totals.minutes == 1
+
+
+def test_nonverdict_attempt_terminal_never_counts_as_a_verdict():
+    common = {
+        "task_id": "discovery-task",
+        "attempt_index": 0,
+        "attempt_id": "discovery-task:0",
+        "review_intent": "discovery",
+    }
+    totals = review_stats(
+        [
+            {**common, "type": "review-nonverdict-launch-v1", "intent": "discovery"},
+            {**common, "type": "attempt-start"},
+            {**common, "type": "attempt-terminal", "status": "completed"},
+            {**common, "type": "verdict", "verdict": "pass"},
+        ]
+    ).totals
+    assert totals.starts == 1
+    assert totals.terminals == 1
+    assert totals.verdicts == 0
