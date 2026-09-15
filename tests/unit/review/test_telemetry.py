@@ -18,8 +18,10 @@ from loopzero.kernel import authority_projection, authority_store
 from loopzero.kernel.gitscope import DispatchError
 from loopzero.kernel.review_state import (
     ReviewGenerationV1,
+    ReviewSlotError,
     ReviewSlotReservation,
     ReviewSlotSettlement,
+    canonical_record_digest,
     generation_id_for,
 )
 from loopzero.review.admission import Reserved
@@ -30,7 +32,7 @@ from loopzero.review.telemetry import (
     ReviewTelemetryError,
     billing_mode_for_credential_kind,
 )
-from loopzero.review.trust_claims import Invalidation
+from loopzero.review.trust_claims import Invalidation, legacy_receipt
 from loopzero.runners.contract import (
     ReviewOutcome,
     RuntimeCostSource,
@@ -158,6 +160,8 @@ def test_launch_rejects_caller_reason_and_hashes_paths():
         ReviewLaunchV1(reason="initial")
     with pytest.raises(ReviewTelemetryError, match="package-derived"):
         ReviewLaunchV1.from_admission(_reserved(caller_label=True), attempt_id="a1")
+    with pytest.raises(ReviewTelemetryError, match="attempt index"):
+        ReviewLaunchV1.from_admission(_reserved(), attempt_id="unstructured")
 
     invalidation = Invalidation(
         fresh_claim_ids=("fresh",),
@@ -169,6 +173,7 @@ def test_launch_rejects_caller_reason_and_hashes_paths():
     launch = ReviewLaunchV1.from_admission(
         _reserved(),
         attempt_id="a1",
+        attempt_index=0,
         admitted_at=datetime(2026, 9, 14, tzinfo=UTC),
         invalidation=invalidation,
     )
@@ -188,7 +193,8 @@ def test_launch_rejects_caller_reason_and_hashes_paths():
 
 def test_unknown_cost_and_credential_kind_never_become_zero():
     launch = ReviewLaunchV1.from_admission(
-        _reserved(), attempt_id="a1", admitted_at="2026-09-14T10:00:00Z"
+        _reserved(), attempt_id="a1", attempt_index=0,
+        admitted_at="2026-09-14T10:00:00Z"
     )
     settlement = ReviewSlotSettlement(
         reservation_id=launch.reservation_id,
@@ -238,7 +244,8 @@ def test_review_observations_survive_with_reservations_during_compaction(
     monkeypatch,
 ):
     launch = ReviewLaunchV1.from_admission(
-        _reserved(), attempt_id="a1", admitted_at="2026-09-14T10:00:00Z"
+        _reserved(), attempt_id="a1", attempt_index=0,
+        admitted_at="2026-09-14T10:00:00Z"
     ).to_dict()
     outcome = {
         **launch,
@@ -271,7 +278,8 @@ def test_review_compaction_reprojects_authenticated_retention_state(monkeypatch)
         settlement_id="rs_" + "8" * 32,
     ).to_dict()
     launch = ReviewLaunchV1.from_admission(
-        _reserved(), attempt_id="a1", admitted_at="2026-09-14T10:00:00Z"
+        _reserved(), attempt_id="a1", attempt_index=0,
+        admitted_at="2026-09-14T10:00:00Z"
     ).to_dict()
     outcome = {
         **launch,
@@ -380,11 +388,38 @@ def test_registered_consumer_families_compact_with_their_anchors(monkeypatch):
         "attempt_id": "discovery-task:0",
         "intent": "discovery",
     }
+    manifest = {
+        "actors_assets": [{"text": "dispatcher", "paths": ["src/auth.py"]}],
+        "risk_paths": ["src/auth.py"],
+    }
+    receipt = legacy_receipt(
+        manifest,
+        source_identity=canonical_record_digest(
+            {"head": patch["candidate_sha"]}
+        ),
+        tree_sha=patch["candidate_tree_sha"],
+        manifest_sha256="8" * 64,
+        verifier_run_id="trust-run",
+        verifier_task_id="trust-task",
+    )
     trust_receipt = {
         **metadata,
         "type": "trust-claim-receipt-v1",
         "task_id": "trust-task",
-        "trust_claim_receipt": {"generation_ref": generation_id},
+        "run_id": "trust-run",
+        "status": "reused",
+        "read_only": True,
+        "work_kind": "review",
+        "review_intent": "trust-manifest-verification",
+        "category": "trust-manifest-verification",
+        "trust_claim_receipt": receipt.to_dict(),
+        "trust_claim_manifest": manifest,
+        "manifest_sha256": receipt.manifest_sha256,
+        "verification_verdict": "pass",
+        "trust_claim_aggregate": "pass",
+        "source_identity": {"head": patch["candidate_sha"]},
+        "snapshot_tree_sha": patch["candidate_tree_sha"],
+        "patch_identity": patch,
     }
     rows = [generation, start, nonverdict, trust_receipt]
     _authenticate_all_review_rows(monkeypatch)
@@ -405,6 +440,56 @@ def test_registered_consumer_families_compact_with_their_anchors(monkeypatch):
 
     # Parent proof (6215393): this pending launch is absent after projection,
     # so the assertion fails on the reviewed head.
+
+
+def test_pending_nonverdict_launch_is_keyed_by_run_task_and_attempt(monkeypatch):
+    metadata = {
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+    }
+    common = {
+        **metadata,
+        "task_id": "reused-task",
+        "attempt_index": 0,
+        "review_intent": "discovery",
+    }
+    old_start = {**common, "type": "attempt-start", "run_id": "old-run"}
+    old_terminal = {
+        **common,
+        "type": "attempt-terminal",
+        "run_id": "old-run",
+        "status": "completed",
+    }
+    pending_launch = {
+        **metadata,
+        "type": "review-nonverdict-launch-v1",
+        "task_id": "reused-task",
+        "attempt_index": 0,
+        "attempt_id": "reused-task:0",
+        "run_id": "new-run",
+        "intent": "discovery",
+        "reason": "initial",
+        "secondary_triggers": [],
+        "admitted_at": "2026-09-15T12:00:00Z",
+        "source_identity_digest": "a" * 64,
+        "patch_identity_digest": "b" * 64,
+    }
+    rows = [old_start, old_terminal, pending_launch]
+    _authenticate_all_review_rows(monkeypatch)
+
+    retained = authority_store.retained_authority_projection(
+        rows, active_run_ids={"new-run"}
+    )
+
+    assert pending_launch in retained
+
+
+def test_review_slot_error_is_content_free_and_names_its_class():
+    secret = "credential-and-path-must-not-escape"
+    error = ReviewSlotError("reservation-conflict", secret)
+    assert str(error) == "ReviewSlotError: reservation-conflict"
+    assert secret not in str(error)
 
 
 def test_unregistered_governed_family_still_refuses_compaction(monkeypatch):

@@ -378,6 +378,29 @@ def admit(
     )
 
 
+def admit_family(rows, patch, family, name, *, proof=None, invalidated=()):
+    review_task = (
+        trust_task(patch, name=name, key=name, invalidated=invalidated)
+        if family == "trust"
+        else task(name, name)
+    )
+    return admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=review_task,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=(("trust",) if family == "trust" else ("code",)),
+        equivalence_proof=proof,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+
+
 def terminal(task_id, *, tree=None, released=False, unresolved=False):
     row = {"type": "attempt-terminal", "task_id": task_id}
     row["snapshot_tree_sha"] = tree
@@ -402,6 +425,8 @@ def append_settlement(rows, reservation, outcome, result, *, verdict="pass"):
         **result,
         "snapshot_tree_sha": result.get("snapshot_tree_sha") or generation.tree,
         "review_family": reservation.family,
+        "review_reservation_id": reservation.reservation_id,
+        "review_generation_id": reservation.generation_id,
         "review_intent": (
             "trust-manifest-verification"
             if reservation.family == "trust"
@@ -604,6 +629,222 @@ def test_carry_reports_an_authenticated_failing_verdict():
     )
     assert isinstance(carried, admission.Carry)
     assert {verdict for _, verdict in carried.verdicts} == {"fail"}
+
+
+def test_intentless_legacy_delivery_primary_carries_conservatively():
+    patch = identity("a")
+    metadata = {
+        "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": authority_store.DISPATCH_POLICY_VERSION,
+        "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
+    }
+    old_terminal = {
+        **metadata,
+        **terminal("legacy-review", tree=patch["candidate_tree_sha"]),
+        "repository_binding": "repo",
+        "patch_identity": patch,
+        "source_identity": {"head": patch["candidate_sha"]},
+        "review_lens": "code",
+        "read_only": True,
+        "work_kind": "review",
+    }
+    rows = [
+        old_terminal,
+        {
+            **metadata,
+            "type": "verdict",
+            "task_id": "legacy-review",
+            "verdict": "pass",
+        },
+    ]
+
+    carried = admit(
+        rows,
+        patch,
+        review_task=task("repeat-legacy", "repeat-legacy"),
+        security=(),
+    )
+
+    assert isinstance(carried, admission.Carry)
+    assert carried.verdicts == (
+        (review_state.canonical_record_digest(old_terminal), "pass"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("first_family", "second_family"),
+    [("delivery", "trust"), ("trust", "delivery")],
+)
+def test_family_first_reviewed_at_equivalent_endpoint_can_carry(
+    first_family, second_family
+):
+    original = identity("a")
+    endpoint = identity("b")
+    first = admit_family(
+        [],
+        original,
+        first_family,
+        f"{first_family}-a",
+        invalidated=(("a" * 64,) if first_family == "trust" else ()),
+    )
+    assert isinstance(first, admission.Reserved)
+    rows = list(first.records_to_append)
+    append_settlement(
+        rows,
+        first.slot,
+        ReviewOutcome.CONSUMED,
+        terminal(f"{first_family}-a"),
+    )
+    proof = generation_proof(original, endpoint)
+    rows.append(proof)
+    first_carry = admit_family(
+        rows,
+        endpoint,
+        first_family,
+        f"{first_family}-b",
+        proof=proof,
+    )
+    assert isinstance(first_carry, admission.Carry)
+    rows.extend(first_carry.records_to_append)
+
+    second = admit_family(
+        rows,
+        endpoint,
+        second_family,
+        f"{second_family}-b",
+        proof=proof,
+        invalidated=(("a" * 64,) if second_family == "trust" else ()),
+    )
+    assert isinstance(second, admission.Reserved)
+    rows.extend(second.records_to_append)
+    append_settlement(
+        rows,
+        second.slot,
+        ReviewOutcome.CONSUMED,
+        terminal(f"{second_family}-b", tree=endpoint["candidate_tree_sha"]),
+    )
+
+    repeated = admit_family(
+        rows,
+        endpoint,
+        second_family,
+        f"repeat-{second_family}",
+    )
+    assert isinstance(repeated, admission.Carry)
+    assert {verdict for _, verdict in repeated.verdicts} == {"pass"}
+
+
+def test_old_trust_terminal_cannot_settle_a_new_obligation():
+    patch = identity("a")
+    first = admit_family(
+        [], patch, "trust", "trust", invalidated=("a" * 64,)
+    )
+    assert isinstance(first, admission.Reserved)
+    rows = list(first.records_to_append)
+    first_terminal = {
+        **terminal("trust"),
+        "review_reservation_id": first.slot.reservation_id,
+        "review_generation_id": first.slot.generation_id,
+        "task_contract": first.scoped_task,
+    }
+    append_settlement(
+        rows, first.slot, ReviewOutcome.CONSUMED, first_terminal
+    )
+    recorded_terminal = next(
+        row for row in rows if row.get("type") == "attempt-terminal"
+    )
+
+    changed_task = trust_task(
+        patch,
+        name="trust",
+        key="new-obligation",
+        invalidated=("b" * 64,),
+    )
+    delta = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=changed_task,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="delta",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(delta, admission.Reserved)
+    assert delta.slot.coverage_digest != first.slot.coverage_digest
+    rows.extend(delta.records_to_append)
+
+    with pytest.raises(review_state.ReviewSlotError, match="ReviewSlotError"):
+        review_state.settle_review_slot(
+            _REPOSITORY,
+            rows,
+            reservation=delta.slot,
+            outcome=ReviewOutcome.CONSUMED,
+            terminal_ref=recorded_terminal,
+        )
+
+    replayed = review_state.ReviewSlotSettlement(
+        reservation_id=delta.slot.reservation_id,
+        generation_id=delta.slot.generation_id,
+        family=delta.slot.family,
+        slot_kind=delta.slot.slot_kind,
+        task_id=delta.slot.task_id,
+        outcome=ReviewOutcome.CONSUMED,
+        terminal_ref=review_state.canonical_record_digest(recorded_terminal),
+        settlement_id=review_state._settlement_id(
+            delta.slot.reservation_id,
+            ReviewOutcome.CONSUMED,
+            review_state.canonical_record_digest(recorded_terminal),
+        ),
+    ).to_dict()
+    replayed_state = authority_projection.slot_state(
+        [*rows, replayed], delta.slot.generation_id, "trust"
+    )
+    assert replayed_state.outstanding == delta.slot
+    assert not replayed_state.delta_consumed
+
+
+def test_pending_trust_invalidation_cannot_be_omitted_on_retry():
+    patch = identity("a")
+    first = admit_family(
+        [], patch, "trust", "trust", invalidated=("a" * 64,)
+    )
+    assert isinstance(first, admission.Reserved)
+    rows = list(first.records_to_append)
+    append_settlement(
+        rows, first.slot, ReviewOutcome.CONSUMED, terminal("trust")
+    )
+
+    invalidation = admit_family(
+        rows,
+        patch,
+        "trust",
+        "invalidate",
+        invalidated=("a" * 64,),
+    )
+    assert isinstance(invalidation, admission.Reserved)
+    assert invalidation.slot.slot_kind == "delta"
+    rows.extend(invalidation.records_to_append)
+
+    omitted = admit_family(rows, patch, "trust", "later", invalidated=())
+    assert isinstance(omitted, admission.Blocked)
+    assert omitted.code == "slots-exhausted"
+    assert omitted.records_to_append == ()
+
+    append_settlement(
+        rows,
+        invalidation.slot,
+        ReviewOutcome.CONSUMED,
+        terminal("invalidate"),
+    )
+    settled = admit_family(rows, patch, "trust", "settled", invalidated=())
+    assert isinstance(settled, admission.Carry)
+    assert len(settled.receipts) == 2
 
 
 def test_amended_commit_message_reuses_settled_generation_and_slots(tmp_path):
