@@ -630,6 +630,64 @@ def test_released_slot_is_reusable_once_and_unresolved_never_frees():
     assert held.conflict
 
 
+def test_released_delta_allows_one_fail_closed_primary_reverification():
+    generation = resolve([], identity("a", "1" * 40)).generation
+    rows = [generation.to_dict()]
+    primary = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="primary",
+        task_id="primary",
+        idempotency_key="primary",
+    )
+    settle(rows, primary, consumed_terminal("primary"), ReviewOutcome.CONSUMED)
+    released = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="delta",
+        task_id="released",
+        idempotency_key="released",
+    )
+    settle(rows, released, released_terminal("released"), ReviewOutcome.RELEASED)
+    retry = review_state.reserve_review_slot(
+        _REPOSITORY,
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="delta",
+        task_id="retry",
+        idempotency_key="retry",
+    )
+    settle(rows, retry, consumed_terminal("retry"), ReviewOutcome.CONSUMED)
+
+    with pytest.raises(review_state.ReviewSlotError) as ordinary_primary:
+        review_state.reserve_review_slot(
+            _REPOSITORY,
+            rows,
+            generation_id=generation.generation_id,
+            family="delivery",
+            slot_kind="primary",
+            task_id="ordinary",
+            idempotency_key="ordinary",
+        )
+    assert ordinary_primary.value.code == "slots-exhausted"
+
+    guarded = review_state._reserve_review_slot(
+        rows,
+        generation_id=generation.generation_id,
+        family="delivery",
+        slot_kind="primary",
+        task_id="guarded",
+        idempotency_key="guarded",
+        released_retry_reverification=True,
+    )
+    assert guarded.slot_kind == "primary"
+
+
 def test_idempotency_key_is_reusable_only_for_an_unsettled_reservation():
     generation = resolve([], identity("a", "1" * 40)).generation
     rows = [generation.to_dict()]

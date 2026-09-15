@@ -3,6 +3,10 @@
 The import dependency closure intentionally is not computed in this release.
 ``closure_paths`` is the exact union of changed paths and security-trigger
 paths; the repository-aware closure belongs in a later ``review/scope.py``.
+
+Released-retry paths are rare and deliberately fail closed.  If their
+obligations cannot be proved complete, admission spends one full primary
+verification instead of carrying earlier authority.
 """
 
 from __future__ import annotations
@@ -15,8 +19,10 @@ from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from ..kernel.authority_projection import (
+    ReviewSlotState,
     authenticated_review_state_records,
     family_coverages,
+    generations,
     slot_state,
 )
 from ..kernel.canonical import canonical_record_digest
@@ -29,10 +35,11 @@ from ..kernel.policy import (
 )
 from ..kernel.review_state import (
     GenerationCarryV1,
+    ReviewFamilyCoverageV1,
     ReviewGenerationV1,
     ReviewSlotError,
-    ReviewStateError,
     ReviewSlotReservation,
+    ReviewStateError,
     _reserve_review_slot,
     assert_authority_ledger_lock_held,
     fresh_review_generation,
@@ -406,6 +413,135 @@ def _trust_obligation(
         tuple(sorted(normalized_manifest.by_id)),
         typed_task.to_dict(),
     )
+
+
+def _released_retry_guard(
+    records: Sequence[Mapping[str, object]],
+    generation: ReviewGenerationV1,
+    state: ReviewSlotState,
+    family: Literal["delivery", "trust"],
+    current_claim_ids: Sequence[str] = (),
+) -> tuple[bool, tuple[str, ...], tuple[str, ...]]:
+    """Return whether released work still requires a full primary boundary."""
+    from ..runners.contract import ReviewOutcome
+
+    coverages: dict[str, ReviewFamilyCoverageV1] = {}
+    for record in authenticated_review_state_records(
+        cast(Sequence[dict[str, object]], records)
+    ):
+        if record.get("type") != "review-family-coverage-v1":
+            continue
+        try:
+            parsed = ReviewFamilyCoverageV1.from_dict(record)
+        except (TypeError, ValueError):
+            continue
+        coverages[canonical_record_digest(parsed.to_dict())] = parsed
+
+    projected_generations = generations(cast(Sequence[dict[str, object]], records))
+    lineage: list[ReviewGenerationV1] = []
+    cursor: ReviewGenerationV1 | None = generation
+    seen: set[str] = set()
+    while cursor is not None and cursor.generation_id not in seen:
+        seen.add(cursor.generation_id)
+        lineage.append(cursor)
+        predecessor = projected_generations.get(cursor.predecessor_id)
+        cursor = (
+            cast(ReviewGenerationV1, predecessor)
+            if predecessor is not None
+            else None
+        )
+    entries: list[tuple[ReviewSlotState, ReviewSlotReservation]] = []
+    for member in reversed(lineage):
+        member_state = (
+            state
+            if member.generation_id == generation.generation_id
+            else slot_state(
+                cast(Sequence[dict[str, object]], records),
+                member.generation_id,
+                family,
+            )
+        )
+        entries.extend(
+            (member_state, reservation)
+            for reservation in cast(
+                Sequence[ReviewSlotReservation], member_state.reservations
+            )
+        )
+
+    current_ids = set(current_claim_ids)
+    unfinished_retirements: set[str] = set()
+    terminal_refs = tuple(
+        dict.fromkeys(
+            settlement.terminal_ref
+            for entry_state, reservation in entries
+            if (
+                settlement := entry_state.settlement_for(
+                    reservation.reservation_id
+                )
+            )
+            is not None
+        )
+    )
+    guard = False
+    for index, (reservation_state, reservation) in enumerate(entries):
+        settlement = reservation_state.settlement_for(reservation.reservation_id)
+        if settlement is None or reservation_state._effective_outcome(
+            settlement
+        ) is not (
+            ReviewOutcome.RELEASED
+        ):
+            continue
+        released_coverage = coverages.get(reservation.coverage_digest)
+        released_scope = (
+            set(released_coverage.invalidated_claim_ids).union(
+                released_coverage.retirement_claim_ids
+            )
+            if released_coverage is not None
+            else set()
+        )
+        later_primary_scopes: list[set[str]] = []
+        later_consumed_claims: set[str] = set()
+        for later_state, later in entries[index + 1 :]:
+            later_settlement = later_state.settlement_for(later.reservation_id)
+            if later_settlement is None or later_state._effective_outcome(
+                later_settlement
+            ) is not ReviewOutcome.CONSUMED:
+                continue
+            later_coverage = coverages.get(later.coverage_digest)
+            later_scope = (
+                set(later_coverage.invalidated_claim_ids).union(
+                    later_coverage.retirement_claim_ids
+                )
+                if later_coverage is not None
+                else set()
+            )
+            later_consumed_claims.update(later_scope)
+            if later.slot_kind == "primary":
+                later_primary_scopes.append(later_scope)
+
+        primary_discharged = bool(
+            later_primary_scopes
+            and (
+                family == "delivery"
+                or (
+                    released_coverage is not None
+                    and released_coverage._claim_scope_bound
+                    and any(
+                        released_scope <= scope for scope in later_primary_scopes
+                    )
+                )
+            )
+        )
+        if primary_discharged:
+            continue
+        if family == "delivery" or reservation.slot_kind == "delta":
+            guard = True
+        if family == "trust":
+            unfinished = released_scope.difference(later_consumed_claims)
+            if unfinished or released_coverage is None:
+                guard = True
+            unfinished_retirements.update(unfinished.difference(current_ids))
+    return guard, tuple(sorted(unfinished_retirements)), terminal_refs
 
 
 def admit_review(
@@ -986,74 +1122,217 @@ def admit_review(
             )
         )
     )
-    if (
+    carry_eligible = bool(
         resolution.kind == "same"
         and (own_primary_consumed or inherited_coverage_complete)
         and complete_carry
         and state.outstanding is None
-    ):
-        receipts = (
-            tuple(
-                dict.fromkeys(
-                    (
-                        *((inherited_primary,) if inherited_primary is not None else ()),
-                        *current_primary_receipts,
-                        *current_delta_receipts,
-                    )
+    )
+    guard_eligible = bool(
+        carry_eligible
+        or (
+            resolution.kind == "new"
+            and inherited_primary is not None
+            and state.outstanding is None
+        )
+    )
+    released_retry_reverification = False
+    if guard_eligible:
+        (
+            released_retry_reverification,
+            unfinished_retirement_ids,
+            obligation_terminal_refs,
+        ) = _released_retry_guard(
+            records,
+            generation,
+            state,
+            family,
+            current_claim_ids or (),
+        )
+        if released_retry_reverification:
+            if resolution.kind == "new":
+                generation = replace(
+                    generation,
+                    primary_origin_receipt=None,
+                    inherited_coverage=(),
+                    invalidated_sections=(),
                 )
+                append_before_slot = [
+                    generation.to_dict()
+                    if record.get("type") == "review-generation-v1"
+                    and record.get("generation_id") == generation.generation_id
+                    else record
+                    for record in append_before_slot
+                ]
+            reset_coverage = replace(
+                coverage,
+                primary_origin_receipt=None,
+                inherited_coverage=(),
+                invalidated_sections=(),
             )
-            if family == "trust"
-            else state.receipts
-        )
-        if inherited_primary is not None and inherited_primary not in receipts:
-            receipts = (inherited_primary, *receipts)
-        if not receipts:
-            return _blocked(
-                "missing-evidence",
-                "generation primary verdict has no authenticated receipt",
-                records=append_before_slot,
-            )
-        from .authority import authenticated_review_verdict
-
-        terminal_by_digest = {
-            canonical_record_digest(record): record
-            for record in records
-            if isinstance(record, Mapping)
-        }
-        verdicts: list[tuple[str, Literal["pass", "fail"]]] = []
-        native_generation_ids = {
-            record.get("generation_id")
-            for record in authenticated_review_state_records(
-                cast(Sequence[dict[str, object]], records)
-            )
-            if record.get("type") == "review-generation-v1"
-        }
-        legacy_delivery = (
-            family == "delivery"
-            and generation.generation_id not in native_generation_ids
-        )
-        for receipt in receipts:
-            verdict = authenticated_review_verdict(
-                terminal_by_digest.get(receipt),
-                records,
-                expected_family=family,
-                allow_missing_intent=legacy_delivery,
-            )
-            if verdict not in {"pass", "fail"}:
+            if family == "delivery" and reset_coverage != coverage:
+                coverage = reset_coverage
+                append_before_slot.append(coverage.to_dict())
+                coverage_digest = canonical_record_digest(coverage.to_dict())
+        if released_retry_reverification and family == "trust":
+            if trust_task is None or current_claim_ids is None:
                 return _blocked(
                     "missing-evidence",
-                    "generation receipt has no authenticated verdict",
+                    "full trust reverification has no current claim set",
                     records=append_before_slot,
-                    terminal_ref=receipt,
                 )
-            verdicts.append((receipt, cast(Literal["pass", "fail"], verdict)))
-        return Carry(
-            generation=generation,
-            receipts=receipts,
-            verdicts=tuple(verdicts),
-            carry_record=cast(GenerationCarryV1, carry_record),
-            records_to_append=tuple(append_before_slot),
-        )
+            raw_manifest = (
+                task.get("task_contract", {}).get("trust_claim_manifest")
+                if isinstance(task.get("task_contract"), Mapping)
+                and "trust_claim_manifest" in task["task_contract"]
+                else task.get("trust_claim_manifest")
+            )
+            try:
+                from .trust_claims import normalize_manifest
+
+                current_claims = normalize_manifest(
+                    cast(Mapping[object, object], raw_manifest)
+                ).by_id
+            except (TypeError, ValueError):
+                current_claims = {}
+            invalidated_rows = [
+                current_claims[claim_id].to_dict()
+                for claim_id in current_claim_ids
+                if claim_id in current_claims
+            ]
+            terminal_by_digest = {
+                canonical_record_digest(record): record
+                for record in records
+                if isinstance(record, Mapping)
+            }
+            retirement_rows_by_id = {
+                row.get("claim_id"): dict(row)
+                for row in cast(Sequence[object], trust_task.get("retirements", []))
+                if isinstance(row, Mapping) and isinstance(row.get("claim_id"), str)
+            }
+            for terminal_ref in obligation_terminal_refs:
+                terminal = terminal_by_digest.get(terminal_ref)
+                contract = (
+                    terminal.get("task_contract")
+                    if isinstance(terminal, Mapping)
+                    else None
+                )
+                if not isinstance(contract, Mapping):
+                    continue
+                try:
+                    *_, persisted_task = _trust_obligation(contract)
+                except ValueError:
+                    continue
+                for row in (
+                    *cast(
+                        Sequence[object],
+                        persisted_task.get("invalidated_claims", []),
+                    ),
+                    *cast(
+                        Sequence[object], persisted_task.get("retirements", [])
+                    ),
+                ):
+                    if isinstance(row, Mapping) and isinstance(
+                        row.get("claim_id"), str
+                    ):
+                        retirement_rows_by_id[cast(str, row["claim_id"])] = dict(row)
+            retirement_rows = [
+                retirement_rows_by_id[claim_id]
+                for claim_id in unfinished_retirement_ids
+                if claim_id in retirement_rows_by_id
+            ]
+            if (
+                len(invalidated_rows) != len(current_claim_ids)
+                or len(retirement_rows) != len(unfinished_retirement_ids)
+            ):
+                return _blocked(
+                    "missing-evidence",
+                    "full trust reverification scope is incomplete",
+                    records=append_before_slot,
+                )
+            rebuilt_task = {
+                **dict(trust_task),
+                "invalidated_claims": invalidated_rows,
+                "retirements": retirement_rows,
+                "carried_receipt_digests": [],
+            }
+            rebuilt_task.pop("task_hash", None)
+            rebuilt_task["task_hash"] = canonical_record_digest(rebuilt_task)
+            trust_task = rebuilt_task
+            invalidated_claim_ids = current_claim_ids
+            retirement_claim_ids = unfinished_retirement_ids
+            full_coverage = replace(
+                reset_coverage,
+                invalidated_claim_ids=current_claim_ids,
+                retirement_claim_ids=unfinished_retirement_ids,
+            )
+            if full_coverage != coverage:
+                coverage = full_coverage
+                append_before_slot.append(coverage.to_dict())
+                coverage_digest = canonical_record_digest(coverage.to_dict())
+        if carry_eligible and not released_retry_reverification:
+            receipts = (
+                tuple(
+                    dict.fromkeys(
+                        (
+                            *((inherited_primary,) if inherited_primary is not None else ()),
+                            *current_primary_receipts,
+                            *current_delta_receipts,
+                        )
+                    )
+                )
+                if family == "trust"
+                else state.receipts
+            )
+            if inherited_primary is not None and inherited_primary not in receipts:
+                receipts = (inherited_primary, *receipts)
+            if not receipts:
+                return _blocked(
+                    "missing-evidence",
+                    "generation primary verdict has no authenticated receipt",
+                    records=append_before_slot,
+                )
+            from .authority import authenticated_review_verdict
+
+            terminal_by_digest = {
+                canonical_record_digest(record): record
+                for record in records
+                if isinstance(record, Mapping)
+            }
+            verdicts: list[tuple[str, Literal["pass", "fail"]]] = []
+            native_generation_ids = {
+                record.get("generation_id")
+                for record in authenticated_review_state_records(
+                    cast(Sequence[dict[str, object]], records)
+                )
+                if record.get("type") == "review-generation-v1"
+            }
+            legacy_delivery = (
+                family == "delivery"
+                and generation.generation_id not in native_generation_ids
+            )
+            for receipt in receipts:
+                verdict = authenticated_review_verdict(
+                    terminal_by_digest.get(receipt),
+                    records,
+                    expected_family=family,
+                    allow_missing_intent=legacy_delivery,
+                )
+                if verdict not in {"pass", "fail"}:
+                    return _blocked(
+                        "missing-evidence",
+                        "generation receipt has no authenticated verdict",
+                        records=append_before_slot,
+                        terminal_ref=receipt,
+                    )
+                verdicts.append((receipt, cast(Literal["pass", "fail"], verdict)))
+            return Carry(
+                generation=generation,
+                receipts=receipts,
+                verdicts=tuple(verdicts),
+                carry_record=cast(GenerationCarryV1, carry_record),
+                records_to_append=tuple(append_before_slot),
+            )
 
     closure = tuple(sorted(set(changed).union(security)))
     trust_obligation_delta = bool(
@@ -1093,20 +1372,35 @@ def admit_review(
         append_before_slot = [generation.to_dict(), coverage.to_dict()]
         coverage_digest = canonical_record_digest(coverage.to_dict())
 
-    if has_primary and requested != "delta" and not trust_obligation_delta:
+    if (
+        not released_retry_reverification
+        and has_primary
+        and requested != "delta"
+        and not trust_obligation_delta
+    ):
         return _blocked(
             "slots-exhausted",
             "generation already has a primary; only a delta is admissible",
             records=append_before_slot,
         )
-    if not has_primary and requested == "delta":
+    if (
+        not released_retry_reverification
+        and not has_primary
+        and requested == "delta"
+    ):
         return _blocked(
             "missing-evidence",
             "delta review requires exactly one settled primary",
             records=append_before_slot,
         )
 
-    slot_kind: Literal["primary", "delta"] = "delta" if has_primary else "primary"
+    slot_kind: Literal["primary", "delta"] = (
+        "primary"
+        if released_retry_reverification
+        else "delta"
+        if has_primary
+        else "primary"
+    )
     delta_scope: dict[str, object] | None = None
     if slot_kind == "delta":
         if len(closure) > MAX_DELTA_SCOPE_PATHS:
@@ -1144,6 +1438,7 @@ def admit_review(
             coverage_digest=coverage_digest,
             prospective_generation=(generation if resolution.kind == "new" else None),
             prospective_inherited_primary=(inherited_primary is not None),
+            released_retry_reverification=released_retry_reverification,
         )
     except ReviewSlotError as exc:
         code = cast(BlockedCode, exc.code)

@@ -1471,7 +1471,7 @@ def test_manifest_edit_after_released_trust_delta_reserves_changed_obligation(
 
 
 @pytest.mark.parametrize("requested", ["review", "delta"])
-def test_changed_manifest_retry_cannot_drop_a_released_claim_obligation(requested):
+def test_released_manifest_retry_requires_full_primary_before_carry(requested):
     patch = identity("a")
     primary = admission.admit_review(
         _REPOSITORY,
@@ -1531,33 +1531,56 @@ def test_changed_manifest_retry_cannot_drop_a_released_claim_obligation(requeste
         },
     )
 
-    retry = admission.admit_review(
-        _REPOSITORY,
-        rows,
-        repository_binding="repo",
-        task=trust_task_with_manifest_scope(
-            patch,
-            name="retry-c",
-            claims=("a" * 64, "b" * 64, "c" * 64),
-            scope=("c",),
-        ),
-        current_source_identity={"head": patch["candidate_sha"]},
-        current_tree_sha=patch["candidate_tree_sha"],
-        patch_identity=patch,
-        required_sections=("trust",),
-        equivalence_proof=None,
-        format_only_proof=None,
-        requested=requested,
-        changed_paths=None,
-        security_trigger_paths=(),
+    # Reproduce the round-six reviewer's parent ledger: the changed-manifest
+    # retry consumed only C, leaving released claim A without a verdict.
+    retry_task = trust_task_with_manifest_scope(
+        patch,
+        name="retry-c",
+        claims=("a" * 64, "b" * 64, "c" * 64),
+        scope=("c",),
     )
-    assert isinstance(retry, admission.Reserved)
-    rows.extend(retry.records_to_append)
+    (
+        manifest_digest,
+        claim_set_digest,
+        invalidated_claim_ids,
+        _,
+        _,
+        _,
+    ) = admission._trust_obligation(retry_task)
+    current_coverage = authority_projection.family_coverages(rows)[
+        (primary.generation.generation_id, "trust")
+    ]
+    state = authority_projection.slot_state(
+        rows, primary.generation.generation_id, "trust"
+    )
+    narrow_coverage = review_state.ReviewFamilyCoverageV1(
+        generation_id=primary.generation.generation_id,
+        family="trust",
+        required_sections=("trust",),
+        policy_digest=current_coverage.policy_digest,
+        primary_origin_receipt=state.primary_terminal_ref,
+        invalidated_sections=("trust",),
+        manifest_digest=manifest_digest,
+        claim_set_digest=claim_set_digest,
+        invalidated_claim_ids=invalidated_claim_ids,
+    )
+    rows.append(narrow_coverage.to_dict())
+    retry = review_state._reserve_review_slot(
+        rows,
+        generation_id=primary.generation.generation_id,
+        family="trust",
+        slot_kind="delta",
+        task_id="retry-c",
+        idempotency_key="retry-c",
+        coverage_digest=review_state.canonical_record_digest(
+            narrow_coverage.to_dict()
+        ),
+    )
     append_settlement(
         rows,
-        retry.slot,
+        retry,
         ReviewOutcome.CONSUMED,
-        {**terminal("retry-c"), "task_contract": retry.scoped_task},
+        {**terminal("retry-c"), "task_contract": retry_task},
     )
 
     later = admission.admit_review(
@@ -1576,21 +1599,52 @@ def test_changed_manifest_retry_cannot_drop_a_released_claim_obligation(requeste
         required_sections=("trust",),
         equivalence_proof=None,
         format_only_proof=None,
-        requested="review",
+        requested=requested,
         changed_paths=None,
         security_trigger_paths=(),
     )
 
-    expected = {
-        TrustClaim("actors_assets", f"claim-{'a' * 64}", ()).claim_id,
-        TrustClaim("actors_assets", f"claim-{'c' * 64}", ()).claim_id,
-    }
-    assert set(retry.scoped_task["delta_scope"]["invalidated_claim_ids"]) == expected
+    assert isinstance(later, admission.Reserved)
+    assert later.slot.slot_kind == "primary"
+    assert "delta_scope" not in later.scoped_task
     assert {
         claim["claim_id"]
-        for claim in retry.scoped_task["trust_claim_task"]["invalidated_claims"]
-    } == expected
-    assert isinstance(later, admission.Carry)
+        for claim in later.scoped_task["trust_claim_task"]["invalidated_claims"]
+    } == {
+        TrustClaim("actors_assets", f"claim-{label * 64}", ()).claim_id
+        for label in ("a", "b", "c")
+    }
+
+    # The round-six reviewer sequence reached Carry(pass) here on its parent.
+    # The released delta now costs one complete primary verification.
+    rows.extend(later.records_to_append)
+    append_settlement(
+        rows,
+        later.slot,
+        ReviewOutcome.CONSUMED,
+        {**terminal("later-abc"), "task_contract": later.scoped_task},
+    )
+    carried = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task_with_manifest_scope(
+            patch,
+            name="verified-abc",
+            claims=("a" * 64, "b" * 64, "c" * 64),
+            scope=(),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(carried, admission.Carry)
 
 
 def test_released_retirement_is_reconciled_with_a_later_manifest_change():
@@ -1755,6 +1809,21 @@ def test_delivery_release_does_not_carry_across_a_later_diff():
         ReviewOutcome.RELEASED,
         terminal("middle-delta", tree=middle.generation.tree, released=True),
     )
+    retry = admit(
+        rows,
+        middle_patch,
+        review_task=task("middle-retry", "middle-retry"),
+        requested="delta",
+    )
+    assert isinstance(retry, admission.Reserved)
+    assert retry.slot.slot_kind == "delta"
+    rows.extend(retry.records_to_append)
+    append_settlement(
+        rows,
+        retry.slot,
+        ReviewOutcome.CONSUMED,
+        terminal("middle-retry", tree=middle.generation.tree),
+    )
 
     successor_patch = identity("c")
     link_generation(rows, middle.generation, successor_patch)
@@ -1768,6 +1837,7 @@ def test_delivery_release_does_not_carry_across_a_later_diff():
     assert isinstance(successor, admission.Reserved)
     assert successor.slot.slot_kind == "primary"
     assert successor.generation.primary_origin_receipt is None
+    assert successor.scoped_task["required_sections"] == ["code"]
 
 
 def test_released_retry_rebuilds_trust_task_for_current_equivalent_endpoint():

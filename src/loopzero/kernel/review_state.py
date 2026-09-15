@@ -1800,6 +1800,7 @@ def _reserve_review_slot(
     coverage_digest: str | None = None,
     prospective_generation: ReviewGenerationV1 | None = None,
     prospective_inherited_primary: bool = False,
+    released_retry_reverification: bool = False,
 ) -> ReviewSlotReservation:
     from .authority_projection import authenticated_review_state_records, slot_state
     from ..review.chain import ReviewChainError, enforce_review_budget
@@ -1855,6 +1856,14 @@ def _reserve_review_slot(
         )
     )
     primary_consumed = state.primary_consumed or prospective_primary
+    if released_retry_reverification and (
+        slot_kind != "primary"
+        or not primary_consumed
+    ):
+        raise ReviewSlotError(
+            "reservation-conflict",
+            "released-retry reverification has no unfinished released boundary",
+        )
     for existing in state.reservations:
         if existing.idempotency_key != idempotency_key:
             continue
@@ -1899,7 +1908,13 @@ def _reserve_review_slot(
             existing=True,
             conflict=True,
         )
-    if slot_kind == "primary" and primary_consumed:
+    # Admission may spend one full review beyond the normal primary/delta
+    # budget only to close an authenticated released-retry boundary.
+    if (
+        slot_kind == "primary"
+        and primary_consumed
+        and not released_retry_reverification
+    ):
         raise ReviewSlotError("slots-exhausted", "primary review slot is consumed")
     if slot_kind == "delta" and not primary_consumed:
         raise ReviewSlotError(
@@ -1912,15 +1927,16 @@ def _reserve_review_slot(
 
     primary_count = int(primary_consumed)
     delta_count = int(state.delta_consumed)
-    try:
-        enforce_review_budget(
-            completed_reviews=primary_count,
-            completed_delta_reviews=delta_count,
-            requested="review" if slot_kind == "primary" else "delta",
-            generation=generation_id,
-        )
-    except ReviewChainError as exc:
-        raise ReviewSlotError("slots-exhausted", str(exc)) from exc
+    if not released_retry_reverification:
+        try:
+            enforce_review_budget(
+                completed_reviews=primary_count,
+                completed_delta_reviews=delta_count,
+                requested="review" if slot_kind == "primary" else "delta",
+                generation=generation_id,
+            )
+        except ReviewChainError as exc:
+            raise ReviewSlotError("slots-exhausted", str(exc)) from exc
     return ReviewSlotReservation(
         generation_id=generation_id,
         family=family,
