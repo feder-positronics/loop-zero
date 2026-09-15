@@ -2450,6 +2450,16 @@ def slot_state(
             )
             or (
                 terminal is not None
+                and terminal.get("review_reservation_id")
+                != reservation.reservation_id
+            )
+            or (
+                terminal is not None
+                and terminal.get("review_generation_id")
+                != reservation.generation_id
+            )
+            or (
+                terminal is not None
                 and terminal.get("snapshot_tree_sha") not in generation_trees
             )
             or settlement.generation_id != reservation.generation_id

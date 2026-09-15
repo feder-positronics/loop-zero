@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal
 
-RetentionAnchor = Literal["policy", "generation", "reservation", "attempt"]
+RetentionAnchor = Literal[
+    "policy", "generation", "trust-generation", "reservation", "attempt"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +71,7 @@ GOVERNED_RECORD_FAMILIES: Mapping[str, GovernedRecordFamily] = MappingProxyType(
             _family("review-family-coverage-v1", "generation", "generation_id"),
             _family(
                 "trust-claim-receipt-v1",
-                "generation",
-                "trust_claim_receipt",
-                "generation_ref",
+                "trust-generation",
             ),
             _family("review-nonverdict-launch-v1", "attempt"),
         ]

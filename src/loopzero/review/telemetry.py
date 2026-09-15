@@ -285,7 +285,7 @@ class ReviewLaunchV1:
             if separator and prefix == resolved_task_id and suffix.isdigit():
                 raw_attempt_index = int(suffix)
         if raw_attempt_index is None:
-            raw_attempt_index = 0
+            raise ReviewTelemetryError("review launch attempt index is missing")
         return cls(
             reservation_id=admitted.slot.reservation_id,
             attempt_id=attempt_id,

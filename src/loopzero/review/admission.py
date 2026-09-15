@@ -14,7 +14,11 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
-from ..kernel.authority_projection import family_coverages, slot_state
+from ..kernel.authority_projection import (
+    authenticated_review_state_records,
+    family_coverages,
+    slot_state,
+)
 from ..kernel.canonical import canonical_record_digest
 from ..kernel.gitscope import DispatchError
 from ..kernel.patch_identity import PatchIdentityError, tree_diff_paths
@@ -568,6 +572,8 @@ def admit_review(
         family=family,
         manifest_digest=manifest_digest,
         claim_set_digest=claim_set_digest,
+        invalidated_claim_ids=invalidated_claim_ids,
+        retirement_claim_ids=retirement_claim_ids,
     )
     if resolution.kind == "refused" or resolution.generation is None:
         reason = str(resolution.reason or "missing-evidence")
@@ -789,6 +795,7 @@ def admit_review(
         resolution.kind == "same"
         and (own_primary_consumed or inherited_coverage_complete)
         and complete_carry
+        and state.outstanding is None
     ):
         receipts = (
             tuple(
@@ -819,9 +826,22 @@ def admit_review(
             if isinstance(record, Mapping)
         }
         verdicts: list[tuple[str, Literal["pass", "fail"]]] = []
+        native_generation_ids = {
+            record.get("generation_id")
+            for record in authenticated_review_state_records(
+                cast(Sequence[dict[str, object]], records)
+            )
+            if record.get("type") == "review-generation-v1"
+        }
+        legacy_delivery = (
+            family == "delivery"
+            and generation.generation_id not in native_generation_ids
+        )
         for receipt in receipts:
             verdict = authenticated_review_verdict(
-                terminal_by_digest.get(receipt), records, expected_family=family
+                terminal_by_digest.get(receipt),
+                records,
+                expected_family=(None if legacy_delivery else family),
             )
             if verdict not in {"pass", "fail"}:
                 return _blocked(

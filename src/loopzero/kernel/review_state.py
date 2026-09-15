@@ -69,7 +69,7 @@ class ReviewSlotError(ReviewStateError):
     """Typed slot admission failure used by the review admission facade."""
 
     def __init__(self, code: str, message: str) -> None:
-        super().__init__(message)
+        super().__init__(f"{type(self).__name__}: {code}")
         self.code = code
 
 
@@ -358,6 +358,9 @@ class ReviewFamilyCoverageV1:
     invalidated_sections: tuple[str, ...] = ()
     manifest_digest: str | None = None
     claim_set_digest: str | None = None
+    invalidated_claim_ids: tuple[str, ...] = ()
+    retirement_claim_ids: tuple[str, ...] = ()
+    _claim_scope_bound: bool = field(default=True, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.generation_id, str) or re.fullmatch(
@@ -391,16 +394,42 @@ class ReviewFamilyCoverageV1:
             for value in obligations
         ):
             raise ReviewStateError("trust coverage obligation is invalid")
+        invalidated_claim_ids = _frozen_strings(
+            self.invalidated_claim_ids, label="invalidated claim identities"
+        )
+        retirement_claim_ids = _frozen_strings(
+            self.retirement_claim_ids, label="retirement claim identities"
+        )
+        if any(
+            re.fullmatch(r"tc_[0-9a-f]{64}", identity) is None
+            for identity in (*invalidated_claim_ids, *retirement_claim_ids)
+        ):
+            raise ReviewStateError("trust coverage claim identity is invalid")
+        if self.family == "delivery" and (
+            invalidated_claim_ids or retirement_claim_ids
+        ):
+            raise ReviewStateError("delivery coverage cannot carry trust claim scope")
+        if set(invalidated_claim_ids).intersection(retirement_claim_ids):
+            raise ReviewStateError("trust coverage claim scopes overlap")
         object.__setattr__(self, "required_sections", sections)
         object.__setattr__(self, "inherited_coverage", inherited)
         object.__setattr__(self, "invalidated_sections", invalidated)
+        object.__setattr__(self, "invalidated_claim_ids", invalidated_claim_ids)
+        object.__setattr__(self, "retirement_claim_ids", retirement_claim_ids)
 
     @property
-    def obligation_key(self) -> tuple[str | None, str | None]:
-        return self.manifest_digest, self.claim_set_digest
+    def obligation_key(
+        self,
+    ) -> tuple[str | None, str | None, tuple[str, ...], tuple[str, ...]]:
+        return (
+            self.manifest_digest,
+            self.claim_set_digest,
+            self.invalidated_claim_ids,
+            self.retirement_claim_ids,
+        )
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        record: dict[str, object] = {
             "type": REVIEW_FAMILY_COVERAGE_TYPE,
             "generation_id": self.generation_id,
             "family": self.family,
@@ -412,22 +441,39 @@ class ReviewFamilyCoverageV1:
             "manifest_digest": self.manifest_digest,
             "claim_set_digest": self.claim_set_digest,
         }
+        if self._claim_scope_bound:
+            record["invalidated_claim_ids"] = list(self.invalidated_claim_ids)
+            record["retirement_claim_ids"] = list(self.retirement_claim_ids)
+        return record
 
     to_record = to_dict
     to_json = to_dict
 
     @classmethod
     def from_dict(cls, record: Mapping[str, object]) -> ReviewFamilyCoverageV1:
-        expected = {
+        legacy_expected = {
             "type", "generation_id", "family", "required_sections",
             "policy_digest", "primary_origin_receipt", "inherited_coverage",
             "invalidated_sections", "manifest_digest", "claim_set_digest",
         }
-        if set(record) not in (expected, expected | {"terminal_authority_proof"}):
+        expected = legacy_expected | {
+            "invalidated_claim_ids", "retirement_claim_ids"
+        }
+        if set(record) not in (
+            legacy_expected,
+            legacy_expected | {"terminal_authority_proof"},
+            expected,
+            expected | {"terminal_authority_proof"},
+        ):
             raise ReviewStateError("review family coverage fields are invalid")
         if record.get("type") != REVIEW_FAMILY_COVERAGE_TYPE or any(
             not isinstance(record.get(name), list)
             for name in ("required_sections", "inherited_coverage", "invalidated_sections")
+        ):
+            raise ReviewStateError("review family coverage fields are invalid")
+        if any(
+            name in record and not isinstance(record[name], list)
+            for name in ("invalidated_claim_ids", "retirement_claim_ids")
         ):
             raise ReviewStateError("review family coverage fields are invalid")
         return cls(
@@ -440,6 +486,13 @@ class ReviewFamilyCoverageV1:
             invalidated_sections=tuple(cast(list[str], record["invalidated_sections"])),
             manifest_digest=cast(str | None, record.get("manifest_digest")),
             claim_set_digest=cast(str | None, record.get("claim_set_digest")),
+            invalidated_claim_ids=tuple(
+                cast(list[str], record.get("invalidated_claim_ids", []))
+            ),
+            retirement_claim_ids=tuple(
+                cast(list[str], record.get("retirement_claim_ids", []))
+            ),
+            _claim_scope_bound="invalidated_claim_ids" in record,
         )
 
 
@@ -1060,6 +1113,8 @@ def resolve_generation(
     family: ReviewFamily = "delivery",
     manifest_digest: str | None = None,
     claim_set_digest: str | None = None,
+    invalidated_claim_ids: Sequence[str] = (),
+    retirement_claim_ids: Sequence[str] = (),
 ) -> GenerationResolution:
     """Resolve content to an authenticated generation without running Git.
 
@@ -1083,6 +1138,16 @@ def resolve_generation(
             for value in obligations
         ):
             raise ReviewStateError("trust claim obligation is missing")
+        invalidated_claim_scope = _frozen_strings(
+            invalidated_claim_ids, label="invalidated claim identities"
+        )
+        retirement_claim_scope = _frozen_strings(
+            retirement_claim_ids, label="retirement claim identities"
+        )
+        if family == "delivery" and (
+            invalidated_claim_scope or retirement_claim_scope
+        ):
+            raise ReviewStateError("delivery review has a trust claim scope")
         if not isinstance(repository_binding, str) or not repository_binding:
             raise ReviewStateError("repository binding is invalid")
     except ReviewStateError as exc:
@@ -1206,12 +1271,24 @@ def resolve_generation(
                 invalidated_sections=sections if primary_receipt is not None else (),
                 manifest_digest=manifest_digest,
                 claim_set_digest=claim_set_digest,
+                invalidated_claim_ids=invalidated_claim_scope,
+                retirement_claim_ids=retirement_claim_scope,
             )
         typed = cast(ReviewFamilyCoverageV1, existing)
-        if family == "trust" and typed.obligation_key != (
+        requested_obligation = (
             manifest_digest,
             claim_set_digest,
+            invalidated_claim_scope,
+            retirement_claim_scope,
+        )
+        if (
+            family == "trust"
+            and typed.obligation_key[:2] == requested_obligation[:2]
+            and (typed.invalidated_claim_ids or typed.retirement_claim_ids)
+            and not (invalidated_claim_scope or retirement_claim_scope)
         ):
+            return typed
+        if family == "trust" and typed.obligation_key != requested_obligation:
             state = slot_state(
                 cast(Sequence[dict[str, object]], records),
                 generation.generation_id,
@@ -1227,6 +1304,8 @@ def resolve_generation(
                 invalidated_sections=sections,
                 manifest_digest=manifest_digest,
                 claim_set_digest=claim_set_digest,
+                invalidated_claim_ids=invalidated_claim_scope,
+                retirement_claim_ids=retirement_claim_scope,
             )
         return typed
 
@@ -1234,7 +1313,7 @@ def resolve_generation(
         existing = projected_coverage.get((generation.generation_id, family))
         return existing is not None and cast(
             ReviewFamilyCoverageV1, existing
-        ).obligation_key == (manifest_digest, claim_set_digest)
+        ).obligation_key == coverage_for(generation).obligation_key
 
     # Exact content is an authenticated lookup, not a caller assertion.  It is
     # what prevents an amend, re-commit, revert, or branch rename from
@@ -1297,6 +1376,49 @@ def resolve_generation(
         )
         reachable_sections.setdefault(target_key, set()).update(carried_sections)
         carry_identities[target_key] = carry.to_identity
+
+    terminal_by_digest = {
+        canonical_record_digest(record): record
+        for record in records
+        if isinstance(record, Mapping)
+    }
+    for generation in projected.values():
+        family_coverage = projected_coverage.get((generation.generation_id, family))
+        if family_coverage is None:
+            continue
+        state = slot_state(
+            cast(Sequence[dict[str, object]], records),
+            generation.generation_id,
+            family,
+        )
+        if not state.own_primary_consumed or state.primary_terminal_ref is None:
+            continue
+        terminal = terminal_by_digest.get(state.primary_terminal_ref)
+        if terminal is None:
+            continue
+        terminal_identity = terminal.get("patch_identity")
+        terminal_tree = terminal.get("snapshot_tree_sha")
+        if not isinstance(terminal_identity, Mapping):
+            matching_identities = [
+                carry.to_identity
+                for carry in projected_carries
+                if carry.generation_id == generation.generation_id
+                and carry.family == family
+                and carry.to_identity.get("candidate_tree_sha") == terminal_tree
+            ]
+            if len(matching_identities) != 1:
+                continue
+            terminal_identity = matching_identities[0]
+        if terminal_identity.get("candidate_tree_sha") != terminal_tree:
+            continue
+        key = (
+            generation.generation_id,
+            patch_identity_digest(terminal_identity),
+        )
+        reachable_sections.setdefault(key, set()).update(
+            cast(ReviewFamilyCoverageV1, family_coverage).required_sections
+        )
+        carry_identities[key] = terminal_identity
 
     carried_exact: list[
         tuple[ReviewGenerationV1, Mapping[str, object], tuple[str, ...]]
@@ -1832,6 +1954,14 @@ def settle_review_slot(
     if terminal.get("task_id") != reservation.task_id:
         raise ReviewSlotError(
             "reservation-conflict", "terminal reference belongs to another task"
+        )
+    if (
+        terminal.get("review_reservation_id") != reservation.reservation_id
+        or terminal.get("review_generation_id") != reservation.generation_id
+    ):
+        raise ReviewSlotError(
+            "reservation-conflict",
+            "terminal reference belongs to another review obligation",
         )
     valid_terminal_family, terminal_family = _terminal_verdict_family(
         terminal, require_intent=True
