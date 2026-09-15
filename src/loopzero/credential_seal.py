@@ -105,7 +105,13 @@ def _host_refresh_wrapper() -> SandboxWrapper:
         raise CredentialSealError("credential refresh containment is unavailable")
     bwrap = str(Path(bwrap_value).resolve(strict=True))
     runtime_root_value = os.environ.get("LOOPZERO_LIVE_RUNTIME_ROOT")
-    readonly_roots = [Path("/usr"), Path(sys.prefix).resolve()]
+    # A venv supplies the SDKs, while a managed base installation supplies its
+    # interpreter, standard library and extension modules. Bind those exact
+    # installations, never their shared cache or host-home ancestors.
+    readonly_roots = [
+        Path("/usr"), Path(sys.prefix).resolve(),
+        Path(sys.base_prefix).resolve(), Path(sys.base_exec_prefix).resolve(),
+    ]
     if runtime_root_value:
         readonly_roots.append(Path(runtime_root_value).resolve(strict=True))
 
@@ -290,7 +296,9 @@ def seal_credential(
     discovery_state_root = os.environ.get("LOOPZERO_LIVE_STATE_ROOT")
     settings = RuntimeSettings(
         tooling_root=Path(sys.prefix).resolve(),
-        toolchain_interpreter=Path(sys.executable).resolve(),
+        # Resolve directory aliases, but retain the venv's final executable
+        # symlink: invoking its target would discard the venv's SDK imports.
+        toolchain_interpreter=Path(sys.executable).parent.resolve() / Path(sys.executable).name,
         bridge_path=Path(codex.__file__).resolve().with_name("bridge.py"),
         # Preserve the live host's configured (or standard) account-state token
         # discovery path when no explicit credential file was supplied. The
