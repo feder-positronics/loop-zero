@@ -2356,7 +2356,7 @@ def slot_state(
         ReviewSlotReservation,
         ReviewSlotSettlement,
     )
-    from ..review.authority import classify_review_outcome
+    from ..review.authority import classify_review_outcome, _terminal_verdict_family
 
     cache_key = (*_authentication_cache_key(records), generation_id, family)
     cached = _slot_projection_cache.get(cache_key)
@@ -2407,9 +2407,16 @@ def slot_state(
             continue
         reservation = reservations_by_id.get(settlement.reservation_id)
         terminal = terminal_by_digest.get(settlement.terminal_ref)
-        classified = (
-            classify_review_outcome(terminal, records)
+        valid_terminal_family, terminal_family = (
+            _terminal_verdict_family(terminal, require_intent=True)
             if terminal is not None
+            else (False, None)
+        )
+        classified = (
+            classify_review_outcome(
+                terminal, records, expected_family=reservation.family
+            )
+            if terminal is not None and reservation is not None
             else ReviewOutcome.UNRESOLVED
         )
         effective = (
@@ -2449,6 +2456,13 @@ def slot_state(
             or settlement.family != reservation.family
             or settlement.slot_kind != reservation.slot_kind
             or settlement.task_id != reservation.task_id
+            or (
+                terminal is not None
+                and (
+                    not valid_terminal_family
+                    or terminal_family != reservation.family
+                )
+            )
             or (
                 terminal is not None
                 and settlement.outcome is not ReviewOutcome.UNRESOLVED

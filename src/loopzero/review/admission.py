@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
-from ..kernel.authority_projection import family_coverages, generations, slot_state
+from ..kernel.authority_projection import family_coverages, slot_state
 from ..kernel.canonical import canonical_record_digest
 from ..kernel.gitscope import DispatchError
 from ..kernel.patch_identity import PatchIdentityError, tree_diff_paths
@@ -158,10 +158,27 @@ def _blocked(
     records: Sequence[Mapping[str, object]] = (),
     **evidence: object,
 ) -> Blocked:
+    safe_records = tuple(
+        record for record in records if record.get("type") == "generation-carry-v1"
+    )
+    safe_evidence = {
+        key: value
+        for key, value in evidence.items()
+        if key in {"path_count", "maximum", "fields"}
+    }
+    cause_class = (
+        message
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:Error)?", message)
+        else "".join(part.capitalize() for part in code.split("-")) + "Error"
+    )
     return Blocked(
         code,
-        {"message": message, **evidence},
-        tuple(records),
+        {
+            "message": "Blocked",
+            "cause_class": cause_class,
+            **safe_evidence,
+        },
+        safe_records,
     )
 
 
@@ -200,6 +217,44 @@ def _review_intent(task: Mapping[str, object]) -> object:
     return contracted if contracted is not None else supplied
 
 
+_UNBOUND_TASK = object()
+
+
+def _bound_task_family(
+    records: Sequence[Mapping[str, object]], task_id: str
+) -> object:
+    """Return the family already authenticated for a task identity, if any."""
+    from ..kernel.authority_projection import authenticated_coordinator_record_ids
+
+    authenticated = authenticated_coordinator_record_ids(
+        cast(Sequence[dict[str, object]], records)
+    )
+    families: set[str | None] = set()
+    for record in records:
+        if id(record) not in authenticated or record.get("task_id") != task_id:
+            continue
+        if record.get("type") == "review-slot-reservation-v1":
+            family = record.get("family")
+            if family in {"delivery", "trust"}:
+                families.add(cast(str, family))
+            continue
+        intent = None
+        if record.get("type") == "review-nonverdict-launch-v1":
+            intent = record.get("intent")
+        else:
+            contract = record.get("task_contract")
+            if isinstance(contract, Mapping):
+                intent = contract.get("review_intent")
+        if intent is not None:
+            try:
+                families.add(review_family_for_intent(intent))
+            except DispatchError:
+                continue
+    if len(families) > 1:
+        raise ValueError("task identity has conflicting authenticated review families")
+    return next(iter(families)) if families else _UNBOUND_TASK
+
+
 def _trust_obligation(
     task: Mapping[str, object],
 ) -> tuple[str, str, tuple[str, ...], tuple[str, ...], Mapping[str, object]]:
@@ -211,35 +266,133 @@ def _trust_obligation(
     )
     if not isinstance(raw, Mapping):
         raise ValueError("trust review requires a package trust claim task")
-    manifest = raw.get("manifest_sha256")
-    claim_set = raw.get("claim_set_digest")
+    raw_manifest = (
+        contract.get("trust_claim_manifest")
+        if isinstance(contract, Mapping) and "trust_claim_manifest" in contract
+        else task.get("trust_claim_manifest")
+    )
+    if not isinstance(raw_manifest, Mapping):
+        raise ValueError("trust review requires normalized manifest evidence")
+    from .trust_claims import (
+        TrustClaim,
+        TrustClaimError,
+        TrustClaimTaskV1,
+        normalize_manifest,
+    )
+
+    try:
+        normalized_manifest = normalize_manifest(raw_manifest)
+    except TrustClaimError as exc:
+        raise ValueError("trust manifest evidence is invalid") from exc
+    manifest = canonical_record_digest(
+        {
+            "scheme": "trust-claim-manifest-v1",
+            "claim_set": normalized_manifest.to_dict(),
+        }
+    )
+    claim_set = normalized_manifest.claim_set_digest
+    stated_manifest = raw.get("manifest_sha256")
+    stated_claim_set = raw.get("claim_set_digest")
     task_hash = raw.get("task_hash")
+    task_fields = {
+        "generation_ref",
+        "source_identity",
+        "tree_sha",
+        "manifest_sha256",
+        "claim_set_digest",
+        "invalidated_claims",
+        "retirements",
+        "carried_receipt_digests",
+        "delta_from_tree_sha",
+        "changed_paths",
+        "changed_paths_digest",
+        "base_moved",
+        "risk_paths_added",
+        "previous_receipt_digest",
+        "task_hash",
+    }
+    if set(raw) != task_fields:
+        raise ValueError("trust claim task fields are invalid")
     if any(
         not isinstance(value, str) or len(value) != 64 or re.fullmatch(r"[0-9a-f]{64}", value) is None
-        for value in (manifest, claim_set, task_hash)
+        for value in (stated_manifest, stated_claim_set, task_hash)
     ):
         raise ValueError("trust claim obligation digest is invalid")
-    payload = {key: value for key, value in raw.items() if key != "task_hash"}
-    if canonical_record_digest(payload) != task_hash:
-        raise ValueError("trust claim task hash is invalid")
+    if stated_claim_set != claim_set:
+        raise ValueError("trust claim set digest is not package-derived")
+    parsed_claims: dict[str, tuple[TrustClaim, ...]] = {}
 
-    def identities(name: str) -> tuple[str, ...]:
+    def identities(name: str, *, current: bool) -> tuple[str, ...]:
         rows = raw.get(name)
         if not isinstance(rows, list) or not all(isinstance(row, Mapping) for row in rows):
             raise ValueError("trust claim scope is invalid")
-        values = tuple(sorted(str(row.get("claim_id")) for row in rows))
-        if len(values) != len(set(values)) or any(
-            re.fullmatch(r"tc_[0-9a-f]{64}", value) is None for value in values
+        values: list[str] = []
+        claims: list[TrustClaim] = []
+        for row in rows:
+            if set(row) != {"claim_id", "section", "text", "paths"} or not isinstance(
+                row.get("paths"), list
+            ):
+                raise ValueError("trust claim scope is invalid")
+            try:
+                claim = TrustClaim(
+                    section=cast(str, row.get("section")),
+                    text=cast(str, row.get("text")),
+                    paths=tuple(cast(list[str], row.get("paths"))),
+                )
+            except (TrustClaimError, TypeError, ValueError) as exc:
+                raise ValueError("trust claim scope is invalid") from exc
+            if row.get("claim_id") != claim.claim_id:
+                raise ValueError("trust claim scope is invalid")
+            if current and normalized_manifest.by_id.get(claim.claim_id) != claim:
+                raise ValueError("trust invalidation is outside the current manifest")
+            if not current and claim.claim_id in normalized_manifest.by_id:
+                raise ValueError("trust retirement remains in the current manifest")
+            values.append(claim.claim_id)
+            claims.append(claim)
+        values_tuple = tuple(sorted(values))
+        if len(values_tuple) != len(set(values_tuple)) or any(
+            re.fullmatch(r"tc_[0-9a-f]{64}", value) is None for value in values_tuple
         ):
             raise ValueError("trust claim scope is invalid")
-        return values
+        parsed_claims[name] = tuple(claims)
+        return values_tuple
+
+    invalidated = identities("invalidated_claims", current=True)
+    retirements = identities("retirements", current=False)
+    try:
+        typed_task = TrustClaimTaskV1(
+            generation_ref=cast(str, raw.get("generation_ref")),
+            source_identity=cast(str, raw.get("source_identity")),
+            tree_sha=cast(str, raw.get("tree_sha")),
+            manifest_sha256=cast(str, stated_manifest),
+            claim_set_digest=cast(str, stated_claim_set),
+            invalidated_claims=parsed_claims["invalidated_claims"],
+            retirements=parsed_claims["retirements"],
+            carried_receipt_digests=tuple(
+                cast(Sequence[str], raw.get("carried_receipt_digests"))
+            ),
+            delta_from_tree_sha=cast(str | None, raw.get("delta_from_tree_sha")),
+            changed_paths=tuple(cast(Sequence[str], raw.get("changed_paths"))),
+            changed_paths_digest=cast(str, raw.get("changed_paths_digest")),
+            base_moved=cast(bool, raw.get("base_moved")),
+            risk_paths_added=tuple(
+                cast(Sequence[str], raw.get("risk_paths_added"))
+            ),
+            previous_receipt_digest=cast(
+                str | None, raw.get("previous_receipt_digest")
+            ),
+        )
+    except (KeyError, TrustClaimError, TypeError, ValueError) as exc:
+        raise ValueError("trust claim task is invalid") from exc
+    if typed_task.task_hash != task_hash:
+        raise ValueError("trust claim task hash is invalid")
 
     return (
         cast(str, manifest),
         cast(str, claim_set),
-        identities("invalidated_claims"),
-        identities("retirements"),
-        raw,
+        invalidated,
+        retirements,
+        typed_task.to_dict(),
     )
 
 
@@ -312,11 +465,16 @@ def admit_review(
     try:
         intent = _review_intent(task)
         family = review_family_for_intent(intent)
+        bound_family = _bound_task_family(records, task_id)
     except (ValueError, DispatchError) as exc:
         # DispatchError is intentionally reported through a content-free
         # admission class; caller labels must not appear in authority errors.
         return _blocked("unknown-intent", type(exc).__name__)
+    if bound_family is not _UNBOUND_TASK and bound_family != family:
+        return _blocked("unknown-intent", "ReviewIntentRelabelError")
     if family is None:
+        if not isinstance(task.get("task_contract"), Mapping):
+            return _blocked("missing-evidence", "ReviewIntentAuthorityError")
         if (
             isinstance(attempt_index, bool)
             or not isinstance(attempt_index, int)
@@ -350,6 +508,12 @@ def admit_review(
             ),
             "patch_identity_digest": canonical_record_digest(dict(patch_identity)),
         }
+        run_id = scoped_task.get("run_id")
+        if not isinstance(run_id, str):
+            contract = scoped_task.get("task_contract")
+            run_id = contract.get("run_id") if isinstance(contract, Mapping) else None
+        if isinstance(run_id, str) and run_id:
+            launch_record["run_id"] = run_id
         return NonVerdictReviewLaunch(
             scoped_task=scoped_task,
             launch_record=launch_record,
@@ -505,37 +669,28 @@ def admit_review(
     state = slot_state(
         cast(Sequence[dict[str, object]], records), generation.generation_id, family
     )
+    coverage_digest = canonical_record_digest(coverage.to_dict())
+
+    def current_coverage_receipts(slot_kind: str) -> tuple[str, ...]:
+        from ..runners.contract import ReviewOutcome
+
+        values: list[str] = []
+        for reservation in state.reservations:
+            if (
+                reservation.slot_kind != slot_kind
+                or reservation.coverage_digest != coverage_digest
+            ):
+                continue
+            settlement = state.settlement_for(reservation.reservation_id)
+            if settlement is not None and state._effective_outcome(settlement) is (
+                ReviewOutcome.CONSUMED
+            ):
+                values.append(cast(str, settlement.terminal_ref))
+        return tuple(dict.fromkeys(values))
+
+    current_primary_receipts = current_coverage_receipts("primary")
+    current_delta_receipts = current_coverage_receipts("delta")
     inherited_primary = coverage.primary_origin_receipt
-    if (
-        inherited_primary is None
-        and resolution.kind == "new"
-        and generation.predecessor_id is not None
-    ):
-        predecessor = generations(cast(Sequence[dict[str, object]], records)).get(
-            generation.predecessor_id
-        )
-        predecessor_state = slot_state(
-            cast(Sequence[dict[str, object]], records),
-            generation.predecessor_id,
-            family,
-        )
-        if predecessor_state.own_primary_consumed or (
-            predecessor_state.inherited_primary_ref is not None
-            and predecessor is not None
-            and (
-                (
-                    predecessor_coverage := family_coverages(
-                        cast(Sequence[dict[str, object]], records)
-                    ).get((generation.predecessor_id, family))
-                )
-                is not None
-                and (
-                    not predecessor_coverage.invalidated_sections
-                    or predecessor_state.delta_consumed
-                )
-            )
-        ):
-            inherited_primary = predecessor_state.primary_terminal_ref
     has_primary = state.primary_consumed or inherited_primary is not None
     append_before_slot: list[Mapping[str, object]] = []
     carry_proof = carry_record.proof if carry_record is not None else None
@@ -543,6 +698,15 @@ def admit_review(
         carry_proof.get("proof"), Mapping
     ):
         carry_proof = cast(Mapping[str, object], carry_proof["proof"])
+    trust_base_overlap = bool(
+        family == "trust"
+        and isinstance(carry_proof, Mapping)
+        and isinstance(carry_proof.get("base_path_overlap"), list)
+        and carry_proof["base_path_overlap"]
+    )
+    trust_claim_invalidation = bool(
+        family == "trust" and (invalidated_claim_ids or retirement_claim_ids)
+    )
     if (
         carry_record is not None
         and "security" in carry_record.sections
@@ -564,6 +728,20 @@ def admit_review(
             ),
             family=carry_record.family,
         )
+    if carry_record is not None and (
+        trust_base_overlap or trust_claim_invalidation
+    ):
+        # Trust coverage includes the current claim obligation. Base motion and
+        # an explicit invalidation both require a fresh claim-scoped delta even
+        # when patch equivalence proves identical candidate bytes.
+        carry_record = GenerationCarryV1(
+            generation_id=carry_record.generation_id,
+            from_identity=carry_record.from_identity,
+            to_identity=carry_record.to_identity,
+            proof=carry_record.proof,
+            sections=(),
+            family=carry_record.family,
+        )
     if resolution.kind == "new":
         append_before_slot.append(generation.to_dict())
     elif (
@@ -582,19 +760,49 @@ def admit_review(
         and set(coverage.required_sections) <= set(carry_record.sections)
     )
     own_primary_consumed = bool(
-        state.own_primary_consumed
-        and (not coverage.invalidated_sections or state.delta_consumed)
+        (
+            bool(current_primary_receipts)
+            if family == "trust"
+            else state.own_primary_consumed
+        )
+        and (
+            not coverage.invalidated_sections
+            or (
+                bool(current_delta_receipts)
+                if family == "trust"
+                else state.delta_consumed
+            )
+        )
     )
     inherited_coverage_complete = bool(
         inherited_primary is not None
-        and (not coverage.invalidated_sections or state.delta_consumed)
+        and (
+            not coverage.invalidated_sections
+            or (
+                bool(current_delta_receipts)
+                if family == "trust"
+                else state.delta_consumed
+            )
+        )
     )
     if (
         resolution.kind == "same"
         and (own_primary_consumed or inherited_coverage_complete)
         and complete_carry
     ):
-        receipts = state.receipts
+        receipts = (
+            tuple(
+                dict.fromkeys(
+                    (
+                        *((inherited_primary,) if inherited_primary is not None else ()),
+                        *current_primary_receipts,
+                        *current_delta_receipts,
+                    )
+                )
+            )
+            if family == "trust"
+            else state.receipts
+        )
         if inherited_primary is not None and inherited_primary not in receipts:
             receipts = (inherited_primary, *receipts)
         if not receipts:
@@ -613,7 +821,7 @@ def admit_review(
         verdicts: list[tuple[str, Literal["pass", "fail"]]] = []
         for receipt in receipts:
             verdict = authenticated_review_verdict(
-                terminal_by_digest.get(receipt), records
+                terminal_by_digest.get(receipt), records, expected_family=family
             )
             if verdict not in {"pass", "fail"}:
                 return _blocked(
@@ -634,8 +842,14 @@ def admit_review(
     closure = tuple(sorted(set(changed).union(security)))
     trust_obligation_delta = bool(
         family == "trust"
-        and prior_coverage is not None
-        and prior_coverage.obligation_key != coverage.obligation_key
+        and (
+            (
+                prior_coverage is not None
+                and prior_coverage.obligation_key != coverage.obligation_key
+            )
+            or trust_base_overlap
+            or trust_claim_invalidation
+        )
     )
     if (
         has_primary
@@ -661,6 +875,7 @@ def admit_review(
         inherited_primary = None
         has_primary = state.primary_consumed
         append_before_slot = [generation.to_dict(), coverage.to_dict()]
+        coverage_digest = canonical_record_digest(coverage.to_dict())
 
     if has_primary and requested != "delta" and not trust_obligation_delta:
         return _blocked(
@@ -710,6 +925,7 @@ def admit_review(
             slot_kind=slot_kind,
             task_id=task_id,
             idempotency_key=idempotency_key,
+            coverage_digest=coverage_digest,
             prospective_generation=(generation if resolution.kind == "new" else None),
             prospective_inherited_primary=(inherited_primary is not None),
         )
@@ -771,6 +987,7 @@ __all__ = [
     "Blocked",
     "Carry",
     "LaunchReason",
+    "NonVerdictReviewLaunch",
     "Reserved",
     "admit_review",
 ]

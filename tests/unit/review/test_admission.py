@@ -6,6 +6,19 @@ from types import SimpleNamespace
 
 import pytest
 
+# Parent regression evidence was run from a clean `git archive 6215393` checkout
+# after copying this file, with:
+# `PYTHONPATH=src <repair>/.venv/bin/pytest -q
+# tests/unit/review/test_admission.py::test_admission_rejects_caller_supplied_launch_reason
+# tests/unit/review/test_admission.py::test_base_motion_invalidates_trust_carry_for_both_requested_kinds
+# tests/unit/review/test_admission.py::test_successor_initializes_each_family_from_its_own_predecessor
+# tests/unit/review/test_admission.py::test_blocked_trust_obligation_cannot_be_covered_by_an_old_delta
+# tests/unit/review/test_admission.py::test_consumed_delivery_task_cannot_be_relabelled_nonverdict_without_contract
+# tests/unit/review/test_admission.py::test_native_delivery_settlement_rejects_nonverdict_and_cross_family_terminals
+# tests/unit/review/test_admission.py::test_caller_rehashed_stale_trust_digests_cannot_carry_old_receipt
+# tests/unit/review/test_admission.py::test_package_declared_nonverdict_intents_launch_without_slot_authority`.
+# All fourteen parametrized cases failed on 6215393.
+
 from loopzero.kernel import (
     authority_projection,
     authority_store,
@@ -13,6 +26,7 @@ from loopzero.kernel import (
     review_state,
 )
 from loopzero.review import admission, authority as review_authority, chain
+from loopzero.review.trust_claims import TrustClaim, normalize_manifest
 from loopzero.runners.contract import ReviewOutcome
 
 _REPOSITORY = None
@@ -143,6 +157,36 @@ def trust_task(
     invalidated=("a" * 64,),
     retirements=(),
 ):
+    current_labels = tuple(invalidated) or (
+        (("a" * 64,) if retirements else ("a" * 64,))
+    )
+    current_claims = tuple(
+        sorted(
+            (
+                TrustClaim("actors_assets", f"claim-{label}", ())
+                for label in current_labels
+                if label not in retirements
+            ),
+            key=lambda claim: claim.claim_id,
+        )
+    )
+    retired_claims = tuple(
+        sorted(
+            (
+                TrustClaim("actors_assets", f"claim-{label}", ())
+                for label in retirements
+            ),
+            key=lambda claim: claim.claim_id,
+        )
+    )
+    trust_manifest = {
+        "actors_assets": [
+            {"text": claim.text, "paths": list(claim.paths)}
+            for claim in current_claims
+        ],
+        "risk_paths": [],
+    }
+    derived_claim_set = normalize_manifest(trust_manifest)
     payload = {
         "generation_ref": review_state.generation_id_for(
             "repo", patch, patch["candidate_tree_sha"], ("trust",)
@@ -152,19 +196,31 @@ def trust_task(
         ),
         "tree_sha": patch["candidate_tree_sha"],
         "manifest_sha256": manifest,
-        "claim_set_digest": claim_set,
-        "invalidated_claims": [
-            {"claim_id": f"tc_{identity}"} for identity in invalidated
-        ],
-        "retirements": [
-            {"claim_id": f"tc_{identity}"} for identity in retirements
-        ],
+        "claim_set_digest": derived_claim_set.claim_set_digest,
+        "invalidated_claims": [claim.to_dict() for claim in current_claims]
+        if invalidated
+        else [],
+        "retirements": [claim.to_dict() for claim in retired_claims],
+        "carried_receipt_digests": [],
+        "delta_from_tree_sha": None,
+        "changed_paths": [],
+        "changed_paths_digest": hashlib.sha256(
+            json.dumps(
+                ["trust-claim-changed-paths-v1", []],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        "base_moved": False,
+        "risk_paths_added": [],
+        "previous_receipt_digest": None,
     }
     payload["task_hash"] = review_state.canonical_record_digest(payload)
     return {
         **task(name, key),
         "review_intent": "trust-manifest-verification",
         "trust_claim_task": payload,
+        "trust_claim_manifest": trust_manifest,
     }
 
 
@@ -176,7 +232,9 @@ def test_admission_rejects_caller_supplied_launch_reason():
     )
     assert isinstance(result, admission.Blocked)
     assert result.code == "invalid-launch-label"
-    assert "package-derived" in result.evidence["message"]
+    assert result.evidence["message"] == "Blocked"
+    assert result.evidence["cause_class"] == "InvalidLaunchLabelError"
+    assert "initial" not in repr(result.evidence)
 
     missing_identity = admit(
         [],
@@ -185,6 +243,7 @@ def test_admission_rejects_caller_supplied_launch_reason():
     )
     assert isinstance(missing_identity, admission.Blocked)
     assert missing_identity.code == "missing-evidence"
+    assert missing_identity.evidence["cause_class"] == "MissingEvidenceError"
 
 
 def test_all_launch_reasons_are_observable_through_admission(monkeypatch):
@@ -339,7 +398,16 @@ def append_settlement(rows, reservation, outcome, result, *, verdict="pass"):
     if reservation.to_dict() not in rows:
         rows.append(reservation.to_dict())
     generation = authority_projection.generations(rows)[reservation.generation_id]
-    result = {**result, "snapshot_tree_sha": result.get("snapshot_tree_sha") or generation.tree}
+    result = {
+        **result,
+        "snapshot_tree_sha": result.get("snapshot_tree_sha") or generation.tree,
+        "review_family": reservation.family,
+        "review_intent": (
+            "trust-manifest-verification"
+            if reservation.family == "trust"
+            else "delivery-code-review"
+        ),
+    }
     rows.append(result)
     if outcome is ReviewOutcome.CONSUMED:
         rows.append({
@@ -827,7 +895,8 @@ def test_admission_resolution_and_publication_agree_per_section_on_proof_hops():
             )
 
 
-def test_withheld_delivery_section_does_not_withhold_trust_family_carry():
+@pytest.mark.parametrize("requested", ["review", "delta"])
+def test_base_motion_invalidates_trust_carry_for_both_requested_kinds(requested):
     original = identity("a")
     delivery = admit_all_sections([], original, "delivery", requested="review")
     rows = list(delivery.records_to_append)
@@ -854,24 +923,33 @@ def test_withheld_delivery_section_does_not_withhold_trust_family_carry():
     )
     assert isinstance(delivery_delta, admission.Reserved)
     rows.extend(delivery_delta.records_to_append)
-    trust_carry = admission.admit_review(
+    target_trust_task = trust_task(
+        target, name="trust-carry", key="trust-carry"
+    )
+    trust_delta = admission.admit_review(
         _REPOSITORY, rows, repository_binding="repo",
-        task=trust_task(target, name="trust-carry", key="trust-carry"),
+        task=target_trust_task,
         current_source_identity={"head": target["candidate_sha"]},
         current_tree_sha=target["candidate_tree_sha"], patch_identity=target,
         required_sections=("trust",), equivalence_proof=proof,
-        format_only_proof=None, requested="review", changed_paths=None,
+        format_only_proof=None, requested=requested, changed_paths=None,
         security_trigger_paths=(),
     )
-    assert isinstance(trust_carry, admission.Carry)
-    assert trust_carry.carry_record.family == "trust"
-    assert trust_carry.carry_record.sections == ("trust",)
+    assert isinstance(trust_delta, admission.Reserved)
+    assert trust_delta.slot.family == "trust"
+    assert trust_delta.slot.slot_kind == "delta"
+    assert trust_delta.scoped_task["delta_scope"]["invalidated_claim_ids"] == [
+        target_trust_task["trust_claim_task"]["invalidated_claims"][0]["claim_id"]
+    ]
     delivery_carry = next(
         row for row in delivery_delta.records_to_append
         if row["type"] == "generation-carry-v1"
     )
     assert delivery_carry["family"] == "delivery"
     assert delivery_carry["sections"] == ["code"]
+
+    # Parent proof (6215393): running this node after copying it onto the
+    # reviewed head returns Carry for both parameters, so both cases fail.
 
 
 def test_every_blocked_code_is_reachable():
@@ -956,7 +1034,7 @@ def test_idempotent_admission_returns_own_reservation_and_blocks_competitor():
     competing = admit(rows, patch, review_task=task("two", "other-key"))
     assert isinstance(competing, admission.Blocked)
     assert competing.code == "slot-held"
-    assert competing.evidence["reservation_id"] == first.slot.reservation_id
+    assert first.slot.reservation_id not in repr(competing.evidence)
 
 
 def test_settled_idempotency_key_never_relaunches_or_bypasses_current_holder():
@@ -980,7 +1058,7 @@ def test_settled_idempotency_key_never_relaunches_or_bypasses_current_holder():
     competitor = admit(rows, patch, review_task=task("three", "other-key"))
     assert isinstance(competitor, admission.Blocked)
     assert competitor.code == "slot-held"
-    assert competitor.evidence["reservation_id"] == second.slot.reservation_id
+    assert second.slot.reservation_id not in repr(competitor.evidence)
     append_settlement(
         rows, second.slot, ReviewOutcome.CONSUMED, terminal("two")
     )
@@ -1074,6 +1152,75 @@ def test_delivery_and_trust_own_independent_coverage_on_identical_content(first_
     assert second.scoped_task["required_sections"] == list(second_sections)
 
 
+@pytest.mark.parametrize("first_family", ["delivery", "trust"])
+def test_successor_initializes_each_family_from_its_own_predecessor(first_family):
+    original = identity("a")
+    delivery = admit([], original, review_task=task("delivery", "delivery"))
+    rows = list(delivery.records_to_append)
+    append_settlement(
+        rows, delivery.slot, ReviewOutcome.CONSUMED, terminal("delivery")
+    )
+    trust = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task(original),
+        current_source_identity={"head": original["candidate_sha"]},
+        current_tree_sha=original["candidate_tree_sha"],
+        patch_identity=original,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="review",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    rows.extend(trust.records_to_append)
+    append_settlement(rows, trust.slot, ReviewOutcome.CONSUMED, terminal("trust"))
+
+    target = identity("b")
+    link_generation(rows, delivery.generation, target)
+
+    def family_delta(family, suffix):
+        if family == "delivery":
+            return admit(
+                rows,
+                target,
+                review_task=task(f"delivery-{suffix}", f"delivery-{suffix}"),
+                requested="delta",
+            )
+        return admission.admit_review(
+            _REPOSITORY,
+            rows,
+            repository_binding="repo",
+            task=trust_task(
+                target, name=f"trust-{suffix}", key=f"trust-{suffix}"
+            ),
+            current_source_identity={"head": target["candidate_sha"]},
+            current_tree_sha=target["candidate_tree_sha"],
+            patch_identity=target,
+            required_sections=("trust",),
+            equivalence_proof=None,
+            format_only_proof=None,
+            requested="delta",
+            changed_paths=None,
+            security_trigger_paths=(),
+        )
+
+    first = family_delta(first_family, "first")
+    assert isinstance(first, admission.Reserved)
+    assert first.slot.slot_kind == "delta"
+    rows.extend(first.records_to_append)
+    second_family = "trust" if first_family == "delivery" else "delivery"
+    second = family_delta(second_family, "second")
+    assert isinstance(second, admission.Reserved)
+    assert second.slot.slot_kind == "delta"
+    assert second.generation.generation_id == first.generation.generation_id
+
+    # Parent proof (6215393): copying this node onto the reviewed head and
+    # running it blocks the second family with missing-evidence in both orders.
+
+
 def test_trust_carry_key_binds_manifest_and_claim_set_on_the_same_tree():
     patch = identity("a")
     first = admission.admit_review(
@@ -1092,7 +1239,8 @@ def test_trust_carry_key_binds_manifest_and_claim_set_on_the_same_tree():
     )
 
     carried = admission.admit_review(
-        _REPOSITORY, rows, repository_binding="repo", task=trust_task(patch, name="same", key="same"),
+        _REPOSITORY, rows, repository_binding="repo",
+        task=trust_task(patch, name="same", key="same", invalidated=()),
         current_source_identity={"head": patch["candidate_sha"]},
         current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
         required_sections=("trust",), equivalence_proof=None,
@@ -1101,12 +1249,13 @@ def test_trust_carry_key_binds_manifest_and_claim_set_on_the_same_tree():
     )
     assert isinstance(carried, admission.Carry)
 
+    changed_task = trust_task(
+        patch, name="changed", key="changed", manifest="8" * 64,
+        claim_set="9" * 64, invalidated=("b" * 64,),
+    )
     changed = admission.admit_review(
         _REPOSITORY, rows, repository_binding="repo",
-        task=trust_task(
-            patch, name="changed", key="changed", manifest="8" * 64,
-            claim_set="9" * 64, invalidated=("b" * 64,),
-        ),
+        task=changed_task,
         current_source_identity={"head": patch["candidate_sha"]},
         current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
         required_sections=("trust",), equivalence_proof=None,
@@ -1116,8 +1265,57 @@ def test_trust_carry_key_binds_manifest_and_claim_set_on_the_same_tree():
     assert isinstance(changed, admission.Reserved)
     assert changed.slot.slot_kind == "delta"
     assert changed.scoped_task["delta_scope"]["invalidated_claim_ids"] == [
-        "tc_" + "b" * 64
+        changed_task["trust_claim_task"]["invalidated_claims"][0]["claim_id"]
     ]
+
+
+def test_caller_rehashed_stale_trust_digests_cannot_carry_old_receipt():
+    patch = identity("a")
+    initial_task = trust_task(patch)
+    first = admission.admit_review(
+        _REPOSITORY, [], repository_binding="repo", task=initial_task,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    rows = list(first.records_to_append)
+    append_settlement(rows, first.slot, ReviewOutcome.CONSUMED, terminal("trust"))
+
+    forged = trust_task(
+        patch, name="forged", key="forged", invalidated=("b" * 64,)
+    )
+    forged_claim_task = dict(forged["trust_claim_task"])
+    forged_claim_task["manifest_sha256"] = initial_task["trust_claim_task"][
+        "manifest_sha256"
+    ]
+    forged_claim_task["claim_set_digest"] = initial_task["trust_claim_task"][
+        "claim_set_digest"
+    ]
+    forged_claim_task["task_hash"] = review_state.canonical_record_digest(
+        {
+            key: value
+            for key, value in forged_claim_task.items()
+            if key != "task_hash"
+        }
+    )
+    forged["trust_claim_task"] = forged_claim_task
+    result = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo", task=forged,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(result, admission.Blocked)
+    assert result.code == "missing-evidence"
+    assert result.records_to_append == ()
+
+    # Parent proof (6215393): copying this node onto the reviewed head returns
+    # Carry because only the caller-recomputable task hash and stale digests are
+    # checked there.
 
 
 def test_manifest_only_retirement_is_a_trust_delta():
@@ -1135,12 +1333,13 @@ def test_manifest_only_retirement_is_a_trust_delta():
     )
     rows = list(first.records_to_append)
     append_settlement(rows, first.slot, ReviewOutcome.CONSUMED, terminal("trust"))
+    retired_task = trust_task(
+        patch, name="retire", key="retire", manifest="8" * 64,
+        claim_set="9" * 64, invalidated=(), retirements=("b" * 64,),
+    )
     retired = admission.admit_review(
         _REPOSITORY, rows, repository_binding="repo",
-        task=trust_task(
-            patch, name="retire", key="retire", manifest="8" * 64,
-            claim_set="9" * 64, invalidated=(), retirements=("b" * 64,),
-        ),
+        task=retired_task,
         current_source_identity={"head": patch["candidate_sha"]},
         current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
         required_sections=("trust",), equivalence_proof=None,
@@ -1150,8 +1349,66 @@ def test_manifest_only_retirement_is_a_trust_delta():
     assert isinstance(retired, admission.Reserved)
     assert retired.slot.slot_kind == "delta"
     assert retired.scoped_task["delta_scope"]["retirement_claim_ids"] == [
-        "tc_" + "b" * 64
+        retired_task["trust_claim_task"]["retirements"][0]["claim_id"]
     ]
+
+
+def test_blocked_trust_obligation_cannot_be_covered_by_an_old_delta():
+    patch = identity("a")
+    primary = admission.admit_review(
+        _REPOSITORY, [], repository_binding="repo", task=trust_task(patch),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="review", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    rows = list(primary.records_to_append)
+    append_settlement(rows, primary.slot, ReviewOutcome.CONSUMED, terminal("trust"))
+    delta = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo",
+        task=trust_task(
+            patch, name="trust-b", key="trust-b", manifest="8" * 64,
+            claim_set="9" * 64, invalidated=("b" * 64,),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="delta", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    rows.extend(delta.records_to_append)
+    append_settlement(rows, delta.slot, ReviewOutcome.CONSUMED, terminal("trust-b"))
+
+    obligation_c = trust_task(
+        patch, name="trust-c", key="trust-c", manifest="a" * 64,
+        claim_set="b" * 64, invalidated=("c" * 64,),
+    )
+    blocked = admission.admit_review(
+        _REPOSITORY, rows, repository_binding="repo", task=obligation_c,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="delta", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(blocked, admission.Blocked)
+    assert blocked.code == "slots-exhausted"
+    assert blocked.records_to_append == ()
+    repeated = admission.admit_review(
+        _REPOSITORY, [*rows, *blocked.records_to_append],
+        repository_binding="repo", task=obligation_c,
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"], patch_identity=patch,
+        required_sections=("trust",), equivalence_proof=None,
+        format_only_proof=None, requested="delta", changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(repeated, admission.Blocked)
+    assert repeated.code == "slots-exhausted"
+
+    # Parent proof (6215393): persisting the first Blocked.records_to_append and
+    # retrying returns Carry, so this test fails on the reviewed head.
 
 
 @pytest.mark.parametrize("intent", ["discovery", "resolution-adjudication"])
@@ -1159,7 +1416,11 @@ def test_package_declared_nonverdict_intents_launch_without_slot_authority(inten
     patch = identity("a")
     result = admit(
         [], patch,
-        review_task={**task(intent, intent), "review_intent": intent},
+        review_task={
+            **task(intent, intent),
+            "review_intent": intent,
+            "task_contract": {"review_intent": intent, "run_id": "run"},
+        },
     )
     assert isinstance(result, admission.NonVerdictReviewLaunch)
     assert result.family is None
@@ -1168,6 +1429,7 @@ def test_package_declared_nonverdict_intents_launch_without_slot_authority(inten
     ]
     assert result.launch_record["task_id"] == intent
     assert result.launch_record["attempt_index"] == 0
+    assert result.launch_record["run_id"] == "run"
 
 
 def test_unknown_or_contradictory_intent_cannot_bypass_delivery_admission():
@@ -1191,6 +1453,30 @@ def test_unknown_or_contradictory_intent_cannot_bypass_delivery_admission():
     assert bypass.code == "unknown-intent"
 
 
+def test_consumed_delivery_task_cannot_be_relabelled_nonverdict_without_contract():
+    patch = identity("a")
+    delivery = admit([], patch)
+    rows = list(delivery.records_to_append)
+    append_settlement(
+        rows, delivery.slot, ReviewOutcome.CONSUMED, terminal("review")
+    )
+    relabelled = admit(
+        rows,
+        patch,
+        review_task={
+            "task_id": "review",
+            "idempotency_key": "key",
+            "review_intent": "discovery",
+        },
+    )
+    assert isinstance(relabelled, admission.Blocked)
+    assert relabelled.code == "unknown-intent"
+    assert relabelled.records_to_append == ()
+
+    # Parent proof (6215393): copying this node onto the reviewed head returns
+    # NonVerdictReviewLaunch and therefore fails this assertion.
+
+
 def test_nonverdict_terminal_can_never_supply_delivery_coverage():
     from loopzero.review import _tree_coverage
 
@@ -1208,6 +1494,49 @@ def test_nonverdict_terminal_can_never_supply_delivery_coverage():
         lens="code",
         current_tree=patch["candidate_tree_sha"],
     )
+
+
+@pytest.mark.parametrize(
+    ("intent", "family"),
+    [
+        ("discovery", None),
+        ("resolution-adjudication", None),
+        ("trust-manifest-verification", "trust"),
+        (None, "delivery"),
+    ],
+)
+def test_native_delivery_settlement_rejects_nonverdict_and_cross_family_terminals(
+    intent, family
+):
+    patch = identity("a")
+    delivery = admit([], patch)
+    rows = list(delivery.records_to_append)
+    candidate = {
+        **terminal("review", tree=patch["candidate_tree_sha"]),
+    }
+    candidate.pop("review_intent", None)
+    candidate.pop("review_family", None)
+    if intent is not None:
+        candidate["review_intent"] = intent
+    if family is not None:
+        candidate["review_family"] = family
+    rows.extend(
+        [
+            candidate,
+            {"type": "verdict", "task_id": "review", "verdict": "pass"},
+        ]
+    )
+    with pytest.raises(review_state.ReviewSlotError):
+        review_state.settle_review_slot(
+            _REPOSITORY,
+            rows,
+            reservation=delivery.slot,
+            outcome=ReviewOutcome.CONSUMED,
+            terminal_ref=candidate,
+        )
+
+    # Parent proof (6215393): copying this node onto the reviewed head and
+    # running all three parameters produces consumed settlements.
 
 
 def test_seen_content_with_changed_sections_cannot_receive_a_fresh_primary():
@@ -1229,7 +1558,7 @@ def test_seen_content_with_changed_sections_cannot_receive_a_fresh_primary():
     )
     assert isinstance(result, admission.Blocked)
     assert result.code == "missing-evidence"
-    assert result.evidence["generation_id"] == generation.generation_id
+    assert generation.generation_id not in repr(result.evidence)
     assert result.records_to_append == ()
 
 

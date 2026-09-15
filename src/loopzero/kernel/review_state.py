@@ -772,11 +772,12 @@ class ReviewSlotReservation:
     task_id: str
     idempotency_key: str
     reservation_id: str
+    coverage_digest: str | None = None
     existing: bool = field(default=False, compare=False)
     conflict: bool = field(default=False, compare=False)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        record: dict[str, object] = {
             "type": REVIEW_SLOT_RESERVATION_TYPE,
             "generation_id": self.generation_id,
             "family": self.family,
@@ -785,6 +786,9 @@ class ReviewSlotReservation:
             "idempotency_key": self.idempotency_key,
             "reservation_id": self.reservation_id,
         }
+        if self.coverage_digest is not None:
+            record["coverage_digest"] = self.coverage_digest
+        return record
 
     to_json = to_dict
     to_record = to_dict
@@ -798,13 +802,20 @@ class ReviewSlotReservation:
             "type", "generation_id", "family", "slot_kind", "task_id",
             "idempotency_key", "reservation_id",
         }
-        if set(record) not in (expected, expected | {"terminal_authority_proof"}):
+        accepted = (
+            expected,
+            expected | {"coverage_digest"},
+            expected | {"terminal_authority_proof"},
+            expected | {"coverage_digest", "terminal_authority_proof"},
+        )
+        if set(record) not in accepted:
             raise ReviewStateError("review slot reservation fields are invalid")
         family = record.get("family")
         slot_kind = record.get("slot_kind")
         task_id = record.get("task_id")
         key = record.get("idempotency_key")
         generation_id = record.get("generation_id")
+        coverage_digest = record.get("coverage_digest")
         if (
             record.get("type") != REVIEW_SLOT_RESERVATION_TYPE
             or family not in {"delivery", "trust"}
@@ -812,11 +823,19 @@ class ReviewSlotReservation:
             or not isinstance(task_id, str) or not task_id
             or not isinstance(key, str) or not key
             or not isinstance(generation_id, str)
+            or (
+                coverage_digest is not None
+                and (
+                    not isinstance(coverage_digest, str)
+                    or _SHA256_RE.fullmatch(coverage_digest) is None
+                )
+            )
         ):
             raise ReviewStateError("review slot reservation is invalid")
         expected_id = _reservation_id(
             generation_id, cast(ReviewFamily, family),
             cast(ReviewSlotKind, slot_kind), task_id, key,
+            cast(str | None, coverage_digest),
         )
         if record.get("reservation_id") != expected_id:
             raise ReviewStateError("review slot reservation id is invalid")
@@ -827,6 +846,7 @@ class ReviewSlotReservation:
             task_id=task_id,
             idempotency_key=key,
             reservation_id=expected_id,
+            coverage_digest=cast(str | None, coverage_digest),
         )
 
 
@@ -906,11 +926,15 @@ def _reservation_id(
     slot_kind: ReviewSlotKind,
     task_id: str,
     idempotency_key: str,
+    coverage_digest: str | None = None,
 ) -> str:
-    return "rr_" + _digest([
+    payload: list[object] = [
         "review-slot-reservation-v1", generation_id, family, slot_kind,
         task_id, idempotency_key,
-    ])[:32]
+    ]
+    if coverage_digest is not None:
+        payload.append(coverage_digest)
+    return "rr_" + _digest(payload)[:32]
 
 
 def _settlement_id(
@@ -1105,14 +1129,81 @@ def resolve_generation(
         cast(Sequence[dict[str, object]], records)
     )
 
+    def predecessor_baseline(
+        predecessor_id: str | None,
+    ) -> tuple[str | None, tuple[str, ...]]:
+        """Resolve this family's baseline even when another family made the row."""
+        if predecessor_id is None:
+            return None, ()
+        predecessor_coverage = projected_coverage.get(
+            (predecessor_id, family)
+        )
+        if predecessor_coverage is None:
+            return None, ()
+        typed = cast(ReviewFamilyCoverageV1, predecessor_coverage)
+        predecessor_state = slot_state(
+            cast(Sequence[dict[str, object]], records),
+            predecessor_id,
+            family,
+        )
+        if family == "trust":
+            coverage_digest = canonical_record_digest(typed.to_dict())
+
+            def consumed_receipt(slot_kind: ReviewSlotKind) -> str | None:
+                for reservation in reversed(predecessor_state.reservations):
+                    if (
+                        reservation.slot_kind != slot_kind
+                        or reservation.coverage_digest != coverage_digest
+                    ):
+                        continue
+                    settlement = predecessor_state.settlement_for(
+                        reservation.reservation_id
+                    )
+                    if settlement is not None and predecessor_state._effective_outcome(
+                        settlement
+                    ) is ReviewOutcome.CONSUMED:
+                        return cast(str, settlement.terminal_ref)
+                return None
+
+            own_primary_ref = consumed_receipt("primary")
+            current_delta_consumed = consumed_receipt("delta") is not None
+            covered = own_primary_ref is not None or (
+                predecessor_state.inherited_primary_ref is not None
+                and (
+                    not typed.invalidated_sections or current_delta_consumed
+                )
+            )
+            receipt = own_primary_ref or predecessor_state.inherited_primary_ref
+        else:
+            covered = predecessor_state.own_primary_consumed or (
+                predecessor_state.inherited_primary_ref is not None
+                and (
+                    not typed.invalidated_sections
+                    or predecessor_state.delta_consumed
+                )
+            )
+            receipt = predecessor_state.primary_terminal_ref
+        if not covered:
+            return None, ()
+        inherited = tuple(
+            sorted(set(typed.required_sections).intersection(sections))
+        )
+        return receipt, inherited
+
     def coverage_for(generation: ReviewGenerationV1) -> ReviewFamilyCoverageV1:
         existing = projected_coverage.get((generation.generation_id, family))
         if existing is None:
+            primary_receipt, inherited = predecessor_baseline(
+                generation.predecessor_id
+            )
             return ReviewFamilyCoverageV1(
                 generation_id=generation.generation_id,
                 family=family,
                 required_sections=sections,
                 policy_digest=_policy_digest(sections),
+                primary_origin_receipt=primary_receipt,
+                inherited_coverage=inherited,
+                invalidated_sections=sections if primary_receipt is not None else (),
                 manifest_digest=manifest_digest,
                 claim_set_digest=claim_set_digest,
             )
@@ -1387,46 +1478,7 @@ def resolve_generation(
     primary_receipt: str | None = None
     inherited: tuple[str, ...] = ()
     if predecessor is not None:
-        predecessor_slots = slot_state(
-            cast(Sequence[dict[str, object]], records),
-            predecessor.generation_id,
-            family,
-        )
-        predecessor_coverage = projected_coverage.get(
-            (predecessor.generation_id, family)
-        )
-        predecessor_is_covered = bool(
-            predecessor_coverage is not None
-            and cast(ReviewFamilyCoverageV1, predecessor_coverage).obligation_key
-            == (manifest_digest, claim_set_digest)
-            and (
-            predecessor_slots.own_primary_consumed
-            or (
-                predecessor_slots.inherited_primary_ref is not None
-                and (
-                    not cast(
-                        ReviewFamilyCoverageV1, predecessor_coverage
-                    ).invalidated_sections
-                    or predecessor_slots.delta_consumed
-                )
-            )
-            )
-        )
-        primary_receipt = (
-            predecessor_slots.primary_terminal_ref
-            if predecessor_is_covered
-            else None
-        )
-        if primary_receipt is not None:
-            inherited = tuple(
-                sorted(
-                    set(
-                        cast(
-                            ReviewFamilyCoverageV1, predecessor_coverage
-                        ).required_sections
-                    ).intersection(sections)
-                )
-            )
+        primary_receipt, inherited = predecessor_baseline(predecessor_id)
     generation = ReviewGenerationV1(
         repository_binding=repository_binding,
         lineage_id=lineage_id,
@@ -1540,6 +1592,7 @@ def _reserve_review_slot(
     slot_kind: ReviewSlotKind,
     task_id: str,
     idempotency_key: str,
+    coverage_digest: str | None = None,
     prospective_generation: ReviewGenerationV1 | None = None,
     prospective_inherited_primary: bool = False,
 ) -> ReviewSlotReservation:
@@ -1551,6 +1604,10 @@ def _reserve_review_slot(
     if not task_id or not idempotency_key:
         raise ReviewSlotError(
             "reservation-conflict", "review reservation identity is missing"
+        )
+    if coverage_digest is not None and _SHA256_RE.fullmatch(coverage_digest) is None:
+        raise ReviewSlotError(
+            "reservation-conflict", "review coverage binding is invalid"
         )
     if generation_id not in _prospective_generations(records, prospective_generation):
         raise ReviewSlotError("missing-evidence", "review generation is not authenticated")
@@ -1572,7 +1629,8 @@ def _reserve_review_slot(
             bound.family,
             bound.slot_kind,
             bound.task_id,
-        ) != (generation_id, family, slot_kind, task_id):
+            bound.coverage_digest,
+        ) != (generation_id, family, slot_kind, task_id, coverage_digest):
             raise ReviewSlotError(
                 "reservation-conflict",
                 "idempotency key is already bound to another review obligation",
@@ -1582,10 +1640,10 @@ def _reserve_review_slot(
         cast(Sequence[dict[str, object]], records), generation_id, family
     )
     prospective_primary = bool(
-        prospective_generation is not None
-        and (
-            prospective_inherited_primary
-            or (
+        prospective_inherited_primary
+        or (
+            prospective_generation is not None
+            and (
                 family == "delivery"
                 and prospective_generation.primary_origin_receipt is not None
             )
@@ -1600,6 +1658,7 @@ def _reserve_review_slot(
             and existing.family == family
             and existing.slot_kind == slot_kind
             and existing.task_id == task_id
+            and existing.coverage_digest == coverage_digest
         )
         if not same:
             raise ReviewSlotError(
@@ -1617,7 +1676,7 @@ def _reserve_review_slot(
                 name: getattr(existing, name)
                 for name in (
                     "generation_id", "family", "slot_kind", "task_id",
-                    "idempotency_key", "reservation_id",
+                    "idempotency_key", "reservation_id", "coverage_digest",
                 )
             },
             existing=True,
@@ -1629,7 +1688,7 @@ def _reserve_review_slot(
                 name: getattr(existing, name)
                 for name in (
                     "generation_id", "family", "slot_kind", "task_id",
-                    "idempotency_key", "reservation_id",
+                    "idempotency_key", "reservation_id", "coverage_digest",
                 )
             },
             existing=True,
@@ -1663,8 +1722,10 @@ def _reserve_review_slot(
         slot_kind=slot_kind,
         task_id=task_id,
         idempotency_key=idempotency_key,
+        coverage_digest=coverage_digest,
         reservation_id=_reservation_id(
-            generation_id, family, slot_kind, task_id, idempotency_key
+            generation_id, family, slot_kind, task_id, idempotency_key,
+            coverage_digest,
         ),
     )
 
@@ -1678,6 +1739,7 @@ def reserve_review_slot(
     slot_kind: ReviewSlotKind,
     task_id: str,
     idempotency_key: str,
+    coverage_digest: str | None = None,
 ) -> ReviewSlotReservation:
     """Reserve one slot from authenticated ledger state.
 
@@ -1693,6 +1755,7 @@ def reserve_review_slot(
         slot_kind=slot_kind,
         task_id=task_id,
         idempotency_key=idempotency_key,
+        coverage_digest=coverage_digest,
     )
 
 
@@ -1742,7 +1805,7 @@ def settle_review_slot(
         generation_carries,
         generations,
     )
-    from ..review.authority import classify_review_outcome
+    from ..review.authority import classify_review_outcome, _terminal_verdict_family
 
     assert_authority_ledger_lock_held(repository)
     try:
@@ -1770,6 +1833,14 @@ def settle_review_slot(
         raise ReviewSlotError(
             "reservation-conflict", "terminal reference belongs to another task"
         )
+    valid_terminal_family, terminal_family = _terminal_verdict_family(
+        terminal, require_intent=True
+    )
+    if not valid_terminal_family or terminal_family != reservation.family:
+        raise ReviewSlotError(
+            "reservation-conflict",
+            "terminal family does not match the review reservation",
+        )
     generation = generations(cast(Sequence[dict[str, object]], records)).get(
         reservation.generation_id
     )
@@ -1785,7 +1856,9 @@ def settle_review_slot(
             "reservation-conflict",
             "terminal tree is outside the reserved content generation",
         )
-    classified = classify_review_outcome(terminal, records)
+    classified = classify_review_outcome(
+        terminal, records, expected_family=reservation.family
+    )
     if classified is not normalized_outcome:
         raise ReviewSlotError(
             "reservation-conflict", "settlement outcome does not match terminal"

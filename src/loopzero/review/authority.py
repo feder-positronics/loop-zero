@@ -51,6 +51,7 @@ from .routing import (
     DISPATCH_OUTCOME_TYPES,
     ESCALATION_TARGETS,
     WORK_UNIT_HISTORY_DAYS,
+    review_family_for_intent,
     supersession_reason_matches_terminal,
     verifier_identity_is_independent,
 )
@@ -101,11 +102,69 @@ def _accepted_terminal_verdict(terminal: Mapping[str, object]) -> str | None:
     return None
 
 
+def _terminal_verdict_family(
+    terminal: Mapping[str, object],
+    *,
+    require_intent: bool = False,
+) -> tuple[bool, str | None]:
+    """Derive verdict family from fields protected by terminal authority."""
+    contract = terminal.get("task_contract")
+    contracted_intent = (
+        contract.get("review_intent") if isinstance(contract, Mapping) else None
+    )
+    supplied_intent = terminal.get("review_intent")
+    if (
+        contracted_intent is not None
+        and supplied_intent is not None
+        and contracted_intent != supplied_intent
+    ):
+        return False, None
+    intent = contracted_intent if contracted_intent is not None else supplied_intent
+    contracted_family = (
+        contract.get("review_family") if isinstance(contract, Mapping) else None
+    )
+    supplied_family = terminal.get("review_family")
+    if (
+        contracted_family is not None
+        and supplied_family is not None
+        and contracted_family != supplied_family
+    ):
+        return False, None
+    declared_family = (
+        contracted_family if contracted_family is not None else supplied_family
+    )
+    if declared_family is not None and declared_family not in {"delivery", "trust"}:
+        return False, None
+    if intent is None:
+        if require_intent:
+            return False, None
+        return True, cast(str | None, declared_family)
+    try:
+        routed = review_family_for_intent(intent)
+    except DispatchError:
+        return False, None
+    if routed is None or (
+        declared_family is not None and declared_family != routed
+    ):
+        return False, None
+    return True, routed
+
+
 def authenticated_review_verdict(
-    terminal: object, records: Sequence[Mapping[str, object]] = ()
+    terminal: object,
+    records: Sequence[Mapping[str, object]] = (),
+    *,
+    expected_family: str | None = None,
 ) -> str | None:
     """Return the authenticated pass/fail fact carried by one terminal."""
     if not isinstance(terminal, Mapping):
+        return None
+    valid_family, terminal_family = _terminal_verdict_family(
+        terminal, require_intent=expected_family is not None
+    )
+    if not valid_family or (
+        expected_family is not None and terminal_family != expected_family
+    ):
         return None
     mapped = cast(Sequence[dict[str, object]], records)
     terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
@@ -147,7 +206,10 @@ def authenticated_review_verdict(
 
 
 def classify_review_outcome(
-    terminal: object, records: Sequence[Mapping[str, object]] = ()
+    terminal: object,
+    records: Sequence[Mapping[str, object]] = (),
+    *,
+    expected_family: str | None = None,
 ) -> ReviewOutcome:
     """Map ledger-authenticated terminal and verdict facts to slot accounting."""
     if not isinstance(terminal, Mapping):
@@ -161,7 +223,9 @@ def classify_review_outcome(
     status = terminal.get("status")
     reason = terminal.get("terminal_reason")
     failure = terminal.get("failure_class")
-    verdict = authenticated_review_verdict(terminal, records)
+    verdict = authenticated_review_verdict(
+        terminal, records, expected_family=expected_family
+    )
     verification = terminal.get("verification_verdict")
 
     # A verdict is the review's content fact regardless of how the surrounding

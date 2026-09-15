@@ -141,6 +141,8 @@ def consumed_terminal(task_id, tree=None):
         "review_acceptance_verified": True,
         "accepted_verdict": "pass",
         "snapshot_tree_sha": tree,
+        "review_intent": "delivery-code-review",
+        "review_family": "delivery",
     }
 
 
@@ -151,6 +153,8 @@ def released_terminal(task_id, tree=None):
         "status": "infrastructure-failure",
         "terminal_reason": "transport-disconnect",
         "snapshot_tree_sha": tree,
+        "review_intent": "delivery-code-review",
+        "review_family": "delivery",
     }
 
 
@@ -158,7 +162,16 @@ def settle(rows, reservation, terminal, outcome):
     if reservation.to_dict() not in rows:
         rows.append(reservation.to_dict())
     generation = authority_projection.generations(rows)[reservation.generation_id]
-    terminal = {**terminal, "snapshot_tree_sha": terminal.get("snapshot_tree_sha") or generation.tree}
+    terminal = {
+        **terminal,
+        "snapshot_tree_sha": terminal.get("snapshot_tree_sha") or generation.tree,
+        "review_family": reservation.family,
+        "review_intent": (
+            "trust-manifest-verification"
+            if reservation.family == "trust"
+            else "delivery-code-review"
+        ),
+    }
     rows.append(terminal)
     if outcome is ReviewOutcome.CONSUMED:
         rows.append({
