@@ -62,7 +62,7 @@ jobs:
           UV_CACHE_DIR="$UV_CACHE_ROOT" UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
             uv sync --locked --python 3.13 --group dev --no-install-project
 
-      - name: Build and install pinned release credential broker
+      - name: Build and install the credential broker from reviewed main
         env:
           RUNTIME: ${{ matrix.runtime }}
         run: |
@@ -71,7 +71,15 @@ jobs:
           RELEASE_SOURCE="$ROOT/release-source"
           WHEEL_DIR="$ROOT/release-wheel"
           BROKER_VENV="$ROOT/broker-venv"
-          RELEASE_SHA=$(git rev-parse 'refs/remotes/origin/release/0.3^{commit}')
+          # The broker seals the refresh-capable credential on the host before
+          # any sandbox starts, so it must come from a reviewed revision and
+          # never from the branch under test: a branch dispatch may run
+          # arbitrary code only inside the bubble, against the access-only
+          # snapshot. It used to come from a fixed release branch, which went
+          # stale and hid the doctor-based refresh (PR #36) from the runner
+          # for days; main is the reviewed, protected line, so it comes from
+          # main now, and the bubble still tests the checked-out revision.
+          RELEASE_SHA=$(git rev-parse 'refs/remotes/origin/main^{commit}')
           install -d -m 700 "$RELEASE_SOURCE" "$WHEEL_DIR"
           git archive --format=tar "$RELEASE_SHA" | tar -xf - -C "$RELEASE_SOURCE"
           UV_CACHE_DIR="$ROOT/uv-cache" uv build --wheel \
