@@ -1,5 +1,12 @@
 name: deterministic checks
-on: [push, pull_request]
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'release/**'
+    tags:
+      - '*'
 permissions:
   contents: read
 jobs:
