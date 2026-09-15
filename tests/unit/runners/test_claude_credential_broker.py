@@ -890,7 +890,7 @@ def test_explicit_access_only_token_snapshot_never_enters_oauth_refresh(
     credential = token_root / "sealed.json"
     credential.write_text(json.dumps({
         "claudeCodeOauthToken": token,
-        "source": "token-file(default)",
+        "source": "setup-token-file",
     }))
     credential.chmod(0o600)
     monkeypatch.setattr(
@@ -904,7 +904,7 @@ def test_explicit_access_only_token_snapshot_never_enters_oauth_refresh(
         credential_path=credential,
         allow_token_fallback=False,
     ) as fd:
-        assert token_broker.snapshot_source(fd) == "token-file(default)"
+        assert token_broker.snapshot_source(fd) == "setup-token-file"
         assert token_broker.snapshot_token(fd) == token
 
 
