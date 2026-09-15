@@ -18,6 +18,10 @@ import pytest
 # tests/unit/review/test_admission.py::test_caller_rehashed_stale_trust_digests_cannot_carry_old_receipt
 # tests/unit/review/test_admission.py::test_package_declared_nonverdict_intents_launch_without_slot_authority`.
 # All sixteen parametrized cases failed on 6215393.
+# Third-round probes were first run unchanged on a0a42e99: the trust-intent
+# legacy case, both second-hop family orderings, and both persisted-scope retry
+# cases failed. The intent-less and discovery legacy cases already behaved
+# correctly on that head.
 
 from loopzero.kernel import (
     authority_projection,
@@ -631,7 +635,19 @@ def test_carry_reports_an_authenticated_failing_verdict():
     assert {verdict for _, verdict in carried.verdicts} == {"fail"}
 
 
-def test_intentless_legacy_delivery_primary_carries_conservatively():
+@pytest.mark.parametrize(
+    ("legacy_intent", "expected_type"),
+    [
+        (None, admission.Carry),
+        ("delivery-code-review", admission.Carry),
+        ("trust-manifest-verification", admission.Reserved),
+        ("discovery", admission.Reserved),
+        ("resolution-adjudication", admission.Reserved),
+    ],
+)
+def test_legacy_terminal_intent_controls_verdict_family(
+    legacy_intent, expected_type
+):
     patch = identity("a")
     metadata = {
         "schema_version": authority_store.TELEMETRY_SCHEMA_VERSION,
@@ -648,6 +664,8 @@ def test_intentless_legacy_delivery_primary_carries_conservatively():
         "read_only": True,
         "work_kind": "review",
     }
+    if legacy_intent is not None:
+        old_terminal["review_intent"] = legacy_intent
     rows = [
         old_terminal,
         {
@@ -665,9 +683,26 @@ def test_intentless_legacy_delivery_primary_carries_conservatively():
         security=(),
     )
 
-    assert isinstance(carried, admission.Carry)
-    assert carried.verdicts == (
-        (review_state.canonical_record_digest(old_terminal), "pass"),
+    assert isinstance(carried, expected_type)
+    if isinstance(carried, admission.Carry):
+        assert carried.verdicts == (
+            (review_state.canonical_record_digest(old_terminal), "pass"),
+        )
+    else:
+        assert carried.slot.slot_kind == "primary"
+        assert review_state.canonical_record_digest(old_terminal) not in {
+            receipt for receipt, _verdict in getattr(carried, "verdicts", ())
+        }
+    projected_families = {
+        family
+        for _generation_id, family in authority_projection.family_coverages(rows)
+    }
+    assert projected_families == (
+        {"trust"}
+        if legacy_intent == "trust-manifest-verification"
+        else set()
+        if legacy_intent in {"discovery", "resolution-adjudication"}
+        else {"delivery"}
     )
 
 
@@ -732,6 +767,28 @@ def test_family_first_reviewed_at_equivalent_endpoint_can_carry(
     )
     assert isinstance(repeated, admission.Carry)
     assert {verdict for _, verdict in repeated.verdicts} == {"pass"}
+
+    second_endpoint = identity("c")
+    second_proof = generation_proof(endpoint, second_endpoint)
+    rows.append(second_proof)
+    carried_again = admit_family(
+        rows,
+        second_endpoint,
+        second_family,
+        f"{second_family}-c",
+        proof=second_proof,
+    )
+    assert isinstance(carried_again, admission.Carry)
+    rows.extend(carried_again.records_to_append)
+
+    repeated_again = admit_family(
+        rows,
+        second_endpoint,
+        second_family,
+        f"repeat-{second_family}-c",
+    )
+    assert isinstance(repeated_again, admission.Carry)
+    assert {verdict for _, verdict in repeated_again.verdicts} == {"pass"}
 
 
 def test_old_trust_terminal_cannot_settle_a_new_obligation():
@@ -845,6 +902,61 @@ def test_pending_trust_invalidation_cannot_be_omitted_on_retry():
     settled = admit_family(rows, patch, "trust", "settled", invalidated=())
     assert isinstance(settled, admission.Carry)
     assert len(settled.receipts) == 2
+
+
+@pytest.mark.parametrize("release_before_retry", [False, True])
+def test_trust_retry_dispatches_the_persisted_claim_scope(release_before_retry):
+    patch = identity("a")
+    first = admit_family([], patch, "trust", "trust", invalidated=())
+    assert isinstance(first, admission.Reserved)
+    rows = list(first.records_to_append)
+    append_settlement(
+        rows, first.slot, ReviewOutcome.CONSUMED, terminal("trust")
+    )
+
+    claim_id = TrustClaim("actors_assets", f"claim-{'a' * 64}", ()).claim_id
+    invalidation = admit_family(
+        rows,
+        patch,
+        "trust",
+        "invalidate",
+        invalidated=("a" * 64,),
+    )
+    assert isinstance(invalidation, admission.Reserved)
+    rows.extend(invalidation.records_to_append)
+    if release_before_retry:
+        append_settlement(
+            rows,
+            invalidation.slot,
+            ReviewOutcome.RELEASED,
+            terminal("invalidate", released=True),
+        )
+
+    retry_name = "retry" if release_before_retry else "invalidate"
+    retry = admission.admit_review(
+        _REPOSITORY,
+        rows,
+        repository_binding="repo",
+        task=trust_task(
+            patch,
+            name=retry_name,
+            key=retry_name,
+            invalidated=(),
+        ),
+        current_source_identity={"head": patch["candidate_sha"]},
+        current_tree_sha=patch["candidate_tree_sha"],
+        patch_identity=patch,
+        required_sections=("trust",),
+        equivalence_proof=None,
+        format_only_proof=None,
+        requested="delta",
+        changed_paths=None,
+        security_trigger_paths=(),
+    )
+    assert isinstance(retry, admission.Blocked)
+    assert retry.code == "invalid-proof"
+    assert retry.records_to_append == ()
+    assert claim_id not in repr(retry.evidence)
 
 
 def test_amended_commit_message_reuses_settled_generation_and_slots(tmp_path):

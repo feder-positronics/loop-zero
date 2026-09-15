@@ -12,6 +12,8 @@ import pytest
 # tests/unit/review/test_stats.py::test_attempt_identity_retains_run_when_task_and_index_are_reused
 # tests/unit/review/test_stats.py::test_legacy_verdict_without_attempt_fields_joins_its_run_and_task`
 # failed on 6215393 with one collapsed start and zero legacy verdicts.
+# The consumer-shape non-verdict test below was copied into a clean d141fcea
+# archive; it failed there with verdicts=1 and passes on a0a42e99 with zero.
 
 from loopzero.kernel import authority_projection, authority_store
 from loopzero.kernel.policy import (
@@ -449,18 +451,33 @@ def test_legacy_verdict_without_attempt_fields_joins_its_run_and_task():
 
 
 def test_nonverdict_attempt_terminal_never_counts_as_a_verdict():
-    common = {
+    launch = {
         "task_id": "discovery-task",
         "attempt_index": 0,
         "attempt_id": "discovery-task:0",
+        "run_id": "discovery-run",
+    }
+    consumer_attempt = {
+        "task_id": "discovery-task",
+        "attempt_index": 0,
+        "run_id": "discovery-run",
         "review_intent": "discovery",
     }
     totals = review_stats(
         [
-            {**common, "type": "review-nonverdict-launch-v1", "intent": "discovery"},
-            {**common, "type": "attempt-start"},
-            {**common, "type": "attempt-terminal", "status": "completed"},
-            {**common, "type": "verdict", "verdict": "pass"},
+            {**launch, "type": "review-nonverdict-launch-v1", "intent": "discovery"},
+            {**consumer_attempt, "type": "attempt-start"},
+            {
+                **consumer_attempt,
+                "type": "attempt-terminal",
+                "status": "completed",
+            },
+            {
+                "type": "verdict",
+                "run_id": "discovery-run",
+                "task_id": "discovery-task",
+                "verdict": "pass",
+            },
         ]
     ).totals
     assert totals.starts == 1
