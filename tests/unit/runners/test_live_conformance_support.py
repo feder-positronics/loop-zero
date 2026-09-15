@@ -831,7 +831,13 @@ def test_workflow_seals_with_release_wheel_and_deletes_source_before_bwrap() -> 
     validation_body = workflow[validation_step:]
     bwrap_command = workflow[bwrap:workflow.index("--chdir", bwrap)]
 
-    assert "refs/remotes/origin/release/0.3" in workflow
+    # The broker touches the refresh-capable secret on the host, so it is
+    # built from reviewed main, never from the revision under test.
+    assert "refs/remotes/origin/main^{commit}" in workflow
+    broker_step = workflow.index("- name: Build and install the credential broker")
+    broker_body = workflow[broker_step:seal_step]
+    assert "GITHUB_SHA" not in broker_body
+    assert "git rev-parse HEAD" not in broker_body
     assert "$RUNNER_TEMP/loopzero-live/broker-venv" in workflow
     assert seal_step < source_delete < validation_step < bwrap
     assert '--ro-bind "$SNAPSHOT" /run/loopzero-credential.json' in validation_body
