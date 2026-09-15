@@ -157,26 +157,99 @@ def _identity(value: object) -> str | None:
     return None
 
 
+def _attempt_index(record: Mapping[str, object]) -> int | None:
+    value = record.get("attempt_index")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 def _attempt_key(record: Mapping[str, object]) -> tuple[object, ...] | None:
     task_id = record.get("task_id")
-    attempt_index = record.get("attempt_index")
-    if (
-        isinstance(task_id, str)
-        and task_id
-        and isinstance(attempt_index, int)
-        and not isinstance(attempt_index, bool)
-        and attempt_index >= 0
-    ):
-        return ("attempt", task_id, attempt_index)
+    attempt_index = _attempt_index(record)
+    run_id = record.get("run_id")
+    if isinstance(task_id, str) and task_id and attempt_index is not None:
+        return (
+            "attempt",
+            run_id if isinstance(run_id, str) and run_id else None,
+            task_id,
+            attempt_index,
+        )
     attempt_id = record.get("attempt_id")
     if isinstance(attempt_id, str) and attempt_id:
         prefix, separator, suffix = attempt_id.rpartition(":")
         if separator and prefix and suffix.isdigit():
-            return ("attempt", prefix, int(suffix))
+            return (
+                "attempt",
+                run_id if isinstance(run_id, str) and run_id else None,
+                prefix,
+                int(suffix),
+            )
         return ("attempt-id", attempt_id)
     if isinstance(task_id, str) and task_id:
-        return ("legacy", record.get("run_id"), task_id, attempt_index)
+        return ("legacy", run_id, task_id, attempt_index)
     return None
+
+
+def _attempt_aliases(
+    records: Sequence[Mapping[str, object]],
+) -> tuple[
+    dict[tuple[object, object], set[tuple[object, ...]]],
+    dict[tuple[object, object], set[tuple[object, ...]]],
+]:
+    """Index consumer execution rows without erasing their run identity."""
+    by_task_index: dict[tuple[object, object], set[tuple[object, ...]]] = defaultdict(set)
+    by_run_task: dict[tuple[object, object], set[tuple[object, ...]]] = defaultdict(set)
+    execution_types = {
+        "attempt-start",
+        "attempt-terminal",
+        "attempt-recovery",
+        "attempt-abort",
+    }
+    for record in records:
+        if record.get("type") not in execution_types:
+            continue
+        key = _attempt_key(record)
+        task_id = record.get("task_id")
+        if key is None or not isinstance(task_id, str) or not task_id:
+            continue
+        attempt_index = _attempt_index(record)
+        if attempt_index is not None:
+            by_task_index[(task_id, attempt_index)].add(key)
+        run_id = record.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            by_run_task[(run_id, task_id)].add(key)
+    return by_task_index, by_run_task
+
+
+def _joined_attempt_key(
+    record: Mapping[str, object],
+    *,
+    by_task_index: Mapping[tuple[object, object], set[tuple[object, ...]]],
+    by_run_task: Mapping[tuple[object, object], set[tuple[object, ...]]],
+    telemetry: bool = False,
+) -> tuple[object, ...] | None:
+    """Resolve weak launch/verdict aliases only when they name one execution."""
+    task_id = record.get("task_id")
+    run_id = record.get("run_id")
+    attempt_index = _attempt_index(record)
+    if isinstance(run_id, str) and run_id and isinstance(task_id, str) and task_id:
+        if attempt_index is not None:
+            return ("attempt", run_id, task_id, attempt_index)
+        candidates = by_run_task.get((run_id, task_id), set())
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        if candidates:
+            return None
+    if isinstance(task_id, str) and task_id and attempt_index is not None:
+        candidates = by_task_index.get((task_id, attempt_index), set())
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        if candidates and telemetry:
+            # The consumer execution rows remain authoritative when two runs
+            # reuse the same task/index and an older telemetry row lacks run_id.
+            return None
+    return _attempt_key(record)
 
 
 def _is_review(record: Mapping[str, object]) -> bool:
@@ -267,17 +340,30 @@ def _record_timestamp(record: Mapping[str, object]) -> datetime | None:
 
 def _collect(records: Sequence[Mapping[str, object]]) -> list[_Attempt]:
     attempts: dict[tuple[object, ...], _Attempt] = {}
+    by_task_index, by_run_task = _attempt_aliases(records)
     review_legacy_keys = {
         key
         for record in records
         if record.get("type") == "attempt-start" and _is_review(record)
-        if (key := _attempt_key(record)) is not None
+        if (
+            key := _joined_attempt_key(
+                record,
+                by_task_index=by_task_index,
+                by_run_task=by_run_task,
+            )
+        )
+        is not None
     }
 
     for record in records:
         record_type = record.get("type")
         if record_type in {REVIEW_LAUNCH_TYPE, REVIEW_NONVERDICT_LAUNCH_TYPE}:
-            key = _attempt_key(record)
+            key = _joined_attempt_key(
+                record,
+                by_task_index=by_task_index,
+                by_run_task=by_run_task,
+                telemetry=True,
+            )
             if key is None:
                 continue
             attempt = attempts.setdefault(key, _Attempt(key))
@@ -296,7 +382,12 @@ def _collect(records: Sequence[Mapping[str, object]]) -> list[_Attempt]:
             attempt.timestamp = _record_timestamp(record)
             continue
         if record_type == REVIEW_LAUNCH_OUTCOME_TYPE:
-            key = _attempt_key(record)
+            key = _joined_attempt_key(
+                record,
+                by_task_index=by_task_index,
+                by_run_task=by_run_task,
+                telemetry=True,
+            )
             if key is None:
                 continue
             attempt = attempts.setdefault(key, _Attempt(key))
@@ -315,7 +406,11 @@ def _collect(records: Sequence[Mapping[str, object]]) -> list[_Attempt]:
             attempt.timestamp = _record_timestamp(record) or attempt.timestamp
             continue
 
-        key = _attempt_key(record)
+        key = _joined_attempt_key(
+            record,
+            by_task_index=by_task_index,
+            by_run_task=by_run_task,
+        )
         if key is None:
             continue
         if key not in review_legacy_keys and not _is_review(record):
@@ -355,22 +450,20 @@ def _collect(records: Sequence[Mapping[str, object]]) -> list[_Attempt]:
         if record.get("type") == "verdict"
         and record.get("verdict") in {"pass", "fail", "clean", "findings"}
     ]
-    verdict_tasks = {
-        (record.get("run_id"), record.get("task_id"))
-        for record in verdict_records
-    }
     verdict_attempts = {
         key
         for record in verdict_records
-        if (key := _attempt_key(record)) is not None and key[0] == "attempt"
+        if (
+            key := _joined_attempt_key(
+                record,
+                by_task_index=by_task_index,
+                by_run_task=by_run_task,
+            )
+        )
+        is not None
     }
     for attempt in attempts.values():
-        if (
-            attempt.key[0] == "legacy"
-            and (attempt.key[1], attempt.key[2]) in verdict_tasks
-        ):
-            attempt.verdict = True
-        elif attempt.key in verdict_attempts:
+        if attempt.key in verdict_attempts:
             attempt.verdict = True
         if (
             attempt.intent in REVIEW_INTENT_FAMILIES

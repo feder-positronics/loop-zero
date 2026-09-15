@@ -1054,6 +1054,20 @@ def _retention_live_record_ids(
         if id(record) in selected
         and record.get("type") in {"attempt-start", "attempt-terminal", "attempt-abort"}
     }
+    recorded_attempts = {
+        attempt_reference(record)
+        for record in records
+        if record.get("type") in {"attempt-start", "attempt-terminal", "attempt-abort"}
+    }
+    # A no-family launch is the durable pending-attempt anchor until the
+    # consumer appends its start. Without this bridge, size compaction in the
+    # launch/start window silently erases admission telemetry.
+    attempt_anchors.update(
+        attempt_reference(record)
+        for record in records
+        if record.get("type") == "review-nonverdict-launch-v1"
+        and attempt_reference(record) not in recorded_attempts
+    )
 
     def reference(record: Mapping[str, object], path: tuple[str, ...]) -> object:
         value: object = record
@@ -1501,17 +1515,14 @@ def retained_authority_projection(
 ) -> list[dict[str, object]]:
     """Return the deterministic dependency seed for the current authority policy."""
     governed = _governed_records_with_review_state(records)
-    unknown = sorted(
-        {
-            str(record.get("type"))
-            for record in governed
-            if record.get("type") not in GOVERNED_RECORD_FAMILIES
-        }
+    unknown = any(
+        record.get("type") not in GOVERNED_RECORD_FAMILIES
+        for record in governed
     )
     if unknown:
         raise DispatchError(
-            "authority compaction does not know current-policy record families: "
-            + ", ".join(unknown)
+            "DispatchError: authority compaction found an unregistered "
+            "current-policy record family"
         )
     active_runs = frozenset(active_run_ids)
     live_ids = _retention_live_record_ids(governed, active_run_ids=active_runs)

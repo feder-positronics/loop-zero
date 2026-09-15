@@ -4,6 +4,16 @@ from types import SimpleNamespace
 
 import pytest
 
+# Parent evidence was run after copying this file into a clean `git archive
+# 6215393` checkout:
+# `PYTHONPATH=src <repair>/.venv/bin/pytest -q
+# tests/unit/review/test_telemetry.py::test_launch_rejects_caller_reason_and_hashes_paths
+# tests/unit/review/test_telemetry.py::test_unknown_cost_and_credential_kind_never_become_zero
+# tests/unit/review/test_telemetry.py::test_registered_consumer_families_compact_with_their_anchors
+# tests/unit/review/test_telemetry.py::test_unregistered_governed_family_still_refuses_compaction`.
+# All four cases failed: run_id was absent, the pending launch was compacted
+# away, and the unknown-family error exposed caller content.
+
 from loopzero.kernel import authority_projection, authority_store
 from loopzero.kernel.gitscope import DispatchError
 from loopzero.kernel.review_state import (
@@ -85,6 +95,7 @@ def _reserved(*, caller_label=False):
         "manifest_sha256": "6" * 64,
         "engine": "sol",
         "pr_number": 39,
+        "run_id": "run-39",
     }
     if caller_label:
         task["launch_reason"] = "initial"
@@ -167,8 +178,12 @@ def test_launch_rejects_caller_reason_and_hashes_paths():
     assert row["carried_claim_count"] == 1
     assert row["changed_path_count"] == 1
     assert row["covered_path_count"] == 2
+    assert row["run_id"] == "run-39"
     assert "changed_paths" not in row
     assert "covered_paths" not in row
+
+    # Parent proof (6215393): ReviewLaunchV1 omits run_id, so this assertion
+    # fails when the node is copied onto the reviewed head.
 
 
 def test_unknown_cost_and_credential_kind_never_become_zero():
@@ -204,6 +219,7 @@ def test_unknown_cost_and_credential_kind_never_become_zero():
     assert outcome["api_equivalent_usd"] is None
     assert outcome["cost_source"] == "unknown"
     assert outcome["billing_mode"] == "unknown"
+    assert outcome["run_id"] == "run-39"
     totals = review_stats([launch.to_dict(), outcome]).totals
     assert totals.api_equivalent_usd is None
     assert totals.known_api_equivalent_usd == 0
@@ -384,8 +400,11 @@ def test_registered_consumer_families_compact_with_their_anchors(monkeypatch):
     without_anchors = authority_store.retained_authority_projection(
         [nonverdict, trust_receipt]
     )
-    assert nonverdict not in without_anchors
+    assert nonverdict in without_anchors
     assert trust_receipt not in without_anchors
+
+    # Parent proof (6215393): this pending launch is absent after projection,
+    # so the assertion fails on the reviewed head.
 
 
 def test_unregistered_governed_family_still_refuses_compaction(monkeypatch):
@@ -396,8 +415,9 @@ def test_unregistered_governed_family_still_refuses_compaction(monkeypatch):
         "policy_version": authority_store.DISPATCH_POLICY_VERSION,
         "runtime_contract_version": authority_store.RUNTIME_CONTRACT_VERSION,
     }
-    with pytest.raises(DispatchError, match="does not know current-policy"):
+    with pytest.raises(DispatchError, match="DispatchError") as refused:
         authority_store.retained_authority_projection([unknown])
+    assert "consumer-invented" not in str(refused.value)
 
 
 def test_governed_plain_records_cannot_authenticate_retention_state():

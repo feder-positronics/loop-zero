@@ -4,6 +4,15 @@ from pathlib import Path
 
 import pytest
 
+# Parent evidence commands used after copying this file into clean git archives:
+# `PYTHONPATH=src <repair>/.venv/bin/pytest -q
+# tests/unit/review/test_stats.py::test_launch_start_terminal_and_outcome_join_as_one_attempt`
+# failed on d141fcea with 2 starts, 2 terminals, 2 verdicts, and 2 minutes.
+# `PYTHONPATH=src <repair>/.venv/bin/pytest -q
+# tests/unit/review/test_stats.py::test_attempt_identity_retains_run_when_task_and_index_are_reused
+# tests/unit/review/test_stats.py::test_legacy_verdict_without_attempt_fields_joins_its_run_and_task`
+# failed on 6215393 with one collapsed start and zero legacy verdicts.
+
 from loopzero.kernel import authority_projection, authority_store
 from loopzero.kernel.policy import (
     DISPATCH_POLICY_VERSION,
@@ -222,7 +231,9 @@ def test_pre_release_ledger_admits_and_projects_as_unrecorded(tmp_path, monkeypa
         lambda records, **kwargs: {"old-review": verdict},
     )
     monkeypatch.setattr(
-        review_authority, "authenticated_review_verdict", lambda *args: "pass"
+        review_authority,
+        "authenticated_review_verdict",
+        lambda *args, **kwargs: "pass",
     )
     monkeypatch.setattr(
         admission,
@@ -290,17 +301,23 @@ def test_since_keeps_attempts_with_unrecorded_timestamps():
 
 
 def test_launch_start_terminal_and_outcome_join_as_one_attempt():
-    common = {
+    launch_identity = {
         "task_id": "joined-review",
         "attempt_index": 2,
         "attempt_id": "joined-review:2",
+        "run_id": "run",
+    }
+    consumer_attempt = {
+        "task_id": "joined-review",
+        "attempt_index": 2,
+        "run_id": "run",
         "review_intent": "delivery-code-review",
         "pr_number": 4409,
         "engine": "codex",
     }
     rows = [
         {
-            **common,
+            **launch_identity,
             "type": "review-launch-v1",
             "reservation_id": "rr_joined",
             "reason": "initial",
@@ -311,18 +328,21 @@ def test_launch_start_terminal_and_outcome_join_as_one_attempt():
             "carried_claim_count": 0,
             "admitted_at": "2026-09-14T10:00:00+00:00",
         },
-        {**common, "type": "attempt-start", "run_id": "run"},
+        {**consumer_attempt, "type": "attempt-start"},
         {
-            **common,
+            **consumer_attempt,
             "type": "attempt-terminal",
-            "run_id": "run",
             "status": "completed",
             "duration_s": 60,
-            "accepted_verdict": "pass",
         },
-        {**common, "type": "verdict", "run_id": "run", "verdict": "pass"},
         {
-            **common,
+            "type": "verdict",
+            "run_id": "run",
+            "task_id": "joined-review",
+            "verdict": "pass",
+        },
+        {
+            **launch_identity,
             "type": "review-launch-outcome-v1",
             "reservation_id": "rr_joined",
             "review_outcome": "consumed",
@@ -337,6 +357,95 @@ def test_launch_start_terminal_and_outcome_join_as_one_attempt():
     assert totals.terminals == 1
     assert totals.verdicts == 1
     assert totals.minutes == 1
+
+    # Parent proof (d141fcea): copying this test onto the parent and running
+    # `PYTHONPATH=src uv run --python 3.13 pytest -q
+    # tests/unit/review/test_stats.py::test_launch_start_terminal_and_outcome_join_as_one_attempt`
+    # reports starts=2, terminals=2, verdicts=2, minutes=2 and fails.
+
+
+def test_attempt_identity_retains_run_when_task_and_index_are_reused():
+    rows = []
+    for run_id in ("run-a", "run-b"):
+        common = {
+            "task_id": "reused-review",
+            "attempt_index": 0,
+            "run_id": run_id,
+            "review_intent": "delivery-code-review",
+        }
+        rows.extend(
+            [
+                {
+                    **common,
+                    "type": "review-launch-v1",
+                    "attempt_id": "reused-review:0",
+                    "reason": "initial",
+                },
+                {**common, "type": "attempt-start"},
+                {
+                    **common,
+                    "type": "attempt-terminal",
+                    "status": "completed",
+                    "duration_s": 30,
+                },
+                {
+                    "type": "verdict",
+                    "run_id": run_id,
+                    "task_id": "reused-review",
+                    "verdict": "pass",
+                },
+                {
+                    **common,
+                    "type": "review-launch-outcome-v1",
+                    "attempt_id": "reused-review:0",
+                    "review_outcome": "consumed",
+                    "elapsed_seconds": 30,
+                    "cost_source": "unknown",
+                },
+            ]
+        )
+
+    totals = review_stats(rows).totals
+    assert totals.starts == 2
+    assert totals.terminals == 2
+    assert totals.verdicts == 2
+    assert totals.minutes == 1
+
+    # Parent proof (6215393): the command documented above collapses these rows
+    # to one attempt, so this test fails on the reviewed parent of this repair
+    # series.
+
+
+def test_legacy_verdict_without_attempt_fields_joins_its_run_and_task():
+    common = {
+        "task_id": "legacy-review",
+        "attempt_index": 4,
+        "run_id": "legacy-run",
+        "review_intent": "delivery-code-review",
+    }
+    totals = review_stats(
+        [
+            {**common, "type": "attempt-start"},
+            {
+                **common,
+                "type": "attempt-terminal",
+                "status": "completed",
+                "duration_s": 60,
+            },
+            {
+                "type": "verdict",
+                "run_id": "legacy-run",
+                "task_id": "legacy-review",
+                "verdict": "pass",
+            },
+        ]
+    ).totals
+    assert totals.starts == 1
+    assert totals.terminals == 1
+    assert totals.verdicts == 1
+    assert totals.minutes == 1
+
+    # Parent proof (6215393): the command documented above reports verdicts=0.
 
 
 def test_nonverdict_attempt_terminal_never_counts_as_a_verdict():

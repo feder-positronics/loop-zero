@@ -133,6 +133,7 @@ class ReviewLaunchV1:
     source_identity_digest: str | None = None
     patch_identity_digest: str | None = None
     manifest_digest: str | None = None
+    run_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.reservation_id, str) or not self.reservation_id:
@@ -166,6 +167,10 @@ class ReviewLaunchV1:
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ReviewTelemetryError(f"review launch {label} is invalid")
+        if self.run_id is not None and (
+            not isinstance(self.run_id, str) or not self.run_id
+        ):
+            raise ReviewTelemetryError("review launch run id is invalid")
         for label, value in (
             ("changed paths digest", self.changed_paths_digest),
             ("covered paths digest", self.covered_paths_digest),
@@ -318,6 +323,7 @@ class ReviewLaunchV1:
             manifest_digest=_optional_string(
                 _task_value(task, "manifest_sha256"), label="review manifest digest"
             ),
+            run_id=_optional_string(_task_value(task, "run_id"), label="review run id"),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -330,6 +336,7 @@ class ReviewLaunchV1:
             "attempt_id": self.attempt_id,
             "task_id": self.task_id,
             "attempt_index": self.attempt_index,
+            "run_id": self.run_id,
             "reason": self.reason,
             "secondary_triggers": list(self.secondary_triggers),
             "invalidation_causes": dict(self.invalidation_causes),
@@ -382,9 +389,12 @@ class ReviewLaunchV1:
             "source_identity_digest",
             "patch_identity_digest",
             "manifest_digest",
+            "run_id",
         }
+        legacy_fields = fields - {"run_id"}
         if (
-            set(record) != metadata | fields
+            frozenset(record)
+            not in {frozenset(metadata | fields), frozenset(metadata | legacy_fields)}
             or record.get("type") != REVIEW_LAUNCH_TYPE
             or not isinstance(record.get("secondary_triggers"), list)
             or not isinstance(record.get("invalidation_causes"), Mapping)
@@ -418,6 +428,7 @@ class ReviewLaunchV1:
             source_identity_digest=cast(str | None, record["source_identity_digest"]),
             patch_identity_digest=cast(str | None, record["patch_identity_digest"]),
             manifest_digest=cast(str | None, record["manifest_digest"]),
+            run_id=cast(str | None, record.get("run_id")),
         )
 
     from_dict = from_mapping
@@ -478,6 +489,7 @@ class ReviewLaunchOutcomeV1:
     quota_state: Mapping[str, object]
     settlement_ref: str
     terminal_at: str
+    run_id: str | None = None
 
     def __post_init__(self) -> None:
         try:
@@ -530,6 +542,10 @@ class ReviewLaunchOutcomeV1:
             not isinstance(self.failure_class, str) or not self.failure_class
         ):
             raise ReviewTelemetryError("review failure class is invalid")
+        if self.run_id is not None and (
+            not isinstance(self.run_id, str) or not self.run_id
+        ):
+            raise ReviewTelemetryError("review outcome run id is invalid")
         if (
             not isinstance(self.settlement_ref, str)
             or _SHA256_RE.fullmatch(self.settlement_ref) is None
@@ -582,6 +598,7 @@ class ReviewLaunchOutcomeV1:
             quota_state=_mapping(quota_state),
             settlement_ref=canonical_record_digest(settlement.to_dict()),
             terminal_at=_timestamp(terminal_at),
+            run_id=launch.run_id,
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -594,6 +611,7 @@ class ReviewLaunchOutcomeV1:
             "attempt_id": self.attempt_id,
             "task_id": self.task_id,
             "attempt_index": self.attempt_index,
+            "run_id": self.run_id,
             "review_outcome": self.review_outcome.value,
             "failure_class": self.failure_class,
             "elapsed_seconds": self.elapsed_seconds,
@@ -626,9 +644,12 @@ class ReviewLaunchOutcomeV1:
             "quota_state",
             "settlement_ref",
             "terminal_at",
+            "run_id",
         }
+        legacy_fields = fields - {"run_id"}
         if (
-            set(record) != metadata | fields
+            frozenset(record)
+            not in {frozenset(metadata | fields), frozenset(metadata | legacy_fields)}
             or record.get("type") != REVIEW_LAUNCH_OUTCOME_TYPE
             or not isinstance(record.get("tokens"), Mapping)
             or not isinstance(record.get("quota_state"), Mapping)
@@ -649,6 +670,7 @@ class ReviewLaunchOutcomeV1:
             quota_state=cast(Mapping[str, object], record["quota_state"]),
             settlement_ref=cast(str, record["settlement_ref"]),
             terminal_at=cast(str, record["terminal_at"]),
+            run_id=cast(str | None, record.get("run_id")),
         )
 
     from_dict = from_mapping
