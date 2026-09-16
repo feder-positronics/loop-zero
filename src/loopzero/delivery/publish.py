@@ -7,7 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -191,6 +191,7 @@ class PublicationRequest:
     review_risk_tier: str = ""
     admission_tier_floor: str = ""
     review_reentry_generation: int = 0
+    bind_provisional_findings: Callable[[int, str, str, str], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -630,6 +631,31 @@ def open_important_finding_ids(
         )
         and review_refs.get(str(record.get("review_task_id"))) == head_ref
     ]
+    from ..review.provisional_findings import (
+        authenticated_publication_bindings,
+        authenticated_recovery_admissions,
+        load_provisional_findings,
+    )
+
+    admissions = authenticated_recovery_admissions(records)
+    bound_owners = set(authenticated_publication_bindings(records))
+    for admission in admissions.values():
+        owner = str(admission["provisional_owner_id"])
+        source = admission.get("source_identity")
+        if (
+            owner in bound_owners
+            or admission.get("task_id") in resolved_predecessors
+            or not isinstance(source, Mapping)
+        ):
+            continue
+        if source.get("ref") != head_ref:
+            continue
+        blockers.extend(
+            str(finding["finding_id"])
+            for finding in load_provisional_findings(repo, owner_id=owner)
+            if finding.get("state") == "open"
+            and finding.get("severity") in {"critical", "important"}
+        )
     return tuple(sorted(blockers))
 
 
@@ -1224,6 +1250,29 @@ def publish(
         validate_adopted_body(
             request, number=number, body=fresh_body, error_type=PublicationError
         )
+
+    if request.bind_provisional_findings is not None:
+        try:
+            request.bind_provisional_findings(
+                number, request.expected_head, request.base, repository_name
+            )
+        except Exception as exc:
+            evidence_path = _write_evidence(
+                evidence_dir or _repo_root() / ".audit" / "pr-publications",
+                {
+                    "base": request.base,
+                    "expected_head": request.expected_head,
+                    "head": request.head,
+                    "pr": number,
+                    "review_task_id": request.review_task_id,
+                    "status": "provisional_binding_failed",
+                    "url": url,
+                },
+            )
+            raise PublicationError(
+                f"PR #{number} is open but provisional finding binding failed; "
+                f"retry the same PR; evidence: {evidence_path}"
+            ) from exc
 
     metadata_mutations: list[dict[str, object]] = []
     if labels:

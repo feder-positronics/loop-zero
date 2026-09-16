@@ -789,6 +789,48 @@ def test_publish_creates_final_pr_then_batches_all_labels_once(tmp_path: Path) -
     ]
 
 
+def test_publish_binds_provisional_findings_after_fresh_identity_before_evidence(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+    calls: list[tuple[int, str, str, str]] = []
+
+    result = module.publish(
+        runner,
+        replace(
+            request(),
+            bind_provisional_findings=lambda *args: calls.append(args),
+        ),
+        evidence_dir=tmp_path,
+    )
+
+    assert result.number == 2646
+    assert calls == [(2646, "a" * 40, "main", "feder-positronics/intelflo")]
+    assert json.loads(result.evidence_path.read_text())["status"] == "published"
+
+
+def test_binding_failure_preserves_the_same_open_pr_for_idempotent_retry(
+    tmp_path: Path,
+) -> None:
+    runner = FakeRunner()
+
+    with pytest.raises(module.PublicationError, match="retry the same PR"):
+        module.publish(
+            runner,
+            replace(
+                request(),
+                bind_provisional_findings=lambda *_args: (_ for _ in ()).throw(
+                    RuntimeError("interrupted after binding append")
+                ),
+            ),
+            evidence_dir=tmp_path,
+        )
+
+    assert not any("PATCH" in args for args, _payload in runner.calls)
+    record = json.loads(next(tmp_path.glob("*.jsonl")).read_text().strip())
+    assert record["status"] == "provisional_binding_failed"
+
+
 def test_publish_rejects_invalid_body_before_any_github_mutation(
     tmp_path: Path,
 ) -> None:

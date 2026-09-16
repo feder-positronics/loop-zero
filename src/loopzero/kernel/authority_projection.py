@@ -1130,6 +1130,17 @@ _RECOVERY_DEPOSIT_IDENTITY_FIELDS = (
     "task_contract_hash",
 )
 
+_FINDING_ADMISSION_IDENTITY_FIELDS = (
+    *_RECOVERY_DEPOSIT_IDENTITY_FIELDS,
+    "worktree",
+    "result_artifact",
+    "result_sha256",
+    "reservation_id",
+    "generation_id",
+    "family",
+    "repository_binding",
+)
+
 
 def _recovery_matches_deposit(
     recovery: Mapping[str, object], deposit: Mapping[str, object]
@@ -1156,6 +1167,7 @@ def _recovery_matches_deposit(
         formal_review and deposit.get("status") in {"blocked", "completed"}
     ) or failure_pair in {
         ("infrastructure-failure", "acceptance-environment"),
+        ("infrastructure-failure", "finding-deposition-failed"),
         ("toolchain-failure", "toolchain"),
         ("packaging-failure", PACKAGING_TIMEOUT_FAILURE_CLASS),
     }
@@ -1172,6 +1184,73 @@ def _recovery_matches_deposit(
     return recovery.get(artifact_field) == deposit.get(
         "result_artifact"
     ) and recovery.get(digest_field) == deposit.get("result_sha256")
+
+
+def finding_deposition_recovery_matches(
+    records: Sequence[dict[str, object]],
+    recovery: Mapping[str, object],
+    deposit: Mapping[str, object],
+) -> bool:
+    """Authenticate the narrow registered-terminal deposition recovery."""
+    if (
+        recovery.get("recovery_classification") != "finding-deposition-only"
+        or deposit.get("status") != "infrastructure-failure"
+        or deposit.get("failure_class") != "finding-deposition-failed"
+        or deposit.get("deposit_state") != "none"
+        or recovery.get("recovered_terminal_status") != "infrastructure-failure"
+        or not _recovery_matches_deposit(recovery, deposit)
+    ):
+        return False
+    owner = recovery.get("provisional_owner_id")
+    receipt_digest = recovery.get("finding_capture_receipt_sha256")
+    if (
+        not isinstance(owner, str)
+        or not owner.startswith("pfo_")
+        or not isinstance(receipt_digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", receipt_digest) is None
+    ):
+        return False
+    coordinator_ids = _authenticated_coordinator_record_ids(records)
+    recovery_index = next(
+        (index for index, row in enumerate(records) if row is recovery), None
+    )
+    if recovery_index is None:
+        return False
+    admissions = [
+        row
+        for row in records[:recovery_index]
+        if row.get("type") == "finding-recovery-admission-v1"
+        and row.get("provisional_owner_id") == owner
+        and row.get("task_id") == recovery.get("task_id")
+        and id(row) in coordinator_ids
+    ]
+    if len(admissions) != 1:
+        return False
+    admission = admissions[0]
+    identity = {
+        field: deposit.get(field) for field in _FINDING_ADMISSION_IDENTITY_FIELDS
+    }
+    expected_owner = "pfo_" + hashlib.sha256(
+        json.dumps(
+            identity,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return (
+        admission.get("status") == "admitted"
+        and admission.get("recovery_classification") == "finding-deposition-only"
+        and owner == expected_owner
+        and deposit.get("read_only") is True
+        and deposit.get("work_kind") == "review"
+        and deposit.get("advisory") is not True
+        and deposit.get("review_intent") == "delivery-code-review"
+        and all(
+            admission.get(field) == deposit.get(field)
+            for field in _FINDING_ADMISSION_IDENTITY_FIELDS
+        )
+    )
 
 
 _SUPERSESSION_PRESERVED_FIELDS = (
@@ -1356,7 +1435,10 @@ def validate_serial_terminal_authority(
             raise DispatchError(
                 "serial recovery was recorded while an authenticated attempt was open"
             )
-        if isinstance(deposit.get("terminal_authority_proof"), dict):
+        registered_deposition_recovery = finding_deposition_recovery_matches(
+            authority_history, terminal, deposit
+        )
+        if isinstance(deposit.get("terminal_authority_proof"), dict) and not registered_deposition_recovery:
             raise DispatchError(
                 "serial recovery cannot authorize success after an authenticated "
                 "dispatcher settlement"

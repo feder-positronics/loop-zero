@@ -33,6 +33,7 @@ from ..kernel.authority_projection import (
     _terminal_authority_attempt_key,
     authenticated_supersessions,
     current_telemetry,
+    finding_deposition_recovery_matches,
     retained_retry_outcomes,
     worktree_status_paths,
 )
@@ -1135,6 +1136,22 @@ def review_terminal_acceptance_reasons(
         verification = record.get("recovery_verification")
         recovered_terminal_status = record.get("recovered_terminal_status")
         recorded_classification = record.get("recovery_classification")
+        if recorded_classification == "finding-deposition-only":
+            if (
+                recovered_terminal_status != "infrastructure-failure"
+                or not str(record.get("provisional_owner_id") or "").startswith("pfo_")
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(record.get("finding_capture_receipt_sha256") or ""),
+                )
+                is None
+                or record.get("recovered_result_artifact")
+                != record.get("result_artifact")
+                or record.get("recovered_result_sha256")
+                != record.get("result_sha256")
+            ):
+                reasons.append("invalid-finding-deposition-recovery")
+            return tuple(dict.fromkeys(reasons))
         legacy_capability_recovery = (
             recovered_terminal_status is None
             and recorded_classification is None
@@ -1229,14 +1246,21 @@ def _review_terminal_authority_projection(
             continue
         if record.get("type") != "attempt-recovery":
             continue
-        if id(record) in registered_before_ids:
+        if (
+            id(record) in registered_before_ids
+            and record.get("recovery_classification") != "finding-deposition-only"
+        ):
             continue
         deposits = deposits_by_key.get(key, []) if key is not None else []
         if len(deposits) != 1 or id(record) in open_before_ids:
             continue
         deposit = deposits[0]
-        if isinstance(
-            deposit.get("terminal_authority_proof"), dict
+        registered_deposition_recovery = finding_deposition_recovery_matches(
+            authority_history, record, deposit
+        )
+        if (
+            isinstance(deposit.get("terminal_authority_proof"), dict)
+            and not registered_deposition_recovery
         ) or not _recovery_matches_deposit(record, deposit):
             continue
         if not isinstance(record.get("terminal_authority_proof"), dict):
@@ -1308,7 +1332,31 @@ def accepted_review_terminals(
         ):
             latest_by_task[task_id] = record
     accepted: dict[str, dict[str, object]] = {}
+    coordinator_ids = _authenticated_coordinator_record_ids(records)
+    record_positions = {id(row): index for index, row in enumerate(records)}
     for task_id, terminal in latest_by_task.items():
+        finding_recovery_has_verdict = terminal.get(
+            "recovery_classification"
+        ) != "finding-deposition-only" or any(
+            row.get("type") == "verdict"
+            and row.get("task_id") == task_id
+            and row.get("run_id") == terminal.get("run_id")
+            and row.get("verdict") in {"pass", "fail"}
+            and id(row) in coordinator_ids
+            and record_positions[id(row)] > record_positions[id(terminal)]
+            and row.get("target_worker_identity") == terminal.get("worker_identity")
+            and isinstance(row.get("verifier_identity"), str)
+            and bool(str(row.get("verifier_identity") or "").strip())
+            and verifier_identity_is_independent(
+                worker_identity=terminal.get("worker_identity"),
+                worker_alias=_effective_alias(terminal),
+                worker_model=terminal.get("runtime_effective_model")
+                or terminal.get("model"),
+                verifier_identity=row.get("verifier_identity"),
+                verifier_alias=row.get("verifier_alias"),
+            )
+            for row in records
+        )
         if (
             (
                 terminal.get("type") == "attempt-terminal"
@@ -1318,7 +1366,7 @@ def accepted_review_terminals(
                 terminal.get("type") == "attempt-recovery"
                 and id(terminal) in authenticated_recovery_ids
             )
-        ) and not review_terminal_acceptance_reasons(
+        ) and finding_recovery_has_verdict and not review_terminal_acceptance_reasons(
             terminal, allow_advisory=allow_advisory
         ):
             accepted[task_id] = terminal
