@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero.kernel import authority as kernel_authority
-from loopzero.kernel import authority_projection, authority_store, policy
+from loopzero.kernel import authority_projection, authority_store, policy, review_state
 from loopzero.review import authority as review_authority
 from loopzero.review import findings, provisional_findings
 
@@ -21,7 +21,12 @@ def _review_result():
     }
 
 
-def _signed_history(tmp_path: Path):
+def _signed_history(
+    tmp_path: Path,
+    *,
+    result: dict[str, object] | None = None,
+    task_contract: dict[str, object] | None = None,
+):
     dispatcher = kernel_authority.TerminalAuthority.generate()
     coordinator = kernel_authority.CoordinatorAuthority(
         dispatcher.public_key, dispatcher._private_key
@@ -41,8 +46,22 @@ def _signed_history(tmp_path: Path):
     )
     artifact = tmp_path / ".audit" / "dispatch" / "results" / "review-1.json"
     artifact.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(_review_result(), sort_keys=True).encode("utf-8")
+    payload = json.dumps(result or _review_result(), sort_keys=True).encode("utf-8")
     artifact.write_bytes(payload)
+    snapshot_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    snapshot_tree_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
     identity = {
         **common,
         "task_id": "review-1",
@@ -54,8 +73,8 @@ def _signed_history(tmp_path: Path):
         "work_kind": "review",
         "advisory": False,
         "review_intent": "delivery-code-review",
-        "snapshot_sha": "a" * 40,
-        "snapshot_tree_sha": "b" * 40,
+        "snapshot_sha": snapshot_sha,
+        "snapshot_tree_sha": snapshot_tree_sha,
         "result_artifact": ".audit/dispatch/results/review-1.json",
         "result_sha256": hashlib.sha256(payload).hexdigest(),
         "reservation_id": "rr_" + "2" * 32,
@@ -65,6 +84,8 @@ def _signed_history(tmp_path: Path):
         "source_identity": {"head": "a" * 40, "ref": "refs/heads/fix/18"},
         "task_contract_hash": "d" * 64,
     }
+    if task_contract is not None:
+        identity["task_contract"] = task_contract
     start = coordinator.seal(
         {
             **identity,
@@ -90,6 +111,15 @@ def _signed_history(tmp_path: Path):
 @pytest.fixture
 def configured(tmp_path: Path):
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
+    (tmp_path / "a.py").write_text("value = 1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
     profile = SimpleNamespace(
         root=tmp_path,
         audit_root=Path(".audit"),
@@ -98,6 +128,37 @@ def configured(tmp_path: Path):
     provisional_findings.configure(profile)
     findings.configure(profile)
     return tmp_path
+
+
+def _snapshot_identity(repo: Path) -> tuple[str, str]:
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return head, tree
+
+
+def _seal_admission(coordinator, payload, **changes):
+    return coordinator.seal(
+        {
+            "ts": "2026-09-16T12:00:00+00:00",
+            **payload,
+            **changes,
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
+        authority_kind="coordinator",
+    )
 
 
 def test_admission_is_derived_from_the_exact_registered_failure(
@@ -113,7 +174,7 @@ def test_admission_is_derived_from_the_exact_registered_failure(
     unsigned = provisional_findings.build_recovery_admission(
         records, task_id="review-1"
     )
-    admission = coordinator.seal(unsigned, authority_kind="coordinator")
+    admission = _seal_admission(coordinator, unsigned)
     projected = provisional_findings.authenticated_recovery_admissions(
         [*records, admission]
     )
@@ -123,9 +184,7 @@ def test_admission_is_derived_from_the_exact_registered_failure(
     assert admission["provisional_owner_id"].startswith("pfo_")
     assert "pr" not in admission
 
-    forged = coordinator.seal(
-        {**unsigned, "snapshot_sha": "f" * 40}, authority_kind="coordinator"
-    )
+    forged = _seal_admission(coordinator, unsigned, snapshot_sha="f" * 40)
     assert (
         provisional_findings.authenticated_recovery_admissions([*records, forged]) == {}
     )
@@ -140,9 +199,9 @@ def test_capture_replays_exactly_and_rejects_owner_or_content_reuse(
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
     )
-    admission = coordinator.seal(
+    admission = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_admission(records, task_id="review-1"),
-        authority_kind="coordinator",
     )
     records.append(admission)
     result = _review_result()
@@ -181,9 +240,9 @@ def test_authenticated_owner_without_capture_fails_closed(configured, monkeypatc
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
     )
-    admission = coordinator.seal(
+    admission = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_admission(records, task_id="review-1"),
-        authority_kind="coordinator",
     )
 
     with pytest.raises(
@@ -201,9 +260,9 @@ def test_capture_rejects_changed_or_symlinked_result_artifact(configured, monkey
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
     )
-    admission = coordinator.seal(
+    admission = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_admission(records, task_id="review-1"),
-        authority_kind="coordinator",
     )
     records.append(admission)
     artifact = configured / str(admission["result_artifact"])
@@ -235,9 +294,9 @@ def test_capture_interruption_before_replace_is_cleanly_retryable(
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
     )
-    admission = coordinator.seal(
+    admission = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_admission(records, task_id="review-1"),
-        authority_kind="coordinator",
     )
     records.append(admission)
     real_replace = provisional_findings.os.replace
@@ -268,9 +327,9 @@ def test_binding_is_permanent_idempotent_and_cannot_move_to_another_pr(
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
     )
-    admission = coordinator.seal(
+    admission = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_admission(records, task_id="review-1"),
-        authority_kind="coordinator",
     )
     records.append(admission)
     receipt = provisional_findings.capture_provisional_findings(
@@ -359,6 +418,33 @@ def test_truncated_capture_stream_fails_closed(configured):
         provisional_findings.load_provisional_findings(configured)
 
 
+def test_capture_receipt_must_name_the_exact_persisted_findings(configured):
+    stream = configured / ".audit" / "provisional-findings" / "2026-09-16.jsonl"
+    stream.parent.mkdir(parents=True)
+    rows = [
+        {
+            "type": provisional_findings.FINDING_TYPE,
+            "provisional_owner_id": "pfo_test",
+            "finding_id": "pf_real",
+        },
+        {
+            "type": provisional_findings.CAPTURE_TYPE,
+            "provisional_owner_id": "pfo_test",
+            "finding_count": 1,
+            "finding_ids": ["pf_forged"],
+        },
+    ]
+    stream.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        provisional_findings.ProvisionalFindingError, match="complete receipt"
+    ):
+        provisional_findings.load_provisional_findings(configured)
+
+
 def test_recovery_is_authenticated_before_but_accepted_only_after_verdict(
     configured, monkeypatch
 ):
@@ -368,9 +454,9 @@ def test_recovery_is_authenticated_before_but_accepted_only_after_verdict(
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
     )
-    admission = coordinator.seal(
+    admission = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_admission(records, task_id="review-1"),
-        authority_kind="coordinator",
     )
     records.append(admission)
     receipt = provisional_findings.capture_provisional_findings(
@@ -437,3 +523,244 @@ def test_recovery_rejects_wrong_capture_and_unsigned_admission(configured, monke
             admission=unsigned,
             capture_receipt={"type": provisional_findings.CAPTURE_TYPE},
         )
+
+
+def test_enveloped_admission_projects_and_unknown_fields_do_not(
+    configured, monkeypatch
+):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    payload = provisional_findings.build_recovery_admission(records, task_id="review-1")
+    unenveloped = coordinator.seal(payload, authority_kind="coordinator")
+    assert (
+        provisional_findings.authenticated_recovery_admissions([*records, unenveloped])
+        == {}
+    )
+    admission = coordinator.seal(
+        {
+            "ts": "2026-09-16T12:00:00+00:00",
+            **payload,
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
+        authority_kind="coordinator",
+    )
+    assert (
+        provisional_findings.authenticated_recovery_admissions([*records, admission])[
+            "review-1"
+        ]
+        == admission
+    )
+
+    forged = coordinator.seal(
+        {
+            "ts": "2026-09-16T12:00:00+00:00",
+            **payload,
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+            "unexpected": True,
+        },
+        authority_kind="coordinator",
+    )
+    assert (
+        provisional_findings.authenticated_recovery_admissions([*records, forged]) == {}
+    )
+
+
+def test_recovery_reloads_the_persisted_capture_receipt(configured, monkeypatch):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    receipt = provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    forged = {
+        **receipt,
+        "capture_request_sha256": "0" * 64,
+        "finding_ids": ["pf_forged"],
+    }
+
+    with pytest.raises(
+        provisional_findings.ProvisionalFindingError, match="persisted capture receipt"
+    ):
+        provisional_findings.build_recovery_evidence(
+            records,
+            repo=configured,
+            admission=admission,
+            capture_receipt=forged,
+        )
+
+
+def test_capture_anchors_findings_to_the_authenticated_predecessor(
+    configured, monkeypatch
+):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+
+    provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    captured = provisional_findings.load_provisional_findings(
+        configured, owner_id=str(admission["provisional_owner_id"])
+    )
+    expected_blob = subprocess.run(
+        ["git", "rev-parse", f"{admission['snapshot_sha']}:a.py"],
+        cwd=configured,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert captured[0]["content_anchor"] == {
+        "path": "a.py",
+        "blob_sha": expected_blob,
+    }
+
+
+def test_recovery_reconstructs_missing_review_chain_receipt(configured, monkeypatch):
+    material = {
+        "severity": "important",
+        "claim": "fix it",
+        "path": "a.py",
+    }
+    result = {
+        "findings": [material],
+        "review_sections": {
+            "code": {
+                "completion": "completed",
+                "verdict": "findings",
+                "findings": [material],
+            },
+            "security": {
+                "completion": "completed",
+                "verdict": "clean",
+                "findings": [],
+                "threat_model_summary": "No changed trust boundary.",
+            },
+        },
+    }
+    task_contract = {
+        "task_id": "review-1",
+        "review_intent": "delivery-code-review",
+        "security_trigger_paths": ["a.py"],
+        "required_sections": ["code", "security"],
+    }
+    coordinator, records, _terminal = _signed_history(
+        configured, result=result, task_contract=task_contract
+    )
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    receipt = provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+
+    recovery = provisional_findings.build_recovery_evidence(
+        records,
+        repo=configured,
+        admission=admission,
+        capture_receipt=receipt,
+    )
+
+    assert (
+        recovery["review_chain_receipt"]["sections"]["code"]["finding_ids"]
+        == receipt["finding_ids"]
+    )
+    assert (
+        recovery["review_chain_receipt"]["snapshot_tree_sha"]
+        == admission["snapshot_tree_sha"]
+    )
+
+
+def test_classified_recovery_append_requires_both_locks_and_replays_once(
+    configured, monkeypatch
+):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    receipt = provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    recovery = coordinator.seal(
+        {
+            "ts": "2026-09-16T12:00:01+00:00",
+            **provisional_findings.build_recovery_evidence(
+                records,
+                repo=configured,
+                admission=admission,
+                capture_receipt=receipt,
+            ),
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
+        authority_kind="coordinator",
+    )
+    with pytest.raises(review_state.ReviewStateError, match="authority ledger lock"):
+        provisional_findings.authorize_classified_recovery_append(
+            configured, records, recovery
+        )
+    with authority_store.authority_ledger_lock(configured):
+        with pytest.raises(RuntimeError, match="attempt lifecycle lock"):
+            provisional_findings.authorize_classified_recovery_append(
+                configured, records, recovery
+            )
+        with authority_store.attempt_lifecycle_lock(configured, "review-1"):
+            forged = coordinator.seal(
+                {
+                    **{
+                        key: value
+                        for key, value in recovery.items()
+                        if key != "terminal_authority_proof"
+                    },
+                    "recovered_result_sha256": "9" * 64,
+                },
+                authority_kind="coordinator",
+            )
+            with pytest.raises(
+                provisional_findings.ProvisionalFindingError,
+                match="evidence is invalid",
+            ):
+                provisional_findings.authorize_classified_recovery_append(
+                    configured, records, forged
+                )
+            assert provisional_findings.authorize_classified_recovery_append(
+                configured, records, recovery
+            )
+            assert not provisional_findings.authorize_classified_recovery_append(
+                configured, [*records, recovery], recovery
+            )

@@ -240,6 +240,12 @@ def attempt_lifecycle_lock(repo: Path, task_id: object):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def assert_attempt_lifecycle_lock_held(task_id: object) -> None:
+    """Require the in-process lifecycle lock for one exact attempt task."""
+    if _attempt_lock_key(task_id) not in _held_attempt_locks():
+        raise RuntimeError("attempt lifecycle lock must be held")
+
+
 def create_terminal_authority() -> TerminalAuthority:
     try:
         return TerminalAuthority.generate()

@@ -81,6 +81,29 @@ Both the builder and the ledger projection must independently require:
    The API must append through the protected authority transaction; callers do
    not construct or hand-sign a record.
 
+The authenticated projections compare the semantic admission to the original
+terminal while requiring the current `ts`, `schema_version`, and
+`policy_version` envelope and rejecting every unknown field. Before recovery,
+the package reloads the sole capture receipt from the provisional stream and
+requires byte-for-byte canonical equality with any caller reference. Caller
+prose cannot replace persisted ownership evidence.
+
+Every path-bearing finding is anchored to the blob and optional line context in
+the authenticated `snapshot_sha`; the commit must resolve to the recorded
+`snapshot_tree_sha` immediately before capture. If the original deposition
+failed before assembling `review_chain_receipt`, the package reconstructs that
+receipt only from the authenticated task contract, exact result, snapshot and
+persisted finding IDs. An incomplete section contract remains unrecoverable.
+
+The consumer seals the prospective recovery first, then retains the authority
+ledger lock and the original task's attempt-lifecycle lock while the package
+validates the fresh history, persisted receipt, repository identity, proof and
+exact recovery projection. The consumer may bypass ordinary first-settlement
+append only when that validator returns append. The same validator returns an
+idempotent no-write result for the one already-authenticated recovery; any
+second or changed recovery fails closed. The package never receives signing
+material and the consumer never interprets recovery eligibility itself.
+
 The authority ledger owns admission and the later unique PR binding. A distinct
 provisional finding stream owns immutable content and its capture receipt. The
 ordinary Finding Ledger retains positive, non-null PR scope. The recoverable
