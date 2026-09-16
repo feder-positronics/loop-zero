@@ -637,7 +637,7 @@ def test_live_adapter_run_transfers_a_duplicate_not_the_broker_descriptor(
             )
             assert child_descriptor != broker_descriptor
             os.fstat(broker_descriptor)
-            return live.run_cli(
+            outcome = live.run_cli(
                 [sys.executable, "-c", "pass"],
                 cwd=request.cwd,
                 input_text="",
@@ -648,6 +648,13 @@ def test_live_adapter_run_transfers_a_duplicate_not_the_broker_descriptor(
                 },
                 pass_fds=(child_descriptor,),
                 sandbox_wrapper=lambda spec: spec.argv,
+            )
+
+            return RuntimeResult(
+                vendor=request.vendor, transport=request.transport,
+                requested_model=request.requested_model, attempt_id=request.attempt_id,
+                status=RuntimeStatus.COMPLETED, terminal_reason=TerminalReason.COMPLETED,
+                returncode=outcome.returncode,
             )
 
     monkeypatch.setattr(live.codex, "codex_subscription_credential", broker)

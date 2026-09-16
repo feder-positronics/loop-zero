@@ -240,3 +240,167 @@ def test_nonmatching_result_route_cannot_acquire_subscription_label(
             vendor, Adapter(), request, timeout_s=5, settings=settings, wrapper=None
         )
     assert result.billing_mode is contract.RuntimeBillingMode.UNKNOWN
+
+
+@pytest.mark.parametrize("invalid", ["missing", "api-key", "refresh-capable"])
+def test_invalid_snapshot_cannot_supply_billing_evidence(
+    tmp_path, monkeypatch, invalid
+):
+    vendor, source, payload, settings, request = _context(
+        tmp_path, monkeypatch, "codex"
+    )
+    if invalid == "missing":
+        source.unlink()
+    elif invalid == "api-key":
+        payload["OPENAI_API_KEY"] = "synthetic-metered-key"
+        source.write_text(json.dumps(payload))
+    else:
+        payload["tokens"]["refresh_token"] = "synthetic-refresh-capability"
+        source.write_text(json.dumps(payload))
+
+    class ForbiddenAdapter:
+        def run(self, _request):
+            pytest.fail("invalid credential reached adapter")
+
+    with (
+        settings.use(),
+        pytest.raises((RuntimeError, live.credential_seal.CredentialSealError)),
+    ):
+        live._run_with_credential(
+            vendor,
+            ForbiddenAdapter(),
+            request,
+            timeout_s=5,
+            settings=settings,
+            wrapper=None,
+        )
+
+
+@pytest.mark.parametrize(
+    "scenario,fail_second",
+    [
+        ("success", False),
+        ("restart-resume", False),
+        ("restart-resume", True),
+        ("malformed-output", False),
+    ],
+)
+def test_scenario_artifacts_preserve_each_invocation_mode(
+    tmp_path, monkeypatch, scenario, fail_second
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+
+    executable = tmp_path / "codex"
+    executable.touch()
+    output = tmp_path / "result.json"
+    monkeypatch.setenv("LOOPZERO_LIVE_CLI_PATH", str(executable))
+    monkeypatch.setenv("LOOPZERO_LIVE_RESULTS", str(output))
+    monkeypatch.setattr(live, "SCENARIOS", (scenario,))
+    monkeypatch.setattr(live, "_suite_access_only_credential", lambda *_: nullcontext())
+    monkeypatch.setattr(
+        live, "private_temporary_directory", lambda *_: nullcontext(tmp_path)
+    )
+    monkeypatch.setattr(live, "_sandbox_wrapper", lambda *_: None)
+    monkeypatch.setattr(live, "_version", lambda *_args, **_kwargs: live.PINS["codex"])
+    monkeypatch.setattr(
+        live,
+        "_probe_with_credential",
+        lambda *_args, **_kwargs: SimpleNamespace(ready=True),
+    )
+    monkeypatch.setattr(live, "_normalized_readiness", lambda *_: {"ready": True})
+    runner = SimpleNamespace(
+        scenario_started=False, scenario_invocations=0, killed=False, metered_cost=None
+    )
+    monkeypatch.setattr(live, "RealProcess", lambda *_: runner)
+    monkeypatch.setattr(
+        live.RUNTIME_REGISTRY,
+        "create",
+        lambda *_args, **_kwargs: SimpleNamespace(cancel=lambda: None),
+    )
+
+    def run(_vendor, _adapter, request, **_kwargs):
+        runner.scenario_started = True
+        runner.scenario_invocations += 1
+        if fail_second and runner.scenario_invocations == 2:
+            raise RuntimeError("synthetic terminal failure")
+        return replace(
+            _result(request),
+            session_id="synthetic-session",
+            structured_output={"ok": True},
+            billing_mode=contract.RuntimeBillingMode.SUBSCRIPTION
+            if runner.scenario_invocations == 1
+            else contract.RuntimeBillingMode.UNKNOWN,
+        )
+
+    monkeypatch.setattr(live, "_run_with_credential", run)
+    expected_failure = fail_second or scenario == "malformed-output"
+    with pytest.raises(AssertionError) if expected_failure else nullcontext():
+        live.test_live_runtime_contract(
+            "codex", tmp_path, SimpleNamespace(getoption=lambda _: False)
+        )
+    record = json.loads(output.read_text())["scenarios"][0]
+    assert record["billing_modes"] == (
+        ["subscription", "unknown"]
+        if scenario == "restart-resume"
+        else ["subscription"]
+    )
+    assert record["outcome"] == (
+        "failed" if fail_second or scenario == "malformed-output" else "passed"
+    )
+    assert record["charged_cost_usd"] >= 0.01
+    if not fail_second:
+        assert record["charged_cost_usd"] == (
+            0.02 if scenario == "restart-resume" else 0.01
+        )
+
+
+def test_workflow_summary_displays_modes_and_unknown_for_older_artifacts(
+    tmp_path, monkeypatch
+):
+    import sys
+
+    import yaml
+    from conftest import REPO
+
+    workflow = yaml.safe_load(
+        (REPO / ".github/workflows/nightly-conformance.yml").read_text()
+    )
+    step = next(
+        step
+        for step in workflow["jobs"]["runtime"]["steps"]
+        if step.get("name") == "Add normalized summary"
+    )
+    script = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+    result = tmp_path / "result.json"
+    output = tmp_path / "summary.md"
+    result.write_text(
+        json.dumps(
+            {
+                "runtime": "codex",
+                "version": "test",
+                "scenarios": [
+                    {
+                        "scenario": "restart-resume",
+                        "outcome": "passed",
+                        "billing_modes": ["subscription", "unknown"],
+                        "charged_cost_usd": 0.02,
+                    },
+                    {"scenario": "legacy", "outcome": "failed"},
+                ],
+                "charged_cost_usd": 0.02,
+                "killed_runs": 0,
+                "max_killed_runs": 3,
+                "unaccounted_runs": 0,
+                "max_unaccounted_runs": 3,
+                "spend_bound": "bounded",
+            }
+        )
+    )
+    monkeypatch.setattr(sys, "argv", ["summary", str(result), str(output)])
+    exec(compile(script, "nightly-summary", "exec"), {})
+    summary = output.read_text()
+    assert "Billing mode(s)" in summary
+    assert "| restart-resume | passed | n/a | subscription, unknown |" in summary
+    assert "| legacy | failed | n/a | unknown |" in summary
+    assert "Total budget debit (API-equivalent USD): 0.020000" in summary
