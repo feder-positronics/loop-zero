@@ -5,18 +5,19 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urldefrag, urlsplit
 
 import pytest
 
-from conftest import REVISION, minimal_workflow
+from conftest import REVISION, git
 from loopzero import config, sync
 
 
 REPO = Path(__file__).resolve().parents[1]
 CORE_SKILLS = REPO / "core" / "skills"
-INTELFLO = Path(os.environ.get("LOOPZERO_INTELFLO_CHECKOUT", "/home/marcin/dev/intelflo"))
+INTELFLO_FIXTURE = REPO / "tests/fixtures/intelflo-skills"
 MOVED_GOVERNANCE = {
     "align",
     "archive-docs",
@@ -118,183 +119,122 @@ def _anchors(path: Path) -> set[str]:
 
 
 def _intelflo_token_block() -> str:
-    return '''[skill_tokens]
-readme_consumer_catalogue = "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)"
-base_branch = "origin/main"
-coherence_owner = "Marcin"
-doctrine_d2 = "D-2"
-doctrine_d14 = "D-14"
-doctrine_d16 = "D-16"
-doctrine_d18 = "D-18"
-doctrine_d21 = "D-21"
-legacy_delivery_contract = """
-For a new task, use [loop-zero delivery](../../../docs/guides/dev-workflow/loop-zero-delivery.md)
-under `AGENTS.md`'s Primary Delivery Contract. Retain issue acceptance and, when
-applicable, blueprint lifecycle commands. The legacy procedure below applies
-only to runs whose original record selects `intelflo-v1`; never migrate an
-existing run, reset its history, or apply its phase choreography to a new task."""
-debug_environment = """
-- Backend API, SQLAlchemy, and error handling:
-  [backend patterns](../../../docs/guides/backend/backend-patterns.md).
-- Backend tests and the port-5433 recovery:
-  [backend testing](../../../docs/guides/backend/backend-testing.md).
-- UI state/network triage and isolated-stack evidence:
-  [UI debugging](../../../docs/guides/frontend/bug-hunting-debug.md).
-- Collaborative T3 inspection and bounded recovery:
-  [T3 preview readiness and browser authority](../../../docs/guides/frontend/frontend-testing-e2e.md#preview-readiness-and-bounded-recovery).
-- Frontend tests:
-  [frontend testing](../../../docs/guides/frontend/frontend-testing.md).
-- Production frontend and Vercel inspection:
-  [production frontend](../../../docs/ops/runbooks/production-frontend-debugging.md)
-  and [Vercel CLI](../../../docs/ops/runbooks/vercel-cli-guide.md)."""
-commit_hook_chain = """
-This repo has **two** pre-commit pipelines that `git commit` runs:
-
-1. **pre-commit** (Python hooks via fastapi_backend venv):
-   ```bash
-   cd fastapi_backend && uv run pre-commit run
-   ```
-   Hooks: trailing-whitespace, ruff (lint + format), prettier, openapi-generate,
-   sync-agent-rules, export-requirements, pytest-config-check,
-   service-organization-check, alembic-heads-check, docs index generation,
-   check-skills-canonical-dir.
-
-2. **lint-staged** (frontend hooks via simple-git-hooks in `nextjs-frontend/package.json`):
-   ```bash
-   pnpm -C nextjs-frontend lint-staged
-   ```
-   Runs only when TS/TSX files are staged; `pre-commit run` does NOT trigger it.
-   The commit-autofix script runs it after pre-commit so it validates the final
-   staged TS/TSX state, including generated SDK files."""
-commit_dependency_preflight = """If `nextjs-frontend/package.json` or `pnpm-lock.yaml` changed after a branch switch, merge, or cherry-pick, refresh deps before frontend validation: `pnpm -C nextjs-frontend install --frozen-lockfile`. In worktrees, a missing `lint-staged` is self-healed when staged TS/TSX or docs files require the shared dependency tree (`commit-auto-fix.sh` runs `make worktree-setup`; the runtime-entry hook pre-runs it). Backend-only commits do not need frontend dependency setup. Manual fix only if self-heal fails: `make worktree-setup` (worktree) / `pnpm -C nextjs-frontend install` (primary). Frontend `test` scripts fail fast on a stale Vitest binary; verify with `pnpm -C nextjs-frontend exec vitest --version` when needed."""
-commit_mirror_paths = """| `.cursor/rules/*.mdc`, `.cursor/skills/*/SKILL.md` | `.agents/rules/*.md`, `.agent/rules/*`, `.claude/rules/*` |"""
-commit_backend_hook_behavior = """
-**Backend source changed** (`fastapi_backend/`): backend test-lane selection
-(tooling vs full unit vs risk critical) follows the ladder in the AGENTS.md
-Quick Commands table; `commit-auto-fix.sh` is the deterministic authority. Do
-**not** substitute `make test-be` or `make test-be-slow` — those are broader
-regression lanes, not commit-hook checks.
-
-The full-unit xdist lane (`make test-be-precommit-unit`) is a convenience check, not the git pre-commit gate (staged-file hooks). It flakes under load — workers crash, or **diff-unrelated** tests fail (different set each run, pass in isolation). A failure outside the staged diff that passes alone is xdist pollution: re-run once (lower `PYTEST_WORKERS` if workers crashed), don't debug it (`reference_precommit_xdist_flakiness`).
-
-**Agent-tooling tests only** (`fastapi_backend/tests/unit/scripts/`, with any
-matching root `scripts/` implementation): `make test-agent-tooling`.
-This lane runs the changed owning workflow-script tests (or the complete
-workflow-script surface when no owning test is in scope) and skips the product
-unit suite. Any product test, backend app, dependency, config, or shared test
-infrastructure path keeps the full-unit fail-safe routing."""
-
-[skill_routes]
-audit_surface = "audit-surface"
-design_handoff = "design-handoff"
-design_mockup = "design-mockup"
-execute_blueprint = "execute-blueprint"
-fix_ui_bug = "fix-ui-bug"
-fortify_roadmap = "fortify-roadmap"
-frontier_roadmap = "frontier-roadmap"
-generate_parser_rules = "generate-parser-rules"
-implement_backend = "implement-backend"
-implement_frontend = "implement-frontend"
-
-'''
+    workflow = (INTELFLO_FIXTURE / "workflow.toml").read_text(encoding="utf-8")
+    return "[skill_tokens]" + workflow.split("[skill_tokens]", 1)[1].split("[toolchain]", 1)[0]
 
 
-def _skill_workflow() -> str:
-    package = (
-        "[package]\n"
-        'env_prefix = "INTELFLO"\n'
-        'product_name = "IntelFlo"\n'
-        'primary_env = "INTELFLO_PRIMARY"\n'
-        'audit_root = ".audit"\n'
-        'skills_dir = ".cursor/skills"\n'
-        'skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]\n'
-        'docs_root = "../../../docs"\n'
-        'rules_root = "../../rules"\n'
-        'constraints_file = "../../../AGENTS.md"\n'
-        'delivery_guide = "../../../docs/guides/dev-workflow/loop-zero-delivery.md"\n'
-        'skills_readme = "../README.md"\n\n'
-        'docs_dir = "docs"\n'
-        'weekly_issue_workflow = ".github/workflows/weekly-issue.yml"\n'
-        'openapi_document = "shared-data/openapi.json"\n'
-        'commit_identity = "Vercel-authorized eowca"\n'
-        'frontend_full_env = "CI_MIRROR_FULL_FRONTEND"\n\n'
-        'suppressions_file = "../../../suppressions.yaml"\n\n'
-        + _intelflo_token_block()
-        + "[toolchain]\n"
-        'backend_dir = "fastapi_backend"\n'
-        'frontend_dir = "nextjs-frontend"\n'
-        'scripts_dir = "scripts"\n'
-        'scripts_root = "../../../scripts"\n\n'
-        'python = "python3"\n'
-        'system_python = "/usr/bin/python3"\n'
-        'uv = "uv"\n'
-        'pnpm = "pnpm"\n'
-        'pytest = "pytest"\n'
-        'vitest = "vitest"\n\n'
-        "[toolchain.commands]\n"
-    )
-    commands = "".join(
-        f'{name} = {json.dumps(value)}\n'
-        for name, value in sorted(sync._COMMAND_DEFAULTS.items())
-    )
-    return minimal_workflow(extra=package + commands, include_identity=False)
+def _file_digests(root: Path) -> dict[str, str]:
+    return {
+        path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*")) if path.is_file()
+    }
+
+
+def _assert_governance_reference(canonical: Path) -> None:
+    expected = json.loads((INTELFLO_FIXTURE / "expected.json").read_text())["sha256"]
+    assert {path.split("/", 1)[0] for path in expected} == MOVED_GOVERNANCE
+    assert len(MOVED_GOVERNANCE) == 23
+    for name in sorted(MOVED_GOVERNANCE):
+        files = {
+            path.removeprefix(name + "/"): digest
+            for path, digest in expected.items() if path.startswith(name + "/")
+        }
+        assert "SKILL.md" in files, name
+        assert _file_digests(canonical / name) == files, name
 
 
 def test_intelflo_governance_render_is_byte_identical(tmp_path: Path) -> None:
-    canonical = INTELFLO / ".cursor" / "skills"
-    if not canonical.is_dir():
-        pytest.skip(f"canonical IntelFlo skills unavailable at {canonical}")
-
     consumer = tmp_path / "intelflo-profile"
     consumer.mkdir()
     shutil.copytree(REPO / "core", consumer / "vendor" / "loop-zero")
-    (consumer / "workflow.toml").write_text(_skill_workflow(), encoding="utf-8")
-    for name in sorted(CONSUMER_OWNED):
-        shutil.copytree(canonical / name, consumer / ".cursor" / "skills" / name)
+    shutil.copyfile(INTELFLO_FIXTURE / "workflow.toml", consumer / "workflow.toml")
+    owned = INTELFLO_FIXTURE / "consumer-owned"
+    assert {path.name for path in owned.iterdir()} == CONSUMER_OWNED
+    canonical = consumer / ".cursor/skills"
+    shutil.copytree(owned, canonical)
 
     profile = config.load_profile(consumer)
     sync.write(profile)
-
+    _assert_governance_reference(canonical)
     expected_readme = (CORE_SKILLS / "README.md").read_text().replace(
         "{{skill_tokens.readme_consumer_catalogue}}",
         "[Skills catalogue](../../docs/guides/dev-workflow/skills-catalogue.md)",
     ).replace("{{package.core_contract_from_readme}}", "../../vendor/loop-zero/CONTRACT.md")
-    assert (consumer / ".cursor/skills/README.md").read_bytes() == expected_readme.encode()
-
-    compared = 0
-    for name in sorted(MOVED_GOVERNANCE):
-        expected_directory = canonical / name
-        actual_directory = consumer / ".cursor" / "skills" / name
-        expected_paths = {
-            path.relative_to(expected_directory)
-            for path in expected_directory.rglob("*")
-            if path.is_file()
-        }
-        actual_paths = {
-            path.relative_to(actual_directory)
-            for path in actual_directory.rglob("*")
-            if path.is_file()
-        }
-        assert actual_paths == expected_paths, name
-        for relative in sorted(expected_paths):
-            assert (actual_directory / relative).read_bytes() == (
-                expected_directory / relative
-            ).read_bytes(), (name, relative)
-        expected = (expected_directory / "SKILL.md").read_bytes()
-        actual = (actual_directory / "SKILL.md").read_bytes()
-        assert actual == expected, name
-        assert _frontmatter(actual) == _frontmatter(expected), name
-        mirror = INTELFLO / ".agents" / "skills" / name / "SKILL.md"
-        if mirror.is_file():
-            assert actual == mirror.read_bytes(), name
-        compared += 1
-    assert compared == 23
-    print(f"{compared} identical")
+    assert (canonical / "README.md").read_bytes() == expected_readme.encode()
     for name in sorted(CONSUMER_OWNED):
-        for source in (canonical / name).rglob("*"):
-            if source.is_file():
-                relative = source.relative_to(canonical / name)
-                assert (consumer / ".cursor" / "skills" / name / relative).read_bytes() == source.read_bytes()
+        assert _file_digests(canonical / name) == _file_digests(owned / name)
+    for mirror in profile.skill_mirrors:
+        for name in MOVED_GOVERNANCE | CONSUMER_OWNED:
+            link = consumer / mirror / name
+            assert link.is_symlink(), link
+            assert os.readlink(link) == os.path.relpath(profile.skills_dir / name, mirror)
+            assert _file_digests(link) == _file_digests(canonical / name), link
+
+
+def _live_intelflo_checkout() -> Path:
+    checkout = os.environ.get("LOOPZERO_INTELFLO_CHECKOUT")
+    revision = os.environ.get("LOOPZERO_INTELFLO_REVISION")
+    if checkout is None and revision is None:
+        pytest.skip("live comparison requires LOOPZERO_INTELFLO_CHECKOUT and LOOPZERO_INTELFLO_REVISION")
+    if not checkout or not revision or not re.fullmatch(r"[0-9a-f]{40}", revision):
+        pytest.fail("set LOOPZERO_INTELFLO_CHECKOUT and a full 40-character LOOPZERO_INTELFLO_REVISION")
+    root = Path(checkout)
+    try:
+        head = git(root, "rev-parse", "HEAD").strip()
+        dirty = git(root, "status", "--porcelain", "--untracked-files=all", "--ignored", "--",
+                    ".cursor/skills", ".agents/skills")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(f"invalid IntelFlo checkout: {exc}")
+    assert head == revision, "IntelFlo checkout HEAD differs from LOOPZERO_INTELFLO_REVISION"
+    assert not dirty, f"IntelFlo skill trees must be clean: {dirty}"
+    return root
+
+
+def test_live_intelflo_governance_matches_pinned_reference() -> None:
+    root = _live_intelflo_checkout()
+    _assert_governance_reference(root / ".cursor/skills")
+    _assert_governance_reference(root / ".agents/skills")
+
+
+def test_live_intelflo_comparison_requires_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LOOPZERO_INTELFLO_CHECKOUT", raising=False)
+    monkeypatch.delenv("LOOPZERO_INTELFLO_REVISION", raising=False)
+    with pytest.raises(pytest.skip.Exception):
+        _live_intelflo_checkout()
+
+
+@pytest.mark.parametrize("checkout,revision", [("/unused", None), (None, "a" * 40), ("/unused", "main"), ("/unused", "abcdef0")])
+def test_live_intelflo_comparison_rejects_incomplete_opt_in(
+    monkeypatch: pytest.MonkeyPatch, checkout: str | None, revision: str | None,
+) -> None:
+    for key, value in [("LOOPZERO_INTELFLO_CHECKOUT", checkout), ("LOOPZERO_INTELFLO_REVISION", revision)]:
+        monkeypatch.delenv(key, raising=False)
+        if value is not None:
+            monkeypatch.setenv(key, value)
+    with pytest.raises(pytest.fail.Exception, match="full 40-character"):
+        _live_intelflo_checkout()
+
+
+@pytest.mark.parametrize("change", ["revision", "tracked", "untracked", "ignored"])
+def test_live_intelflo_comparison_rejects_moving_checkout(
+    consumer: Path, monkeypatch: pytest.MonkeyPatch, change: str,
+) -> None:
+    skill = consumer / ".cursor/skills/local/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("pinned\n")
+    git(consumer, "add", ".")
+    git(consumer, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "skills")
+    revision = git(consumer, "rev-parse", "HEAD").strip()
+    monkeypatch.setenv("LOOPZERO_INTELFLO_CHECKOUT", str(consumer))
+    monkeypatch.setenv("LOOPZERO_INTELFLO_REVISION", "0" * 40 if change == "revision" else revision)
+    if change == "tracked":
+        skill.write_text("changed\n")
+    elif change in {"untracked", "ignored"}:
+        (skill.parent / "extra.txt").write_text("extra\n")
+        if change == "ignored":
+            (consumer / ".git/info/exclude").write_text("extra.txt\n")
+    with pytest.raises(AssertionError, match="HEAD differs|must be clean"):
+        _live_intelflo_checkout()
 
 
 @pytest.mark.parametrize(
