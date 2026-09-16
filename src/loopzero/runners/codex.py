@@ -2406,7 +2406,9 @@ def _sync_credential_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _check_pending_refresh(path: Path, credential: _ValidatedCredential) -> None:
+def _check_pending_refresh(
+    path: Path, credential: _ValidatedCredential, *, horizon_s: float
+) -> None:
     """A token possibly consumed by an interrupted renewal must never be retried."""
     try:
         descriptor = os.open(
@@ -2433,6 +2435,10 @@ def _check_pending_refresh(path: Path, credential: _ValidatedCredential) -> None
     finally:
         os.close(descriptor)
     if fingerprint == _refresh_fingerprint(credential):
+        if credential.expires_at_s > horizon_s:
+            # This admits only existing access material. The uncertainty marker
+            # remains unchanged and still forbids any future renewal attempt.
+            return
         raise CodexCredentialRefreshFailed(
             "Codex renewal requires a new host login after an uncertain refresh"
         )
@@ -2534,7 +2540,7 @@ def codex_subscription_credential(
             horizon_s = now_s + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
             credential = _read_credential(path)
             pending = path.with_name(f".{path.name}.refresh-pending")
-            _check_pending_refresh(pending, credential)
+            _check_pending_refresh(pending, credential, horizon_s=horizon_s)
             if credential.expires_at_s <= horizon_s:
                 if _is_access_only_credential(credential):
                     raise CodexCredentialUnavailable(

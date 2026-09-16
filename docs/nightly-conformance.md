@@ -124,6 +124,16 @@ same refresh token, even after a restart or access-expiry edit. This is an
 indefinite backoff until recovery, not an hourly vendor retry. Obtain a new host
 login with a different refresh token and rerun renewal; the broker automatically
 clears the old marker. Do not delete the marker to retry an uncertain token.
+
+A matching, safely validated marker still permits a shorter run whose existing
+access token covers its full runtime plus the safety margin. The broker checks
+the current credential and marker under the same renewal lock, exports only the
+access-only snapshot, and leaves the marker bytes and permissions unchanged.
+This does not permit another refresh or establish recovery of the interrupted
+rotation. If access expires while admission is in progress, the final horizon
+check rejects the snapshot. Insufficient access lifetime still requires host
+recovery; inconsistent current account claims fail closed.
+
 Malformed or unsafe marker files fail closed and require host operator repair.
 A failure before vendor launch can conservatively require the same recovery.
 
