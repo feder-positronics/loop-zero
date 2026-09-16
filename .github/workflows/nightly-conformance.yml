@@ -294,15 +294,16 @@ jobs:
           result = json.load(open(sys.argv[1], encoding="utf-8"))
           with open(sys.argv[2], "a", encoding="utf-8") as summary:
               summary.write(f"### {result['runtime']} {result['version']}\n\n")
-              summary.write("| Scenario | Outcome | Cost source(s) | Accounting | Charged cost (USD) |\n|---|---:|---|---|---:|\n")
+              summary.write("| Scenario | Outcome | Cost source(s) | Accounting | Budget debit (API-equivalent USD) |\n|---|---:|---|---|---:|\n")
               for row in result["scenarios"]:
                   cost = row.get("charged_cost_usd")
                   sources = ", ".join(row.get("cost_sources", ())) or "n/a"
                   summary.write(f"| {row['scenario']} | {row['outcome']} | {sources} | {row.get('accounting', 'n/a')} | {cost if cost is not None else 'n/a'} |\n")
-              summary.write(f"\nTotal charged cost: ${result['charged_cost_usd']:.6f}\n\n")
+              summary.write(f"\nTotal budget debit (API-equivalent USD): {result['charged_cost_usd']:.6f}\n\n")
+              summary.write("Budget debits include conservative charges for killed or unaccounted runs; they do not report subscription payments.\n\n")
               summary.write(f"Killed runs: {result['killed_runs']}/{result['max_killed_runs']}\n\n")
               summary.write(f"Unaccounted runs: {result['unaccounted_runs']}/{result['max_unaccounted_runs']}\n\n")
-              summary.write(f"Spend bound: {result['spend_bound']}\n")
+              summary.write(f"Budget bound: {result['spend_bound']}\n")
           PY
 
       - name: Upload normalized conformance result
