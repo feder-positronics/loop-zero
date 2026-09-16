@@ -57,6 +57,7 @@ ATTEMPT_HISTORY_TYPES = frozenset(
     {
         "attempt-start",
         "attempt-checkpoint",
+        "deposit-adoption",
         "deposit-verification",
         "review-recovery-verification",
         *ATTEMPT_TERMINAL_TYPES,

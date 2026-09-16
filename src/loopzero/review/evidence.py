@@ -44,7 +44,7 @@ from .findings import LedgerConflict
 from .findings import replay_finding_capture
 from .routing import REVIEW_INTENTS
 from ..kernel.sandbox import environment as sandbox_environment
-from ..kernel.worktree_lease import worktree_lease
+from ..kernel.worktree_lease import WorktreeGuardError, source_identity, worktree_lease
 
 _PROFILE: ContextVar[Profile | None] = ContextVar("review_evidence_profile", default=None)
 _DEFAULT_PROFILE: Profile | None = None
@@ -193,6 +193,54 @@ def _snapshot_git(
         )
     return completed.stdout.strip()
 
+def _capture_source_tree(worktree: Path, head: str) -> str:
+    with tempfile.TemporaryDirectory(prefix="dispatch-snapshot-index-") as scratch:
+        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
+        _snapshot_git(worktree, "read-tree", head, env=env)
+        _snapshot_git(worktree, "add", "-A", env=env)
+        return _snapshot_git(worktree, "write-tree", env=env)
+
+
+def dirty_snapshot_matches_source(
+    repository: Path,
+    worktree: Path,
+    expected_source: Mapping[str, object],
+    identity: Mapping[str, object],
+) -> bool:
+    """Prove a dirty snapshot's parent and full content against the live source.
+
+    Caller-provided digests alone confer no authority. Recompute the patch from
+    Git objects and the source tree with an isolated index, bracketing that
+    capture with the comprehensive source identity to reject concurrent drift.
+    """
+    try:
+        if expected_source.get("version") != 2:
+            return False
+        if primary_repo_root(repository) != primary_repo_root(worktree):
+            return False
+        if source_identity(worktree) != dict(expected_source):
+            return False
+        patch_identity._validate_identity(worktree, identity)
+        candidate = str(identity["candidate_sha"])
+        head = str(expected_source["head"])
+        parents = _snapshot_git(worktree, "rev-list", "--parents", "-n", "1", candidate)
+        if parents.split() != [candidate, head]:
+            return False
+        tree = _capture_source_tree(worktree, head)
+        return (
+            tree == identity["candidate_tree_sha"]
+            and source_identity(worktree) == dict(expected_source)
+        )
+    except (
+        DispatchError,
+        patch_identity.PatchIdentityError,
+        WorktreeGuardError,
+        OSError,
+        ValueError,
+    ):
+        return False
+
+
 def create_review_snapshot(
     worktree: Path,
     task_id: str,
@@ -220,11 +268,7 @@ def create_review_snapshot(
     safe_task_id = re.sub(r"[^A-Za-z0-9_.-]", "_", task_id)
     task_token = _review_snapshot_task_token(task_id)
     head = _snapshot_git(resolved, "rev-parse", "HEAD")
-    with tempfile.TemporaryDirectory(prefix="dispatch-snapshot-index-") as scratch:
-        env = {"GIT_INDEX_FILE": str(Path(scratch) / "index")}
-        _snapshot_git(resolved, "read-tree", "HEAD", env=env)
-        _snapshot_git(resolved, "add", "-A", env=env)
-        tree_sha = _snapshot_git(resolved, "write-tree", env=env)
+    tree_sha = _capture_source_tree(resolved, head)
     # Fixed message + fixed ident: identical content yields an identical
     # commit SHA regardless of task, so re-snapshots are idempotent. Task
     # provenance lives in the ref name, not the commit.

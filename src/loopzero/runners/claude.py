@@ -38,6 +38,7 @@ from .contract import (
     is_valid_resume_session_id,
     sanitized_bridge_failure,
     sanitized_bridge_text,
+    sanitized_provider_error,
 )
 from .process import (
     ProcessHandle,
@@ -653,6 +654,15 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
             event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
+            if kind == "provider_start":
+                semantic_seen = True
+            if kind == "provider_error" or (kind == "assistant" and subtype == "error"):
+                # Provider rejection proves a request was attempted. Prevent a
+                # fallback retry even though it is not actual model output.
+                semantic_seen = True
+                detail = sanitized_provider_error(raw.get("detail"))
+                if detail and len(diagnostics) < MAX_DIAGNOSTICS:
+                    diagnostics.append(f"Claude provider error: {detail}")
             if kind == "system" and subtype == "api_retry":
                 _retain_api_retry_diagnostic(diagnostics, raw.get("detail"))
             event_session_id = _bounded_string(raw.get("session_id"), "session_id")
@@ -737,7 +747,16 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                     diagnostics.append(
                         "Claude structured output recovered from accepted tool result"
                     )
-            # Retain only fixed categories, never provider error text or paths.
+            if frame_status is RuntimeStatus.FAILED:
+                errors = raw.get("errors")
+                if isinstance(errors, list):
+                    for value in errors[:MAX_DIAGNOSTICS]:
+                        detail = sanitized_provider_error(value)
+                        if detail and len(diagnostics) < MAX_DIAGNOSTICS:
+                            diagnostics.append(f"Claude provider error: {detail}")
+                if raw.get("model_output_seen") is False and len(diagnostics) < MAX_DIAGNOSTICS:
+                    diagnostics.append("Claude request ended before observed model output")
+            # Retain fixed result categories alongside sanitized provider errors.
             if (
                 result_subtype
                 in {

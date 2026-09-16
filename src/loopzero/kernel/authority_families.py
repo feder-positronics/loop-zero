@@ -43,6 +43,7 @@ _POLICY_FAMILIES = (
     "attempt-terminal",
     "coordinator-authority-cutover",
     "delivery-control",
+    "deposit-adoption",
     "deposit-verification",
     "evidence-cleanup",
     "evidence-cleanup-friction",

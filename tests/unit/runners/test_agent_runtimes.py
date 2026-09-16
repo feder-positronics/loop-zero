@@ -1320,6 +1320,7 @@ def test_claude_sdk_progress_maps_phases_without_retaining_sensitive_content(
     asyncio.run(sdk_bridge._run_claude(bridge_request, reporter=reporter))
 
     assert reporter.phases == [
+        contracts.RuntimePhase.STARTUP,
         contracts.RuntimePhase.MODEL_ACTIVE,
         contracts.RuntimePhase.TOOL_EXECUTION,
         contracts.RuntimePhase.RESULT_PACKAGING,
@@ -1396,7 +1397,7 @@ def test_claude_structured_output_tool_maps_directly_to_result_packaging(
     )
 
     assert reporter.phases == [
-        contracts.RuntimePhase.MODEL_ACTIVE,
+        contracts.RuntimePhase.STARTUP,
         contracts.RuntimePhase.RESULT_PACKAGING,
     ]
     assert all(tool is None for _phase, tool in reporter.observations)
@@ -8869,3 +8870,62 @@ def test_default_refresh_runner_kills_the_entire_process_group_on_timeout(
     # Orphan zombies may await the host init; no descendant may remain live.
     identity = process._read_proc_identity(pid, proc_root=Path("/proc"))
     assert identity is None or identity[0] == "Z"
+
+
+def test_claude_message_start_disconnect_prevents_fallback_without_model_activity(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    import asyncio
+    import claude_agent_sdk as sdk
+
+    async def query(**kwargs):
+        yield sdk.StreamEvent(
+            uuid="request",
+            session_id="session",
+            event={"type": "message_start"},
+        )
+        raise ConnectionError("disconnect")
+
+    phases = []
+    monkeypatch.setattr(sdk, "query", query)
+    monkeypatch.setattr(sdk_bridge, "_options", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        sdk_bridge,
+        "_observe_progress",
+        lambda reporter, phase, **kwargs: phases.append(phase),
+    )
+    with pytest.raises(ConnectionError):
+        asyncio.run(
+            sdk_bridge._run_claude(
+                {"prompt": "test", "commercial_mode": "subscription-only"}
+            )
+        )
+    wire = (
+        capsys.readouterr().out
+        + json.dumps({"type": "error", "reason": "disconnect"})
+        + "\n"
+    )
+    parsed = claude.parse_claude_stream(wire)
+    assert parsed.semantic_event is True
+    assert contracts.RuntimePhase.STARTUP in phases
+    assert contracts.RuntimePhase.MODEL_ACTIVE not in phases
+    assert parsed.events[0].semantic is False
+    calls = []
+
+    def run_process(command, **kwargs):
+        calls.append(command)
+        return process.ProcessResult(
+            returncode=1, stdout=wire, stderr="", duration_s=0.01, timed_out=False
+        )
+
+    adapter = claude.ClaudeAdapter(
+        run_process=run_process,
+        run_probe=lambda *args, **kwargs: _auth_process_result(),
+        sdk_available=lambda *_args: True,
+        which=lambda _name: "/usr/bin/claude",
+    )
+    result = adapter.run(claude_request(tmp_path))
+    assert result.terminal_reason is contracts.TerminalReason.TRANSPORT_DISCONNECT
+    assert len(calls) == 1

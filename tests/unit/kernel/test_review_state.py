@@ -972,3 +972,29 @@ def test_settlement_api_refuses_without_authority_lock(tmp_path):
             outcome=ReviewOutcome.UNRESOLVED,
             terminal_ref="3" * 64,
         )
+
+
+def test_deposit_adoption_survives_active_attempt_retention():
+    from loopzero.kernel import policy
+
+    adoption = {
+        "type": "deposit-adoption",
+        "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+        "policy_version": policy.DISPATCH_POLICY_VERSION,
+        "task_id": "adopted-deposit",
+        "work_unit_id": "adopted-deposit",
+        "run_id": "sr_" + "1" * 32,
+        "attempt_index": 0,
+        "status": "unverified",
+        "reason": "owner-authorized-recovery",
+        "original_terminal_receipt": "a" * 64,
+        "original_output_identity": {"head": "b" * 40, "state_sha256": "c" * 64},
+        "adopted_output_identity": {"head": "b" * 40, "state_sha256": "d" * 64},
+    }
+    retained = authority_store.retained_authority_projection(
+        [adoption],
+        active_run_ids=(adoption["run_id"],),
+    )
+    assert adoption in retained
+    assert "deposit-adoption" in policy.ATTEMPT_HISTORY_TYPES
+    assert "deposit-adoption" not in policy.ATTEMPT_TERMINAL_TYPES
