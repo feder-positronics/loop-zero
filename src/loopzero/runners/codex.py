@@ -2025,6 +2025,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 import base64
 import fcntl
+import hashlib
 import json
 import os
 import stat
@@ -2300,7 +2301,6 @@ def _default_refresh_command() -> tuple[str, ...]:
 def _refresh_credential(
     credential: _ValidatedCredential,
     *,
-    horizon_s: float,
     run_refresh: Callable[..., subprocess.CompletedProcess[str]],
     refresh_command: Sequence[str],
     sandbox_wrapper: SandboxWrapper | None = None,
@@ -2357,17 +2357,59 @@ def _refresh_credential(
             raise UnsafeCodexCredential(
                 "Codex credential account changed during refresh"
             )
-        if (
-            refreshed.expires_at_s <= credential.expires_at_s
-            or refreshed.expires_at_s <= horizon_s
-        ):
-            raise UnsafeCodexCredential(
-                "Codex credential refresh did not advance expiry"
-            )
         return refreshed
 
 
-def _install_credential(path: Path, credential: _ValidatedCredential) -> None:
+def _refresh_fingerprint(credential: _ValidatedCredential) -> bytes:
+    token = json.loads(credential.payload)["tokens"]["refresh_token"]
+    return hashlib.sha256(token.encode("utf-8")).hexdigest().encode("ascii")
+
+
+def _sync_credential_directory(path: Path) -> None:
+    descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _check_pending_refresh(path: Path, credential: _ValidatedCredential) -> None:
+    """A token possibly consumed by an interrupted renewal must never be retried."""
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise UnsafeCodexCredential("Codex renewal recovery state is unsafe") from exc
+    try:
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_nlink != 1
+            or metadata.st_uid != os.getuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_size != 64
+        ):
+            raise UnsafeCodexCredential("Codex renewal recovery state is unsafe")
+        fingerprint = os.pread(descriptor, 65, 0)
+        if len(fingerprint) != 64 or any(c not in b"0123456789abcdef" for c in fingerprint):
+            raise UnsafeCodexCredential("Codex renewal recovery state is unsafe")
+    finally:
+        os.close(descriptor)
+    if fingerprint == _refresh_fingerprint(credential):
+        raise CodexCredentialRefreshFailed(
+            "Codex renewal requires a new host login after an uncertain refresh"
+        )
+    # A different host refresh token is the explicit recovery boundary. Access
+    # expiry or last_refresh edits alone cannot make a spent token retryable.
+    path.unlink()
+    _sync_credential_directory(path)
+
+
+def _validate_credential_directory(path: Path) -> None:
     parent = path.parent
     try:
         metadata = parent.stat(follow_symlinks=False)
@@ -2382,6 +2424,11 @@ def _install_credential(path: Path, credential: _ValidatedCredential) -> None:
         or metadata.st_mode & 0o002
     ):
         raise UnsafeCodexCredential("Codex credential directory is unsafe")
+
+
+def _install_credential(path: Path, credential: _ValidatedCredential) -> None:
+    _validate_credential_directory(path)
+    parent = path.parent
     temporary = parent / f".auth-{uuid.uuid4().hex}.tmp"
     try:
         _write_private_file(temporary, credential.payload)
@@ -2447,33 +2494,60 @@ def codex_subscription_credential(
     if requested_runtime_s <= 0:
         raise ValueError("requested_runtime_s must be positive")
     path = credential_path or Path.home() / ".codex" / "auth.json"
-    with _renewal_lock(path.parent / get_settings().lock_name("codex-refresh")):
-        now_s = clock()
-        horizon_s = now_s + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
-        credential = _read_credential(path)
-        if credential.expires_at_s <= horizon_s:
-            if _is_access_only_credential(credential):
-                raise CodexCredentialUnavailable(
-                    "Codex access-only credential is unavailable for the requested run"
-                )
-            refreshed = _refresh_credential(
-                credential,
-                horizon_s=horizon_s,
-                run_refresh=run_refresh or _run_refresh_process_group,
-                refresh_command=refresh_command or _default_refresh_command(),
-                sandbox_wrapper=sandbox_wrapper,
-            )
-            if _read_credential(path).payload != credential.payload:
-                raise CodexCredentialRefreshFailed(
-                    "Codex credential changed during trusted refresh"
-                )
-            _install_credential(path, refreshed)
+    _validate_credential_directory(path)
+    try:
+        with _renewal_lock(path.parent / get_settings().lock_name("codex-refresh")):
+            now_s = clock()
+            horizon_s = now_s + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
             credential = _read_credential(path)
-            if credential.payload != refreshed.payload:
-                raise UnsafeCodexCredential(
-                    "Codex credential changed during trusted installation"
+            pending = path.with_name(f".{path.name}.refresh-pending")
+            _check_pending_refresh(pending, credential)
+            if credential.expires_at_s <= horizon_s:
+                if _is_access_only_credential(credential):
+                    raise CodexCredentialUnavailable(
+                        "Codex access-only credential is unavailable for the requested run"
+                    )
+                command = refresh_command or _default_refresh_command()
+                # Durable intent precedes any vendor call. Keep it on every uncertain
+                # exit, including process death, invalid output and install failure.
+                _write_private_file(pending, _refresh_fingerprint(credential))
+                _sync_credential_directory(pending)
+                refreshed = _refresh_credential(
+                    credential,
+                    run_refresh=run_refresh or _run_refresh_process_group,
+                    refresh_command=command,
+                    sandbox_wrapper=sandbox_wrapper,
                 )
-        snapshot = _snapshot_descriptor(_sandbox_snapshot_payload(credential))
+                if _read_credential(path).payload != credential.payload:
+                    raise CodexCredentialRefreshFailed(
+                        "Codex credential changed during trusted refresh"
+                    )
+                try:
+                    _install_credential(path, refreshed)
+                except OSError as exc:
+                    raise CodexCredentialRefreshFailed(
+                        "Codex credential installation failed; host recovery is required"
+                    ) from exc
+                credential = _read_credential(path)
+                if credential.payload != refreshed.payload:
+                    raise UnsafeCodexCredential(
+                        "Codex credential changed during trusted installation"
+                    )
+                pending.unlink()
+                _sync_credential_directory(pending)
+            # Host rotation and executor admission are separate decisions. Even an
+            # equal/shorter-lived replacement may be the only usable refresh token.
+            if credential.expires_at_s <= clock() + requested_runtime_s + REFRESH_SAFETY_MARGIN_S:
+                raise CodexCredentialUnavailable(
+                    "Codex credential is unavailable for the requested run"
+                )
+            snapshot = _snapshot_descriptor(_sandbox_snapshot_payload(credential))
+    except OSError:
+        # Filesystem exceptions may embed credential paths or private details.
+        # Do not wrap the caller's code after yield, only broker preparation.
+        raise CodexCredentialRefreshFailed(
+            "Codex credential renewal state is unavailable; host recovery is required"
+        ) from None
     try:
         yield snapshot
     finally:

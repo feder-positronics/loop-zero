@@ -112,9 +112,20 @@ archive or upload the staging directory; only the validated snapshot is suitable
 for GitHub.
 
 If the vendor returns an access token too short for the 72-hour horizon, renewal
-refuses to export it. Preserving the vendor's rotated host login in that failure
-case remains a liveness follow-up in
-[#63](https://github.com/feder-positronics/loop-zero/issues/63).
+persists the validated same-account rotated login on the host, then refuses to
+export it. The next scheduled run uses the replacement refresh token.
+
+Before contacting the vendor, the broker writes and fsyncs a private
+`.auth.json.refresh-pending` file beside the source login. It contains only a
+SHA-256 fingerprint of the refresh token, never the token itself. Successful
+durable installation clears it. Timeout, interrupted refresh, invalid vendor
+output, or failed installation retains it: subsequent runs refuse to reuse the
+same refresh token, even after a restart or access-expiry edit. This is an
+indefinite backoff until recovery, not an hourly vendor retry. Obtain a new host
+login with a different refresh token and rerun renewal; the broker automatically
+clears the old marker. Do not delete the marker to retry an uncertain token.
+Malformed or unsafe marker files fail closed and require host operator repair.
+A failure before vendor launch can conservatively require the same recovery.
 
 The workflow continues to validate and seal the snapshot before launching
 checked-out code. It fails if the access token no longer covers the job; it
