@@ -1284,19 +1284,172 @@ def test_main_rejects_partial_repository_binding_before_local_git(
         )
 
 
+def _set_publisher_process_source(
+    monkeypatch: pytest.MonkeyPatch, source: Path, *, isolated: bool = True
+) -> None:
+    _set_publisher_process_command(
+        monkeypatch,
+        os.fsencode(sys.executable),
+        b"-I" if isolated else b"-B",
+        os.fsencode(source),
+    )
+
+
+def _set_publisher_process_command(
+    monkeypatch: pytest.MonkeyPatch, *arguments: bytes
+) -> None:
+    original_read_bytes = Path.read_bytes
+    command = b"\0".join((*arguments, b""))
+
+    def read_bytes(path: Path) -> bytes:
+        if path == Path("/proc/self/cmdline"):
+            return command
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
 def test_publisher_source_must_come_from_the_pinned_primary_repository(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
-    stale = tmp_path / "worktree" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    _set_publisher_process_source(monkeypatch, canonical)
 
-    module.require_canonical_publisher_source(
-        tmp_path / "primary", source_path=canonical
-    )
+    module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+@pytest.mark.parametrize("checkout", ["candidate", "stale", "untrusted"])
+def test_publisher_source_rejects_other_checkout_launchers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkout: str
+) -> None:
+    launcher = tmp_path / checkout / "scripts" / "util" / "pr_publish.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text("# other publisher\n", encoding="utf-8")
+    _set_publisher_process_source(monkeypatch, launcher)
+
     with pytest.raises(module.PublicationError, match="canonical primary"):
-        module.require_canonical_publisher_source(
-            tmp_path / "primary", source_path=stale
-        )
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+def test_publisher_source_rejects_forged_symlink_to_canonical_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    forged = tmp_path / "candidate" / "scripts" / "util" / "pr_publish.py"
+    forged.parent.mkdir(parents=True)
+    forged.symlink_to(canonical)
+    _set_publisher_process_source(monkeypatch, forged)
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+@pytest.mark.parametrize("kind", ["missing", "directory"])
+def test_publisher_source_rejects_nonregular_primary_launcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    if kind == "directory":
+        canonical.mkdir()
+    _set_publisher_process_source(monkeypatch, canonical)
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+def test_publisher_source_rejects_unisolated_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    _set_publisher_process_source(monkeypatch, canonical, isolated=False)
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+@pytest.mark.parametrize("mode", [b"-c", b"-m"])
+def test_publisher_source_rejects_interpreter_mode_smuggling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: bytes
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    _set_publisher_process_command(
+        monkeypatch,
+        os.fsencode(sys.executable),
+        b"-I",
+        mode,
+        os.fsencode(canonical),
+    )
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+def test_publisher_source_ignores_mutable_python_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    candidate = tmp_path / "candidate" / "scripts" / "util" / "pr_publish.py"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("# candidate publisher\n", encoding="utf-8")
+    _set_publisher_process_source(monkeypatch, candidate)
+    monkeypatch.setattr(sys, "argv", [str(canonical)])
+    monkeypatch.setattr(sys.modules["__main__"], "__file__", str(canonical))
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+def test_publisher_source_fails_closed_without_process_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_read_bytes = Path.read_bytes
+
+    def read_bytes(path: Path) -> bytes:
+        if path == Path("/proc/self/cmdline"):
+            raise OSError("proc unavailable")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(tmp_path / "primary")
+
+
+def test_publisher_source_accepts_real_isolated_primary_launcher(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    canonical = primary / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    source_root = Path(module.__file__).resolve().parents[2]
+    canonical.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(source_root)!r})\n"
+        "from pathlib import Path\n"
+        "from loopzero.delivery.publish import require_canonical_publisher_source\n"
+        f"require_canonical_publisher_source(Path({str(primary)!r}))\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", str(canonical)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("republish", [False, True])
