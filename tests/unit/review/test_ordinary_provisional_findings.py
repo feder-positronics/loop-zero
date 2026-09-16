@@ -657,3 +657,71 @@ def test_signed_supersession_prevents_first_admission_without_releasing_slot(ord
     )
     assert len(state.reservations) == 1
     assert state.settlement_for(completion["reservation_id"]) is None
+
+
+def _first_deposition_failure(case):
+    _, _, dispatcher, records, completion = case
+    start = next(row for row in records if row["type"] == "attempt-start")
+    failure = dispatcher.seal(
+        {
+            **{k: v for k, v in start.items()
+               if k not in {"terminal_authority_proof", "terminal_authority"}},
+            **{key: completion[key] for key in (
+                "result_artifact", "result_sha256", "reservation_id",
+                "generation_id", "family", "repository_binding")},
+            "type": "attempt-terminal",
+            "status": "infrastructure-failure",
+            "failure_class": "finding-deposition-failed",
+            "deposit_state": "none",
+        },
+        authority_kind="dispatcher",
+    )
+    records.append(failure)
+    return failure
+
+
+def test_pending_ordinary_owner_rejects_recovery_after_first_failure(ordinary):
+    repo, _, _, records, _ = ordinary
+    admission = admit(ordinary)
+    receipt = provisional.capture_provisional_findings(
+        repo, authority_records=records, admission=admission
+    )
+    assert receipt["finding_ids"]
+    _first_deposition_failure(ordinary)
+    assert sum(row["type"] == "attempt-terminal" for row in records) == 1
+    with pytest.raises(provisional.ProvisionalFindingError, match="conflict"):
+        provisional.build_recovery_admission(records, task_id="review-1")
+    assert provisional.authenticated_capture_admissions(records)["review-1"] == admission
+
+
+def test_historical_conflicting_owners_cannot_erase_publication_debt(ordinary):
+    from loopzero.delivery.publish import open_important_finding_ids
+
+    repo, coordinator, _, records, _ = ordinary
+    admission = admit(ordinary)
+    receipt = provisional.capture_provisional_findings(
+        repo, authority_records=records, admission=admission
+    )
+    assert receipt["finding_ids"]
+    failure = _first_deposition_failure(ordinary)
+    # Construct the historically accepted signed record directly: a fixed
+    # builder must not prevent this probe from testing already-persisted debt.
+    recovery = coordinator.seal(
+        {
+            **provisional._admission_payload(failure),
+            "ts": "2026-09-16T13:00:00+00:00",
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
+        authority_kind="coordinator",
+    )
+    records.append(recovery)
+    assert provisional.authenticated_recovery_admissions(records)["review-1"] == recovery
+    assert provisional.authenticated_capture_admissions(records)["review-1"] == admission
+    with pytest.raises(provisional.ProvisionalFindingError, match="conflict"):
+        provisional.authenticated_provisional_admissions(records)
+    with pytest.raises(provisional.ProvisionalFindingError, match="conflict"):
+        open_important_finding_ids(
+            repo, "refs/heads/fix/18", dispatch_records=records, finding_records=[]
+        )
+    assert recovery in records and admission in records
