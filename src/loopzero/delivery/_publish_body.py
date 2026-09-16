@@ -173,7 +173,11 @@ def validate_body_against_trusted_base(
             "pinned base before publication"
         )
     with tempfile.TemporaryDirectory(prefix="loopzero-pr-body-") as directory:
-        checker_path = Path(directory) / Path(TRUSTED_BODY_CHECKER_PATH).name
+        # Consumer facades may import from both their directory and its parent.
+        # Keep both inside the private boundary, never the shared temp root.
+        checker_directory = Path(directory) / "checker"
+        checker_directory.mkdir(mode=0o700)
+        checker_path = checker_directory / Path(TRUSTED_BODY_CHECKER_PATH).name
         checker_path.write_text(shown.stdout, encoding="utf-8")
         body_path = Path(directory) / "body.md"
         body_path.write_text(body, encoding="utf-8")

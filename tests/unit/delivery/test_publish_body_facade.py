@@ -63,6 +63,10 @@ def test_trusted_base_executes_rendered_intelflo_facade(tmp_path, monkeypatch):
     monkeypatch.setenv("PYTHONPATH", str(candidate))
     monkeypatch.delenv("INTELFLO_ROOT", raising=False)
     monkeypatch.delenv("LOOPZERO_ROOT", raising=False)
+    # The real facade explicitly inserts both of its enclosing directories.
+    # Its parent must not expose a shared/candidate-controlled temp root.
+    (candidate / "html.py").write_text("raise RuntimeError('temporary root import')")
+    monkeypatch.setattr(body_check.tempfile, "tempdir", str(candidate))
 
     body_check.validate_body_against_trusted_base(
         BaseRunner(), trusted_base_head="c" * 40, body=VALID_BODY, standalone=False
@@ -86,10 +90,11 @@ def test_private_checker_files_are_removed_after_execution(failure):
 
     def checker(argv):
         script, body = Path(argv[2]), Path(argv[4])
-        paths.extend([script, body, script.parent])
+        paths.extend([script, body, script.parent, body.parent])
         assert script.name == "pr_body_check.py"
-        assert script.parent == body.parent
+        assert script.parent.parent == body.parent
         assert script.parent.stat().st_mode & 0o777 == 0o700
+        assert body.parent.stat().st_mode & 0o777 == 0o700
         assert script.read_text() == "trusted source"
         assert body.read_text() == VALID_BODY
         if failure is not None:
