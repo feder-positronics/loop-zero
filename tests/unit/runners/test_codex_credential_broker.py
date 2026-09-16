@@ -583,3 +583,65 @@ def test_codex_snapshot_carries_last_refresh_so_app_server_uses_the_access_token
     assert isinstance(stamped["last_refresh"], str)
     assert stamped["last_refresh"].endswith("Z")
     assert set(stamped) == {"auth_mode", "OPENAI_API_KEY", "tokens", "last_refresh"}
+
+
+@pytest.mark.parametrize("replacement_expiry", [1_050, 1_100, 1_200])
+def test_short_rotation_is_saved_before_snapshot_refusal(tmp_path, replacement_expiry):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100, refresh_token="old"))
+    replacement = _credential(expires_at_s=replacement_expiry, refresh_token="rotated")
+
+    def vendor(command, *, env, **kwargs):
+        _write_credential(Path(env["CODEX_HOME"]) / "auth.json", replacement)
+        return subprocess.CompletedProcess(command, 0, stdout='{"authenticated":true}')
+
+    with pytest.raises(codex_credential.CodexCredentialError):
+        with codex_credential.codex_subscription_credential(
+            requested_runtime_s=600, credential_path=path, clock=lambda: 1_000,
+            run_refresh=vendor, refresh_command=("fake-vendor",),
+        ):
+            pytest.fail("insufficient snapshot escaped")
+    assert json.loads(path.read_text()) == replacement
+
+
+@pytest.mark.parametrize("failure", ["timeout", "install", "account", "status"])
+def test_uncertain_rotation_blocks_spent_token_until_new_host_login(tmp_path, monkeypatch, failure):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100, refresh_token="spent"))
+    calls = []
+    install = codex_credential._install_credential
+
+    def vendor(command, *, env, **kwargs):
+        calls.append(command)
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(command, 30)
+        replacement = _credential(expires_at_s=3_000, refresh_token="rotated")
+        if failure == "account":
+            replacement["tokens"]["account_id"] = "different-account"
+        _write_credential(Path(env["CODEX_HOME"]) / "auth.json", replacement)
+        return subprocess.CompletedProcess(command, 1 if failure == "status" else 0,
+                                           stdout='{"authenticated":true}')
+
+    def broken_install(*args):
+        raise OSError("synthetic install failure")
+
+    if failure == "install":
+        monkeypatch.setattr(codex_credential, "_install_credential", broken_install)
+    arguments = dict(requested_runtime_s=600, credential_path=path, clock=lambda: 1_000,
+                     run_refresh=vendor, refresh_command=("fake-vendor",))
+    for _ in range(2):
+        with pytest.raises((codex_credential.CodexCredentialError, OSError)):
+            with codex_credential.codex_subscription_credential(**arguments):
+                pytest.fail("uncertain rotation escaped")
+    assert len(calls) == 1
+    # Editing access expiry cannot authorize a retry of the same spent refresh token.
+    _write_credential(path, _credential(expires_at_s=1_200, refresh_token="spent"))
+    with pytest.raises(codex_credential.CodexCredentialError):
+        with codex_credential.codex_subscription_credential(**arguments):
+            pytest.fail("spent token was retried")
+    assert len(calls) == 1
+    monkeypatch.setattr(codex_credential, "_install_credential", install)
+    _write_credential(path, _credential(expires_at_s=3_000, refresh_token="new-login"))
+    with codex_credential.codex_subscription_credential(**arguments):
+        pass
+    assert len(calls) == 1
