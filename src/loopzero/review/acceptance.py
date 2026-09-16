@@ -982,8 +982,12 @@ _ACCEPTANCE_SECRET_CLI = re.compile(
     rf"({_ACCEPTANCE_SECRET_VALUE})"
 )
 _ACCEPTANCE_BEARER = re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)\S+")
+# Start at the literal delimiter, not a variable-length scheme: searching for
+# a scheme retries at every letter of a long non-URL collection node (quadratic
+# work). Keep the scheme untouched and conservatively hide userinfo even when
+# the preceding scheme is malformed. Slashes bound each delimiter's scan.
 _ACCEPTANCE_URL_CREDENTIAL = re.compile(
-    r"([A-Za-z][A-Za-z0-9+.-]*://)[^/@:\s]+(?::[^/@\s]*)?@"
+    r"(://)[^/@:\s]+(?::[^/@\s]*)?@"
 )
 
 
