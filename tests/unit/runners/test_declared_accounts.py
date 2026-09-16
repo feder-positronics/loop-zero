@@ -287,29 +287,53 @@ print(hashlib.sha256(os.read(fd,10000)).hexdigest())
     assert dict(os.environ) == before
 
 
-@pytest.mark.parametrize("projection", [None, {}, {"declared_credential_vendor": None}, {"declared_credential_vendor": "claude"}])
+@pytest.mark.parametrize(
+    "projection",
+    [
+        None,
+        {},
+        {"declared_credential_vendor": None},
+        {"declared_credential_vendor": "claude"},
+    ],
+)
 def test_real_bridge_latch_rejects_missing_or_wrong_context(tmp_path, projection):
     settings, request, _source, _payload = fixture(tmp_path)
     from loopzero.runners.settings import PACKAGED_BRIDGE, SETTINGS_ENV
+
     with settings.use(), accounts().credential_scope(settings, "codex", request):
         fd = accounts().credential_descriptor("codex")
         environment = {"PATH": "/usr/bin:/bin", "LOOPZERO_CODEX_AUTH_FD": str(fd)}
         if projection is not None:
             environment[SETTINGS_ENV] = json.dumps(projection)
         result = subprocess.run(
-            [sys.executable, "-I", str(PACKAGED_BRIDGE), "--require-brokered-credential"],
-            input=codex._sdk_readiness_payload(request), text=True, capture_output=True,
-            env=environment, pass_fds=(fd,), timeout=5,
+            [
+                sys.executable,
+                "-I",
+                str(PACKAGED_BRIDGE),
+                "--require-brokered-credential",
+            ],
+            input=codex._sdk_readiness_payload(request),
+            text=True,
+            capture_output=True,
+            env=environment,
+            pass_fds=(fd,),
+            timeout=5,
         )
     assert result.returncode == 2
     assert json.loads(result.stdout)["type"] == "error"
     assert not result.stderr
 
 
-@pytest.mark.parametrize("invalid", ["absent", "plain-file", "closed", "refresh-capable"])
-def test_child_gate_denies_unprotected_or_refresh_capable_fd(tmp_path, monkeypatch, invalid):
+@pytest.mark.parametrize(
+    "invalid", ["absent", "plain-file", "closed", "refresh-capable"]
+)
+def test_child_gate_denies_unprotected_or_refresh_capable_fd(
+    tmp_path, monkeypatch, invalid
+):
     settings, request, source, payload = fixture(tmp_path)
-    child_settings = replace(settings, accounts=None, declared_credential_vendor="codex")
+    child_settings = replace(
+        settings, accounts=None, declared_credential_vendor="codex"
+    )
     fd = None
     if invalid == "plain-file":
         fd = os.open(source, os.O_RDONLY)
@@ -342,11 +366,15 @@ def test_selected_native_snapshot_passes_child_validation(tmp_path, monkeypatch)
 @pytest.mark.parametrize("vendor", ["claude", "codex"])
 def test_sdk_unavailable_does_not_attempt_declared_cli_fallback(tmp_path, vendor):
     settings, request, _source, _payload = fixture(tmp_path, vendor)
+
     def forbidden(*a, **kw):
         pytest.fail("SDK failure attempted CLI activity")
+
     with settings.use():
         adapter = (claude.ClaudeAdapter if vendor == "claude" else codex.CodexAdapter)(
-            sdk_available=lambda *_: False, run_cli=forbidden, run_probe=forbidden,
+            sdk_available=lambda *_: False,
+            run_cli=forbidden,
+            run_probe=forbidden,
         )
     result = adapter.run(request)
     assert result.status.value == "subscription-unavailable"
@@ -355,7 +383,9 @@ def test_sdk_unavailable_does_not_attempt_declared_cli_fallback(tmp_path, vendor
     assert selected is None and not readiness.ready
 
 
-@pytest.mark.parametrize("extra", [{"select": "other"}, {"kind": []}, {"credential_path": "relative"}])
+@pytest.mark.parametrize(
+    "extra", [{"select": "other"}, {"kind": []}, {"credential_path": "relative"}]
+)
 def test_declaration_rejects_unsupported_narrowing_fields(extra):
     entry = {"kind": "oauth-login", "credential_path": "/protected/source", **extra}
     with pytest.raises(accounts().DeclaredAccountError):
@@ -363,35 +393,51 @@ def test_declaration_rejects_unsupported_narrowing_fields(extra):
 
 
 @pytest.mark.parametrize("vendor", ["claude", "codex"])
-def test_bridge_main_validates_then_consumes_selected_snapshot(tmp_path, monkeypatch, vendor):
+def test_bridge_main_validates_then_consumes_selected_snapshot(
+    tmp_path, monkeypatch, vendor
+):
     import asyncio
     from loopzero.runners import bridge
+
     settings, request, _source, _payload = fixture(tmp_path, vendor)
     with settings.use(), accounts().credential_scope(settings, vendor, request):
         active = accounts().get_settings()
         inherited = accounts().credential_descriptor(vendor)
-        with accounts().declared_launch_environment({}, (), bridge=True, sandboxed=True) as (env, fds):
+        with accounts().declared_launch_environment(
+            {}, (), bridge=True, sandboxed=True
+        ) as (env, fds):
             for key, value in env.items():
                 monkeypatch.setenv(key, value)
             payload = {"vendor": vendor}
             monkeypatch.setattr(bridge, "_read_request", lambda: payload)
-            monkeypatch.setattr(sys, "argv", ["bridge.py", "--require-brokered-credential"])
+            monkeypatch.setattr(
+                sys, "argv", ["bridge.py", "--require-brokered-credential"]
+            )
             consumed = []
+
             async def run(request, *, reporter):
                 if vendor == "claude":
                     selected = bridge._claude_subscription_environment()
                     assert selected["CLAUDE_CODE_OAUTH_TOKEN"] == "selected"
                 else:
-                    directory, selected, path = bridge._materialize_codex_subscription_auth()
+                    directory, selected, path = (
+                        bridge._materialize_codex_subscription_auth()
+                    )
                     assert directory is None
-                    assert json.loads(path.read_text())["tokens"]["account_id"] == "selected"
+                    assert (
+                        json.loads(path.read_text())["tokens"]["account_id"]
+                        == "selected"
+                    )
                     path.unlink()
                 consumed.append(request)
+
             monkeypatch.setattr(bridge, "_run", run)
             # The real child owns its duplicated fd; model that ownership here
             # while retaining the context manager's parent-side descriptor.
             child_fd = os.open(f"/proc/self/fd/{fds[-1]}", os.O_RDONLY)
-            monkeypatch.setenv(active.env_name(f"{vendor.upper()}_AUTH_FD"), str(child_fd))
+            monkeypatch.setenv(
+                active.env_name(f"{vendor.upper()}_AUTH_FD"), str(child_fd)
+            )
             assert asyncio.run(bridge.main()) == 0
             assert consumed == [payload]
             with pytest.raises(OSError):
@@ -404,8 +450,13 @@ def test_caller_fd_overlay_is_not_owned_or_inherited(tmp_path):
     caller_fd = os.open(source, os.O_RDONLY)
     try:
         with settings.use(), accounts().credential_scope(settings, "codex", request):
-            hostile = {settings.env_name("CODEX_AUTH_FD"): str(caller_fd), "HOME": str(source.parent)}
-            with accounts().declared_launch_environment(hostile, (caller_fd,), bridge=True, sandboxed=True) as (env, fds):
+            hostile = {
+                settings.env_name("CODEX_AUTH_FD"): str(caller_fd),
+                "HOME": str(source.parent),
+            }
+            with accounts().declared_launch_environment(
+                hostile, (caller_fd,), bridge=True, sandboxed=True
+            ) as (env, fds):
                 assert caller_fd not in fds
                 assert env[settings.env_name("CODEX_AUTH_FD")] != str(caller_fd)
                 assert env["HOME"] != str(source.parent)
@@ -420,7 +471,12 @@ def test_caller_fd_overlay_is_not_owned_or_inherited(tmp_path):
 @pytest.mark.parametrize("field", ["read_roots", "evidence_read_roots", "write_roots"])
 def test_declared_source_cannot_be_in_request_mounts(tmp_path, field):
     settings, request, source, _payload = fixture(tmp_path)
-    request = replace(request, capability_profile=replace(request.capability_profile, **{field: (source.parent,)}))
+    request = replace(
+        request,
+        capability_profile=replace(
+            request.capability_profile, **{field: (source.parent,)}
+        ),
+    )
     with settings.use(), pytest.raises(accounts().DeclaredAccountError):
         with accounts().credential_scope(settings, "codex", request):
             pytest.fail("source admitted inside a worker mount")
@@ -436,10 +492,67 @@ def test_cursor_uses_scoped_private_home_and_scrubs_it(tmp_path, monkeypatch):
             auth = home / ".config/cursor/auth.json"
             assert json.loads(auth.read_text())["accessToken"] == payload["accessToken"]
             assert mounts == (home,)
-            with accounts().declared_launch_environment(environment, (), bridge=False, sandboxed=True) as (child, fds):
+            with accounts().declared_launch_environment(
+                environment, (), bridge=False, sandboxed=True
+            ) as (child, fds):
                 assert child["HOME"] == str(home)
                 assert settings.env_name("CURSOR_AUTH_FD") not in child
                 assert not fds
         assert not auth.exists()
     assert not home.exists()
     assert dict(os.environ) == before
+
+
+@pytest.mark.parametrize("vendor", ["claude", "codex"])
+def test_declared_broker_receives_package_refresh_containment(tmp_path, monkeypatch, vendor):
+    from contextlib import contextmanager
+    from loopzero import credential_seal
+    settings, request, source, _payload = fixture(tmp_path, vendor)
+    module = claude if vendor == "claude" else codex
+    original = getattr(module, f"{vendor}_subscription_credential")
+    sentinel = object()
+    calls = []
+    monkeypatch.setattr(credential_seal, "_host_refresh_wrapper", lambda: lambda spec: calls.append(spec) or ["contained"])
+    @contextmanager
+    def broker(**kwargs):
+        assert kwargs["credential_path"] == source
+        wrapper = kwargs.pop("sandbox_wrapper")
+        assert wrapper(sentinel) == ["contained"]
+        if vendor == "claude":
+            assert kwargs["allow_token_fallback"] is False
+        with original(**kwargs) as fd:
+            yield fd
+    monkeypatch.setattr(module, f"{vendor}_subscription_credential", broker)
+    with settings.use(), accounts().credential_scope(settings, vendor, request):
+        assert calls == [sentinel]
+
+
+def test_nested_legacy_adapter_cannot_escape_declared_scope(tmp_path):
+    settings, request, _source, _payload = fixture(tmp_path)
+    legacy = replace(settings, accounts=None)
+    with settings.use(), accounts().credential_scope(settings, "codex", request):
+        with pytest.raises(accounts().DeclaredAccountError):
+            with accounts().credential_scope(legacy, "codex", request):
+                pytest.fail("legacy settings downgraded active declared scope")
+
+
+def test_launch_failure_closes_duplicate_and_scope_scrubs_home(tmp_path, monkeypatch):
+    settings, request, _source, _payload = fixture(tmp_path)
+    observed = []
+    def failed_spawn(*args, **kwargs):
+        observed.extend(kwargs["pass_fds"])
+        raise OSError("synthetic spawn failure")
+    monkeypatch.setattr(process.subprocess, "Popen", failed_spawn)
+    with settings.use(), accounts().credential_scope(settings, "codex", request):
+        parent_fd = accounts().credential_descriptor("codex")
+        home = accounts().get_settings().session_home
+        with pytest.raises(OSError):
+            process.run_cli(settings.bridge_command(request.cwd), cwd=request.cwd,
+                            input_text="", timeout_s=5, sandbox_wrapper=lambda spec: spec.argv)
+        assert len(observed) == 1
+        with pytest.raises(OSError):
+            os.fstat(observed[0])
+        os.fstat(parent_fd)
+    assert not home.exists()
+    with pytest.raises(OSError):
+        os.fstat(parent_fd)
