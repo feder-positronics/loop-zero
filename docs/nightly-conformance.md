@@ -171,5 +171,35 @@ unaccounted invocations and can exceed known usage. Read `accounting` and
 it does not report money paid.
 
 The configured USD ceiling and all existing charge, kill, and unknown-cost
-limits continue to enforce the same runaway bound. Credential-derived billing
-mode and account/model quota evidence remain follow-up work in #34 and #32.
+limits continue to enforce the same runaway bound.
+
+### Billing observations in conformance
+
+`RuntimeResult.billing_mode` is `subscription`, `metered`, or `unknown`; its
+backward-compatible default is `unknown`. Direct/ambient runtime calls continue
+to use that default. Only the live suite attaches a billing observation from its
+existing credential broker: it validates the exact held access-only snapshot
+before lending a duplicate to that invocation. The current brokers accept
+subscription OAuth/setup tokens and browser logins, so this producer can emit
+`subscription` or `unknown`, never `metered`. No mode is inferred from a vendor
+cost frame, requested commercial policy, environment label, or adapter claim.
+A result from another vendor, attempt, or transport remains `unknown`.
+
+The pinned Claude conformance model requires the SDK; its bridge overrides the
+OAuth token from the descriptor and filters API/gateway credentials. Protected
+Codex execution uses its SDK with a private credential home and a ChatGPT account
+check. Cursor uses the snapshot's private browser-auth home and filters API
+credentials. These existing routes are the scope of this observation; another
+transport or fallback is not covered by it.
+
+Each normalized result includes `billing_mode`; each scenario includes
+`billing_modes` in invocation order, including both restart/resume attempts.
+An invocation without a returned result retains `unknown`; older or unlaunched
+scenario rows display `unknown` in the nightly summary. The mode describes the
+selected credential class. It does not establish that a model launched, that
+subscription quota remained, or that money was charged. It is local conformance
+evidence, not signed review/ledger authority.
+
+Full governed-runtime credential provenance, signed telemetry propagation,
+metered credential support, and shared account/model quota evidence remain
+follow-up work in #34 and #32. No historical review records are rewritten.
