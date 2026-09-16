@@ -366,6 +366,7 @@ class Profile:
         }
     )
     hooks: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    accounts: object = field(default=None, repr=False)
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     @property
@@ -1129,11 +1130,19 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             path_class_parents[child] = parent
 
     hooks = _hooks(data, "[hooks]", problems)
+    from .runners.accounts import DeclaredAccountError, parse_accounts
+
+    accounts = None
+    try:
+        accounts = parse_accounts(data.get("accounts"))
+    except DeclaredAccountError as exc:
+        problems.append(str(exc))
 
     if problems:
         raise ConfigError(problems)
 
     return Profile(
+        accounts=accounts,
         root=root,
         core_repository=repository,
         core_revision=revision,

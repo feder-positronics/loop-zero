@@ -5,6 +5,7 @@ The system-Python dispatcher never imports ``openai_codex``.  It starts
 small, allow-listed JSONL protocol implemented by the bridge.
 """
 
+from .accounts import credential_reference
 from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_adapter_settings
 
 
@@ -1055,7 +1056,7 @@ class CodexAdapter:
                     repair="restore the pinned Codex CLI version",
                     transport=CODEX_SDK_TRANSPORT,
                 )
-        raw_auth_fd = os.environ.get(get_settings().env_name("CODEX_AUTH_FD"))
+        raw_auth_fd = credential_reference("codex")
         if raw_auth_fd is not None:
             try:
                 fd = int(raw_auth_fd)
@@ -1136,7 +1137,7 @@ class CodexAdapter:
 
     def _cli_launch_readiness(self, request: RuntimeRequest) -> RuntimeReadiness:
         """Authorize a CLI launch without repeating its config bootstrap."""
-        if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
+        if credential_reference("codex") is not None:
             return RuntimeReadiness(
                 ready=False,
                 eligibility=SubscriptionEligibility.UNAVAILABLE,
@@ -1318,10 +1319,12 @@ class CodexAdapter:
         sdk_readiness = self.probe_sdk(request)
         if sdk_readiness.ready:
             return replace(request, transport=CODEX_SDK_TRANSPORT), sdk_readiness
+        if get_settings().accounts is not None:
+            return None, sdk_readiness
         cli_readiness = self.probe_cli(request)
         if cli_readiness.ready:
             return replace(request, transport=CODEX_CLI_TRANSPORT), cli_readiness
-        if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
+        if credential_reference("codex") is not None:
             # The protected credential is transferred only to the exact SDK
             # bridge command. The CLI denial is therefore policy, not the
             # cause of the failed selection; preserve the SDK diagnosis.
@@ -1363,9 +1366,7 @@ class CodexAdapter:
             if sdk_readiness.ready:
                 request = replace(request, transport=CODEX_SDK_TRANSPORT)
             else:
-                if os.environ.get(
-                    get_settings().env_name("CODEX_AUTH_FD")
-                ) is not None:
+                if credential_reference("codex") is not None:
                     # A protected snapshot is deliberately unusable by the CLI.
                     # Preserve the app-server diagnosis and do not probe or
                     # record a fallback that policy can never launch.
@@ -1792,7 +1793,7 @@ class CodexAdapter:
             request,
             transport=CODEX_CLI_TRANSPORT,
         )
-        if os.environ.get(get_settings().env_name("CODEX_AUTH_FD")) is not None:
+        if credential_reference("codex") is not None:
             preferred = RuntimeTransportAttempt(
                 transport=request.transport,
                 requested_model=request.requested_model,
