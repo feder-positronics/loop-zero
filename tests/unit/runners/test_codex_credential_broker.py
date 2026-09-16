@@ -864,3 +864,157 @@ def test_codex_account_claim_compatibility_is_not_identity_proof(tmp_path, auth,
         run_refresh=lambda *a, **k: pytest.fail("fresh compatible source refreshed"),
     ) as descriptor:
         assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == _runtime_snapshot(payload)
+
+
+def _matching_pending(path, payload):
+    pending = path.with_name(f".{path.name}.refresh-pending")
+    validated = codex_credential._validate_payload(json.dumps(payload).encode())
+    pending.write_bytes(codex_credential._refresh_fingerprint(validated))
+    pending.chmod(0o600)
+    return pending
+
+
+@pytest.mark.parametrize("runtime, admitted", [(600, True), (1_699, True), (1_700, False), (1_701, False)])
+def test_pending_refresh_only_blocks_renewal_not_fresh_access(tmp_path, runtime, admitted):
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000)
+    _write_credential(path, payload)
+    pending = _matching_pending(path, payload)
+    before = (pending.read_bytes(), pending.stat().st_mode, pending.stat().st_ino)
+    arguments = dict(credential_path=path, requested_runtime_s=runtime, clock=lambda: 1_000,
+                     run_refresh=lambda *a, **k: pytest.fail("uncertain token reached vendor"))
+    if admitted:
+        with codex_credential.codex_subscription_credential(**arguments) as descriptor:
+            assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == _runtime_snapshot(payload)
+    else:
+        with pytest.raises(codex_credential.CodexCredentialRefreshFailed):
+            with codex_credential.codex_subscription_credential(**arguments):
+                pytest.fail("insufficient snapshot exported")
+    assert (pending.read_bytes(), pending.stat().st_mode, pending.stat().st_ino) == before
+
+
+def test_pending_fresh_admission_rechecks_final_horizon(tmp_path):
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000)
+    _write_credential(path, payload)
+    pending = _matching_pending(path, payload)
+    before = pending.read_bytes()
+    times = iter([1_000, 2_100])
+    with pytest.raises(codex_credential.CodexCredentialUnavailable):
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: next(times),
+            run_refresh=lambda *a, **k: pytest.fail("elapsed time authorized renewal"),
+        ):
+            pytest.fail("expired snapshot exported")
+    assert pending.read_bytes() == before
+
+
+@pytest.mark.parametrize("unsafe", ["malformed", "public", "hardlink", "symlink", "account"])
+def test_pending_fresh_admission_still_validates_marker_and_account(tmp_path, unsafe):
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000)
+    _write_credential(path, payload)
+    pending = _matching_pending(path, payload)
+    if unsafe == "malformed":
+        pending.write_bytes(b"invalid")
+    elif unsafe == "public":
+        pending.chmod(0o644)
+    elif unsafe == "hardlink":
+        os.link(pending, tmp_path / "alias")
+    elif unsafe == "symlink":
+        pending.rename(tmp_path / "target")
+        pending.symlink_to(tmp_path / "target")
+    else:
+        payload["tokens"]["id_token"] = _account_jwt({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "other-account"},
+        })
+        _write_credential(path, payload)
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            run_refresh=lambda *a, **k: pytest.fail("unsafe state reached vendor"),
+        ):
+            pytest.fail("unsafe fresh snapshot exported")
+
+
+def test_interrupted_refresh_allows_concurrent_short_runs_without_retry(tmp_path):
+    import signal
+    import time
+
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000, refresh_token="possibly-spent")
+    _write_credential(path, payload)
+    source_root = Path(__file__).resolve().parents[3] / "src"
+    probe = '''
+import json, os, subprocess, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from loopzero.runners.codex import codex_subscription_credential, CodexCredentialRefreshFailed
+from loopzero.runners.settings import RuntimeSettings
+root, mode, label = Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+settings = RuntimeSettings(state_root=str(root / "state"), env_prefix=sys.argv[5])
+def vendor(command, *, env, pass_fds, **kwargs):
+    if mode != "interrupt":
+        (root / "unexpected-vendor").write_text("called")
+        raise AssertionError("uncertain refresh retried")
+    child = "import os,sys,time; from pathlib import Path; assert os.pread(int(sys.argv[1]),1048576,0); Path(sys.argv[2]).write_text('contact'); time.sleep(30)"
+    return subprocess.run([sys.executable, "-I", "-c", child,
+        str(pass_fds[0]), str(root / "vendor-contact")], pass_fds=pass_fds)
+with settings.use():
+    (root / (label + "-started")).write_text("started")
+    try:
+        with codex_subscription_credential(credential_path=root / "auth.json",
+                requested_runtime_s=3_000 if mode in {"interrupt", "blocked"} else 600,
+                clock=lambda: 1_000, run_refresh=vendor, refresh_command=("fake",)) as fd:
+            if mode != "snapshot":
+                raise AssertionError("insufficient snapshot exported")
+            (root / label).write_bytes(os.pread(fd,1048576,0))
+    except CodexCredentialRefreshFailed:
+        if mode != "blocked":
+            raise
+        (root / label).write_text("blocked")
+'''
+
+    def spawn(mode, label):
+        return subprocess.Popen(
+            [sys.executable, "-I", "-c", probe, str(source_root), str(tmp_path), mode, label,
+             codex_credential.get_settings().env_prefix],
+            start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+
+    def wait_for(path):
+        deadline = time.monotonic() + 5
+        while not path.exists():
+            assert time.monotonic() < deadline, f"synthetic process did not reach {path.name}"
+            time.sleep(0.01)
+
+    processes = []
+    try:
+        owner = spawn("interrupt", "owner")
+        processes.append(owner)
+        wait_for(tmp_path / "vendor-contact")
+        pending = tmp_path / ".auth.json.refresh-pending"
+        before = (pending.read_bytes(), pending.stat().st_mode, pending.stat().st_ino)
+        lock = tmp_path / codex_credential.get_settings().lock_name("codex-refresh")
+        lock_inode = lock.stat().st_ino
+        for mode, label in [("snapshot", "short1"), ("snapshot", "short2"), ("blocked", "long")]:
+            processes.append(spawn(mode, label))
+            wait_for(tmp_path / (label + "-started"))
+            assert not (tmp_path / label).exists()
+        os.killpg(owner.pid, signal.SIGKILL)
+        owner.communicate(timeout=5)
+        for child in processes[1:]:
+            stdout, stderr = child.communicate(timeout=5)
+            assert child.returncode == 0, (stdout, stderr)
+        for label in ("short1", "short2"):
+            assert json.loads((tmp_path / label).read_text()) == _runtime_snapshot(payload)
+        assert (tmp_path / "long").read_text() == "blocked"
+        assert not (tmp_path / "unexpected-vendor").exists()
+        assert (pending.read_bytes(), pending.stat().st_mode, pending.stat().st_ino) == before
+        assert lock.stat().st_ino == lock_inode
+        assert json.loads(path.read_text()) == payload
+    finally:
+        for child in processes:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+            child.communicate(timeout=5)
