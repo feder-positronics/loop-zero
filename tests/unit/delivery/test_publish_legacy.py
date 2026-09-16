@@ -1362,6 +1362,36 @@ def test_publisher_source_must_come_from_the_pinned_primary_repository(
     module.require_canonical_publisher_source(tmp_path / "primary")
 
 
+def test_publisher_source_accepts_rendered_consumer_source_path_keyword(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    _set_publisher_process_source(monkeypatch, canonical)
+
+    module.require_canonical_publisher_source(
+        tmp_path / "primary", source_path=canonical
+    )
+
+
+def test_publisher_source_does_not_trust_rendered_consumer_source_path_keyword(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    canonical = tmp_path / "primary" / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    candidate = tmp_path / "candidate" / "scripts" / "util" / "pr_publish.py"
+    candidate.parent.mkdir(parents=True)
+    candidate.write_text("# candidate publisher\n", encoding="utf-8")
+    _set_publisher_process_source(monkeypatch, candidate)
+
+    with pytest.raises(module.PublicationError, match="canonical primary"):
+        module.require_canonical_publisher_source(
+            tmp_path / "primary", source_path=canonical
+        )
+
+
 @pytest.mark.parametrize("checkout", ["candidate", "stale", "untrusted"])
 def test_publisher_source_rejects_other_checkout_launchers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, checkout: str
@@ -1480,7 +1510,8 @@ def test_publisher_source_accepts_real_isolated_primary_launcher(
         f"sys.path.insert(0, {str(source_root)!r})\n"
         "from pathlib import Path\n"
         "from loopzero.delivery.publish import require_canonical_publisher_source\n"
-        f"require_canonical_publisher_source(Path({str(primary)!r}))\n",
+        f"require_canonical_publisher_source(Path({str(primary)!r}), "
+        "source_path=Path(__file__))\n",
         encoding="utf-8",
     )
 
@@ -1492,6 +1523,37 @@ def test_publisher_source_accepts_real_isolated_primary_launcher(
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_publisher_source_real_process_rejects_forged_compatibility_path(
+    tmp_path: Path,
+) -> None:
+    primary = tmp_path / "primary"
+    canonical = primary / "scripts" / "util" / "pr_publish.py"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("# trusted publisher\n", encoding="utf-8")
+    candidate = tmp_path / "candidate" / "scripts" / "util" / "pr_publish.py"
+    candidate.parent.mkdir(parents=True)
+    source_root = Path(module.__file__).resolve().parents[2]
+    candidate.write_text(
+        "import sys\n"
+        f"sys.path.insert(0, {str(source_root)!r})\n"
+        "from pathlib import Path\n"
+        "from loopzero.delivery.publish import require_canonical_publisher_source\n"
+        f"require_canonical_publisher_source(Path({str(primary)!r}), "
+        f"source_path=Path({str(canonical)!r}))\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-I", str(candidate)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "canonical primary" in completed.stderr
 
 
 @pytest.mark.parametrize("republish", [False, True])
