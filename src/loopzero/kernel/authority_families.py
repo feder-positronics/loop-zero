@@ -48,6 +48,7 @@ _POLICY_FAMILIES = (
     "evidence-cleanup",
     "evidence-cleanup-friction",
     "finding-publication-binding-v1",
+    "finding-capture-admission-v1",
     "finding-recovery-admission-v1",
     "inline",
     "inconclusive-retry-authorization",

@@ -361,16 +361,18 @@ def test_append_requires_both_locks_and_original_coordinator(ordinary):
     )
     with pytest.raises(Exception, match="lock"):
         provisional.authorize_capture_admission_append(repo, records, admission)
-    with authority_store.authority_ledger_lock(repo):
-        with pytest.raises(Exception, match="lock"):
-            provisional.authorize_capture_admission_append(repo, records, admission)
+    with (
+        authority_store.authority_ledger_lock(repo),
+        pytest.raises(Exception, match="lock"),
+    ):
+        provisional.authorize_capture_admission_append(repo, records, admission)
     unsigned = {k: v for k, v in admission.items() if k != "terminal_authority_proof"}
     with (
         authority_store.authority_ledger_lock(repo),
         authority_store.attempt_lifecycle_lock(repo, "review-1"),
+        pytest.raises(provisional.ProvisionalFindingError),
     ):
-        with pytest.raises(provisional.ProvisionalFindingError):
-            provisional.authorize_capture_admission_append(repo, records, unsigned)
+        provisional.authorize_capture_admission_append(repo, records, unsigned)
 
 
 @pytest.mark.parametrize("change", ["missing", "symlink", "sections", "wrong-kind"])
@@ -415,28 +417,243 @@ def test_native_artifact_and_registration_fail_closed(ordinary, change):
 
 def test_admission_never_inherits_a_later_task_verdict(ordinary):
     from loopzero.runners.contract import ReviewOutcome
+
     _, coordinator, _, records, _ = ordinary
     admission = admit(ordinary)
-    records.append(coordinator.seal({
-        "type": "verdict", "task_id": "review-1", "run_id": admission["run_id"],
-        "verdict": "pass", "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
-        "policy_version": policy.DISPATCH_POLICY_VERSION,
-    }, authority_kind="coordinator"))
-    assert authority.authenticated_review_verdict(admission, records, expected_family="delivery") is None
-    assert authority.classify_review_outcome(admission, records, expected_family="delivery") is ReviewOutcome.UNRESOLVED
+    records.append(
+        coordinator.seal(
+            {
+                "type": "verdict",
+                "task_id": "review-1",
+                "run_id": admission["run_id"],
+                "verdict": "pass",
+                "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+                "policy_version": policy.DISPATCH_POLICY_VERSION,
+            },
+            authority_kind="coordinator",
+        )
+    )
+    assert (
+        authority.authenticated_review_verdict(
+            admission, records, expected_family="delivery"
+        )
+        is None
+    )
+    assert (
+        authority.classify_review_outcome(
+            admission, records, expected_family="delivery"
+        )
+        is ReviewOutcome.UNRESOLVED
+    )
 
 
 def test_invalid_capture_join_cannot_gain_coordinator_verdict(ordinary):
     from loopzero.runners.contract import ReviewOutcome
+
     _, coordinator, dispatcher, records, _ = ordinary
     _, _, terminal = finish(ordinary)
-    invalid = {key: value for key, value in terminal.items() if key != "terminal_authority_proof"}
+    invalid = {
+        key: value
+        for key, value in terminal.items()
+        if key != "terminal_authority_proof"
+    }
     invalid["finding_capture_receipt_sha256"] = "0" * 64
     invalid = dispatcher.seal(invalid, authority_kind="dispatcher")
     records[-1] = invalid
-    records.append(coordinator.seal({
-        "type": "verdict", "task_id": "review-1", "run_id": terminal["run_id"],
-        "verdict": "pass", "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
-        "policy_version": policy.DISPATCH_POLICY_VERSION,
-    }, authority_kind="coordinator"))
-    assert authority.classify_review_outcome(invalid, records, expected_family="delivery") is ReviewOutcome.UNRESOLVED
+    records.append(
+        coordinator.seal(
+            {
+                "type": "verdict",
+                "task_id": "review-1",
+                "run_id": terminal["run_id"],
+                "verdict": "pass",
+                "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+                "policy_version": policy.DISPATCH_POLICY_VERSION,
+            },
+            authority_kind="coordinator",
+        )
+    )
+    assert (
+        authority.classify_review_outcome(invalid, records, expected_family="delivery")
+        is ReviewOutcome.UNRESOLVED
+    )
+
+
+@pytest.mark.parametrize("run_state", ["missing", "legacy", "changed"])
+def test_native_run_contract_required_at_build_admission_and_terminal(
+    ordinary, run_state
+):
+    import json
+
+    from loopzero.runners.contract import ReviewOutcome
+
+    repo, _, _, records, completion = ordinary
+    admission, _, terminal = finish(ordinary)
+    run_log = repo / ".audit/skill-runs/fixture.jsonl"
+    if run_state == "missing":
+        run_log.unlink()
+    elif run_state == "legacy":
+        run_log.write_text(
+            json.dumps(
+                {"run_id": admission["run_id"], "delivery_contract": "intelflo-v1"}
+            )
+            + "\n"
+        )
+    else:
+        with run_log.open("a") as handle:
+            handle.write(
+                json.dumps(
+                    {"run_id": admission["run_id"], "delivery_contract": "intelflo-v1"}
+                )
+                + "\n"
+            )
+    before_admission = records[
+        : next(
+            index
+            for index, row in enumerate(records)
+            if row.get("type") == "finding-capture-admission-v1"
+        )
+    ]
+    with pytest.raises(provisional.ProvisionalFindingError, match="native"):
+        provisional.build_producer_completion(
+            before_admission,
+            repo=repo,
+            task_id="review-1",
+            result_artifact=completion["result_artifact"],
+            result_sha256=completion["result_sha256"],
+        )
+    with pytest.raises(provisional.ProvisionalFindingError, match="native"):
+        provisional.build_capture_admission(
+            before_admission, repo=repo, completion=completion
+        )
+    assert (
+        authority.authenticated_review_verdict(
+            terminal, records, expected_family="delivery"
+        )
+        is None
+    )
+    assert (
+        authority.classify_review_outcome(terminal, records, expected_family="delivery")
+        is ReviewOutcome.UNRESOLVED
+    )
+
+
+def test_verdict_consumes_original_slot_once_and_survives_compaction(ordinary):
+    from loopzero.kernel import authority_projection
+    from loopzero.runners.contract import ReviewOutcome
+
+    repo, coordinator, _, records, _ = ordinary
+    admission, _, terminal = finish(ordinary)
+    records.append(
+        coordinator.seal(
+            {
+                "type": "verdict",
+                "task_id": "review-1",
+                "run_id": terminal["run_id"],
+                "verdict": "fail",
+                "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+                "policy_version": policy.DISPATCH_POLICY_VERSION,
+            },
+            authority_kind="coordinator",
+        )
+    )
+    reservation = review_state.ReviewSlotReservation.from_dict(
+        next(row for row in records if row["type"] == "review-slot-reservation-v1")
+    )
+    with authority_store.authority_ledger_lock(repo):
+        settlement = review_state.settle_review_slot(
+            repo,
+            records,
+            reservation=reservation,
+            outcome=ReviewOutcome.CONSUMED,
+            terminal_ref=terminal,
+        )
+    records.append(coordinator.seal(settlement.to_dict(), authority_kind="coordinator"))
+    before = authority_projection.slot_state(
+        records, admission["generation_id"], "delivery"
+    )
+    retained = authority_store.retained_authority_projection(records)
+    compacted = authority_store._prospective_retained_view(
+        retained, source_records=records
+    )
+    after = authority_projection.slot_state(
+        compacted, admission["generation_id"], "delivery"
+    )
+    assert before.primary_consumed and after.primary_consumed
+    assert before.attempt_count("primary") == after.attempt_count("primary") == 1
+    assert not before.delta_consumed and not after.delta_consumed
+    assert len(before.reservations) == len(after.reservations) == 1
+    assert (
+        authority.authenticated_review_verdict(
+            terminal, compacted, expected_family="delivery"
+        )
+        == "fail"
+    )
+
+
+def test_publication_blocks_pending_or_open_ordinary_debt(ordinary):
+    from loopzero.delivery.publish import open_important_finding_ids
+    from loopzero.review.findings import load_finding_records
+
+    repo, _, _, records, _ = ordinary
+    admission, receipt, terminal = finish(ordinary)
+    assert not load_finding_records(repo, pr=18)
+    assert open_important_finding_ids(
+        repo, "refs/heads/fix/18", dispatch_records=records, finding_records=[]
+    ) == tuple(receipt["finding_ids"])
+    assert not open_important_finding_ids(
+        repo, "refs/heads/other", dispatch_records=records, finding_records=[]
+    )
+    records.remove(terminal)
+    with pytest.raises(provisional.ProvisionalFindingError):
+        open_important_finding_ids(
+            repo, "refs/heads/fix/18", dispatch_records=records, finding_records=[]
+        )
+    assert (
+        provisional.authenticated_capture_admissions(records)["review-1"] == admission
+    )
+
+
+def test_binding_cannot_reassign_ordinary_owner(ordinary):
+    repo, coordinator, _, records, completion = ordinary
+    admission, receipt, _ = finish(ordinary)
+    args = {
+        "repo": repo,
+        "admission": admission,
+        "capture_receipt": receipt,
+        "head": completion["snapshot_sha"],
+        "base": "main",
+        "repository": "fixture/repo",
+    }
+    binding = provisional.build_publication_binding(records, pr=18, **args)
+    records.append(coordinator.seal(binding, authority_kind="coordinator"))
+    assert provisional.build_publication_binding(records, pr=18, **args) == binding
+    with pytest.raises(provisional.ProvisionalFindingError, match="different PR"):
+        provisional.build_publication_binding(records, pr=19, **args)
+
+
+def test_signed_supersession_prevents_first_admission_without_releasing_slot(ordinary):
+    from loopzero.kernel import authority_projection
+
+    repo, coordinator, _, records, completion = ordinary
+    records.append(
+        coordinator.seal(
+            {
+                "type": "attempt-supersession",
+                "status": "superseded",
+                "task_id": "review-1",
+                "superseded_task_id": "review-1",
+                "run_id": completion["run_id"],
+                "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+                "policy_version": policy.DISPATCH_POLICY_VERSION,
+            },
+            authority_kind="coordinator",
+        )
+    )
+    with pytest.raises(provisional.ProvisionalFindingError, match="superseded"):
+        provisional.build_capture_admission(records, repo=repo, completion=completion)
+    state = authority_projection.slot_state(
+        records, completion["generation_id"], "delivery"
+    )
+    assert len(state.reservations) == 1
+    assert state.settlement_for(completion["reservation_id"]) is None
