@@ -399,23 +399,29 @@ class RuntimeEvent:
     item_id: str | None = None
 
 
-def usage_observes_model_output(*payloads: object) -> bool:
-    """Positive raw counters deny emptiness, including discarded alias values."""
+def usage_observes_model_output(*payloads: object) -> bool | None:
+    """Positive counters win; malformed counters make absence unprovable."""
     output_keys = {
         "output_tokens", "outputTokens", "completion_tokens", "reasoning_tokens",
         "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens",
     }
     pending = list(payloads)
+    complete = True
     while pending:
         payload = pending.pop()
         if not isinstance(payload, dict):
+            if payload is not None:
+                complete = False
             continue
         for key, value in payload.items():
-            if key in output_keys and type(value) in {int, float} and value > 0:
-                return True
+            if key in output_keys:
+                if type(value) in {int, float} and value > 0:
+                    return True
+                if type(value) is not int or value < 0:
+                    complete = False
             if isinstance(value, dict):
                 pending.append(value)
-    return False
+    return False if complete else None
 
 
 @dataclass(frozen=True, slots=True)

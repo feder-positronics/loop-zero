@@ -711,13 +711,15 @@ def parse_claude_stream(
                     str(exc),
                     semantic_event=True,
                 ) from exc
+            usage_output = usage_observes_model_output(
+                raw.get("usage"), raw.get("model_usage"), raw.get("modelUsage")
+            )
+            observation_complete &= usage_output is not None
             if (
                 raw.get("model_output_seen") is True
                 or bool(output)
                 or frame_structured_output is not None
-                or usage_observes_model_output(
-                    raw.get("usage"), raw.get("model_usage"), raw.get("modelUsage")
-                )
+                or usage_output is True
             ):
                 model_output_seen = True
             elif (

@@ -2456,9 +2456,9 @@ async def _run_claude(
             )
             continue
         if isinstance(message, StreamEvent):
-            model_output_seen = model_output_seen or usage_observes_model_output(
-                message.event
-            )
+            usage_output = usage_observes_model_output(message.event)
+            model_output_seen = model_output_seen or usage_output is True
+            output_observation_complete &= usage_output is not None
             event_type = message.event.get("type") if isinstance(message.event, dict) else None
             if event_type == "message_start":
                 # Provider acceptance prevents replay, but does not prove output.
@@ -2504,10 +2504,12 @@ async def _run_claude(
             model_from_usage = _model_from_usage(message.model_usage)
             effective_model = effective_model or model_from_usage
             # Capture before normalization discards partial or budget-limited output.
+            usage_output = usage_observes_model_output(message.usage, message.model_usage)
+            output_observation_complete &= usage_output is not None
             if (
                 message.result is not None
                 or message.structured_output is not None
-                or usage_observes_model_output(message.usage, message.model_usage)
+                or usage_output is True
             ):
                 model_output_seen = True
             output = message.result

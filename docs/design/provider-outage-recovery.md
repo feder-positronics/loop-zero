@@ -67,7 +67,8 @@ The source-owned adapter boundary is:
 
 - Add `reviewed_executor_terminal_ref` to the immutable review contract before
   the first attempt; record the runtime's typed `model_output_seen` in each
-  signed terminal. Do not backfill either fact into historical receipts.
+  signed terminal, preserving `True`/`False`/`None` exactly. Never coerce unknown
+  evidence to `False`. Do not backfill either fact into historical receipts.
 - Under the worktree lease and ledger lock, use `prepare_outage_recovery`, then
   sign, append and fsync its returned record through the existing coordinator.
   An unsigned returned dictionary grants nothing.

@@ -81,6 +81,43 @@ def test_unknown_and_error_streams_cannot_prove_empty():
         parse(terminal(), terminal())
 
 
+@pytest.mark.parametrize("counter", ["5", True, -1, None, float("nan")])
+@pytest.mark.parametrize("through_bridge", [False, True])
+def test_malformed_raw_counter_cannot_prove_empty(
+    counter, through_bridge, monkeypatch, capsys
+):
+    import claude_agent_sdk as sdk
+
+    if not through_bridge:
+        assert (
+            parse(terminal(usage={"output_tokens": counter})).model_output_seen is None
+        )
+        return
+
+    async def query(**kwargs):
+        yield sdk.ResultMessage(
+            subtype="error_max_budget_usd",
+            duration_ms=1,
+            duration_api_ms=0,
+            is_error=True,
+            num_turns=1,
+            session_id="session",
+            usage={"output_tokens": counter},
+        )
+
+    monkeypatch.setattr(sdk, "query", query)
+    monkeypatch.setattr(bridge, "_options", lambda *args, **kwargs: None)
+    asyncio.run(
+        bridge._run_claude({"prompt": "test", "commercial_mode": "subscription-only"})
+    )
+    assert (
+        claude.parse_claude_stream(
+            capsys.readouterr().out, sdk_bridge=True
+        ).model_output_seen
+        is None
+    )
+
+
 @pytest.mark.parametrize(
     "result,structured,usage",
     [
