@@ -8,7 +8,7 @@ from ._review_schema import (
 
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -491,9 +491,14 @@ RESULT_ENFORCEMENT_VALUES = frozenset(mode.value for mode in ResultEnforcement)
 
 
 def governed_result_schema(
-    task_id: str, *, task: Mapping[str, object] | None = None
+    task_id: str, *, task: Mapping[str, object] | None = None,
+    configured_sections: Sequence[str] = ("code", "security"),
 ) -> dict[str, object]:
-    """Return the single vendor- and parent-owned worker result contract."""
+    """Build the worker contract using independently approved section policy.
+
+    Consumers with custom sections pass ``profile.required_sections`` through
+    ``configured_sections``; never derive policy from the task being validated.
+    """
     bounded_string = {"type": "string", "maxLength": MAX_RESULT_STRING}
     is_review = task is not None and task.get("work_kind") == "review"
     is_resolution = is_review and task.get("review_intent") == (
@@ -602,7 +607,9 @@ def governed_result_schema(
         "additionalProperties": False,
     }
     if task is not None and "required_sections" in task:
-        required_sections = validate_review_chain_task(task)
+        required_sections = validate_review_chain_task(
+            task, configured_sections=configured_sections
+        )
         properties = schema["properties"]
         required = schema["required"]
         assert isinstance(properties, dict) and isinstance(required, list)

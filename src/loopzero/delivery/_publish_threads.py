@@ -2,12 +2,8 @@
 
 import json
 import subprocess
-import sys
-from collections.abc import Sequence
-from pathlib import Path
+from collections.abc import Callable, Sequence
 from typing import Protocol
-
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from ._publish_gate import GateError
 from ._publish_paths import PublicationError
@@ -48,27 +44,46 @@ def load_actionable_review_threads(
 ) -> tuple[dict[str, str], ...]:
     if not pr_url:
         raise GateError("PR review-thread state is unavailable: PR URL is missing.")
-    actionable: list[dict[str, str]] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    while True:
+
+    def fetch(cursor: str | None) -> object:
         command = [
-            "gh", "api", "graphql", "-f", f"query={_REVIEW_THREADS_QUERY}",
-            "-f", f"url={pr_url}",
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={_REVIEW_THREADS_QUERY}",
+            "-f",
+            f"url={pr_url}",
         ]
         if cursor is not None:
             command.extend(["-f", f"cursor={cursor}"])
         try:
             payload = json.loads(runner.run(command).stdout)
         except (json.JSONDecodeError, TypeError) as exc:
-            raise GateError("Command did not return valid JSON: gh api graphql") from exc
+            raise GateError(
+                "Command did not return valid JSON: gh api graphql"
+            ) from exc
+        return payload
+
+    return _load_review_thread_pages(fetch, ("resource",))
+
+
+def _load_review_thread_pages(
+    fetch: Callable[[str | None], object], resource_path: tuple[str, ...]
+) -> tuple[dict[str, str], ...]:
+    actionable: list[dict[str, str]] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        payload = fetch(cursor)
         if not isinstance(payload, dict) or payload.get("errors"):
             raise GateError(
                 "PR review-thread state is unavailable: GitHub GraphQL returned "
                 "errors or an invalid response."
             )
-        data = payload.get("data")
-        resource = data.get("resource") if isinstance(data, dict) else None
+        resource = payload.get("data")
+        for key in resource_path:
+            resource = resource.get(key) if isinstance(resource, dict) else None
         threads = resource.get("reviewThreads") if isinstance(resource, dict) else None
         nodes = threads.get("nodes") if isinstance(threads, dict) else None
         page_info = threads.get("pageInfo") if isinstance(threads, dict) else None
@@ -79,34 +94,58 @@ def load_actionable_review_threads(
             )
         for node in nodes:
             if not isinstance(node, dict):
-                raise GateError("PR review-thread state is unavailable: GitHub returned an invalid thread.")
+                raise GateError(
+                    "PR review-thread state is unavailable: GitHub returned an invalid thread."
+                )
             resolved = node.get("isResolved")
             outdated = node.get("isOutdated")
             thread_id = node.get("id")
-            if not isinstance(resolved, bool) or not isinstance(outdated, bool) or not isinstance(thread_id, str):
-                raise GateError("PR review-thread state is unavailable: GitHub returned an invalid thread.")
+            if (
+                not isinstance(resolved, bool)
+                or not isinstance(outdated, bool)
+                or not isinstance(thread_id, str)
+            ):
+                raise GateError(
+                    "PR review-thread state is unavailable: GitHub returned an invalid thread."
+                )
             if resolved:
                 continue
             comments = node.get("comments")
-            comment_nodes = comments.get("nodes") if isinstance(comments, dict) else None
+            comment_nodes = (
+                comments.get("nodes") if isinstance(comments, dict) else None
+            )
             url = ""
-            if isinstance(comment_nodes, list) and comment_nodes and isinstance(comment_nodes[-1], dict):
+            if (
+                isinstance(comment_nodes, list)
+                and comment_nodes
+                and isinstance(comment_nodes[-1], dict)
+            ):
                 raw_url = comment_nodes[-1].get("url")
                 url = raw_url if isinstance(raw_url, str) else ""
             raw_path = node.get("path")
-            actionable.append({
-                "id": thread_id,
-                "path": raw_path if isinstance(raw_path, str) else "<unknown>",
-                "url": url,
-            })
+            actionable.append(
+                {
+                    "id": thread_id,
+                    "path": raw_path if isinstance(raw_path, str) else "<unknown>",
+                    "url": url,
+                }
+            )
         has_next = page_info.get("hasNextPage")
         if not isinstance(has_next, bool):
-            raise GateError("PR review-thread state is unavailable: GitHub pagination is invalid.")
+            raise GateError(
+                "PR review-thread state is unavailable: GitHub pagination is invalid."
+            )
         if not has_next:
             return tuple(actionable)
         next_cursor = page_info.get("endCursor")
-        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
-            raise GateError("PR review-thread state is unavailable: GitHub pagination is invalid.")
+        if (
+            not isinstance(next_cursor, str)
+            or not next_cursor
+            or next_cursor in seen_cursors
+        ):
+            raise GateError(
+                "PR review-thread state is unavailable: GitHub pagination is invalid."
+            )
         seen_cursors.add(next_cursor)
         cursor = next_cursor
 
@@ -117,6 +156,10 @@ def require_resolved_review_threads(runner: JsonRunner, pr_url: str) -> None:
         threads = load_actionable_review_threads(_ReviewThreadRunner(runner), pr_url)
     except GateError as exc:
         raise PublicationError(str(exc)) from exc
+    _require_no_threads(threads)
+
+
+def _require_no_threads(threads: tuple[dict[str, str], ...]) -> None:
     if threads:
         details = "\n".join(
             f"- {thread['id']}: {thread['path']} {thread['url']}" for thread in threads
@@ -125,3 +168,33 @@ def require_resolved_review_threads(runner: JsonRunner, pr_url: str) -> None:
             "PR has unresolved review threads, including outdated threads; "
             "resolve them before publication:\n" + details
         )
+
+
+def require_resolved_review_threads_by_number(runner, pr: int) -> None:
+    """Adapt the repository/number API to the same strict connection reader."""
+    repository = runner.repository()
+    query = (
+        "query($owner:String!,$name:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$name){"
+        "pullRequest(number:$pr){reviewThreads(first:100,after:$after){nodes{id isResolved isOutdated path comments(last:1){nodes{url}}}"
+        "pageInfo{hasNextPage endCursor}}}}}"
+    )
+
+    def fetch(cursor: str | None) -> object:
+        return runner.api(
+            "graphql",
+            fields={
+                "query": query,
+                "variables": {
+                    "owner": repository.owner,
+                    "name": repository.name,
+                    "pr": pr,
+                    "after": cursor,
+                },
+            },
+        )
+
+    try:
+        threads = _load_review_thread_pages(fetch, ("repository", "pullRequest"))
+    except GateError as exc:
+        raise PublicationError(str(exc)) from exc
+    _require_no_threads(threads)

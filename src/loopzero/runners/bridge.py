@@ -27,7 +27,11 @@ from typing import TYPE_CHECKING, Callable, Literal, NotRequired, TypedDict, cas
 # Give relative imports a package rooted at this trusted file, without changing
 # sys.path or loading siblings by file specs. No consumer directory is searched.
 if not __package__:
-    package_name = "_loopzero_bridge"
+    root_name = "_loopzero_bridge"
+    root = ModuleType(root_name)
+    root.__path__ = [str(Path(__file__).resolve().parent.parent)]
+    sys.modules[root_name] = root
+    package_name = f"{root_name}.runners"
     package = ModuleType(package_name)
     package.__path__ = [str(Path(__file__).resolve().parent)]
     sys.modules[package_name] = package

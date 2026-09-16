@@ -15,6 +15,12 @@ from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 
 from ..config import Profile
+from ..review_contract import (
+    ReviewChainError,
+    required_review_sections,
+    review_sections_schema as review_sections_schema,
+    validate_review_chain_task as _validate_review_chain_task,
+)
 
 REVIEW_CHAIN_RECEIPT_SCHEMA = "ReviewChainReceiptV1"
 REVIEW_CHAIN_ADVISORY_RECEIPT_SCHEMA = "ReviewChainAdvisoryReceiptV1"
@@ -35,17 +41,14 @@ def _required_sections() -> tuple[str, ...]:
         return REVIEW_CHAIN_SECTIONS
     if not profile.required_sections:
         raise ReviewChainError("review chain requires configured required sections")
-    return tuple(
-        section for section in dict.fromkeys(profile.required_sections)
-        if section != "security"
-    )
+    return tuple(profile.required_sections)
 
 
 def _required_for_paths(paths: Sequence[str]) -> tuple[str, ...]:
-    configured = _required_sections()
-    if paths and "security" not in configured:
-        return (*configured, "security")
-    return configured
+    return required_review_sections(
+        paths, configured_sections=_required_sections(),
+        require_security=(_PROFILE.get() or _DEFAULT_PROFILE) is None,
+    )
 
 
 def enforce_review_budget(
@@ -79,10 +82,6 @@ def enforce_review_budget(
         raise ReviewChainError("unknown review budget kind")
 _SHA40 = re.compile(r"[0-9a-f]{40}")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
-
-
-class ReviewChainError(ValueError):
-    """Raised when review-chain evidence is incomplete or inconsistent."""
 
 
 def _canonical_sha256(value: object) -> str:
@@ -156,57 +155,11 @@ def review_finding_lens(payload: Mapping[str, object], finding_id: str) -> str:
 
 
 def validate_review_chain_task(task: Mapping[str, object]) -> tuple[str, ...]:
-    """Validate the hash-bound closed section set selected by the outer gate."""
-    raw_paths = task.get("security_trigger_paths")
-    if not isinstance(raw_paths, list) or not all(
-        isinstance(path, str) and path for path in raw_paths
-    ):
-        raise ReviewChainError("security_trigger_paths must be a string list")
-    if raw_paths != sorted(set(raw_paths)):
-        raise ReviewChainError("security_trigger_paths must be sorted and unique")
-    expected = _required_for_paths(raw_paths)
-    raw_sections = task.get("required_sections")
-    if not isinstance(raw_sections, list) or tuple(raw_sections) != expected:
-        raise ReviewChainError(
-            "required_sections must exactly match the security trigger classifier"
-        )
-    return expected
-
-
-def review_sections_schema(
-    required_sections: Sequence[str],
-    *,
-    finding_schema: Mapping[str, object],
-    bounded_string: Mapping[str, object],
-) -> dict[str, object]:
-    """Build the strict model-output fragment for one primary review chain."""
-    properties: dict[str, object] = {}
-    for section in required_sections:
-        section_properties: dict[str, object] = {
-            "completion": {"type": "string", "const": "completed"},
-            "verdict": {"type": "string", "enum": ["clean", "findings"]},
-            "findings": {
-                "type": "array",
-                "maxItems": 64,
-                "items": dict(finding_schema),
-            },
-        }
-        required = ["completion", "verdict", "findings"]
-        if section == "security":
-            section_properties["threat_model_summary"] = dict(bounded_string)
-            required.append("threat_model_summary")
-        properties[section] = {
-            "type": "object",
-            "properties": section_properties,
-            "required": required,
-            "additionalProperties": False,
-        }
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": list(required_sections),
-        "additionalProperties": False,
-    }
+    """Validate task sections against the independently configured review policy."""
+    return _validate_review_chain_task(
+        task, configured_sections=_required_sections(),
+        require_security=(_PROFILE.get() or _DEFAULT_PROFILE) is None,
+    )
 
 
 def validate_review_chain_result(
@@ -455,18 +408,18 @@ def build_review_chain_advisory_receipt(
     }
 
 
-# Tree-coverage predicates are exposed from this target module while kept in a
-# private source file to avoid an import cycle during receipt construction.
-from ._tree_coverage import (  # noqa: E402
-    accepted_review_patch_identity,
-    carried_review_patch_identity,
-    chain_covers_rebased_tree,
-    chain_covers_tree,
-    covers_frozen_tree,
-    load_delta_edges,
-    mechanical_review_carry,
-    review_record_ref,
-    review_task_covers_tree,
-    section_patch_equivalence,
-    terminal_has_review_section,
-)
+# Compatibility exports belong to tree coverage. Resolve them only when used
+# so importing receipt contracts does not eagerly import their own consumers.
+_TREE_COVERAGE_EXPORTS = frozenset({
+    "accepted_review_patch_identity", "carried_review_patch_identity",
+    "chain_covers_rebased_tree", "chain_covers_tree", "covers_frozen_tree",
+    "load_delta_edges", "mechanical_review_carry", "review_record_ref",
+    "review_task_covers_tree", "section_patch_equivalence", "terminal_has_review_section",
+})
+
+
+def __getattr__(name: str):
+    if name in _TREE_COVERAGE_EXPORTS:
+        from . import _tree_coverage
+        return getattr(_tree_coverage, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

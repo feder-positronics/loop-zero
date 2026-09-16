@@ -135,3 +135,23 @@ into a newly constructed fake adapter and preserves progress sequence numbers.
 **with replayed process responses**. These tests exercise normalized protocol
 faults without credentials or paid turns. Live SDK/session conformance is not
 claimed by this suite.
+
+## Configured review sections
+
+Review-section selection and schema construction share the pure
+`loopzero.review_contract` policy. Consumers that configure custom sections must
+pass the approved profile explicitly when constructing the worker schema:
+
+```python
+from loopzero.runners.contract import governed_result_schema
+
+schema = governed_result_schema(
+    task["task_id"], task=task,
+    configured_sections=profile.required_sections,
+)
+```
+
+The default remains `code` plus `security` when security-trigger paths are present.
+The independently approved configuration is compared against the task's sections;
+do not supply the task's own section list as its policy. Triggered security review
+remains mandatory even when `security` is omitted from configured sections.

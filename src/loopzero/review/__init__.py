@@ -1,27 +1,13 @@
 """Portable review mechanisms."""
 
 from dataclasses import replace
+from importlib import import_module
+import sys
 from pathlib import Path
 from threading import Lock
 
 from ..config import ConfigError, Profile
 from ..kernel import settings as kernel_settings
-from . import (
-    acceptance,
-    admission,
-    authority,
-    chain,
-    evidence,
-    findings,
-    harness,
-    preflight,
-    provisional_findings,
-    risk,
-    routing,
-    stats,
-    telemetry,
-    trust_claims,
-)
 
 _DEFAULT_PROFILE: Profile | None = None
 _CONFIGURE_LOCK = Lock()
@@ -59,10 +45,41 @@ def configure(
     global _DEFAULT_PROFILE
     with _CONFIGURE_LOCK:
         if _DEFAULT_PROFILE is not None and profile != _DEFAULT_PROFILE:
-            raise ConfigError(
-                ["review is already configured with a different Profile"]
-            )
-        kernel_settings.configure(_merged_kernel_settings(profile))
+            raise ConfigError(["review is already configured with a different Profile"])
+        configured = _merged_kernel_settings(profile)
+        # Mechanisms retain settings and derive constants during import. Never
+        # replace those values underneath an already imported consumer.
+        for name, module in tuple(sys.modules.items()):
+            if (
+                not name.startswith("loopzero.kernel.")
+                or module is kernel_settings
+                or module is None
+            ):
+                continue
+            captured = vars(module).get("settings")
+            if (
+                isinstance(captured, kernel_settings.KernelSettings)
+                and captured != configured
+            ):
+                raise ConfigError(
+                    [
+                        "configure review before importing kernel mechanisms; "
+                        "a loaded mechanism already captured different settings"
+                    ]
+                )
+        kernel_settings.configure(configured)
+        from . import (
+            acceptance,
+            authority,
+            chain,
+            evidence,
+            findings,
+            harness,
+            provisional_findings,
+            risk,
+            routing,
+        )
+
         for mechanism in (
             acceptance,
             chain,
@@ -79,6 +96,7 @@ def configure(
         )
         authority.configure_kernel_seams()
         _DEFAULT_PROFILE = profile
+
 
 __all__ = [
     "acceptance",
@@ -97,3 +115,10 @@ __all__ = [
     "telemetry",
     "trust_claims",
 ]
+
+
+def __getattr__(name: str):
+    """Load public mechanisms on demand, after callers can configure the kernel."""
+    if name in __all__ and name != "configure":
+        return import_module(f"{__name__}.{name}")
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

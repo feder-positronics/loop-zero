@@ -75,7 +75,10 @@ from ._publish_paths import (
     PublicationError,
     changed_paths_between,
 )
-from ._publish_threads import require_resolved_review_threads as _source_require_resolved_review_threads
+from ._publish_threads import (
+    require_resolved_review_threads as _source_require_resolved_review_threads,
+    require_resolved_review_threads_by_number,
+)
 from ._publish_paths import (
     require_local_publication_prerequisites as _require_local_prerequisites,
 )
@@ -726,37 +729,7 @@ def require_resolved_review_threads(runner, pr_url: str | None = None, *, pr: in
     if pr is None:
         _source_require_resolved_review_threads(runner, str(pr_url or ""))
         return
-    repository = runner.repository()
-    cursor: str | None = None
-    query = (
-        "query($owner:String!,$name:String!,$pr:Int!,$after:String){repository(owner:$owner,name:$name){"
-        "pullRequest(number:$pr){reviewThreads(first:100,after:$after){nodes{id isResolved path comments(first:1){nodes{url}}}"
-        "pageInfo{hasNextPage endCursor}}}}}"
-    )
-    unresolved: list[object] = []
-    while True:
-        payload = runner.api(
-            "graphql",
-            fields={"query": query, "variables": {
-                "owner": repository.owner, "name": repository.name,
-                "pr": pr, "after": cursor,
-            }},
-        )
-        try:
-            page = payload["data"]["repository"]["pullRequest"]["reviewThreads"]
-            nodes, info = page["nodes"], page["pageInfo"]
-        except (KeyError, TypeError) as exc:
-            raise PublicationError("GitHub returned malformed review-thread evidence") from exc
-        if not isinstance(nodes, list) or not isinstance(info, Mapping):
-            raise PublicationError("GitHub returned malformed review-thread evidence")
-        unresolved.extend(node for node in nodes if isinstance(node, dict) and node.get("isResolved") is False)
-        if info.get("hasNextPage") is not True:
-            break
-        cursor = info.get("endCursor")
-        if not isinstance(cursor, str) or not cursor:
-            raise PublicationError("GitHub review-thread pagination is malformed")
-    if unresolved:
-        raise PublicationError(f"PR has {len(unresolved)} unresolved review thread(s), including outdated threads")
+    require_resolved_review_threads_by_number(runner, pr)
 
 
 def write_publication_intent(

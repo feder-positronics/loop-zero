@@ -133,3 +133,37 @@ def test_thread_reader_paginates_through_github_boundary():
     github = Github()
     publish.require_resolved_review_threads(github, pr=7)
     assert github.calls == 2
+
+
+@pytest.mark.parametrize("by_number", [False, True])
+@pytest.mark.parametrize("connection", [
+    {"nodes": [{}], "pageInfo": {"hasNextPage": False}},
+    {"nodes": [None], "pageInfo": {"hasNextPage": False}},
+    {"nodes": [], "pageInfo": {"hasNextPage": "false"}},
+    {"nodes": [], "pageInfo": {"hasNextPage": True, "endCursor": "repeated"}},
+])
+def test_thread_interfaces_reject_incomplete_or_cyclic_evidence(by_number, connection):
+    class Github:
+        calls = 0
+
+        def repository(self):
+            return type("Repo", (), {"owner": "o", "name": "r"})()
+
+        def response(self, by_number):
+            self.calls += 1
+            assert self.calls <= 3, "pagination failed to reject a repeated cursor"
+            if by_number:
+                return {"data": {"repository": {"pullRequest": {"reviewThreads": connection}}}}
+            return {"data": {"resource": {"reviewThreads": connection}}}
+
+        def api(self, endpoint, *, fields):
+            return self.response(True)
+
+        def run_json(self, args):
+            return self.response(False)
+
+    with pytest.raises(publish.PublicationError):
+        if by_number:
+            publish.require_resolved_review_threads(Github(), pr=7)
+        else:
+            publish.require_resolved_review_threads(Github(), "https://example.invalid/pull/7")

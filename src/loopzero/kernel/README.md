@@ -57,7 +57,21 @@ provider credential stores.
 `seams.configure(**adapters)` registers the named A4 review operations used by
 retained projections and archive validation. `ADAPTER_NAMES` lists the complete
 surface. A missing adapter raises `MissingAdapter`; it never means accepted
-review evidence. Composition-root registration remains TODO(A4).
+review evidence. `loopzero.review.configure(profile)` binds the package's
+review adapters. Importing `loopzero.review` leaves mechanisms unloaded so it
+can initialize the kernel first:
+
+```python
+import loopzero.review as review
+review.configure(profile)
+from loopzero.review import admission, authority
+```
+
+Call this before importing review or kernel mechanisms. If a mechanism already
+captured different kernel settings, review configuration raises `ConfigError`
+before changing the active settings. Repeating the same profile is allowed;
+changing consumers in the same process is not. Configure any resolved interpreter
+before mechanism imports as well.
 
 Review generations identify content. `review-family-coverage-v1` rows bind the
 delivery or trust section policy inside a generation, and generation carries

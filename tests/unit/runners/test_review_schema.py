@@ -155,3 +155,32 @@ def test_non_trust_review_does_not_accept_claim_verdicts():
     payload["claim_verdicts"] = []
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(payload, ordinary)
+
+
+@pytest.mark.parametrize("paths", [[], ["app/auth.py"]])
+@pytest.mark.parametrize("configured", [("code", "architecture"), ("code", "architecture", "security"), ("security",)])
+def test_configured_sections_match_review_policy_and_runner_schema(paths, configured):
+    from loopzero.runners.contract import governed_result_schema
+    from types import SimpleNamespace
+    from loopzero.review import chain
+    sections = [section for section in configured if section != "security"] + (["security"] if paths else [])
+    task = {"required_sections": sections, "security_trigger_paths": paths}
+    token = chain._PROFILE.set(SimpleNamespace(required_sections=configured))
+    try:
+        assert chain.validate_review_chain_task(task) == tuple(sections)
+    finally:
+        chain._PROFILE.reset(token)
+    schema = governed_result_schema(
+        "task", task={"required_sections": sections, "security_trigger_paths": paths},
+        configured_sections=configured,
+    )
+    assert schema["properties"]["review_sections"]["required"] == sections
+    for missing in ("architecture", "security"):
+        if missing not in sections:
+            continue
+        with pytest.raises(ValueError, match="required_sections"):
+            governed_result_schema(
+                "task", task={"required_sections": [s for s in sections if s != missing],
+                              "security_trigger_paths": paths},
+                configured_sections=configured,
+            )

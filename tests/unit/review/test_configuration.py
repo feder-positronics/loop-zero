@@ -1,91 +1,13 @@
-from contextvars import Context
+"""Process configuration is exercised before mechanism imports, as in consumers."""
+
+import os
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
-from threading import Thread
-from types import SimpleNamespace
-
-import pytest
-
-import loopzero.review as review
-from loopzero.config import ConfigError
-from loopzero.kernel import seams
-from loopzero.review import (
-    _acceptance_grammar,
-    _ci_path_classifier,
-    _security_scope,
-    acceptance,
-    authority,
-    chain,
-    evidence,
-    findings,
-    harness,
-    risk,
-    routing,
-)
-from loopzero.kernel import settings as kernel_settings
 
 
-@pytest.fixture(autouse=True)
-def isolated_process_configuration(monkeypatch):
-    previous_kernel = kernel_settings.settings
-    contexts = (
-        (_acceptance_grammar._TOOLCHAIN, _acceptance_grammar._TOOLCHAIN.get()),
-        (acceptance._PROFILE, acceptance._PROFILE.get()),
-        (authority._ARCHIVE_VALIDATOR, authority._ARCHIVE_VALIDATOR.get()),
-        (chain._PROFILE, chain._PROFILE.get()),
-        (evidence._PROFILE, evidence._PROFILE.get()),
-        (harness._AUTHORITY_APPEND, harness._AUTHORITY_APPEND.get()),
-        (harness._PROFILE, harness._PROFILE.get()),
-        (risk._SETTINGS, risk._SETTINGS.get()),
-        (routing._SETTINGS, routing._SETTINGS.get()),
-    )
-    defaults = (
-        (_acceptance_grammar, "_DEFAULT_TOOLCHAIN", _acceptance_grammar._DEFAULT_TOOLCHAIN),
-        (acceptance, "_DEFAULT_PROFILE", acceptance._DEFAULT_PROFILE),
-        (authority, "_DEFAULT_ARCHIVE_VALIDATOR", authority._DEFAULT_ARCHIVE_VALIDATOR),
-        (chain, "_DEFAULT_PROFILE", chain._DEFAULT_PROFILE),
-        (evidence, "_DEFAULT_PROFILE", evidence._DEFAULT_PROFILE),
-        (harness, "_DEFAULT_AUTHORITY_APPEND", harness._DEFAULT_AUTHORITY_APPEND),
-        (harness, "_DEFAULT_PROFILE", harness._DEFAULT_PROFILE),
-        (risk, "_DEFAULT_SETTINGS", risk._DEFAULT_SETTINGS),
-        (routing, "_DEFAULT_SETTINGS", routing._DEFAULT_SETTINGS),
-    )
-    old_findings = (
-        findings.FINDINGS_DIR, findings.OPERATIONS_DIR, findings._SEVERITY_RANK,
-        findings._SECURITY_PATH_PATTERNS, findings._CONFIGURED_ROOT,
-        findings._REQUIRE_PR_SCOPE,
-    )
-    old_security_scope = (
-        _security_scope._ALWAYS_SECURITY_REVIEW_PATTERNS,
-        _security_scope._REQUIRED_SECTIONS,
-    )
-    old_path_classifier = (
-        _ci_path_classifier.PATH_CLASSES,
-        _ci_path_classifier.PARENT_CLASSES,
-    )
-    monkeypatch.setattr(review, "_DEFAULT_PROFILE", None)
-    try:
-        yield
-    finally:
-        kernel_settings.configure(previous_kernel)
-        for context, value in contexts:
-            context.set(value)
-        for module, name, value in defaults:
-            setattr(module, name, value)
-        (
-            findings.FINDINGS_DIR, findings.OPERATIONS_DIR, findings._SEVERITY_RANK,
-            findings._SECURITY_PATH_PATTERNS, findings._CONFIGURED_ROOT,
-            findings._REQUIRE_PR_SCOPE,
-        ) = old_findings
-        (
-            _security_scope._ALWAYS_SECURITY_REVIEW_PATTERNS,
-            _security_scope._REQUIRED_SECTIONS,
-        ) = old_security_scope
-        (
-            _ci_path_classifier.PATH_CLASSES,
-            _ci_path_classifier.PARENT_CLASSES,
-        ) = old_path_classifier
-
-
+PROFILE_HELPER = """
 def _profile(tmp_path: Path, *, env_prefix: str = "CONSUMER") -> SimpleNamespace:
     return SimpleNamespace(
         root=tmp_path, env_prefix=env_prefix, audit_root=Path("private"),
@@ -101,73 +23,162 @@ def _profile(tmp_path: Path, *, env_prefix: str = "CONSUMER") -> SimpleNamespace
         github=SimpleNamespace(ref_namespace="refs/consumer"),
     )
 
+"""
+
+
+def probe(tmp_path, body):
+    source = Path(__file__).resolve().parents[3] / "src"
+    setup = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(source)!r})\n"
+        "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
+        "import loopzero.review as review\n"
+        "from loopzero.kernel import settings as kernel_settings\n"
+        "from loopzero.config import ConfigError\n"
+        + PROFILE_HELPER
+        + "\n"
+        + f"profile = _profile(Path({str(tmp_path)!r}))\n"
+    )
+    outcome = subprocess.run(
+        [sys.executable, "-I", "-c", setup + textwrap.dedent(body)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("LOOPZERO_")
+        },
+    )
+    assert outcome.returncode == 0, outcome.stdout + outcome.stderr
+
 
 def test_composition_root_configures_kernel_seams(tmp_path):
-    profile = _profile(tmp_path)
-    review.configure(profile)
-    assert seams._latest_attempt_settlement_indices(
-        [{"type": "inline", "task_id": "task"}]
-    ) == frozenset({0})
-
-
-def test_empty_context_worker_uses_process_review_configuration(tmp_path) -> None:
-    profile = _profile(tmp_path)
-    review.configure(profile)
-    observed: dict[str, object] = {}
-    failures: list[BaseException] = []
-
-    def inspect_configuration() -> None:
-        try:
-            def inspect_empty_context() -> None:
-                observed["routing"] = routing.settings().env_prefix
-                observed["sections"] = chain._required_for_paths(())
-                observed["security_sections"] = chain._required_for_paths(("auth.py",))
-                observed["toolchain"] = acceptance._toolchain()
-                observed["evidence"] = evidence._ref_namespaces()
-                observed["harness"] = harness._configured_profile()
-
-            Context().run(inspect_empty_context)
-        except BaseException as exc:  # surfaced in the parent test thread
-            failures.append(exc)
-
-    worker = Thread(target=inspect_configuration)
-    worker.start()
-    worker.join()
-
-    assert failures == []
-    assert observed == {
-        "routing": "CONSUMER",
-        "sections": ("code",),
-        "security_sections": ("code", "security"),
-        "toolchain": profile.toolchain,
-        "evidence": ("dispatch-snapshots", "finding-snapshots"),
-        "harness": profile,
-    }
-
-
-def test_configuring_two_different_review_profiles_fails(tmp_path) -> None:
-    profile = _profile(tmp_path)
-    review.configure(profile)
-    review.configure(profile)
-
-    with pytest.raises(ConfigError, match="different Profile"):
-        review.configure(_profile(tmp_path, env_prefix="OTHER"))
-
-
-def test_review_configuration_preserves_resolved_kernel_interpreter(tmp_path) -> None:
-    profile = _profile(tmp_path)
-    resolved_interpreter = tmp_path / "uv" / "cpython-3.13.7" / "bin" / "python3.13"
-    kernel_settings.configure(
-        kernel_settings.KernelSettings(
-            env_prefix=profile.env_prefix,
-            toolchain={"interpreter": str(resolved_interpreter)},
-        )
+    probe(
+        tmp_path,
+        """
+        review.configure(profile)
+        from loopzero.kernel import seams
+        assert seams._latest_attempt_settlement_indices(
+            [{"type": "inline", "task_id": "task"}]
+        ) == frozenset({0})
+    """,
     )
 
-    review.configure(profile)
 
-    assert kernel_settings.settings.toolchain == {
-        "interpreter": str(resolved_interpreter),
-        "db_lock": "/tmp/db.lock",
-    }
-    assert kernel_settings.settings.audit_root == profile.audit_root
+def test_empty_context_worker_uses_process_review_configuration(tmp_path):
+    probe(
+        tmp_path,
+        """
+        from contextvars import Context
+        from threading import Thread
+        review.configure(profile)
+        from loopzero.review import routing, chain, acceptance, evidence, harness
+        from loopzero.kernel import sandbox, gitscope, policy, worktree_lease
+        observed = []
+        def inspect():
+            observed.append((
+                routing.settings().env_prefix,
+                chain._required_for_paths(()),
+                chain._required_for_paths(("auth.py",)),
+                acceptance._toolchain(), evidence._ref_namespaces(),
+                harness._configured_profile(),
+                sandbox.settings.env_prefix, gitscope.DISPATCH_DIR,
+                policy.AUTHORITY_LEDGER_DIRECTORY, worktree_lease.LEASE_FD_ENV,
+            ))
+        worker = Thread(target=lambda: Context().run(inspect))
+        worker.start()
+        worker.join()
+        assert observed == [(
+            "CONSUMER", ("code",), ("code", "security"), profile.toolchain,
+            ("dispatch-snapshots", "finding-snapshots"), profile,
+            "CONSUMER", Path("private/dispatch"), Path("private/dispatch/ledger"),
+            "CONSUMER_WORKTREE_LEASE_FD",
+        )], observed
+    """,
+    )
+
+
+def test_configuring_two_different_review_profiles_fails(tmp_path):
+    probe(
+        tmp_path,
+        """
+        review.configure(profile)
+        review.configure(profile)
+        try:
+            review.configure(_profile(profile.root, env_prefix="OTHER"))
+        except ConfigError as exc:
+            assert "different Profile" in str(exc)
+        else:
+            raise AssertionError("accepted another consumer")
+    """,
+    )
+
+
+def test_review_configuration_preserves_resolved_kernel_interpreter(tmp_path):
+    probe(
+        tmp_path,
+        """
+        interpreter = str(profile.root / "approved/bin/python")
+        kernel_settings.configure(kernel_settings.KernelSettings(
+            env_prefix=profile.env_prefix,
+            toolchain={"interpreter": interpreter},
+        ))
+        review.configure(profile)
+        from loopzero.kernel import sandbox
+        assert kernel_settings.settings.toolchain == {
+            "interpreter": interpreter, "db_lock": "/tmp/db.lock",
+        }
+        assert sandbox.settings.toolchain == kernel_settings.settings.toolchain
+        assert sandbox.settings.audit_root == profile.audit_root
+    """,
+    )
+
+
+def test_late_configuration_is_rejected_before_mutation(tmp_path):
+    probe(
+        tmp_path,
+        """
+        from loopzero.kernel import sandbox
+        before = kernel_settings.settings
+        try:
+            review.configure(profile)
+        except ConfigError as exc:
+            assert "before importing kernel mechanisms" in str(exc)
+        else:
+            raise AssertionError("accepted conflicting captured kernel settings")
+        assert kernel_settings.settings is before
+        assert review._DEFAULT_PROFILE is None
+    """,
+    )
+
+
+def test_unconfigured_review_keeps_conservative_security_default(tmp_path):
+    probe(
+        tmp_path,
+        """
+        from loopzero.review import chain
+        task = {"security_trigger_paths": [], "required_sections": ["code"]}
+        try:
+            chain.validate_review_chain_task(task)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unconfigured review lost its security requirement")
+        task["required_sections"].append("security")
+        assert chain.validate_review_chain_task(task) == ("code", "security")
+    """,
+    )
+
+
+def test_preconfigured_kernel_remains_supported(tmp_path):
+    probe(
+        tmp_path,
+        """
+        kernel_settings.configure(kernel_settings.KernelSettings.from_profile(profile))
+        from loopzero.kernel import sandbox
+        review.configure(profile)
+        assert sandbox.settings == kernel_settings.settings
+    """,
+    )
