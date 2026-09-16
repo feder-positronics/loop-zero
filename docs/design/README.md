@@ -12,6 +12,8 @@ decision supersedes it.
 | [Review bar for authority code](authority-review-bar.md) | The method and the rules any change to admission, slots, generations, claims, credentials or the ledger must satisfy before merge |
 | [Review verdicts as content facts](2026-09-14-review-verdicts-as-content-facts.md) | Why a review verdict is keyed by content rather than by pull request, and how claim-level trust verification works |
 
+| [Preventing delivery blockages](2026-09-16-preventing-delivery-blockages.md) | Proposed prevention strategy for mutable test inputs, renewal loss, interrupted delivery, and operational waits |
+
 Decisions that belong to a particular consumer's repository, such as its
 branch protection, environment prefix, throughput thresholds or dependency
 wiring, are recorded by that consumer rather than here.
