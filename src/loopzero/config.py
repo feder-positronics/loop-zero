@@ -421,6 +421,14 @@ def _unknown_fields(
         problems.append(f"{where}.{name}: unknown field")
 
 
+def _table(value: Any, where: str, problems: list[str]) -> dict[str, Any]:
+    """Keep collecting section errors when an optional table is malformed."""
+    if isinstance(value, dict):
+        return value
+    problems.append(f"{where}: must be a table")
+    return {}
+
+
 def _string(
     table: dict[str, Any], name: str, default: str, where: str, problems: list[str]
 ) -> str:
@@ -598,10 +606,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 seen.add(name if isinstance(name, str) else "")
             checks[group] = tuple(n for n in names if isinstance(n, str))
 
-    package = data.get("package", {})
-    if not isinstance(package, dict):
-        problems.append("[package]: must be a table")
-        package = {}
+    package = _table(data.get("package", {}), "[package]", problems)
     env_prefix = package.get("env_prefix", "INTELFLO")
     if not isinstance(env_prefix, str) or not _PREFIX_RE.match(env_prefix):
         problems.append("[package].env_prefix: must match [A-Z][A-Z0-9_]*")
@@ -667,61 +672,50 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
             else:
                 _reject_unsafe_rendered_string(value, f"[package].{key}", problems)
 
-    skill_tokens = data.get("skill_tokens", {})
-    if not isinstance(skill_tokens, dict):
-        problems.append("[skill_tokens]: must be a table")
-        skill_tokens = {}
-    else:
-        for name, value in skill_tokens.items():
-            where = f"[skill_tokens].{name}"
-            if name not in SKILL_TOKEN_KEYS:
-                problems.append(f"{where}: unknown token")
-            if name == "readme_consumer_catalogue":
-                if not isinstance(value, str):
-                    problems.append(f"{where}: must be a string")
-                elif _reject_unsafe_rendered_string(value, where, problems):
-                    # Link text: printable characters without brackets or angle
-                    # brackets; target: a repository-relative path made of a
-                    # safe character set (no scheme, no HTML, no traversal).
-                    if value and not re.fullmatch(
-                        r"\[[A-Za-z0-9 ,.:;'&/_\-]+\]\((?:\.\./)*[A-Za-z0-9._/\-]+\)", value
-                    ):
+    skill_tokens = _table(data.get("skill_tokens", {}), "[skill_tokens]", problems)
+    for name, value in skill_tokens.items():
+        where = f"[skill_tokens].{name}"
+        if name not in SKILL_TOKEN_KEYS:
+            problems.append(f"{where}: unknown token")
+        if name == "readme_consumer_catalogue":
+            if not isinstance(value, str):
+                problems.append(f"{where}: must be a string")
+            elif _reject_unsafe_rendered_string(value, where, problems):
+                # Link text: printable characters without brackets or angle
+                # brackets; target: a repository-relative path made of a
+                # safe character set (no scheme, no HTML, no traversal).
+                if value and not re.fullmatch(
+                    r"\[[A-Za-z0-9 ,.:;'&/_\-]+\]\((?:\.\./)*[A-Za-z0-9._/\-]+\)", value
+                ):
+                    problems.append(
+                        f"{where}: must be a single-line Markdown link to a "
+                        "repository-relative path or empty"
+                    )
+                elif value:
+                    target = value.rsplit("(", 1)[1].rstrip(")")
+                    segments = target.split("/")
+                    leading = 0
+                    while leading < len(segments) and segments[leading] == "..":
+                        leading += 1
+                    if "//" in value or ".." in segments[leading:]:
                         problems.append(
-                            f"{where}: must be a single-line Markdown link to a "
-                            "repository-relative path or empty"
+                            f"{where}: link target must not use a scheme or traverse "
+                            "beyond leading parent segments"
                         )
-                    elif value:
-                        target = value.rsplit("(", 1)[1].rstrip(")")
-                        segments = target.split("/")
-                        leading = 0
-                        while leading < len(segments) and segments[leading] == "..":
-                            leading += 1
-                        if "//" in value or ".." in segments[leading:]:
-                            problems.append(
-                                f"{where}: link target must not use a scheme or traverse "
-                                "beyond leading parent segments"
-                            )
-            elif not isinstance(value, str) or not value:
-                problems.append(f"{where}: must be a nonempty string")
-            else:
-                _reject_unsafe_skill_token(value, where, problems)
+        elif not isinstance(value, str) or not value:
+            problems.append(f"{where}: must be a nonempty string")
+        else:
+            _reject_unsafe_skill_token(value, where, problems)
 
-    skill_routes = data.get("skill_routes", {})
-    if not isinstance(skill_routes, dict):
-        problems.append("[skill_routes]: must be a table")
-        skill_routes = {}
-    else:
-        for name, value in skill_routes.items():
-            where = f"[skill_routes].{name}"
-            if name not in SKILL_ROUTE_KEYS:
-                problems.append(f"{where}: unknown product-skill route")
-            if not isinstance(value, str) or not _SKILL_ROUTE_RE.fullmatch(value):
-                problems.append(f"{where}: must be a canonical skill directory name")
+    skill_routes = _table(data.get("skill_routes", {}), "[skill_routes]", problems)
+    for name, value in skill_routes.items():
+        where = f"[skill_routes].{name}"
+        if name not in SKILL_ROUTE_KEYS:
+            problems.append(f"{where}: unknown product-skill route")
+        if not isinstance(value, str) or not _SKILL_ROUTE_RE.fullmatch(value):
+            problems.append(f"{where}: must be a canonical skill directory name")
 
-    toolchain = data.get("toolchain", {})
-    if not isinstance(toolchain, dict):
-        problems.append("[toolchain]: must be a table")
-        toolchain = {}
+    toolchain = _table(data.get("toolchain", {}), "[toolchain]", problems)
     _unknown_fields(toolchain, TOOLCHAIN_KEYS, "[toolchain]", problems)
     for key in ("interpreter", "dotenv", "dispatcher", "host_dispatcher", "continuation_runner",
                 "closeout_launcher_path", "closeout_snapshot_path",
@@ -770,20 +764,17 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
                 problems.append(f"[toolchain].{key}: must be a nonempty string")
             else:
                 _reject_unsafe_rendered_string(value, f"[toolchain].{key}", problems)
-    skill_commands = toolchain.get("commands", {})
-    if not isinstance(skill_commands, dict):
-        problems.append("[toolchain].commands: must be a table")
-    else:
-        for name, value in skill_commands.items():
-            where = f"[toolchain.commands].{name}"
-            if not isinstance(name, str) or not _ALIAS_RE.match(name.replace("_", "-")):
-                problems.append(f"{where}: command names must use lowercase letters, digits, '_' or '-'")
-            if not isinstance(value, str) or not value:
-                problems.append(f"{where}: must be a nonempty string")
-            else:
-                _reject_unsafe_rendered_string(value, where, problems)
-            if name not in SKILL_COMMAND_KEYS:
-                problems.append(f"{where}: unknown skill command token")
+    skill_commands = _table(toolchain.get("commands", {}), "[toolchain].commands", problems)
+    for name, value in skill_commands.items():
+        where = f"[toolchain.commands].{name}"
+        if not isinstance(name, str) or not _ALIAS_RE.match(name.replace("_", "-")):
+            problems.append(f"{where}: command names must use lowercase letters, digits, '_' or '-'")
+        if not isinstance(value, str) or not value:
+            problems.append(f"{where}: must be a nonempty string")
+        else:
+            _reject_unsafe_rendered_string(value, where, problems)
+        if name not in SKILL_COMMAND_KEYS:
+            problems.append(f"{where}: unknown skill command token")
 
     routing = data.get("routing", {})
     aliases: dict[str, Alias] = {}
@@ -795,9 +786,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         _unknown_fields(routing, ROUTING_KEYS, "[routing]", problems)
         using_default_aliases = "aliases" not in routing
         aliases_table = routing.get("aliases", DEFAULT_ROUTING_ALIASES)
-        if not isinstance(aliases_table, dict):
-            problems.append("[routing.aliases]: must be a table")
-            aliases_table = {}
+        aliases_table = _table(aliases_table, "[routing.aliases]", problems)
         for name, spec in aliases_table.items():
             where = f"[routing.aliases].{name}"
             if not _ALIAS_RE.match(str(name)):
@@ -883,9 +872,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         tiers_table = routing.get(
             "tiers", DEFAULT_ROUTING_TIERS if using_default_aliases else {}
         )
-        if not isinstance(tiers_table, dict):
-            problems.append("[routing.tiers]: must be a table")
-            tiers_table = {}
+        tiers_table = _table(tiers_table, "[routing.tiers]", problems)
         for name, spec in tiers_table.items():
             where = f"[routing.tiers].{name}"
             if not isinstance(spec, dict):
@@ -912,16 +899,14 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
 
     budgets_table = routing.get("budgets", {"medium": 5.0, "high": 10.0})
     routing_budgets: dict[str, float] = {}
-    if not isinstance(budgets_table, dict):
-        problems.append("[routing.budgets]: must be a table")
-    else:
-        for name, value in budgets_table.items():
-            if not isinstance(name, str) or not _ALIAS_RE.fullmatch(name):
-                problems.append(f"[routing.budgets].{name}: budget names match [a-z][a-z0-9-]*")
-            elif type(value) not in (int, float) or value < 0:
-                problems.append(f"[routing.budgets].{name}: must be a non-negative number")
-            else:
-                routing_budgets[name] = float(value)
+    budgets_table = _table(budgets_table, "[routing.budgets]", problems)
+    for name, value in budgets_table.items():
+        if not isinstance(name, str) or not _ALIAS_RE.fullmatch(name):
+            problems.append(f"[routing.budgets].{name}: budget names match [a-z][a-z0-9-]*")
+        elif type(value) not in (int, float) or value < 0:
+            problems.append(f"[routing.budgets].{name}: must be a non-negative number")
+        else:
+            routing_budgets[name] = float(value)
     policy_version = _string(routing, "policy_version", "2026-08-17-v11", "[routing]", problems)
     telemetry_version = _string(
         routing, "telemetry_schema_version", "dispatch-telemetry-v9", "[routing]", problems
@@ -946,23 +931,18 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
 
     verifier_table = routing.get("verifier_models", DEFAULT_VERIFIER_MODELS)
     verifier_models: dict[str, str] = {}
-    if not isinstance(verifier_table, dict):
-        problems.append("[routing.verifier_models]: must be a table")
-    else:
-        for alias, model in verifier_table.items():
-            if not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias):
-                problems.append(
-                    f"[routing.verifier_models].{alias}: alias names match [a-z][a-z0-9-]*"
-                )
-            elif not isinstance(model, str) or not model:
-                problems.append(f"[routing.verifier_models].{alias}: must be a nonempty string")
-            else:
-                verifier_models[alias] = model
+    verifier_table = _table(verifier_table, "[routing.verifier_models]", problems)
+    for alias, model in verifier_table.items():
+        if not isinstance(alias, str) or not _ALIAS_RE.fullmatch(alias):
+            problems.append(
+                f"[routing.verifier_models].{alias}: alias names match [a-z][a-z0-9-]*"
+            )
+        elif not isinstance(model, str) or not model:
+            problems.append(f"[routing.verifier_models].{alias}: must be a nonempty string")
+        else:
+            verifier_models[alias] = model
 
-    review = data.get("review", {})
-    if not isinstance(review, dict):
-        problems.append("[review]: must be a table")
-        review = {}
+    review = _table(data.get("review", {}), "[review]", problems)
     _unknown_fields(review, REVIEW_KEYS, "[review]", problems)
     max_reviews = review.get("max_reviews_per_pr", 1)
     max_delta = review.get("max_delta_reviews", 1)
@@ -997,20 +977,18 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         {"codex": "opus", "claude": "sol"} if using_default_aliases else {},
     )
     cross_harness_routes: dict[str, str] = {}
-    if not isinstance(cross_harness_table, dict):
-        problems.append("[review].cross_harness_routes: must be a table")
-    else:
-        for harness_name, alias_name in cross_harness_table.items():
-            if harness_name not in {"claude", "codex"}:
-                problems.append(
-                    f"[review].cross_harness_routes.{harness_name}: unknown harness"
-                )
-            elif not isinstance(alias_name, str) or alias_name not in aliases:
-                problems.append(
-                    f"[review].cross_harness_routes.{harness_name}: must name a configured alias"
-                )
-            else:
-                cross_harness_routes[harness_name] = alias_name
+    cross_harness_table = _table(cross_harness_table, "[review].cross_harness_routes", problems)
+    for harness_name, alias_name in cross_harness_table.items():
+        if harness_name not in {"claude", "codex"}:
+            problems.append(
+                f"[review].cross_harness_routes.{harness_name}: unknown harness"
+            )
+        elif not isinstance(alias_name, str) or alias_name not in aliases:
+            problems.append(
+                f"[review].cross_harness_routes.{harness_name}: must name a configured alias"
+            )
+        else:
+            cross_harness_routes[harness_name] = alias_name
 
     snapshot_namespaces: dict[str, str] = {}
     for key, default in (
@@ -1032,10 +1010,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
     if len(set(snapshot_namespaces.values())) != len(snapshot_namespaces):
         problems.append("[review]: review and finding snapshot namespaces must differ")
 
-    github = data.get("github", {})
-    if not isinstance(github, dict):
-        problems.append("[github]: must be a table")
-        github = {}
+    github = _table(data.get("github", {}), "[github]", problems)
     _unknown_fields(github, GITHUB_KEYS, "[github]", problems)
     native_protection = github.get("native_protection", True)
     if not isinstance(native_protection, bool):
@@ -1048,28 +1023,24 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         "standalone": "standalone", "ci": "ci",
     })
     labels: dict[str, str] = {}
-    if not isinstance(labels_table, dict):
-        problems.append("[github].labels: must be a table")
-    else:
-        for name, value in labels_table.items():
-            if not _LABEL_KEY_RE.fullmatch(str(name)):
-                problems.append(f"[github].labels.{name}: label keys must be lowercase identifiers")
-            elif not isinstance(value, str) or not value.strip():
-                problems.append(f"[github].labels.{name}: must be a nonempty string")
-            else:
-                labels[str(name)] = value
+    labels_table = _table(labels_table, "[github].labels", problems)
+    for name, value in labels_table.items():
+        if not _LABEL_KEY_RE.fullmatch(str(name)):
+            problems.append(f"[github].labels.{name}: label keys must be lowercase identifiers")
+        elif not isinstance(value, str) or not value.strip():
+            problems.append(f"[github].labels.{name}: must be a nonempty string")
+        else:
+            labels[str(name)] = value
     commands_table = github.get("check_commands", {
         "test": "make test", "test_be": "make test-be", "test_fe": "make test-fe",
     })
     check_commands: dict[str, str] = {}
-    if not isinstance(commands_table, dict):
-        problems.append("[github.check_commands]: must be a table")
-    else:
-        for name, value in commands_table.items():
-            if not isinstance(name, str) or not name.strip() or not isinstance(value, str) or not value.strip():
-                problems.append("[github.check_commands]: names and commands must be nonempty strings")
-            else:
-                check_commands[name] = value
+    commands_table = _table(commands_table, "[github.check_commands]", problems)
+    for name, value in commands_table.items():
+        if not isinstance(name, str) or not name.strip() or not isinstance(value, str) or not value.strip():
+            problems.append("[github.check_commands]: names and commands must be nonempty strings")
+        else:
+            check_commands[name] = value
     ref_namespace = _string(github, "ref_namespace", "refs/heads", "[github]", problems)
     if not ref_namespace.startswith("refs/") or ".." in ref_namespace or ref_namespace.endswith("/"):
         problems.append("[github].ref_namespace: must be a normalized refs/ namespace")
@@ -1114,9 +1085,7 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         }
     else:
         path_classes_table = data.get("path_classes", {})
-    if not isinstance(path_classes_table, dict):
-        problems.append("[path_classes]: must be a table")
-        path_classes_table = {}
+    path_classes_table = _table(path_classes_table, "[path_classes]", problems)
     for name, globs in path_classes_table.items():
         if not _ALIAS_RE.fullmatch(str(name)):
             problems.append(f"[path_classes].{name}: class names must be lowercase identifiers")
@@ -1146,20 +1115,18 @@ def validate(data: dict[str, Any], root: Path) -> Profile:
         else {},
     )
     path_class_parents: dict[str, str] = {}
-    if not isinstance(parent_table, dict):
-        problems.append("[path_class_parents]: must be a table")
-    else:
-        for child, parent in parent_table.items():
-            if not isinstance(child, str) or not _ALIAS_RE.fullmatch(child):
-                problems.append(f"[path_class_parents].{child}: invalid child class")
-            elif not isinstance(parent, str) or not _ALIAS_RE.fullmatch(parent):
-                problems.append(f"[path_class_parents].{child}: invalid parent class")
-            elif path_classes and (child not in path_classes or parent not in path_classes):
-                problems.append(
-                    f"[path_class_parents].{child}: child and parent must name path classes"
-                )
-            else:
-                path_class_parents[child] = parent
+    parent_table = _table(parent_table, "[path_class_parents]", problems)
+    for child, parent in parent_table.items():
+        if not isinstance(child, str) or not _ALIAS_RE.fullmatch(child):
+            problems.append(f"[path_class_parents].{child}: invalid child class")
+        elif not isinstance(parent, str) or not _ALIAS_RE.fullmatch(parent):
+            problems.append(f"[path_class_parents].{child}: invalid parent class")
+        elif path_classes and (child not in path_classes or parent not in path_classes):
+            problems.append(
+                f"[path_class_parents].{child}: child and parent must name path classes"
+            )
+        else:
+            path_class_parents[child] = parent
 
     hooks = _hooks(data, "[hooks]", problems)
 

@@ -393,3 +393,46 @@ def test_core_path_rejects_a_missing_component(tmp_path: Path):
         config.ConfigError, match=r"\[core\]\.path: component .* does not exist"
     ):
         config.load_profile(tmp_path)
+
+
+@pytest.mark.parametrize("path, diagnostic", [
+    (("package",), "[package]: must be a table"),
+    (("skill_tokens",), "[skill_tokens]: must be a table"),
+    (("skill_routes",), "[skill_routes]: must be a table"),
+    (("toolchain",), "[toolchain]: must be a table"),
+    (("toolchain", "commands"), "[toolchain].commands: must be a table"),
+    (("routing", "aliases"), "[routing.aliases]: must be a table"),
+    (("routing", "tiers"), "[routing.tiers]: must be a table"),
+    (("routing", "budgets"), "[routing.budgets]: must be a table"),
+    (("routing", "verifier_models"), "[routing.verifier_models]: must be a table"),
+    (("review",), "[review]: must be a table"),
+    (("review", "cross_harness_routes"), "[review].cross_harness_routes: must be a table"),
+    (("github",), "[github]: must be a table"),
+    (("github", "labels"), "[github].labels: must be a table"),
+    (("github", "check_commands"), "[github.check_commands]: must be a table"),
+    (("path_classes",), "[path_classes]: must be a table"),
+    (("path_class_parents",), "[path_class_parents]: must be a table"),
+])
+@pytest.mark.parametrize("value", [None, False, 0, "invalid", [], ["entry"]])
+def test_malformed_optional_tables_report_section_error(consumer, path, diagnostic, value):
+    data = config.load_mapping(consumer / "workflow.toml")
+    table = data
+    for key in path[:-1]:
+        table = table.setdefault(key, {})
+    table[path[-1]] = value
+    with pytest.raises(config.ConfigError) as caught:
+        config.validate(data, consumer)
+    assert diagnostic in caught.value.problems
+
+
+def test_optional_table_errors_preserve_aggregation_order(consumer):
+    data = config.load_mapping(consumer / "workflow.toml")
+    data.update(skill_tokens=[], skill_routes=False, github={"labels": 0, "check_commands": []})
+    with pytest.raises(config.ConfigError) as caught:
+        config.validate(data, consumer)
+    assert caught.value.problems == [
+        "[skill_tokens]: must be a table",
+        "[skill_routes]: must be a table",
+        "[github].labels: must be a table",
+        "[github.check_commands]: must be a table",
+    ]
