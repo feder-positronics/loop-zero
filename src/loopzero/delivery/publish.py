@@ -635,12 +635,12 @@ def open_important_finding_ids(
         and review_refs.get(str(record.get("review_task_id"))) == head_ref
     ]
     from ..review.provisional_findings import (
+        authenticated_provisional_admissions,
         authenticated_provisional_findings,
         authenticated_publication_bindings,
-        authenticated_recovery_admissions,
     )
 
-    admissions = authenticated_recovery_admissions(records)
+    admissions = authenticated_provisional_admissions(records)
     bound_owners = set(authenticated_publication_bindings(records))
     for admission in admissions.values():
         owner = str(admission["provisional_owner_id"])

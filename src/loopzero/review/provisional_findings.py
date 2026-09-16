@@ -121,6 +121,7 @@ def configure_kernel_seams() -> None:
     seams.configure(
         authenticated_publication_bindings=authenticated_publication_bindings,
         authenticated_recovery_admissions=authenticated_recovery_admissions,
+        authenticated_capture_admissions=authenticated_capture_admissions,
     )
 
 
@@ -230,6 +231,10 @@ def build_recovery_admission(
     records: Sequence[dict[str, object]], *, task_id: str
 ) -> dict[str, object]:
     """Derive an admission solely from one authenticated closed failure."""
+    if task_id in authenticated_capture_admissions(records):
+        raise ProvisionalFindingError(
+            "finding recovery conflicts with existing ordinary capture ownership"
+        )
     terminal = authenticated_review_terminals(records).get(task_id)
     if terminal is None or not _eligible_terminal(terminal):
         raise ProvisionalFindingError(
@@ -401,9 +406,9 @@ def authenticated_provisional_findings(
     *,
     admission: Mapping[str, object],
 ) -> list[dict[str, object]]:
-    """Load findings only when the signed recovery binds their exact receipt."""
+    """Load findings only when a signed review terminal binds their exact receipt."""
     task_id = str(admission.get("task_id") or "")
-    if authenticated_recovery_admissions(records).get(task_id) != admission:
+    if authenticated_provisional_admissions(records).get(task_id) != admission:
         raise ProvisionalFindingError("provisional owner is not authenticated")
     owner = str(admission.get("provisional_owner_id") or "")
     persisted_receipt = _capture_receipts(_stream_records(repo)).get(owner)
@@ -411,11 +416,22 @@ def authenticated_provisional_findings(
     if (
         persisted_receipt is None
         or recovery is None
-        or recovery.get("type") != "attempt-recovery"
-        or recovery.get("recovery_classification") != "finding-deposition-only"
+        or (
+            (
+                admission.get("type") == ADMISSION_TYPE
+                and (
+                    recovery.get("type") != "attempt-recovery"
+                    or recovery.get("recovery_classification")
+                    != "finding-deposition-only"
+                )
+            )
+            or (
+                admission.get("type") != ADMISSION_TYPE
+                and recovery.get("type") != "attempt-terminal"
+            )
+        )
         or recovery.get("provisional_owner_id") != owner
-        or recovery.get("finding_capture_receipt_sha256")
-        != _digest(persisted_receipt)
+        or recovery.get("finding_capture_receipt_sha256") != _digest(persisted_receipt)
     ):
         raise ProvisionalFindingError(
             "provisional findings do not match the authenticated recovery"
@@ -524,7 +540,7 @@ def capture_provisional_findings(
     from .findings import ledger_lock
 
     task_id = admission.get("task_id")
-    authenticated = authenticated_recovery_admissions(authority_records).get(
+    authenticated = authenticated_provisional_admissions(authority_records).get(
         str(task_id)
     )
     if authenticated != admission:
@@ -556,6 +572,12 @@ def capture_provisional_findings(
                     for key in ("severity", "claim", "path", "line_start", "line_end")
                 }
             )
+    if admission.get("type") != ADMISSION_TYPE:
+        from .evidence import persisted_review_findings
+
+        material = persisted_review_findings(
+            material, review_intent=str(admission.get("review_intent"))
+        )
     with ledger_lock(repo) as primary:
         snapshot_sha, snapshot_tree_sha = _authenticated_snapshot(primary, admission)
         anchored = [
@@ -853,7 +875,7 @@ def build_publication_binding(
     if len(head) != 40 or not base.strip() or not repository.strip():
         raise ProvisionalFindingError("publication binding source identity is invalid")
     task_id = str(admission.get("task_id") or "")
-    if authenticated_recovery_admissions(records).get(task_id) != admission:
+    if authenticated_provisional_admissions(records).get(task_id) != admission:
         raise ProvisionalFindingError("publication binding owner is not authenticated")
     from ..kernel.authority_store import authority_repository_binding
 
@@ -903,7 +925,7 @@ def authenticated_publication_bindings(
 ) -> dict[str, dict[str, object]]:
     """Project one coordinator-authenticated immutable binding per owner."""
     coordinator_ids = authenticated_coordinator_record_ids(records)
-    admissions = authenticated_recovery_admissions(records)
+    admissions = authenticated_provisional_admissions(records)
     owners = {row["provisional_owner_id"]: row for row in admissions.values()}
     result: dict[str, dict[str, object]] = {}
     for row in records:
@@ -955,7 +977,7 @@ def materialize_publication_binding(
         raise ProvisionalFindingError(
             "publication binding has no exact capture receipt"
         )
-    admissions = authenticated_recovery_admissions(authority_records)
+    admissions = authenticated_provisional_admissions(authority_records)
     admission = next(
         (
             row
@@ -1005,19 +1027,21 @@ def materialize_publication_binding(
     )
 
 
-# Preserve directly imported package behavior before profile configuration.
-configure_kernel_seams()
-
-
 __all__ = [
     "ADMISSION_TYPE",
     "BINDING_TYPE",
     "CAPTURE_TYPE",
     "FINDING_TYPE",
     "ProvisionalFindingError",
-    "authenticated_publication_bindings",
+    "authenticated_capture_admissions",
+    "authenticated_provisional_admissions",
     "authenticated_provisional_findings",
+    "authenticated_publication_bindings",
     "authenticated_recovery_admissions",
+    "authorize_capture_admission_append",
+    "build_capture_admission",
+    "build_capture_terminal_evidence",
+    "build_producer_completion",
     "build_publication_binding",
     "build_recovery_admission",
     "build_recovery_evidence",
@@ -1027,3 +1051,17 @@ __all__ = [
     "load_recovery_result",
     "materialize_publication_binding",
 ]
+
+
+# Ordinary capture has a separate producer proof; recovery predicates stay closed.
+from .ordinary_findings import (
+    authenticated_capture_admissions,
+    authenticated_provisional_admissions,
+    authorize_capture_admission_append,
+    build_capture_admission,
+    build_capture_terminal_evidence,
+    build_producer_completion,
+)
+
+# Preserve directly imported package behavior before profile configuration.
+configure_kernel_seams()
