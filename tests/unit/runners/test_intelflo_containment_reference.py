@@ -1,4 +1,4 @@
-"""Optional comparison against the pre-extraction IntelFlo argv builder."""
+"""Hermetic comparison against the pre-extraction IntelFlo argv builder."""
 
 import importlib.util
 import json
@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 
-INTELFLO_SOURCE = Path("/home/marcin/dev/intelflo/scripts/util/agent_dispatch.py")
+INTELFLO_SOURCE = Path(__file__).parent / "fixtures/intelflo_containment_reference.py"
 GOLDEN = Path(__file__).parent / "fixtures/intelflo_worker_argv.json"
 
 
@@ -20,13 +20,6 @@ def test_intelflo_argv_golden_has_fixed_credential_binding() -> None:
     ]
 
 
-@pytest.mark.skipif(
-    not INTELFLO_SOURCE.is_file(),
-    reason=(
-        "IntelFlo argv reference unavailable: "
-        "/home/marcin/dev/intelflo/scripts/util/agent_dispatch.py is absent"
-    ),
-)
 def test_intelflo_worker_argv_matches_checked_in_golden(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -34,6 +27,18 @@ def test_intelflo_worker_argv_matches_checked_in_golden(
     assert spec is not None and spec.loader is not None
     original = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(original)
+    # Pin filesystem observations as well as source: hosts differ in /etc files
+    # and symlink targets. No real filesystem mounts or credential reads occur.
+    system_paths = {
+        "/etc/ca-certificates", "/etc/hosts", "/etc/localtime",
+        "/etc/nsswitch.conf", "/etc/passwd", "/etc/group",
+        "/etc/resolv.conf", "/etc/ssl",
+    }
+    monkeypatch.setattr(Path, "exists", lambda path: str(path) in system_paths)
+    monkeypatch.setattr(Path, "resolve", lambda path, **kwargs: path)
+    monkeypatch.setattr(Path, "is_symlink", lambda path: False)
+    monkeypatch.setattr(Path, "is_file", lambda path: False)
+    monkeypatch.setattr(Path, "is_dir", lambda path: False)
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
     monkeypatch.setattr(original, "system_executable", lambda _: Path("/usr/bin/bwrap"))
     monkeypatch.setattr(original, "_worker_runtime_read_roots", lambda _: ())
