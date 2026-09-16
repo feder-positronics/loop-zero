@@ -259,7 +259,7 @@ def test_codex_refresh_failure_is_typed_and_preserves_host_credential(
     assert json.loads(credential.read_text(encoding="utf-8")) == original
 
 
-def test_codex_refresh_rejects_unadvanced_expiry(
+def test_codex_refresh_persists_short_expiry_without_export(
     tmp_path: Path,
 ) -> None:
     credential = tmp_path / ".codex" / "auth.json"
@@ -276,7 +276,7 @@ def test_codex_refresh_rejects_unadvanced_expiry(
             stderr="",
         )
 
-    with pytest.raises(codex_credential.UnsafeCodexCredential):
+    with pytest.raises(codex_credential.CodexCredentialUnavailable):
         with codex_credential.codex_subscription_credential(
             requested_runtime_s=600,
             credential_path=credential,
@@ -286,7 +286,7 @@ def test_codex_refresh_rejects_unadvanced_expiry(
         ):
             pass
 
-    assert json.loads(credential.read_text(encoding="utf-8")) == original
+    assert json.loads(credential.read_text(encoding="utf-8")) == _credential(expires_at_s=1_200)
 
 
 def test_default_refresh_runner_uses_contained_process_seam_on_timeout(
@@ -365,7 +365,6 @@ def test_default_refresh_runner_owns_the_credential_descriptor_close(
 
     refreshed = codex_credential._refresh_credential(
         credential,
-        horizon_s=2_000,
         run_refresh=codex_credential._run_refresh_process_group,
         refresh_command=("trusted-python", "trusted-bridge", "--codex-refresh"),
         sandbox_wrapper=lambda spec: spec.argv,
@@ -645,3 +644,115 @@ def test_uncertain_rotation_blocks_spent_token_until_new_host_login(tmp_path, mo
     with codex_credential.codex_subscription_credential(**arguments):
         pass
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize("state", ["symlink", "malformed", "public"])
+def test_unsafe_pending_rotation_state_blocks_vendor(tmp_path, state):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    pending = tmp_path / ".auth.json.refresh-pending"
+    if state == "symlink":
+        pending.symlink_to(tmp_path / "absent")
+    else:
+        pending.write_bytes(b"broken" if state == "malformed" else b"0" * 64)
+        pending.chmod(0o644 if state == "public" else 0o600)
+
+    def vendor(*args, **kwargs):
+        pytest.fail("unsafe recovery state allowed a vendor call")
+
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(
+            requested_runtime_s=600, credential_path=path, clock=lambda: 1_000,
+            run_refresh=vendor, refresh_command=("fake-vendor",),
+        ):
+            pytest.fail("unsafe recovery state exported a snapshot")
+
+
+def test_pending_rotation_fifo_fails_without_waiting_for_writer(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    os.mkfifo(tmp_path / ".auth.json.refresh-pending", 0o600)
+    probe = '''
+import sys
+from pathlib import Path
+from loopzero.runners.codex import codex_subscription_credential, UnsafeCodexCredential
+try:
+    with codex_subscription_credential(credential_path=Path(sys.argv[1]),
+            requested_runtime_s=600, clock=lambda: 1000,
+            run_refresh=lambda *a, **k: None, refresh_command=("fake",)):
+        raise AssertionError("unsafe snapshot")
+except UnsafeCodexCredential:
+    pass
+'''
+    subprocess.run([sys.executable, "-c", probe, str(path)], timeout=3, check=True)
+
+
+def test_pending_rotation_hardlink_is_rejected(tmp_path):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    pending = tmp_path / ".auth.json.refresh-pending"
+    pending.write_bytes(b"0" * 64)
+    pending.chmod(0o600)
+    os.link(pending, tmp_path / "alias")
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            run_refresh=lambda *a, **k: pytest.fail("hardlink permitted vendor call"),
+            refresh_command=("fake",),
+        ):
+            pytest.fail("unsafe snapshot")
+
+
+@pytest.mark.parametrize("failure", ["create", "unlink", "fsync"])
+def test_pending_rotation_io_failures_are_content_free(tmp_path, monkeypatch, failure):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    pending = tmp_path / ".auth.json.refresh-pending"
+
+    def fail(*args, **kwargs):
+        raise OSError("private-path-and-token-material")
+
+    if failure == "create":
+        monkeypatch.setattr(codex_credential, "_write_private_file", fail)
+    elif failure == "fsync":
+        monkeypatch.setattr(codex_credential, "_sync_credential_directory", fail)
+    else:
+        pending.write_bytes(b"0" * 64)
+        pending.chmod(0o600)
+        unlink = Path.unlink
+
+        def checked_unlink(self, *args, **kwargs):
+            if self == pending:
+                fail()
+            return unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", checked_unlink)
+    with pytest.raises(codex_credential.CodexCredentialError) as error:
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            run_refresh=lambda *a, **k: pytest.fail("failed intent permitted vendor call"),
+            refresh_command=("fake",),
+        ):
+            pytest.fail("unsafe snapshot")
+    assert "private-path-and-token-material" not in str(error.value)
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "world-writable"])
+def test_unsafe_host_directory_prevents_vendor_rotation(tmp_path, unsafe):
+    parent = tmp_path / "host"
+    path = parent / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    if unsafe == "symlink":
+        alias = tmp_path / "alias"
+        alias.symlink_to(parent, target_is_directory=True)
+        path = alias / "auth.json"
+    else:
+        parent.chmod(0o777)
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            run_refresh=lambda *a, **k: pytest.fail("unsafe directory permitted vendor call"),
+            refresh_command=("fake",),
+        ):
+            pytest.fail("unsafe snapshot")
+    assert not (parent / ".auth.json.refresh-pending").exists()
