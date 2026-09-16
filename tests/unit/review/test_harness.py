@@ -13,6 +13,7 @@ from loopzero.review import harness
 
 def _profile(tmp_path):
     return SimpleNamespace(
+        accounts=None,
         aliases={
             "alternate": SimpleNamespace(runner="fake", model="review-model", write=False)
         },
