@@ -44,6 +44,32 @@ def sanitized_bridge_text(value: object) -> str | None:
     return text[:MAX_BRIDGE_FAILURE_CHARS]
 
 
+def sanitized_provider_error(value: object) -> str | None:
+    """Keep bounded provider diagnostics, excluding paths and credential values."""
+    if not isinstance(value, str):
+        return None
+    value = _BRIDGE_SECRET_PATTERN.sub("<redacted>", value)
+    # Authorization schemes can contain spaces, padding and comma-separated
+    # parameters. Consume the complete header value, not just its scheme.
+    value = re.sub(
+        r"(?i)(authorization)[\"']?\s*[:=][ \t]*[^\r\n]*"
+        r"(?:\r?\n[ \t]+[^\r\n]*)*",
+        r"\1=<redacted>", value,
+    )
+    value = re.sub(
+        r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|password)"
+        r"[\"']?\s*[:=]\s*(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)",
+        r"\1=<redacted>", value,
+    )
+    value = re.sub(r"https?://[^\s]+", "<redacted>", value)
+    value = re.sub(
+        r"(?<![A-Za-z0-9:/])(?:~|\.{1,2})?/(?:[^\s/]+/)*[^\s/]+"
+        r"|(?<![A-Za-z0-9])(?:[A-Za-z]:\\|\\\\)[^\s]+",
+        "<redacted>", value,
+    )
+    return sanitized_bridge_text(value)
+
+
 def sanitized_bridge_failure(value: object) -> str | None:
     """Normalize an SDK bridge error frame's ``diagnostics`` object.
 

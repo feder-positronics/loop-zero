@@ -56,6 +56,7 @@ from .contract import (
     RuntimeProgressSignal,
     RuntimeToolLabel,
     is_valid_resume_session_id,
+    sanitized_provider_error,
 )
 
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
@@ -2299,6 +2300,7 @@ async def _run_claude(
     pending_structured_output: tuple[str, dict[str, object]] | None = None
     accepted_structured_output: dict[str, object] | None = None
     saw_message = False
+    model_output_seen = False
     denial_diagnostics: dict[str, int] = {}
 
     def terminal_protocol_failure() -> None:
@@ -2315,10 +2317,13 @@ async def _run_claude(
         prompt=_prompt_stream(request["prompt"]),
         options=_options(request, denial_diagnostics=denial_diagnostics),
     )
-    _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
+    _observe_progress(reporter, RuntimePhase.STARTUP)
     async for message in messages:
         if isinstance(message, RateLimitEvent):
-            _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
+            _observe_progress(
+                reporter,
+                RuntimePhase.MODEL_ACTIVE if model_output_seen else RuntimePhase.STARTUP,
+            )
             info = message.rate_limit_info
             rate_type = _metadata(info.rate_limit_type)
             status = _metadata(info.status)
@@ -2352,6 +2357,18 @@ async def _run_claude(
                 return
             continue
         if isinstance(message, AssistantMessage):
+            synthetic = message.model == "<synthetic>" or bool(message.error)
+            if synthetic:
+                detail = sanitized_provider_error(message.error)
+                _event_frame(
+                    kind="assistant", subtype="error", semantic=False, detail=detail,
+                )
+                for block in message.content[:4]:
+                    detail = sanitized_provider_error(getattr(block, "text", None))
+                    if detail:
+                        _event_frame(kind="provider_error", semantic=False, detail=detail)
+                continue
+            model_output_seen = True
             progress_phase = RuntimePhase.MODEL_ACTIVE
             for block in message.content:
                 if not isinstance(block, ToolUseBlock):
@@ -2396,7 +2413,10 @@ async def _run_claude(
             )
             continue
         if isinstance(message, UserMessage):
-            _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
+            _observe_progress(
+                reporter,
+                RuntimePhase.MODEL_ACTIVE if model_output_seen else RuntimePhase.STARTUP,
+            )
             blocks = message.content if isinstance(message.content, list) else ()
             for block in blocks:
                 if (
@@ -2409,7 +2429,10 @@ async def _run_claude(
                     pending_structured_output = None
             continue
         if isinstance(message, SystemMessage):
-            _observe_progress(reporter, RuntimePhase.MODEL_ACTIVE)
+            _observe_progress(
+                reporter,
+                RuntimePhase.MODEL_ACTIVE if model_output_seen else RuntimePhase.STARTUP,
+            )
             data = message.data if isinstance(message.data, dict) else {}
             session_id = _metadata(data.get("session_id")) or session_id
             effective_model = _metadata(data.get("model")) or effective_model
@@ -2429,6 +2452,17 @@ async def _run_claude(
             )
             continue
         if isinstance(message, StreamEvent):
+            event_type = message.event.get("type") if isinstance(message.event, dict) else None
+            if event_type == "message_start":
+                # Provider acceptance prevents replay, but does not prove output.
+                _observe_progress(reporter, RuntimePhase.STARTUP)
+                _event_frame(
+                    kind="provider_start", subtype="message_start", semantic=False,
+                )
+                continue
+            if event_type not in {"content_block_start", "content_block_delta"}:
+                continue
+            model_output_seen = True
             progress_phase, tool_label = _claude_stream_progress(message.event)
             _observe_progress(
                 reporter,
@@ -2530,6 +2564,14 @@ async def _run_claude(
                 frame["structured_output_recovery"] = "accepted-tool-result"
             frame["permission_check_denials"] = denial_diagnostics
             frame["subtype"] = result_subtype
+            frame["model_output_seen"] = model_output_seen
+            if message.is_error:
+                errors = getattr(message, "errors", None)
+                if isinstance(errors, list):
+                    frame["errors"] = [
+                        detail for value in errors[:4]
+                        if (detail := sanitized_provider_error(value)) is not None
+                    ]
             frame["stop_reason"] = _metadata(message.stop_reason)
             if isinstance(message.api_error_status, int):
                 frame["api_error_status"] = message.api_error_status

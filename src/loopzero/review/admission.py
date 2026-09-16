@@ -52,6 +52,7 @@ from ._security_scope import (
     security_trigger_paths_between,
 )
 from .routing import review_family_for_intent
+from .evidence import dirty_snapshot_matches_source
 
 BlockedCode = Literal[
     "stale-source",
@@ -562,6 +563,7 @@ def admit_review(
     changed_paths_digest: str | None = None,
     diff_sha256: str | None = None,
     attempt_index: int = 0,
+    source_worktree: Path | None = None,
 ) -> Admission:
     """Resolve content, carry valid coverage, or reserve one bounded review."""
     assert_authority_ledger_lock_held(repository)
@@ -588,6 +590,12 @@ def admit_review(
         isinstance(current_head, str)
         and isinstance(identity_head, str)
         and current_head != identity_head
+        and not dirty_snapshot_matches_source(
+            repository,
+            source_worktree or repository,
+            current_source_identity,
+            patch_identity,
+        )
     ):
         return _blocked(
             "stale-source", "patch identity no longer matches the current source"
