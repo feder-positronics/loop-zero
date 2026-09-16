@@ -675,6 +675,7 @@ def test_pending_rotation_fifo_fails_without_waiting_for_writer(tmp_path):
     probe = '''
 import sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[2])
 from loopzero.runners.codex import codex_subscription_credential, UnsafeCodexCredential
 try:
     with codex_subscription_credential(credential_path=Path(sys.argv[1]),
@@ -684,7 +685,12 @@ try:
 except UnsafeCodexCredential:
     pass
 '''
-    subprocess.run([sys.executable, "-c", probe, str(path)], timeout=3, check=True)
+    source_root = Path(__file__).resolve().parents[3] / "src"
+    subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(path), str(source_root)],
+        timeout=3,
+        check=True,
+    )
 
 
 def test_pending_rotation_hardlink_is_rejected(tmp_path):
