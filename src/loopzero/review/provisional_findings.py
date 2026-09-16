@@ -17,7 +17,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..config import Profile
-from ..kernel.authority_projection import authenticated_coordinator_record_ids
+from ..kernel.authority_projection import (
+    AuthorityRecordView,
+    authenticated_coordinator_record_ids,
+)
 from ..kernel.gitscope import trusted_git_command
 from ..kernel.sandbox import environment as sandbox_environment
 from .authority import authenticated_review_terminals
@@ -110,6 +113,17 @@ def configure(profile: Profile) -> None:
     global _CONFIGURED_ROOT, _PROVISIONAL_DIR
     _CONFIGURED_ROOT = Path(profile.root).expanduser().resolve()
     _PROVISIONAL_DIR = Path(profile.audit_root) / "provisional-findings"
+    configure_kernel_seams()
+
+
+def configure_kernel_seams() -> None:
+    """Bind finding authority projections to the package kernel seam."""
+    from ..kernel import seams
+
+    seams.configure(
+        authenticated_publication_bindings=authenticated_publication_bindings,
+        authenticated_recovery_admissions=authenticated_recovery_admissions,
+    )
 
 
 def _canonical(value: object) -> bytes:
@@ -251,7 +265,12 @@ def authenticated_recovery_admissions(
         task_id = record.get("task_id")
         if not isinstance(task_id, str) or id(record) not in coordinator_ids:
             continue
-        terminal = authenticated_review_terminals(preceding).get(task_id)
+        authenticated_prefix = (
+            records.filtered(preceding)
+            if isinstance(records, AuthorityRecordView)
+            else preceding
+        )
+        terminal = authenticated_review_terminals(authenticated_prefix).get(task_id)
         expected = (
             _admission_payload(terminal)
             if terminal and _eligible_terminal(terminal)
@@ -864,6 +883,10 @@ def materialize_publication_binding(
         candidate_records=candidates,
         source_identity={"head": binding["head"], "base": binding["base"]},
     )
+
+
+# Preserve directly imported package behavior before profile configuration.
+configure_kernel_seams()
 
 
 __all__ = [

@@ -18,9 +18,16 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero.kernel import authority as kernel_authority
-from loopzero.kernel import authority_projection, authority_store, policy
+from loopzero.kernel import (
+    authority_projection,
+    authority_store,
+    patch_identity,
+    policy,
+    review_state,
+)
 from loopzero.review import authority as review_authority
-from loopzero.review import findings, provisional_findings
+from loopzero.review import chain, findings, provisional_findings
+from loopzero.runners.contract import ReviewOutcome
 
 
 def _result(*, claim: str = "close the descriptor") -> dict[str, object]:
@@ -117,18 +124,25 @@ def _signed_history(
         capture_output=True,
         text=True,
     ).stdout.strip()
+    base_sha = subprocess.run(
+        ["git", "rev-parse", f"{snapshot_sha}^"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    identity_patch = patch_identity.compute_patch_identity(
+        repo, base_sha=base_sha, candidate_sha=snapshot_sha
+    )
     repository_binding = (
         repository_binding or authority_store.authority_repository_binding(repo)
     )
-    patch_identity = {
-        "base_ref": "refs/remotes/origin/main",
-        "base_sha": "0" * 40,
-        "candidate_sha": snapshot_sha,
-        "candidate_tree_sha": snapshot_tree_sha,
-        "merge_base_sha": "0" * 40,
-        "patch_id": "5" * 64,
-        "changed_paths": ["owned.py"],
-    }
+    generation_id = review_state.generation_id_for(
+        repository_binding, identity_patch, snapshot_tree_sha, ("code", "security")
+    )
+    reservation_id = review_state._reservation_id(
+        generation_id, "delivery", "primary", task_id, task_id
+    )
     identity = {
         **common,
         "task_id": task_id,
@@ -144,11 +158,14 @@ def _signed_history(
         "snapshot_tree_sha": snapshot_tree_sha,
         "result_artifact": result_artifact,
         "result_sha256": result_sha256,
-        "reservation_id": "rr_" + "2" * 32,
-        "generation_id": "cg_" + "3" * 32,
+        "reservation_id": reservation_id,
+        "generation_id": generation_id,
         "family": "gpt",
+        "review_family": "delivery",
+        "review_reservation_id": reservation_id,
+        "review_generation_id": generation_id,
         "repository_binding": repository_binding,
-        "patch_identity": patch_identity,
+        "patch_identity": identity_patch,
         "source_identity": {
             "head": snapshot_sha,
             "tree": snapshot_tree_sha,
@@ -161,7 +178,7 @@ def _signed_history(
             "task_id": task_id,
             "snapshot_sha": snapshot_sha,
             "snapshot_tree_sha": snapshot_tree_sha,
-            "patch_identity": patch_identity,
+            "patch_identity": identity_patch,
             "trigger_classifier": {
                 "security_trigger_paths": ["owned.py"],
                 "security_required": True,
@@ -214,13 +231,18 @@ def configured(tmp_path: Path):
     )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=tmp_path, check=True)
     (tmp_path / "owned.py").write_text("owned = True\n", encoding="utf-8")
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", "base"], cwd=tmp_path, check=True)
     subprocess.run(["git", "add", "owned.py"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=tmp_path, check=True)
     profile = SimpleNamespace(
         root=tmp_path,
         audit_root=Path(".audit"),
         finding_severities=("critical", "important", "suggestion"),
+        max_reviews_per_pr=1,
+        max_delta_reviews=1,
+        required_sections=("code", "security"),
     )
+    chain.configure(profile)
     provisional_findings.configure(profile)
     findings.configure(profile)
     return tmp_path
@@ -601,15 +623,14 @@ def test_binding_cannot_move_to_second_pr_after_replay(configured, monkeypatch):
 def test_compaction_retains_recovery_lineage_and_unique_binding(
     configured, monkeypatch
 ):
-    pytest.skip(
-        "requires a real generation/reservation/unresolved-settlement graph; "
-        "the minimal authority fixture is not a valid compaction witness"
-    )
     coordinator, records, terminal = _signed_history(configured)
     monkeypatch.setattr(
         kernel_authority,
         "_trusted_coordinator_public_key",
         lambda: coordinator.public_key,
+    )
+    monkeypatch.setattr(
+        review_authority, "verifier_identity_is_independent", lambda **_kwargs: True
     )
     admission = _admit(coordinator, records)
     receipt = provisional_findings.capture_provisional_findings(
@@ -617,6 +638,72 @@ def test_compaction_retains_recovery_lineage_and_unique_binding(
         authority_records=records,
         admission=admission,
         result=_result(),
+    )
+    resolution = review_state.resolve_generation(
+        records,
+        repository_binding=str(terminal["repository_binding"]),
+        patch_identity=terminal["patch_identity"],
+        tree_sha=str(terminal["snapshot_tree_sha"]),
+        required_sections=("code", "security"),
+        equivalence_proof=None,
+        format_only_proof=None,
+        family="delivery",
+    )
+    assert resolution.generation is not None
+    assert resolution.coverage is not None
+    records.append(
+        coordinator.seal(resolution.generation.to_dict(), authority_kind="coordinator")
+    )
+    records.append(
+        coordinator.seal(resolution.coverage.to_dict(), authority_kind="coordinator")
+    )
+    with authority_store.authority_ledger_lock(configured):
+        reservation = review_state.reserve_review_slot(
+            configured,
+            records,
+            generation_id=resolution.generation.generation_id,
+            family="delivery",
+            slot_kind="primary",
+            task_id=str(terminal["task_id"]),
+            idempotency_key=str(terminal["task_id"]),
+        )
+        records.append(
+            coordinator.seal(reservation.to_dict(), authority_kind="coordinator")
+        )
+        settlement = review_state.settle_review_slot(
+            configured,
+            records,
+            reservation=reservation,
+            outcome=ReviewOutcome.UNRESOLVED,
+            terminal_ref=terminal,
+        )
+        records.append(
+            coordinator.seal(settlement.to_dict(), authority_kind="coordinator")
+        )
+    recovery = coordinator.seal(
+        provisional_findings.build_recovery_evidence(
+            records,
+            repo=configured,
+            admission=admission,
+            capture_receipt=receipt,
+        ),
+        authority_kind="coordinator",
+    )
+    records.append(recovery)
+    records.append(
+        coordinator.seal(
+            {
+                "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+                "policy_version": policy.DISPATCH_POLICY_VERSION,
+                "type": "verdict",
+                "task_id": terminal["task_id"],
+                "run_id": terminal["run_id"],
+                "verdict": "pass",
+                "target_worker_identity": recovery.get("worker_identity"),
+                "verifier_identity": "independent-verifier",
+            },
+            authority_kind="coordinator",
+        )
     )
     binding = coordinator.seal(
         provisional_findings.build_publication_binding(
@@ -633,9 +720,28 @@ def test_compaction_retains_recovery_lineage_and_unique_binding(
     )
     records.append(binding)
 
-    compacted = authority_store.retained_authority_projection(records)
+    before = authority_projection.slot_state(
+        records, reservation.generation_id, "delivery"
+    )
+    assert before.reservations == (reservation,)
+    assert before.primary_consumed
+    assert before.attempt_count("primary") == 1
+    assert not before.delta_consumed
+    retained = authority_store.retained_authority_projection(records)
+    retained_types = [row.get("type") for row in retained]
+    compacted = authority_store._prospective_retained_view(
+        retained, source_records=records
+    )
+    after = authority_projection.slot_state(
+        compacted, reservation.generation_id, "delivery"
+    )
 
-    assert provisional_findings.authenticated_recovery_admissions(compacted)
+    assert after.reservations == (reservation,), retained_types
+    assert after.primary_consumed, retained_types
+    assert after.attempt_count("primary") == 1
+    assert not after.delta_consumed
+    assert provisional_findings.authenticated_recovery_admissions(compacted), retained_types
+    assert review_authority.authenticated_review_terminals(compacted)["review-1"] == recovery
     assert provisional_findings.authenticated_publication_bindings(compacted) == {
         admission["provisional_owner_id"]: binding
     }

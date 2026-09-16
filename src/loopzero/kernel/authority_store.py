@@ -65,6 +65,8 @@ from .gitscope import (
 from .seams import (
     _latest_attempt_settlement_indices,
     accepted_review_terminals,
+    authenticated_publication_bindings,
+    authenticated_recovery_admissions,
     authenticated_retry_outcomes,
     authenticated_review_terminals,
     authenticated_supersessions,
@@ -97,13 +99,20 @@ def _governed_records_with_review_state(
 ) -> list[dict[str, object]]:
     """Merge telemetry-policy rows with separately versioned D29 authority."""
     review_state = authenticated_review_state_records(records)
+    finding_authority = (
+        *authenticated_recovery_admissions(records).values(),
+        *authenticated_publication_bindings(records).values(),
+    )
     reservation_ids = {
         record.get("reservation_id")
         for record in review_state
         if record.get("type") == "review-slot-reservation-v1"
         and isinstance(record.get("reservation_id"), str)
     }
-    selected = {id(record) for record in (*current_telemetry(records), *review_state)}
+    selected = {
+        id(record)
+        for record in (*current_telemetry(records), *review_state, *finding_authority)
+    }
     # Review observations are versioned separately from the authority they
     # describe. Once a reservation is authenticated, keep every joined launch
     # and outcome across telemetry-schema rotations so compaction cannot leave
@@ -946,6 +955,40 @@ def _retention_live_record_ids(
             in referenced_terminal_tasks
         )
     }
+    recovery_admissions = authenticated_recovery_admissions(records)
+    publication_bindings = authenticated_publication_bindings(records)
+    review_terminals = authenticated_review_terminals(records)
+    anchored_recovery_tasks: set[str] = set()
+    for task_id, admission in recovery_admissions.items():
+        terminal = review_terminals.get(task_id)
+        if (
+            (admission.get("task_id"), admission.get("run_id"))
+            in referenced_terminal_tasks
+            and terminal is not None
+            and terminal.get("type") == "attempt-recovery"
+            and terminal.get("recovery_classification")
+            == "finding-deposition-only"
+            and terminal.get("provisional_owner_id")
+            == admission.get("provisional_owner_id")
+        ):
+            anchored_recovery_tasks.add(task_id)
+    anchored_recovery_ids = {
+        id(record)
+        for task_id in anchored_recovery_tasks
+        for record in (
+            recovery_admissions[task_id],
+            review_terminals[task_id],
+        )
+    }
+    anchored_recovery_owners = {
+        recovery_admissions[task_id].get("provisional_owner_id")
+        for task_id in anchored_recovery_tasks
+    }
+    anchored_recovery_ids.update(
+        id(binding)
+        for owner, binding in publication_bindings.items()
+        if owner in anchored_recovery_owners
+    )
     active_runs = frozenset(active_run_ids)
     open_units_by_worktree: dict[str, dict[str, list[str]]] = {}
     latest_standing: dict[tuple[object, ...], int] = {}
@@ -1002,6 +1045,7 @@ def _retention_live_record_ids(
         )
         if (
             id(record) in authenticated_reentry_ids
+            or id(record) in anchored_recovery_ids
             or id(record) in referenced_dependency_ids
             or record_type
             in {

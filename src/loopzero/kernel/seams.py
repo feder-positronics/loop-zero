@@ -23,7 +23,7 @@ def _invoke(name, *args, **kwargs):
         raise MissingAdapter(f"A4 adapter required: {name}")
     return _adapters[name](*args, **kwargs)
 
-ADAPTER_NAMES = frozenset(['_latest_attempt_settlement_indices', 'accepted_review_terminals', 'archived_supersession_deposits', 'authenticated_retry_outcomes', 'authenticated_review_terminals', 'authenticated_supersessions', 'authenticated_verdicts', 'delivery_controller_records', 'latest_explicit_alias_availability', 'load_authority_records', 'passing_archive_ancestry', 'passing_archive_anchor', 'supersession_reason_matches_terminal', 'validate_archived_review_witness'])
+ADAPTER_NAMES = frozenset(['_latest_attempt_settlement_indices', 'accepted_review_terminals', 'archived_supersession_deposits', 'authenticated_publication_bindings', 'authenticated_recovery_admissions', 'authenticated_retry_outcomes', 'authenticated_review_terminals', 'authenticated_supersessions', 'authenticated_verdicts', 'delivery_controller_records', 'latest_explicit_alias_availability', 'load_authority_records', 'passing_archive_ancestry', 'passing_archive_anchor', 'supersession_reason_matches_terminal', 'validate_archived_review_witness'])
 
 def _latest_attempt_settlement_indices(*args, **kwargs):
     # TODO(A4): inject the consumer review/delivery mechanism.
@@ -36,6 +36,14 @@ def accepted_review_terminals(*args, **kwargs):
 def archived_supersession_deposits(*args, **kwargs):
     # TODO(A4): inject the consumer review/delivery mechanism.
     return _invoke('archived_supersession_deposits', *args, **kwargs)
+
+def authenticated_publication_bindings(*args, **kwargs):
+    # TODO(A4): inject the consumer review/delivery mechanism.
+    return _invoke('authenticated_publication_bindings', *args, **kwargs)
+
+def authenticated_recovery_admissions(*args, **kwargs):
+    # TODO(A4): inject the consumer review/delivery mechanism.
+    return _invoke('authenticated_recovery_admissions', *args, **kwargs)
 
 def authenticated_retry_outcomes(*args, **kwargs):
     # TODO(A4): inject the consumer review/delivery mechanism.
