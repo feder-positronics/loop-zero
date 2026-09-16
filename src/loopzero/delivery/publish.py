@@ -269,15 +269,29 @@ def _repo_root(runner: CommandRunner | None = None) -> Path:
     return Path(common_git_dir).parent
 
 
-def require_canonical_publisher_source(
-    authority_repo: Path, *, source_path: Path | None = None
-) -> None:
-    """Reject a publisher loaded from a delivery branch or stale worktree."""
+def require_canonical_publisher_source(authority_repo: Path) -> None:
+    """Require ``python -I <absolute primary publisher>`` as the process entry.
+
+    Linux exposes the launch argument vector through ``/proc``.  Mutable Python
+    labels such as ``sys.argv`` and ``__main__.__file__`` cannot confer
+    publisher authority through this API.
+    """
     expected = (
         authority_repo.resolve() / "scripts" / "util" / "pr_publish.py"
     ).resolve()
-    actual = (source_path or Path(__file__)).resolve()
-    if actual != expected:
+    try:
+        process_argv = Path("/proc/self/cmdline").read_bytes().split(b"\0")
+        actual = Path(os.fsdecode(process_argv[2]))
+    except (IndexError, OSError, TypeError, ValueError):
+        actual = None
+    if (
+        actual is None
+        or process_argv[1] != b"-I"
+        or not actual.is_absolute()
+        or actual.is_symlink()
+        or not actual.is_file()
+        or actual.resolve() != expected
+    ):
         raise PublicationError(
             "PR publication must run the canonical primary publisher. Retry with "
             f"`/usr/bin/python3 -I {expected} ...` from the delivery worktree."
