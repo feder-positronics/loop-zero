@@ -564,6 +564,8 @@ def admit_review(
     diff_sha256: str | None = None,
     attempt_index: int = 0,
     source_worktree: Path | None = None,
+    outage_authorization_sha256: str | None = None,
+    replacement_route: Mapping[str, object] | None = None,
 ) -> Admission:
     """Resolve content, carry valid coverage, or reserve one bounded review."""
     assert_authority_ledger_lock_held(repository)
@@ -628,6 +630,8 @@ def admit_review(
         return _blocked("unknown-intent", type(exc).__name__)
     if bound_family is not _UNBOUND_TASK and bound_family != family:
         return _blocked("unknown-intent", "ReviewIntentRelabelError")
+    if outage_authorization_sha256 is not None and family is None:
+        return _blocked("unknown-intent", "OutageReviewIntentError")
     if family is None:
         if not isinstance(task.get("task_contract"), Mapping):
             return _blocked("missing-evidence", "ReviewIntentAuthorityError")
@@ -1436,21 +1440,56 @@ def admit_review(
             delta_scope["invalidated_claim_ids"] = list(invalidated_claim_ids)
             delta_scope["retirement_claim_ids"] = list(retirement_claim_ids)
     try:
-        reservation = _reserve_review_slot(
-            records,
-            generation_id=generation.generation_id,
-            family=family,
-            slot_kind=slot_kind,
-            task_id=task_id,
-            idempotency_key=idempotency_key,
-            coverage_digest=coverage_digest,
-            prospective_generation=(generation if resolution.kind == "new" else None),
-            prospective_inherited_primary=(inherited_primary is not None),
-            released_retry_reverification=released_retry_reverification,
-        )
+        if outage_authorization_sha256 is not None:
+            from .outage_recovery import validate_outage_recovery
+            from ..kernel.review_state import _reservation_id
+
+            validate_outage_recovery(
+                repository,
+                records,
+                authorization_sha256=outage_authorization_sha256,
+                task=task,
+                source_identity=current_source_identity,
+                run_id=task.get("run_id"),
+                generation_id=generation.generation_id,
+                family=family,
+                slot_kind=slot_kind,
+                route=replacement_route,
+                attempt_index=attempt_index,
+            )
+            recovery_key = "outage:" + outage_authorization_sha256
+            if idempotency_key != recovery_key:
+                return _blocked("missing-evidence", "OutageReservationBindingError")
+            reservation = ReviewSlotReservation(
+                generation_id=generation.generation_id,
+                family=family,
+                slot_kind=slot_kind,
+                task_id=task_id,
+                idempotency_key=recovery_key,
+                coverage_digest=coverage_digest,
+                reservation_id=_reservation_id(
+                    generation.generation_id, family, slot_kind, task_id,
+                    recovery_key, coverage_digest,
+                ),
+            )
+        else:
+            reservation = _reserve_review_slot(
+                records,
+                generation_id=generation.generation_id,
+                family=family,
+                slot_kind=slot_kind,
+                task_id=task_id,
+                idempotency_key=idempotency_key,
+                coverage_digest=coverage_digest,
+                prospective_generation=(generation if resolution.kind == "new" else None),
+                prospective_inherited_primary=(inherited_primary is not None),
+                released_retry_reverification=released_retry_reverification,
+            )
     except ReviewSlotError as exc:
         code = cast(BlockedCode, exc.code)
         return _blocked(code, str(exc), records=append_before_slot)
+    except DispatchError as exc:
+        return _blocked("missing-evidence", type(exc).__name__, records=append_before_slot)
     if reservation.existing and reservation.conflict:
         return _blocked(
             "slot-held",
@@ -1480,6 +1519,8 @@ def admit_review(
         "review_slot_kind": slot_kind,
         "review_reservation_id": reservation.reservation_id,
     }
+    if outage_authorization_sha256 is not None:
+        scoped_task["outage_authorization_sha256"] = outage_authorization_sha256
     if delta_scope is not None:
         scoped_task["delta_scope"] = delta_scope
     to_append = list(append_before_slot)

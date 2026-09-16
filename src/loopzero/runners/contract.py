@@ -399,6 +399,25 @@ class RuntimeEvent:
     item_id: str | None = None
 
 
+def usage_observes_model_output(*payloads: object) -> bool:
+    """Positive raw counters deny emptiness, including discarded alias values."""
+    output_keys = {
+        "output_tokens", "outputTokens", "completion_tokens", "reasoning_tokens",
+        "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens",
+    }
+    pending = list(payloads)
+    while pending:
+        payload = pending.pop()
+        if not isinstance(payload, dict):
+            continue
+        for key, value in payload.items():
+            if key in output_keys and type(value) in {int, float} and value > 0:
+                return True
+            if isinstance(value, dict):
+                pending.append(value)
+    return False
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeUsage:
     """Optional native usage counters; ``None`` means unavailable, not zero."""
@@ -446,6 +465,8 @@ class RuntimeResult:
     structured_output: dict[str, object] | None = field(default=None, repr=False)
     transport_attempts: tuple[RuntimeTransportAttempt, ...] = ()
     billing_mode: RuntimeBillingMode = RuntimeBillingMode.UNKNOWN
+    # Unknown for legacy/unobserved streams; False requires complete SDK evidence.
+    model_output_seen: bool | None = None
 
 
 class RuntimeAdapter(Protocol):

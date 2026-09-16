@@ -51,6 +51,7 @@ _POLICY_FAMILIES = (
     "finding-recovery-admission-v1",
     "inline",
     "inconclusive-retry-authorization",
+    "provider-outage-recovery-authorization-v1",
     "review-chain-advisory",
     "review-generation-v1",
     "review-generation-proof-v1",

@@ -57,6 +57,7 @@ from .contract import (
     RuntimeToolLabel,
     is_valid_resume_session_id,
     sanitized_provider_error,
+    usage_observes_model_output,
 )
 
 PINNED_CODEX_VERSION: str = _codex_isolation.PINNED_CODEX_VERSION
@@ -2301,6 +2302,7 @@ async def _run_claude(
     accepted_structured_output: dict[str, object] | None = None
     saw_message = False
     model_output_seen = False
+    output_observation_complete = True
     denial_diagnostics: dict[str, int] = {}
 
     def terminal_protocol_failure() -> None:
@@ -2359,6 +2361,8 @@ async def _run_claude(
         if isinstance(message, AssistantMessage):
             synthetic = message.model == "<synthetic>" or bool(message.error)
             if synthetic:
+                if message.model != "<synthetic>":
+                    output_observation_complete = False
                 detail = sanitized_provider_error(message.error)
                 _event_frame(
                     kind="assistant", subtype="error", semantic=False, detail=detail,
@@ -2452,6 +2456,9 @@ async def _run_claude(
             )
             continue
         if isinstance(message, StreamEvent):
+            model_output_seen = model_output_seen or usage_observes_model_output(
+                message.event
+            )
             event_type = message.event.get("type") if isinstance(message.event, dict) else None
             if event_type == "message_start":
                 # Provider acceptance prevents replay, but does not prove output.
@@ -2461,6 +2468,10 @@ async def _run_claude(
                 )
                 continue
             if event_type not in {"content_block_start", "content_block_delta"}:
+                if event_type not in {
+                    "message_delta", "message_stop", "content_block_stop", "ping"
+                }:
+                    output_observation_complete = False
                 continue
             model_output_seen = True
             progress_phase, tool_label = _claude_stream_progress(message.event)
@@ -2492,6 +2503,13 @@ async def _run_claude(
             request_id = _metadata(message.uuid) or request_id
             model_from_usage = _model_from_usage(message.model_usage)
             effective_model = effective_model or model_from_usage
+            # Capture before normalization discards partial or budget-limited output.
+            if (
+                message.result is not None
+                or message.structured_output is not None
+                or usage_observes_model_output(message.usage, message.model_usage)
+            ):
+                model_output_seen = True
             output = message.result
             if output is not None and not isinstance(output, str):
                 output = None
@@ -2564,7 +2582,10 @@ async def _run_claude(
                 frame["structured_output_recovery"] = "accepted-tool-result"
             frame["permission_check_denials"] = denial_diagnostics
             frame["subtype"] = result_subtype
-            frame["model_output_seen"] = model_output_seen
+            frame["model_output_seen"] = (
+                True if model_output_seen else False if output_observation_complete else None
+            )
+            frame["model_output_evidence_version"] = 1
             if message.is_error:
                 errors = getattr(message, "errors", None)
                 if isinstance(errors, list):
@@ -2602,6 +2623,7 @@ async def _run_claude(
                 frame["cost_source"] = "vendor"
             _write_frame(frame)
             return
+        output_observation_complete = False
     if not saw_message:
         raise RuntimeError("startup")
     raise RuntimeError("protocol")
