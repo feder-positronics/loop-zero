@@ -1,8 +1,9 @@
 # Design records
 
-Why loop-zero is shaped as it is. These are records, not plans: each was
-written when a decision was made and is amended in place when a later
-decision supersedes it.
+Why loop-zero is shaped as it is. This directory includes architecture records,
+normative contracts, historical reviews, and proposals. Consult each document's
+status and scope before treating a proposed change as current behavior. The
+[authority review bar](authority-review-bar.md) is a normative merge requirement.
 
 | Document | What it answers |
 | --- | --- |
@@ -12,6 +13,8 @@ decision supersedes it.
 | [Review bar for authority code](authority-review-bar.md) | The method and the rules any change to admission, slots, generations, claims, credentials or the ledger must satisfy before merge |
 | [Review verdicts as content facts](2026-09-14-review-verdicts-as-content-facts.md) | Why a review verdict is keyed by content rather than by pull request, and how claim-level trust verification works |
 | [Preventing delivery blockages](2026-09-16-preventing-delivery-blockages.md) | Proposed prevention strategy for mutable test inputs, renewal loss, interrupted delivery, and operational waits |
+| [Authenticated generation-link producer](authenticated-generation-link-producer.md) | Producer ownership, transaction boundaries, and remaining review evidence |
+| [Finding deposition recovery contract](finding-deposition-recovery-contract.md) | Recovery ownership, admission rules, and regression requirements |
 
 Decisions that belong to a particular consumer's repository, such as its
 branch protection, environment prefix, throughput thresholds or dependency

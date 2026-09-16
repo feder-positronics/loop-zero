@@ -291,3 +291,55 @@ includes the shared module and passed direct delivery-import and custom-schema
 probes. Repository status and whitespace checks passed. No live providers were
 launched, consumer pins changed, or changes merged. The larger authority,
 portability, and credential/transport decompositions remain subsequent stages.
+
+
+**Documentation organization follow-up (2026-09-16).** Reviewed the documentation
+inventory after integrating main at `9d925ea5`. The main problem is competing
+purposes and unclear authority, rather than a shortage of documentation.
+
+| Finding | Consequence | Recommended change |
+| --- | --- | --- |
+| [README](../README.md) devotes most of its 202 lines to nightly operations and still instructs consumers to upgrade to 0.2.1 | New readers encounter credential and release procedures before understanding adoption; release advice is stale against `core/VERSION` | Keep the root page to purpose, architecture, adoption, validation, limitations and navigation; move the detailed nightly section intact to an operator page before consolidating it |
+| [SETUP](../SETUP.md) calls `core/` the entire portable distribution, despite also requiring the Python package | The two-part pinning contract is easy to misunderstand | Explain both artifacts first; separate ongoing revision updates from the historical 0.2.1 migration |
+| [Nightly documentation](nightly-conformance.md), the root README and [conformance test README](../tests/conformance/README.md) repeat operational and cost rules | A billing or credential change can update one explanation while leaving another authoritative-looking copy | Give credential renewal and accounting one canonical owner each; keep test-local documentation focused on contributor invocation and link to the operator guide |
+| [Design index](design/README.md) says records are not plans but includes a proposed blockage strategy; two contracts are unlisted | Readers cannot reliably distinguish active rules, proposals and history | Label document purpose and status; index generation-link production and finding recovery explicitly |
+| [Authority review policy](design/authority-review-bar.md) sits among dated design discussions | A mandatory merge rule is discoverable only through historical architecture navigation | Surface it directly in contributor navigation; eventually place normative policies together without changing their requirements |
+| [CODE-HEALTH-PLAN](../CODE-HEALTH-PLAN.md) mixes implementation status, current architecture and future adoption, overlapping [code-health reference](code-health.md) | Two documents can disagree about what is implemented | Make the reference authoritative for current behavior; retain only unfinished work and historical decisions in the plan |
+| The decision record combines settled decisions, assumptions and deferred work in long tables | Status changes are hard to audit, and later decisions can appear under an unrelated status heading | Add explicit status and supersession links per decision; split only when a decision warrants its own explanation |
+
+Start with one `docs/README.md` organized by the reader's task: adopt, develop,
+operate, understand architecture, and inspect reviews/proposals. Keep filenames
+stable for that first pass. The root README should link to this map, setup,
+current limitations, and the repository-owned review policy.
+
+A later move can use four small groups, without building a documentation framework:
+
+| Group | Canonical content |
+| --- | --- |
+| `docs/guides/` | Consumer setup and upgrades; nightly operation and credential renewal |
+| `docs/reference/` | Current configuration, accounting, code-health behavior and normative review policy |
+| `docs/design/` | Architecture and decision records, with explicit proposed/current/superseded status |
+| `docs/reviews/` | Dated assessments such as this review and the independent architecture review |
+
+Keep source-local READMEs for implementation details and test-local READMEs for
+running that suite. The portable `core/CONTRACT.md`, skill templates and handoff
+are distribution inputs, not ordinary site pages: moving them changes rendering
+and consumer contracts. Keep them in place and link to their authority rather
+than copying their text into guides. Keep `KNOWN-GAPS.md` as the single curated
+debt list; proposals should point to existing issues rather than create another
+backlog.
+
+Each mixed or evolving page needs a short status statement and an explicit
+scope: current behavior, proposal, normative requirement, or historical evidence.
+Historical reviews should retain the reviewed revision. Current guides should
+link to executable version pins instead of repeating transient release advice.
+Security residuals and acceptance criteria must survive moves unchanged; removing
+repeated prose is not permission to weaken the underlying contract.
+
+Sequence: add navigation and repair the misleading entry points; choose the
+canonical owner for each duplicated subject; consolidate one subject at a time;
+then move pages with updated inbound links and short old-path pointers where
+external consumers may rely on them. Verify changed local links and existing
+skill-rendering checks. No new documentation generator, external-link network
+gate, or repository-wide metadata system is needed. Success means that each
+reader task has one obvious entry point and each operational rule has one owner.

@@ -4,8 +4,9 @@
 
 Use an inspected local checkout of `https://github.com/feder-positronics/loop-zero`
 and select its full 40-character commit SHA. A branch or tag is not a pin.
-The source `core/` directory is the entire portable distribution; tests and
-source documentation remain here. The example consumer location is
+The portable distribution has two parts: the source `core/` snapshot and the
+`loopzero` Python package, both pinned to that SHA. Tests and source documentation
+remain here. The example consumer location is
 `vendor/loop-zero/` relative to the consumer repository root.
 
 For a new consumer, from its root, with `LOOP_ZERO_SOURCE` set to the source
