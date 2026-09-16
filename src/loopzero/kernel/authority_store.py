@@ -284,6 +284,11 @@ def _authority_repository_binding(repo: Path) -> str:
         raise DispatchError(f"authority ledger identity is invalid: {exc}") from exc
 
 
+def authority_repository_binding(repo: Path) -> str:
+    """Read the kernel-derived binding; callers cannot select a ledger label."""
+    return _authority_repository_binding(repo)
+
+
 def _load_legacy_authority_records(repo: Path) -> list[dict[str, object]]:
     directory = repo / DISPATCH_DIR
     if not directory.is_dir():
