@@ -97,7 +97,7 @@ def _validate_paths(source: Path | None, output: Path) -> tuple[Path | None, Pat
     return source, output
 
 
-def _host_refresh_wrapper() -> SandboxWrapper:
+def host_refresh_wrapper() -> SandboxWrapper:
     """Build the release-owned positive filesystem allowlist for refresh only."""
 
     bwrap_value = shutil.which("bwrap")
@@ -159,6 +159,11 @@ def _host_refresh_wrapper() -> SandboxWrapper:
         return command
 
     return wrapper
+
+
+# Compatibility for existing package internals and downstream tests. New host
+# launchers use the public name so they do not depend on a private package seam.
+_host_refresh_wrapper = host_refresh_wrapper
 
 
 def _read_snapshot(descriptor: int) -> bytes:

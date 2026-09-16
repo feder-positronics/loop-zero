@@ -50,7 +50,7 @@ def test_refresh_mounts_only_exact_python_installations(tmp_path, monkeypatch):
     monkeypatch.setattr(credential_seal.sys, "base_exec_prefix", str(extensions))
     monkeypatch.delenv("LOOPZERO_LIVE_RUNTIME_ROOT", raising=False)
     monkeypatch.setattr(credential_seal.shutil, "which", lambda _: "/usr/bin/true")
-    argv = credential_seal._host_refresh_wrapper()(LaunchSpec(
+    argv = credential_seal.host_refresh_wrapper()(LaunchSpec(
         argv=(str(venv / "bin/python"),), cwd=tmp_path,
         private_mounts=(), private_tmpdir=tmp_path / "private",
     ))
