@@ -275,8 +275,10 @@ def authenticated_provisional_admissions(
     result = dict(pf.authenticated_recovery_admissions(records))
     for task, row in authenticated_capture_admissions(records).items():
         if task in result:
-            # Different provenance cannot silently move a task's owner.
-            result.pop(task)
+            # Retain both historical projections, but never erase their debt.
+            raise pf.ProvisionalFindingError(
+                "provisional finding ownership has conflicting provenance"
+            )
         else:
             result[task] = row
     return result

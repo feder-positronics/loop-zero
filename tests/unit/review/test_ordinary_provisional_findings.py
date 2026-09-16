@@ -664,11 +664,22 @@ def _first_deposition_failure(case):
     start = next(row for row in records if row["type"] == "attempt-start")
     failure = dispatcher.seal(
         {
-            **{k: v for k, v in start.items()
-               if k not in {"terminal_authority_proof", "terminal_authority"}},
-            **{key: completion[key] for key in (
-                "result_artifact", "result_sha256", "reservation_id",
-                "generation_id", "family", "repository_binding")},
+            **{
+                k: v
+                for k, v in start.items()
+                if k not in {"terminal_authority_proof", "terminal_authority"}
+            },
+            **{
+                key: completion[key]
+                for key in (
+                    "result_artifact",
+                    "result_sha256",
+                    "reservation_id",
+                    "generation_id",
+                    "family",
+                    "repository_binding",
+                )
+            },
             "type": "attempt-terminal",
             "status": "infrastructure-failure",
             "failure_class": "finding-deposition-failed",
@@ -691,7 +702,9 @@ def test_pending_ordinary_owner_rejects_recovery_after_first_failure(ordinary):
     assert sum(row["type"] == "attempt-terminal" for row in records) == 1
     with pytest.raises(provisional.ProvisionalFindingError, match="conflict"):
         provisional.build_recovery_admission(records, task_id="review-1")
-    assert provisional.authenticated_capture_admissions(records)["review-1"] == admission
+    assert (
+        provisional.authenticated_capture_admissions(records)["review-1"] == admission
+    )
 
 
 def test_historical_conflicting_owners_cannot_erase_publication_debt(ordinary):
@@ -716,8 +729,12 @@ def test_historical_conflicting_owners_cannot_erase_publication_debt(ordinary):
         authority_kind="coordinator",
     )
     records.append(recovery)
-    assert provisional.authenticated_recovery_admissions(records)["review-1"] == recovery
-    assert provisional.authenticated_capture_admissions(records)["review-1"] == admission
+    assert (
+        provisional.authenticated_recovery_admissions(records)["review-1"] == recovery
+    )
+    assert (
+        provisional.authenticated_capture_admissions(records)["review-1"] == admission
+    )
     with pytest.raises(provisional.ProvisionalFindingError, match="conflict"):
         provisional.authenticated_provisional_admissions(records)
     with pytest.raises(provisional.ProvisionalFindingError, match="conflict"):

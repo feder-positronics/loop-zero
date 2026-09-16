@@ -231,6 +231,10 @@ def build_recovery_admission(
     records: Sequence[dict[str, object]], *, task_id: str
 ) -> dict[str, object]:
     """Derive an admission solely from one authenticated closed failure."""
+    if task_id in authenticated_capture_admissions(records):
+        raise ProvisionalFindingError(
+            "finding recovery conflicts with existing ordinary capture ownership"
+        )
     terminal = authenticated_review_terminals(records).get(task_id)
     if terminal is None or not _eligible_terminal(terminal):
         raise ProvisionalFindingError(
