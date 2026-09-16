@@ -5693,16 +5693,28 @@ def test_bridge_reporter_stops_and_joins_on_every_terminal_path(
 def test_progress_reader_reporter_is_cleaned_up_on_terminal_paths(
     tmp_path: Path,
     mode: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     code = "pass" if mode == "normal" else "import time; time.sleep(60)"
+    real_sweep = process._process_group_has_live_member
+
+    def loaded_host_sweep(pgid: int) -> bool:
+        # A /proc scan can exceed the old 50 ms test grace on a busy host.
+        # Exercise that case without creating host-wide CPU/process load.
+        time.sleep(0.06)
+        return real_sweep(pgid)
+
+    monkeypatch.setattr(process, "_process_group_has_live_member", loaded_host_sweep)
 
     result = run_cli_unsandboxed(
         [sys.executable, "-c", code],
         cwd=tmp_path,
         input_text="",
-        timeout_s=2 if mode == "normal" else 0.05,
+        timeout_s=10 if mode == "normal" else 0.05,
         env={"PATH": os.environ["PATH"]},
-        terminate_grace_s=0.05,
+        # Use the production cleanup allowance; this test asserts reader cleanup,
+        # not subsecond process scheduling. Deadline bounds have dedicated tests.
+        terminate_grace_s=2.0,
         on_progress=lambda _progress: None,
     )
 
