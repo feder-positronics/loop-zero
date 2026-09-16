@@ -273,12 +273,15 @@ def _repo_root(runner: CommandRunner | None = None) -> Path:
     return Path(common_git_dir).parent
 
 
-def require_canonical_publisher_source(authority_repo: Path) -> None:
+def require_canonical_publisher_source(
+    authority_repo: Path, *, source_path: Path | None = None
+) -> None:
     """Require ``python -I <absolute primary publisher>`` as the process entry.
 
     Linux exposes the launch argument vector through ``/proc``.  Mutable Python
-    labels such as ``sys.argv`` and ``__main__.__file__`` cannot confer
-    publisher authority through this API.
+    labels such as ``sys.argv``, ``__main__.__file__`` and ``source_path`` cannot
+    confer publisher authority through this API. ``source_path`` remains an
+    accepted compatibility argument for rendered consumer facades.
     """
     expected = (
         authority_repo.resolve() / "scripts" / "util" / "pr_publish.py"
