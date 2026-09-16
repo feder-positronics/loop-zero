@@ -125,3 +125,22 @@ cannot refresh on GitHub.
 Cursor remains non-blocking under #35. Its host-renewal mechanism is not provided
 by this Codex command; do not use it to upload a Cursor native login containing
 refresh capability. Completing Cursor renewal remains part of #32 step 2.
+
+## Cost presentation and budget accounting
+
+The nightly summary reports **API-equivalent USD**, a usage proxy. Under a
+subscription this is not a per-turn payment or a conversion of subscription
+quota into dollars. Vendor-reported or estimated values retain their
+`cost_source`; billing mode is not inferred from those values.
+
+Normalized artifacts retain the existing `cost_usd` and `charged_cost_usd` keys
+for compatibility. `cost_usd` is the runtime's API-equivalent usage value when
+known. Scenario and aggregate `charged_cost_usd` values are **budget debits**:
+they include conservative fallback or vendor-cap charges for killed or
+unaccounted invocations and can exceed known usage. Read `accounting` and
+`cost_sources` alongside each scenario's debit. The aggregate sums those debits;
+it does not report money paid.
+
+The configured USD ceiling and all existing charge, kill, and unknown-cost
+limits continue to enforce the same runaway bound. Credential-derived billing
+mode and account/model quota evidence remain follow-up work in #34 and #32.

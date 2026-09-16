@@ -607,6 +607,7 @@ def _request(vendor: str, scenario: str, root: Path, timeout_s: float, resume: s
 
 
 def _normalized(result: RuntimeResult) -> dict[str, object]:
+    """Retain cost_usd as the API-equivalent usage proxy, not a payment record."""
     usage = asdict(result.usage) if result.usage is not None else None
     return {
         "vendor": result.vendor,
@@ -792,15 +793,16 @@ def _write_results(
             {
                 "runtime": vendor,
                 "version": pin,
+                # Budget debit includes conservative charges for unknown usage.
                 "charged_cost_usd": round(total, 9),
                 "killed_runs": killed_runs,
                 "max_killed_runs": max_killed_runs,
                 "unaccounted_runs": unaccounted_runs,
                 "max_unaccounted_runs": max_unaccounted_runs,
                 "spend_bound": (
-                    "fixed fallback charge plus aggregate charged-cost ceiling"
+                    "fixed conservative budget debit plus aggregate API-equivalent USD ceiling"
                     if vendor == "cursor"
-                    else "vendor cap plus aggregate charged-cost ceiling"
+                    else "vendor cap plus aggregate API-equivalent USD ceiling"
                 ),
                 "readiness": readiness,
                 "scenarios": records,
