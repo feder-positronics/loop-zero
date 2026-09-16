@@ -423,7 +423,7 @@ def test_trusted_base_body_check_rejects_a_base_whose_checker_is_unavailable() -
             body="anything",
             standalone=False,
             error_type=module.PublicationError,
-            run_checker=lambda argv, _source: invoked.append(list(argv)),
+            run_checker=lambda argv: invoked.append(list(argv)),
         )
 
     assert invoked == []
@@ -436,9 +436,10 @@ def test_trusted_base_body_check_reports_the_base_checkers_failing_rule() -> Non
     runner = _TrustedShowRunner(checker_source="print('base checker')")
     seen: dict[str, object] = {}
 
-    def fake_checker(argv, source):
+    def fake_checker(argv):
         seen["argv"] = list(argv)
-        seen["source"] = source
+        seen["source"] = Path(argv[2]).read_text(encoding="utf-8")
+        assert Path(argv[2]).parent.stat().st_mode & 0o777 == 0o700
         seen["body"] = Path(argv[argv.index("--body-file") + 1]).read_text(
             encoding="utf-8"
         )
@@ -468,13 +469,15 @@ def test_trusted_base_body_check_reports_the_base_checkers_failing_rule() -> Non
     argv = seen["argv"]
     assert seen["source"] == "print('base checker')"
     assert seen["body"] == VALID_BODY
-    assert argv[:3] == [sys.executable, "-I", "-"]
+    assert argv[:2] == [sys.executable, "-I"]
+    assert Path(argv[2]).name == "pr_body_check.py"
+    assert not Path(argv[2]).parent.exists()
     assert "--ready" in argv and "--standalone" in argv
     assert not Path(argv[argv.index("--body-file") + 1]).exists()
 
 
 def test_trusted_base_body_check_runs_the_real_checker_source() -> None:
-    """The base revision's checker executes from stdin, exactly as PR Lint would."""
+    """The base revision's plain checker still executes as a standalone file."""
     checker_source = (
         Path(module.__file__).resolve().parent / "pr_body_check.py"
     ).with_name("_body_check.py").read_text(encoding="utf-8")
