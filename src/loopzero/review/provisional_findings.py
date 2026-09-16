@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -21,8 +20,7 @@ from ..kernel.authority_projection import (
     AuthorityRecordView,
     authenticated_coordinator_record_ids,
 )
-from ..kernel.gitscope import trusted_git_command
-from ..kernel.sandbox import environment as sandbox_environment
+from ..kernel.gitscope import DispatchError
 from .authority import authenticated_review_terminals
 
 ADMISSION_TYPE = "finding-recovery-admission-v1"
@@ -257,7 +255,6 @@ def authenticated_recovery_admissions(
     coordinator_ids = authenticated_coordinator_record_ids(records)
     preceding: list[dict[str, object]] = []
     admitted: dict[str, dict[str, object]] = {}
-    conflicted: set[str] = set()
     for record in records:
         if record.get("type") != ADMISSION_TYPE:
             preceding.append(record)
@@ -278,13 +275,8 @@ def authenticated_recovery_admissions(
         )
         if expected is None or not _matches_enveloped_payload(record, expected):
             continue
-        if task_id in admitted and admitted[task_id] != record:
-            conflicted.add(task_id)
-        else:
-            admitted[task_id] = record
+        admitted.setdefault(task_id, record)
         preceding.append(record)
-    for task_id in conflicted:
-        admitted.pop(task_id, None)
     return admitted
 
 
@@ -316,6 +308,7 @@ def _capture_receipts(
 ) -> dict[str, dict[str, object]]:
     receipts: dict[str, dict[str, object]] = {}
     members: dict[str, list[str]] = {}
+    member_counts: dict[str, int] = {}
     for row in records:
         owner = row.get("provisional_owner_id")
         if not isinstance(owner, str):
@@ -330,6 +323,40 @@ def _capture_receipts(
             finding_id = row.get("finding_id")
             if not isinstance(finding_id, str) or not finding_id:
                 raise ProvisionalFindingError("provisional finding has no identity")
+            index = member_counts.get(owner, 0) + 1
+            member_counts[owner] = index
+            finding = {
+                key: row.get(key)
+                for key in (
+                    "severity",
+                    "claim",
+                    "path",
+                    "line_start",
+                    "line_end",
+                    "content_anchor",
+                )
+            }
+            expected_id = "pf_" + _digest(
+                {"owner": owner, "index": index, **finding}
+            )
+            expected_keys = {
+                "type",
+                "provisional_owner_id",
+                "finding_id",
+                "state",
+                "review_task_id",
+                "delivery_run_id",
+                *finding,
+            }
+            if (
+                set(row) != expected_keys
+                or row.get("state") != "open"
+                or finding_id != expected_id
+            ):
+                raise ProvisionalFindingError(
+                    "provisional capture has no complete receipt: "
+                    "finding content does not match its identity"
+                )
             owned = members.setdefault(owner, [])
             if finding_id in owned:
                 raise ProvisionalFindingError(
@@ -368,19 +395,43 @@ def load_provisional_findings(
     ]
 
 
+def authenticated_provisional_findings(
+    records: Sequence[dict[str, object]],
+    repo: Path | str,
+    *,
+    admission: Mapping[str, object],
+) -> list[dict[str, object]]:
+    """Load findings only when the signed recovery binds their exact receipt."""
+    task_id = str(admission.get("task_id") or "")
+    if authenticated_recovery_admissions(records).get(task_id) != admission:
+        raise ProvisionalFindingError("provisional owner is not authenticated")
+    owner = str(admission.get("provisional_owner_id") or "")
+    persisted_receipt = _capture_receipts(_stream_records(repo)).get(owner)
+    recovery = authenticated_review_terminals(records).get(task_id)
+    if (
+        persisted_receipt is None
+        or recovery is None
+        or recovery.get("type") != "attempt-recovery"
+        or recovery.get("recovery_classification") != "finding-deposition-only"
+        or recovery.get("provisional_owner_id") != owner
+        or recovery.get("finding_capture_receipt_sha256")
+        != _digest(persisted_receipt)
+    ):
+        raise ProvisionalFindingError(
+            "provisional findings do not match the authenticated recovery"
+        )
+    return load_provisional_findings(repo, owner_id=owner)
+
+
 def _git_output(repo: Path, *args: str) -> str:
-    completed = subprocess.run(
-        trusted_git_command(repo, *args),
-        capture_output=True,
-        text=True,
-        check=False,
-        env=sandbox_environment(os.environ),
-    )
-    if completed.returncode != 0:
+    from .evidence import _snapshot_git
+
+    try:
+        return _snapshot_git(repo, *args)
+    except DispatchError:
         raise ProvisionalFindingError(
             "authenticated predecessor snapshot is unavailable"
-        )
-    return completed.stdout.strip()
+        ) from None
 
 
 def _authenticated_snapshot(
@@ -532,15 +583,6 @@ def capture_provisional_findings(
             "findings": anchored,
         }
         request_digest = _digest(request)
-        existing_records = _stream_records(primary)
-        receipts = _capture_receipts(existing_records)
-        existing = receipts.get(owner)
-        if existing is not None:
-            if existing.get("capture_request_sha256") != request_digest:
-                raise ProvisionalFindingError(
-                    "provisional owner was used with a different payload"
-                )
-            return existing
         rows = [
             {
                 "type": FINDING_TYPE,
@@ -562,6 +604,21 @@ def capture_provisional_findings(
             "finding_ids": [row["finding_id"] for row in rows],
             "result_sha256": admission.get("result_sha256"),
         }
+        existing_records = _stream_records(primary)
+        receipts = _capture_receipts(existing_records)
+        existing = receipts.get(owner)
+        if existing is not None:
+            existing_rows = [
+                row
+                for row in existing_records
+                if row.get("type") == FINDING_TYPE
+                and row.get("provisional_owner_id") == owner
+            ]
+            if existing != receipt or existing_rows != rows:
+                raise ProvisionalFindingError(
+                    "provisional owner was used with a different payload"
+                )
+            return existing
         _append_atomic(primary, [*rows, receipt])
         return receipt
 
@@ -584,6 +641,16 @@ def build_recovery_evidence(
         raise ProvisionalFindingError(
             "recovery requires the exact persisted capture receipt"
         )
+    validated_receipt = capture_provisional_findings(
+        repo,
+        authority_records=records,
+        admission=admission,
+        result=result,
+    )
+    if validated_receipt != persisted_receipt:
+        raise ProvisionalFindingError(
+            "recovery capture no longer matches the authenticated result"
+        )
     if (
         capture_receipt.get("type") != CAPTURE_TYPE
         or capture_receipt.get("provisional_owner_id") != owner
@@ -593,8 +660,42 @@ def build_recovery_evidence(
         raise ProvisionalFindingError("recovery capture receipt is invalid")
     terminals = authenticated_review_terminals(records)
     terminal = terminals.get(task_id)
+    if terminal is not None and terminal.get("type") == "attempt-recovery":
+        existing = [
+            (index, record)
+            for index, record in enumerate(records)
+            if record.get("type") == "attempt-recovery"
+            and record.get("task_id") == task_id
+        ]
+        if (
+            len(existing) != 1
+            or existing[0][1] is not terminal
+            or terminal.get("recovery_classification")
+            != "finding-deposition-only"
+            or terminal.get("provisional_owner_id") != owner
+        ):
+            raise ProvisionalFindingError("recovery has conflicting state")
+        index, _existing_recovery = existing[0]
+        prefix = (
+            records.filtered(records[:index])
+            if isinstance(records, AuthorityRecordView)
+            else list(records[:index])
+        )
+        expected = build_recovery_evidence(
+            prefix,
+            repo=repo,
+            admission=admission,
+            capture_receipt=capture_receipt,
+        )
+        if id(terminal) not in authenticated_coordinator_record_ids(
+            records
+        ) or not _matches_enveloped_payload(terminal, expected):
+            raise ProvisionalFindingError("recovery has conflicting state")
+        return expected
     if terminal is None or not _eligible_terminal(terminal):
         raise ProvisionalFindingError("recovery deposit is no longer authenticated")
+    if _semantic_authority_payload(admission) != _admission_payload(terminal):
+        raise ProvisionalFindingError("recovery predecessor changed after admission")
     preserved = {
         key: value
         for key, value in terminal.items()
@@ -676,7 +777,11 @@ def authorize_classified_recovery_append(
         if len(existing) != 1:
             raise ProvisionalFindingError("classified recovery has conflicting state")
         index, recovered = existing[0]
-        prefix = list(records[:index])
+        prefix = (
+            records.filtered(records[:index])
+            if isinstance(records, AuthorityRecordView)
+            else list(records[:index])
+        )
         admissions = authenticated_recovery_admissions(prefix)
         admission = admissions.get(task_id)
         if admission is None:
@@ -691,13 +796,17 @@ def authorize_classified_recovery_append(
         expected = build_recovery_evidence(
             prefix, repo=root, admission=admission, capture_receipt=receipt
         )
-        authenticated = authenticated_coordinator_record_ids(list(records))
+        authenticated = authenticated_coordinator_record_ids(records)
         if id(recovered) not in authenticated or not _matches_enveloped_payload(
             recovered, expected
         ):
             raise ProvisionalFindingError("classified recovery has conflicting state")
         if not _matches_enveloped_payload(prospective, expected):
             raise ProvisionalFindingError("classified recovery replay changed evidence")
+        if authenticated_review_terminals(records).get(task_id) is not recovered:
+            raise ProvisionalFindingError(
+                "classified recovery is no longer the standing terminal"
+            )
         return False
 
     admission = authenticated_recovery_admissions(records).get(task_id)
@@ -711,7 +820,11 @@ def authorize_classified_recovery_append(
     expected = build_recovery_evidence(
         records, repo=root, admission=admission, capture_receipt=receipt
     )
-    combined = [*records, dict(prospective)]
+    combined = (
+        records.filtered([*records, dict(prospective)])
+        if isinstance(records, AuthorityRecordView)
+        else [*records, dict(prospective)]
+    )
     appended = combined[-1]
     if id(appended) not in authenticated_coordinator_record_ids(combined):
         raise ProvisionalFindingError("classified recovery authority is invalid")
@@ -747,12 +860,16 @@ def build_publication_binding(
     if authority_repository_binding(_root(repo)) != admission.get("repository_binding"):
         raise ProvisionalFindingError("publication repository binding changed")
     owner = str(admission.get("provisional_owner_id") or "")
+    persisted_receipt = _capture_receipts(_stream_records(repo)).get(owner)
     if (
-        capture_receipt.get("type") != CAPTURE_TYPE
+        persisted_receipt is None
+        or dict(capture_receipt) != persisted_receipt
+        or capture_receipt.get("type") != CAPTURE_TYPE
         or capture_receipt.get("provisional_owner_id") != owner
         or capture_receipt.get("result_sha256") != admission.get("result_sha256")
     ):
         raise ProvisionalFindingError("publication binding capture receipt is invalid")
+    authenticated_provisional_findings(records, repo, admission=admission)
     existing = authenticated_publication_bindings(records).get(owner)
     payload = {
         "type": BINDING_TYPE,
@@ -772,11 +889,7 @@ def build_publication_binding(
             raise ProvisionalFindingError(
                 "provisional owner is bound to a different PR"
             )
-        unsigned = {
-            key: value
-            for key, value in existing.items()
-            if key != "terminal_authority_proof"
-        }
+        unsigned = _semantic_authority_payload(existing)
         if unsigned != payload:
             raise ProvisionalFindingError(
                 "provisional binding replay changed source identity"
@@ -793,7 +906,6 @@ def authenticated_publication_bindings(
     admissions = authenticated_recovery_admissions(records)
     owners = {row["provisional_owner_id"]: row for row in admissions.values()}
     result: dict[str, dict[str, object]] = {}
-    conflicts: set[str] = set()
     for row in records:
         owner = row.get("provisional_owner_id")
         if (
@@ -817,12 +929,7 @@ def authenticated_publication_bindings(
             or not str(row["repository"]).strip()
         ):
             continue
-        if owner in result and result[owner] != row:
-            conflicts.add(owner)
-        else:
-            result[owner] = row
-    for owner in conflicts:
-        result.pop(owner, None)
+        result.setdefault(owner, row)
     return result
 
 
@@ -848,7 +955,20 @@ def materialize_publication_binding(
         raise ProvisionalFindingError(
             "publication binding has no exact capture receipt"
         )
-    findings = load_provisional_findings(repo, owner_id=owner)
+    admissions = authenticated_recovery_admissions(authority_records)
+    admission = next(
+        (
+            row
+            for row in admissions.values()
+            if row.get("provisional_owner_id") == owner
+        ),
+        None,
+    )
+    if admission is None:
+        raise ProvisionalFindingError("publication binding owner is not authenticated")
+    findings = authenticated_provisional_findings(
+        authority_records, repo, admission=admission
+    )
     request = build_finding_capture_request(
         pr=int(binding["pr"]),
         producer_id=str(binding["task_id"]),
@@ -896,6 +1016,7 @@ __all__ = [
     "FINDING_TYPE",
     "ProvisionalFindingError",
     "authenticated_publication_bindings",
+    "authenticated_provisional_findings",
     "authenticated_recovery_admissions",
     "build_publication_binding",
     "build_recovery_admission",

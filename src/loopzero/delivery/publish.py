@@ -632,9 +632,9 @@ def open_important_finding_ids(
         and review_refs.get(str(record.get("review_task_id"))) == head_ref
     ]
     from ..review.provisional_findings import (
+        authenticated_provisional_findings,
         authenticated_publication_bindings,
         authenticated_recovery_admissions,
-        load_provisional_findings,
     )
 
     admissions = authenticated_recovery_admissions(records)
@@ -652,7 +652,9 @@ def open_important_finding_ids(
             continue
         blockers.extend(
             str(finding["finding_id"])
-            for finding in load_provisional_findings(repo, owner_id=owner)
+            for finding in authenticated_provisional_findings(
+                records, repo, admission=admission
+            )
             if finding.get("state") == "open"
             and finding.get("severity") in {"critical", "important"}
         )

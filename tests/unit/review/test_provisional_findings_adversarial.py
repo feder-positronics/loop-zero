@@ -264,6 +264,22 @@ def _admit(coordinator, records):
     return admission
 
 
+def _append_recovery(coordinator, records, repo, admission, receipt):
+    recovery = coordinator.seal(
+        {
+            "ts": "2026-09-16T12:00:01+00:00",
+            **provisional_findings.build_recovery_evidence(
+                records, repo=repo, admission=admission, capture_receipt=receipt
+            ),
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
+        authority_kind="coordinator",
+    )
+    records.append(recovery)
+    return recovery
+
+
 def test_admission_binds_repository_and_patch_identity(configured, monkeypatch):
     coordinator, records, terminal = _signed_history(configured)
     monkeypatch.setattr(
@@ -547,12 +563,17 @@ def test_unvalidated_coordinator_verdict_cannot_accept_recovery(
         result=_result(),
     )
     recovery = coordinator.seal(
-        provisional_findings.build_recovery_evidence(
-            records,
-            repo=configured,
-            admission=admission,
-            capture_receipt=receipt,
-        ),
+        {
+            "ts": "2026-09-16T12:00:01+00:00",
+            **provisional_findings.build_recovery_evidence(
+                records,
+                repo=configured,
+                admission=admission,
+                capture_receipt=receipt,
+            ),
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
         authority_kind="coordinator",
     )
     records.append(recovery)
@@ -593,6 +614,7 @@ def test_binding_cannot_move_to_second_pr_after_replay(configured, monkeypatch):
         admission=admission,
         result=_result(),
     )
+    _append_recovery(coordinator, records, configured, admission, receipt)
     first = provisional_findings.build_publication_binding(
         records,
         repo=configured,
@@ -680,13 +702,25 @@ def test_compaction_retains_recovery_lineage_and_unique_binding(
         records.append(
             coordinator.seal(settlement.to_dict(), authority_kind="coordinator")
         )
+    pending_retained = authority_store.retained_authority_projection(records)
+    pending_compacted = authority_store._prospective_retained_view(
+        pending_retained, source_records=records
+    )
+    assert provisional_findings.authenticated_recovery_admissions(
+        pending_compacted
+    ) == {"review-1": admission}
     recovery = coordinator.seal(
-        provisional_findings.build_recovery_evidence(
-            records,
-            repo=configured,
-            admission=admission,
-            capture_receipt=receipt,
-        ),
+        {
+            "ts": "2026-09-16T12:00:01+00:00",
+            **provisional_findings.build_recovery_evidence(
+                records,
+                repo=configured,
+                admission=admission,
+                capture_receipt=receipt,
+            ),
+            "schema_version": policy.TELEMETRY_SCHEMA_VERSION,
+            "policy_version": policy.DISPATCH_POLICY_VERSION,
+        },
         authority_kind="coordinator",
     )
     records.append(recovery)
@@ -746,6 +780,23 @@ def test_compaction_retains_recovery_lineage_and_unique_binding(
         admission["provisional_owner_id"]: binding
     }
     assert any(row == terminal for row in compacted)
+    replay_payload = provisional_findings.build_recovery_evidence(
+        compacted,
+        repo=configured,
+        admission=admission,
+        capture_receipt=receipt,
+    )
+    assert replay_payload["type"] == "attempt-recovery"
+    assert replay_payload["finding_capture_receipt_sha256"] == recovery[
+        "finding_capture_receipt_sha256"
+    ]
+    with authority_store.authority_ledger_lock(configured):
+        with authority_store.attempt_lifecycle_lock(configured, "review-1"):
+            assert not provisional_findings.authorize_classified_recovery_append(
+                configured,
+                compacted,
+                recovery,
+            )
 
 
 def test_fixture_mutation_does_not_accidentally_authenticate(configured, monkeypatch):

@@ -1258,10 +1258,10 @@ def _review_terminal_authority_projection(
         registered_deposition_recovery = finding_deposition_recovery_matches(
             authority_history, record, deposit
         )
-        if (
+        if not registered_deposition_recovery and (
             isinstance(deposit.get("terminal_authority_proof"), dict)
-            and not registered_deposition_recovery
-        ) or not _recovery_matches_deposit(record, deposit):
+            or not _recovery_matches_deposit(record, deposit)
+        ):
             continue
         if not isinstance(record.get("terminal_authority_proof"), dict):
             if id(record) in legacy_compatibility_ids:

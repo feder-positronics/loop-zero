@@ -958,13 +958,18 @@ def _retention_live_record_ids(
     recovery_admissions = authenticated_recovery_admissions(records)
     publication_bindings = authenticated_publication_bindings(records)
     review_terminals = authenticated_review_terminals(records)
+    anchored_admission_tasks = {
+        task_id
+        for task_id, admission in recovery_admissions.items()
+        if (admission.get("task_id"), admission.get("run_id"))
+        in referenced_terminal_tasks
+    }
     anchored_recovery_tasks: set[str] = set()
-    for task_id, admission in recovery_admissions.items():
+    for task_id in anchored_admission_tasks:
+        admission = recovery_admissions[task_id]
         terminal = review_terminals.get(task_id)
         if (
-            (admission.get("task_id"), admission.get("run_id"))
-            in referenced_terminal_tasks
-            and terminal is not None
+            terminal is not None
             and terminal.get("type") == "attempt-recovery"
             and terminal.get("recovery_classification")
             == "finding-deposition-only"
@@ -973,13 +978,11 @@ def _retention_live_record_ids(
         ):
             anchored_recovery_tasks.add(task_id)
     anchored_recovery_ids = {
-        id(record)
-        for task_id in anchored_recovery_tasks
-        for record in (
-            recovery_admissions[task_id],
-            review_terminals[task_id],
-        )
+        id(recovery_admissions[task_id]) for task_id in anchored_admission_tasks
     }
+    anchored_recovery_ids.update(
+        id(review_terminals[task_id]) for task_id in anchored_recovery_tasks
+    )
     anchored_recovery_owners = {
         recovery_admissions[task_id].get("provisional_owner_id")
         for task_id in anchored_recovery_tasks

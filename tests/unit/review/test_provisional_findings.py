@@ -161,6 +161,17 @@ def _seal_admission(coordinator, payload, **changes):
     )
 
 
+def _append_recovery(coordinator, records, repo, admission, receipt):
+    recovery = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_evidence(
+            records, repo=repo, admission=admission, capture_receipt=receipt
+        ),
+    )
+    records.append(recovery)
+    return recovery
+
+
 def test_admission_is_derived_from_the_exact_registered_failure(
     configured, monkeypatch
 ):
@@ -187,6 +198,42 @@ def test_admission_is_derived_from_the_exact_registered_failure(
     forged = _seal_admission(coordinator, unsigned, snapshot_sha="f" * 40)
     assert (
         provisional_findings.authenticated_recovery_admissions([*records, forged]) == {}
+    )
+
+
+def test_admission_replay_with_a_new_envelope_keeps_the_first_owner(
+    configured, monkeypatch
+):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    first = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(first)
+    replay = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+        ts="2026-09-16T12:00:01+00:00",
+    )
+    records.append(replay)
+
+    assert provisional_findings.authenticated_recovery_admissions(records) == {
+        "review-1": first
+    }
+    receipt = provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=first
+    )
+    recovery = _append_recovery(
+        coordinator, records, configured, first, receipt
+    )
+    assert (
+        review_authority.authenticated_review_terminals(records)["review-1"]
+        == recovery
     )
 
 
@@ -338,6 +385,7 @@ def test_binding_is_permanent_idempotent_and_cannot_move_to_another_pr(
         admission=admission,
         result=_review_result(),
     )
+    _append_recovery(coordinator, records, configured, admission, receipt)
     unsigned = provisional_findings.build_publication_binding(
         records,
         repo=configured,
@@ -405,6 +453,44 @@ def test_binding_is_permanent_idempotent_and_cannot_move_to_another_pr(
     ]
 
 
+def test_binding_rejects_a_stream_that_no_longer_matches_the_signed_recovery(
+    configured, monkeypatch
+):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    receipt = provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    _append_recovery(coordinator, records, configured, admission, receipt)
+    stream = next((configured / ".audit/provisional-findings").glob("*.jsonl"))
+    forged = {**receipt, "finding_count": 0, "finding_ids": []}
+    stream.write_text(json.dumps(forged, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        provisional_findings.ProvisionalFindingError,
+        match="authenticated recovery",
+    ):
+        provisional_findings.build_publication_binding(
+            records,
+            repo=configured,
+            admission=admission,
+            capture_receipt=forged,
+            pr=18,
+            head="e" * 40,
+            base="main",
+            repository="feder-positronics/loop-zero",
+        )
+
+
 def test_truncated_capture_stream_fails_closed(configured):
     stream = configured / ".audit" / "provisional-findings" / "2026-09-16.jsonl"
     stream.parent.mkdir(parents=True)
@@ -465,13 +551,18 @@ def test_recovery_is_authenticated_before_but_accepted_only_after_verdict(
         admission=admission,
         result=_review_result(),
     )
-    recovery = coordinator.seal(
+    recovery = _seal_admission(
+        coordinator,
         provisional_findings.build_recovery_evidence(
             records, repo=configured, admission=admission, capture_receipt=receipt
         ),
-        authority_kind="coordinator",
     )
     records.append(recovery)
+    authority_projection.validate_serial_terminal_authority(
+        records,
+        terminal=recovery,
+        worktree=configured,
+    )
     assert "invalid-review-recovery-verification" not in (
         review_authority.review_terminal_acceptance_reasons(recovery)
     )
@@ -764,3 +855,137 @@ def test_classified_recovery_append_requires_both_locks_and_replays_once(
             assert not provisional_findings.authorize_classified_recovery_append(
                 configured, [*records, recovery], recovery
             )
+            real_projection = provisional_findings.authenticated_review_terminals
+            newer = {**_terminal, "attempt_index": 2}
+
+            def terminal_projection(rows):
+                if any(row is recovery for row in rows):
+                    return {"review-1": newer}
+                return real_projection(rows)
+
+            monkeypatch.setattr(
+                provisional_findings,
+                "authenticated_review_terminals",
+                terminal_projection,
+            )
+            with pytest.raises(
+                provisional_findings.ProvisionalFindingError,
+                match="no longer the standing terminal",
+            ):
+                provisional_findings.authorize_classified_recovery_append(
+                    configured, [*records, recovery, newer], recovery
+                )
+
+
+def test_provisional_stream_rejects_content_tampering(configured, monkeypatch):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    stream = next((configured / ".audit/provisional-findings").glob("*.jsonl"))
+    rows = [json.loads(line) for line in stream.read_text().splitlines()]
+    finding = next(row for row in rows if row["type"] == "provisional-finding-v1")
+    finding["claim"] = "tampered"
+    stream.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        provisional_findings.ProvisionalFindingError,
+        match="content does not match its identity",
+    ):
+        provisional_findings.load_provisional_findings(
+            configured, owner_id=str(admission["provisional_owner_id"])
+        )
+
+
+def test_existing_empty_receipt_cannot_hide_material_findings(configured, monkeypatch):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    stream = next((configured / ".audit/provisional-findings").glob("*.jsonl"))
+    rows = [json.loads(line) for line in stream.read_text().splitlines()]
+    receipt = next(row for row in rows if row["type"] == "provisional-finding-capture-v1")
+    receipt["finding_count"] = 0
+    receipt["finding_ids"] = []
+    stream.write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        provisional_findings.ProvisionalFindingError,
+        match="different payload",
+    ):
+        provisional_findings.capture_provisional_findings(
+            configured, authority_records=records, admission=admission
+        )
+
+
+def test_conflicting_binding_cannot_erase_the_first_pr(configured, monkeypatch):
+    coordinator, records, _terminal = _signed_history(configured)
+    monkeypatch.setattr(
+        kernel_authority,
+        "_trusted_coordinator_public_key",
+        lambda: coordinator.public_key,
+    )
+    admission = _seal_admission(
+        coordinator,
+        provisional_findings.build_recovery_admission(records, task_id="review-1"),
+    )
+    records.append(admission)
+    receipt = provisional_findings.capture_provisional_findings(
+        configured, authority_records=records, admission=admission
+    )
+    _append_recovery(coordinator, records, configured, admission, receipt)
+    first_payload = provisional_findings.build_publication_binding(
+        records,
+        repo=configured,
+        admission=admission,
+        capture_receipt=receipt,
+        pr=18,
+        head="e" * 40,
+        base="main",
+        repository="feder-positronics/loop-zero",
+    )
+    first = coordinator.seal(first_payload, authority_kind="coordinator")
+    conflicting = coordinator.seal(
+        {**first_payload, "pr": 19}, authority_kind="coordinator"
+    )
+    records.extend((first, conflicting))
+
+    assert provisional_findings.authenticated_publication_bindings(records) == {
+        admission["provisional_owner_id"]: first
+    }
+    with pytest.raises(
+        provisional_findings.ProvisionalFindingError, match="different PR"
+    ):
+        provisional_findings.build_publication_binding(
+            records,
+            repo=configured,
+            admission=admission,
+            capture_receipt=receipt,
+            pr=20,
+            head="e" * 40,
+            base="main",
+            repository="feder-positronics/loop-zero",
+        )
