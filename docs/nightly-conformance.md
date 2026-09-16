@@ -127,6 +127,24 @@ clears the old marker. Do not delete the marker to retry an uncertain token.
 Malformed or unsafe marker files fail closed and require host operator repair.
 A failure before vendor launch can conservatively require the same recovery.
 
+The broker checks account consistency using only the recognized
+`https://api.openai.com/auth.chatgpt_account_id` claim inside each decoded access
+or identity JWT: a present claim must be a nonempty string equal to outer
+`tokens.account_id`. Missing or null namespaces/claims remain unknown; malformed
+namespace or claim types are rejected. `sub`, email, `chatgpt_user_id`, `user_id`,
+and top-level account-like fields do not substitute for this claim. This matches
+the account namespace in the [pinned vendor parser](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/login/src/token_data.rs).
+
+Access tokens retain the JWT and expiry requirement. An identity token with
+exactly three dot-separated segments must decode to a valid JSON object; other
+nonempty identity strings remain opaque for compatibility, including strings
+with one or more than two dots. Claims are decoded without signature
+verification, solely to reject internal disagreement. Passing these checks does
+not authenticate an account, establish provenance, or authorize an alias.
+Inconsistent source credentials are rejected before refresh; inconsistent vendor
+replacements are never installed or exported, and retain the pending marker
+requiring host recovery described above.
+
 The workflow continues to validate and seal the snapshot before launching
 checked-out code. It fails if the access token no longer covers the job; it
 cannot refresh on GitHub.

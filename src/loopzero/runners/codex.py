@@ -2079,15 +2079,25 @@ class _ValidatedCredential:
     account_id: str
 
 
-def _jwt_expiry(token: str, *, name: str) -> int:
+def _jwt_payload(token: str, *, name: str) -> dict[str, object]:
+    """Decode claims for consistency only; this does not authenticate a JWT."""
     parts = token.split(".")
-    if len(parts) != 3:
+    if len(parts) != 3 or not all(parts):
         raise UnsafeCodexCredential(f"Codex credential {name} is invalid")
     try:
         padding = "=" * (-len(parts[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(parts[1] + padding))
-    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        claims = json.loads(
+            base64.b64decode(parts[1] + padding, altchars=b"-_", validate=True)
+        )
+    except (ValueError, UnicodeDecodeError, RecursionError) as exc:
         raise UnsafeCodexCredential(f"Codex credential {name} is invalid") from exc
+    if not isinstance(claims, dict):
+        raise UnsafeCodexCredential(f"Codex credential {name} is invalid")
+    return claims
+
+
+def _jwt_expiry(token: str, *, name: str) -> int:
+    claims = _jwt_payload(token, name=name)
     expiry = claims.get("exp") if isinstance(claims, dict) else None
     if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
         raise UnsafeCodexCredential(f"Codex credential {name} is invalid")
@@ -2095,6 +2105,26 @@ def _jwt_expiry(token: str, *, name: str) -> int:
     if parsed != expiry or parsed <= 0:
         raise UnsafeCodexCredential(f"Codex credential {name} is invalid")
     return parsed
+
+
+def _validate_account_claim(token: str, *, name: str, account_id: str) -> None:
+    # Non-JWT identity tokens remain opaque. Access tokens always pass the
+    # existing JWT/expiry requirement before this optional consistency check.
+    if name == "id_token" and len(token.split(".")) != 3:
+        return
+    claims = _jwt_payload(token, name=name)
+    namespace = claims.get("https://api.openai.com/auth")
+    if namespace is None:
+        return
+    if not isinstance(namespace, dict):
+        raise UnsafeCodexCredential("Codex credential account claims are invalid")
+    claimed_account = namespace.get("chatgpt_account_id")
+    if claimed_account is None:
+        return
+    if not isinstance(claimed_account, str) or not claimed_account:
+        raise UnsafeCodexCredential("Codex credential account claims are invalid")
+    if claimed_account != account_id:
+        raise UnsafeCodexCredential("Codex credential account claims disagree")
 
 
 def _validate_payload(payload: bytes) -> _ValidatedCredential:
@@ -2112,9 +2142,12 @@ def _validate_payload(payload: bytes) -> _ValidatedCredential:
     for name in ("access_token", "id_token", "refresh_token", "account_id"):
         if not isinstance(tokens.get(name), str) or not tokens[name]:
             raise UnsafeCodexCredential(f"Codex credential {name} is invalid")
+    expires_at_s = _jwt_expiry(tokens["access_token"], name="access_token")
+    for name in ("access_token", "id_token"):
+        _validate_account_claim(tokens[name], name=name, account_id=tokens["account_id"])
     return _ValidatedCredential(
         payload=payload,
-        expires_at_s=_jwt_expiry(tokens["access_token"], name="access_token"),
+        expires_at_s=expires_at_s,
         account_id=tokens["account_id"],
     )
 

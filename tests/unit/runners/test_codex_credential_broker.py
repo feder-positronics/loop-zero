@@ -762,3 +762,105 @@ def test_unsafe_host_directory_prevents_vendor_rotation(tmp_path, unsafe):
         ):
             pytest.fail("unsafe snapshot")
     assert not (parent / ".auth.json.refresh-pending").exists()
+
+
+def _account_jwt(claims):
+    encoded = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+    return f"header.{encoded.decode()}.signature"
+
+
+@pytest.mark.parametrize("token_name", ["access_token", "id_token"])
+@pytest.mark.parametrize("auth", [
+    {"chatgpt_account_id": "account-2"},
+    {"chatgpt_account_id": ""},
+    {"chatgpt_account_id": 12},
+    {"chatgpt_account_id": True},
+    {"chatgpt_account_id": []},
+    {"chatgpt_account_id": {}},
+    "invalid-namespace", [], False,
+])
+def test_codex_account_claim_inconsistency_rejects_native_source(tmp_path, token_name, auth):
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000)
+    payload["tokens"][token_name] = _account_jwt({
+        "exp": 3_000, "https://api.openai.com/auth": auth,
+    })
+    _write_credential(path, payload)
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            run_refresh=lambda *a, **k: pytest.fail("inconsistent source reached vendor"),
+        ):
+            pytest.fail("inconsistent source exported")
+
+
+@pytest.mark.parametrize("identity", [
+    "header.@@@.signature", "header.bm90LWpzb24.signature",
+    _account_jwt([]), _account_jwt(1), "header..signature", "header.e30.",
+])
+def test_codex_jwt_shaped_identity_must_decode_an_object(tmp_path, identity):
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000)
+    payload["tokens"]["id_token"] = identity
+    _write_credential(path, payload)
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+        ):
+            pytest.fail("invalid identity JWT exported")
+
+
+@pytest.mark.parametrize("token_name", ["access_token", "id_token"])
+def test_codex_account_claim_inconsistency_after_rotation_keeps_recovery_marker(tmp_path, token_name):
+    path = tmp_path / "auth.json"
+    original = _credential(expires_at_s=1_100, refresh_token="original-refresh")
+    original["tokens"]["access_token"] = _account_jwt({
+        "exp": 1_100, "https://api.openai.com/auth": {"chatgpt_account_id": "account-1"},
+    })
+    _write_credential(path, original)
+    replacement = _credential(expires_at_s=3_000, refresh_token="rotated-refresh")
+    replacement["tokens"][token_name] = _account_jwt({
+        "exp": 3_000, "https://api.openai.com/auth": {"chatgpt_account_id": "account-2"},
+    })
+    calls = []
+
+    def vendor(command, *, env, **kwargs):
+        calls.append(command)
+        _write_credential(Path(env["CODEX_HOME"]) / "auth.json", replacement)
+        return subprocess.CompletedProcess(command, 0, stdout='{"authenticated":true}')
+
+    arguments = dict(credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+                     run_refresh=vendor, refresh_command=("fake-vendor",))
+    with pytest.raises(codex_credential.UnsafeCodexCredential):
+        with codex_credential.codex_subscription_credential(**arguments):
+            pytest.fail("inconsistent replacement exported")
+    assert json.loads(path.read_text()) == original
+    assert (tmp_path / ".auth.json.refresh-pending").is_file()
+    with pytest.raises(codex_credential.CodexCredentialRefreshFailed):
+        with codex_credential.codex_subscription_credential(**arguments):
+            pytest.fail("spent refresh token retried")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("auth", [None, {}, {"chatgpt_account_id": None},
+                                  {"chatgpt_account_id": "account-1"}])
+@pytest.mark.parametrize("identity", [None, "opaque", "opaque.with-dot", "a.b.c.d"])
+def test_codex_account_claim_compatibility_is_not_identity_proof(tmp_path, auth, identity):
+    path = tmp_path / "auth.json"
+    payload = _credential(expires_at_s=3_000)
+    payload["tokens"]["access_token"] = _account_jwt({
+        "exp": 3_000, "sub": "different-access-subject", "chatgpt_account_id": "ignored",
+        "https://api.openai.com/auth": auth,
+    })
+    payload["tokens"]["id_token"] = identity or _account_jwt({
+        "sub": "different-id-subject", "email": "synthetic@example.invalid",
+        "https://api.openai.com/auth": {
+            **(auth or {}), "chatgpt_user_id": "different-user", "user_id": "other-user",
+        },
+    })
+    _write_credential(path, payload)
+    with codex_credential.codex_subscription_credential(
+        credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+        run_refresh=lambda *a, **k: pytest.fail("fresh compatible source refreshed"),
+    ) as descriptor:
+        assert json.loads(os.pread(descriptor, 1024 * 1024, 0)) == _runtime_snapshot(payload)
