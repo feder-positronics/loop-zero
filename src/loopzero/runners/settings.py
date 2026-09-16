@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import wraps
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -120,8 +120,16 @@ class RuntimeSettings:
     codex_cli_path: Path | None = None
     cursor_cli_path: Path | None = None
     session_home: Path | None = None
+    accounts: object = field(default=None, repr=False)
+    declared_credential_vendor: str | None = None
 
     def __post_init__(self) -> None:
+        if self.accounts is not None:
+            from .accounts import freeze_accounts
+
+            object.__setattr__(self, "accounts", freeze_accounts(self.accounts))
+        if self.declared_credential_vendor not in (None, "claude", "codex", "cursor"):
+            raise ValueError("declared credential vendor is invalid")
         if self.temp_prefix is None:
             object.__setattr__(self, "temp_prefix", self.env_prefix.lower().replace("_", "-"))
         if self.state_root is None:
@@ -175,6 +183,7 @@ class RuntimeSettings:
         if interpreter is not None and (not isinstance(interpreter, str) or not interpreter):
             raise ValueError("[toolchain].interpreter must be a nonempty path string")
         return cls(
+            accounts=profile.accounts,
             env_prefix=profile.env_prefix,
             toolchain_interpreter=Path(interpreter) if interpreter else None,
             state_root=profile.state_root if profile.state_root_explicit else None,
@@ -218,6 +227,7 @@ class RuntimeSettings:
             "codex_cli_path": str(self.codex_cli_path) if self.codex_cli_path else None,
             "cursor_cli_path": str(self.cursor_cli_path) if self.cursor_cli_path else None,
             "session_home": str(self.session_home) if self.session_home else None,
+            "declared_credential_vendor": self.declared_credential_vendor,
         }, separators=(",", ":"))}
 
     @classmethod
@@ -227,6 +237,8 @@ class RuntimeSettings:
         if raw is None:
             return cls()
         values = json.loads(raw)
+        if "accounts" in values:
+            raise ValueError("host accounts cannot cross the child boundary")
         for key in (
             "toolchain_interpreter", "bridge_path", "tooling_root",
             "claude_cli_path", "codex_cli_path", "cursor_cli_path", "session_home",
@@ -362,6 +374,14 @@ def using_adapter_settings(method):
     @wraps(method)
     def scoped(self, *args, **kwargs):
         with self._settings.use():
+            from .accounts import credential_scope
+            from .contract import RuntimeRequest
+
+            request = args[0] if args else kwargs.get("request")
+            if isinstance(request, RuntimeRequest):
+                vendor = self.transport.split("/", 1)[0]
+                with credential_scope(self._settings, vendor, request, method=method.__name__):
+                    return method(self, *args, **kwargs)
             return method(self, *args, **kwargs)
     return scoped
 

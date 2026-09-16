@@ -5,6 +5,7 @@ The system-Python dispatcher never imports ``claude_agent_sdk``.  It starts
 small, allow-listed JSONL protocol implemented here.
 """
 
+from .accounts import credential_reference
 from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_adapter_settings
 
 
@@ -294,7 +295,8 @@ def _has_scoped_tools(request: RuntimeRequest) -> bool:
 
 
 def _requires_sdk_transport(request: RuntimeRequest) -> bool:
-    return request.requested_model in MODELS_REQUIRING_SDK_COMPATIBILITY_PROBE
+    return (get_settings().accounts is not None
+            or request.requested_model in MODELS_REQUIRING_SDK_COMPATIBILITY_PROBE)
 
 
 # Explicit alias keeps call sites readable while allowing fixtures to use the
@@ -1001,7 +1003,7 @@ class ClaudeAdapter:
                     failure=ReadinessFailure.SDK_VERSION_MISMATCH,
                     repair="restore the pinned Claude CLI version",
                 )
-        raw_auth_fd = os.environ.get(get_settings().env_name("CLAUDE_AUTH_FD"))
+        raw_auth_fd = credential_reference("claude")
         if raw_auth_fd is not None:
             try:
                 valid = protected_claude_credential_ready(int(raw_auth_fd))
@@ -2671,8 +2673,8 @@ def protected_token_available() -> bool:
     """Used only by host readiness; workers never receive this broker marker."""
 
     try:
-        return snapshot_token(int(os.environ[get_settings().env_name("CLAUDE_AUTH_FD")])) is not None
-    except (KeyError, ValueError, OSError, ClaudeCredentialError):
+        return snapshot_token(int(credential_reference("claude"))) is not None
+    except (KeyError, TypeError, ValueError, OSError, ClaudeCredentialError):
         return False
 
 

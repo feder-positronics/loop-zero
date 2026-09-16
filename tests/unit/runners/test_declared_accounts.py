@@ -164,15 +164,18 @@ def test_declared_source_failure_never_uses_ambient_descriptor(
             destination = source.with_suffix(".saved")
             source.rename(destination)
             source.symlink_to(destination)
-        with settings.use(), pytest.raises(accounts().DeclaredAccountError):
-            with accounts().credential_scope(settings, "codex", request):
-                pytest.fail("unsafe source lent credential")
+        with (
+            settings.use(),
+            pytest.raises(accounts().DeclaredAccountError),
+            accounts().credential_scope(settings, "codex", request),
+        ):
+            pytest.fail("unsafe source lent credential")
     finally:
         os.close(fd)
 
 
 def test_scope_is_immutable_context_local_and_child_projection_hides_sources(tmp_path):
-    settings, request, source, _payload = fixture(tmp_path)
+    settings, _request, _source, _payload = fixture(tmp_path)
     with pytest.raises(TypeError):
         settings.accounts["claude"] = settings.accounts["codex"]
     before = dict(os.environ)
@@ -181,7 +184,7 @@ def test_scope_is_immutable_context_local_and_child_projection_hides_sources(tmp
     def worker(marker):
         local = tmp_path / marker
         local.mkdir()
-        settings, request, source, payload = fixture(local, marker=marker)
+        settings, request, source, _payload = fixture(local, marker=marker)
         with settings.use(), accounts().credential_scope(settings, "codex", request):
             fd = accounts().credential_descriptor("codex")
             barrier.wait(timeout=5)
@@ -200,34 +203,17 @@ def test_scope_is_immutable_context_local_and_child_projection_hides_sources(tmp
     assert dict(os.environ) == before
 
 
-def test_native_contained_launch_uses_fresh_fds_and_hides_other_sources(
-    tmp_path, monkeypatch
-):
-    settings, request, source, payload = fixture(tmp_path)
+def contained_wrapper(request):
     bwrap = shutil.which("bwrap")
     if not bwrap:
         pytest.skip("bubblewrap unavailable")
     test = subprocess.run(
         [bwrap, "--ro-bind", "/", "/", "--unshare-user", "--", "/usr/bin/true"],
         capture_output=True,
+        check=False,
     )
     if test.returncode:
         pytest.skip("user namespace unavailable")
-    probe = request.cwd / "probe.py"
-    probe.write_text("""import hashlib,json,os,sys
-assert sys.argv[1:] == ["--require-brokered-credential"]
-settings=json.loads(os.environ["LOOPZERO_RUNTIME_SETTINGS"])
-assert settings["declared_credential_vendor"] == "codex"
-assert "accounts" not in settings
-assert "OPENAI_API_KEY" not in os.environ
-from pathlib import Path
-assert not (Path.cwd().parent / "source").exists()
-fd=int(os.environ["LOOPZERO_CODEX_AUTH_FD"])
-print(hashlib.sha256(os.read(fd,10000)).hexdigest())
-""")
-    settings = replace(
-        settings, bridge_path=probe, toolchain_interpreter=Path("/usr/bin/python3")
-    )
 
     def wrapper(spec):
         cmd = [
@@ -261,6 +247,30 @@ print(hashlib.sha256(os.read(fd,10000)).hexdigest())
         for path in (spec.private_tmpdir, *spec.private_mounts):
             cmd += ["--bind", str(path), str(path)]
         return [*cmd, "--chdir", str(request.cwd), "--", *spec.argv]
+
+    return wrapper
+
+
+def test_native_contained_launch_uses_fresh_fds_and_hides_other_sources(
+    tmp_path, monkeypatch
+):
+    settings, request, _source, _payload = fixture(tmp_path)
+    wrapper = contained_wrapper(request)
+    probe = request.cwd / "probe.py"
+    probe.write_text("""import hashlib,json,os,sys
+assert sys.argv[1:] == ["--require-brokered-credential"]
+settings=json.loads(os.environ["LOOPZERO_RUNTIME_SETTINGS"])
+assert settings["declared_credential_vendor"] == "codex"
+assert "accounts" not in settings
+assert "OPENAI_API_KEY" not in os.environ
+from pathlib import Path
+assert not (Path.cwd().parent / "source").exists()
+fd=int(os.environ["LOOPZERO_CODEX_AUTH_FD"])
+print(hashlib.sha256(os.read(fd,10000)).hexdigest())
+""")
+    settings = replace(
+        settings, bridge_path=probe, toolchain_interpreter=Path("/usr/bin/python3")
+    )
 
     monkeypatch.setenv("OPENAI_API_KEY", "hostile")
     before = dict(os.environ)
@@ -318,6 +328,7 @@ def test_real_bridge_latch_rejects_missing_or_wrong_context(tmp_path, projection
             env=environment,
             pass_fds=(fd,),
             timeout=5,
+            check=False,
         )
     assert result.returncode == 2
     assert json.loads(result.stdout)["type"] == "error"
@@ -330,7 +341,7 @@ def test_real_bridge_latch_rejects_missing_or_wrong_context(tmp_path, projection
 def test_child_gate_denies_unprotected_or_refresh_capable_fd(
     tmp_path, monkeypatch, invalid
 ):
-    settings, request, source, payload = fixture(tmp_path)
+    settings, _request, source, payload = fixture(tmp_path)
     child_settings = replace(
         settings, accounts=None, declared_credential_vendor="codex"
     )
@@ -397,6 +408,7 @@ def test_bridge_main_validates_then_consumes_selected_snapshot(
     tmp_path, monkeypatch, vendor
 ):
     import asyncio
+
     from loopzero.runners import bridge
 
     settings, request, _source, _payload = fixture(tmp_path, vendor)
@@ -477,9 +489,12 @@ def test_declared_source_cannot_be_in_request_mounts(tmp_path, field):
             request.capability_profile, **{field: (source.parent,)}
         ),
     )
-    with settings.use(), pytest.raises(accounts().DeclaredAccountError):
-        with accounts().credential_scope(settings, "codex", request):
-            pytest.fail("source admitted inside a worker mount")
+    with (
+        settings.use(),
+        pytest.raises(accounts().DeclaredAccountError),
+        accounts().credential_scope(settings, "codex", request),
+    ):
+        pytest.fail("source admitted inside a worker mount")
 
 
 def test_cursor_uses_scoped_private_home_and_scrubs_it(tmp_path, monkeypatch):
@@ -504,15 +519,24 @@ def test_cursor_uses_scoped_private_home_and_scrubs_it(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("vendor", ["claude", "codex"])
-def test_declared_broker_receives_package_refresh_containment(tmp_path, monkeypatch, vendor):
+def test_declared_broker_receives_package_refresh_containment(
+    tmp_path, monkeypatch, vendor
+):
     from contextlib import contextmanager
+
     from loopzero import credential_seal
+
     settings, request, source, _payload = fixture(tmp_path, vendor)
     module = claude if vendor == "claude" else codex
     original = getattr(module, f"{vendor}_subscription_credential")
     sentinel = object()
     calls = []
-    monkeypatch.setattr(credential_seal, "_host_refresh_wrapper", lambda: lambda spec: calls.append(spec) or ["contained"])
+    monkeypatch.setattr(
+        credential_seal,
+        "_host_refresh_wrapper",
+        lambda: lambda spec: calls.append(spec) or ["contained"],
+    )
+
     @contextmanager
     def broker(**kwargs):
         assert kwargs["credential_path"] == source
@@ -522,6 +546,7 @@ def test_declared_broker_receives_package_refresh_containment(tmp_path, monkeypa
             assert kwargs["allow_token_fallback"] is False
         with original(**kwargs) as fd:
             yield fd
+
     monkeypatch.setattr(module, f"{vendor}_subscription_credential", broker)
     with settings.use(), accounts().credential_scope(settings, vendor, request):
         assert calls == [sentinel]
@@ -530,29 +555,105 @@ def test_declared_broker_receives_package_refresh_containment(tmp_path, monkeypa
 def test_nested_legacy_adapter_cannot_escape_declared_scope(tmp_path):
     settings, request, _source, _payload = fixture(tmp_path)
     legacy = replace(settings, accounts=None)
-    with settings.use(), accounts().credential_scope(settings, "codex", request):
-        with pytest.raises(accounts().DeclaredAccountError):
-            with accounts().credential_scope(legacy, "codex", request):
-                pytest.fail("legacy settings downgraded active declared scope")
+    with (
+        settings.use(),
+        accounts().credential_scope(settings, "codex", request),
+        pytest.raises(accounts().DeclaredAccountError),
+        accounts().credential_scope(legacy, "codex", request),
+    ):
+        pytest.fail("legacy settings downgraded active declared scope")
 
 
 def test_launch_failure_closes_duplicate_and_scope_scrubs_home(tmp_path, monkeypatch):
-    settings, request, _source, _payload = fixture(tmp_path)
+    settings, request, source, _payload = fixture(tmp_path)
+    caller_fd = os.open(source, os.O_RDONLY)
     observed = []
+
     def failed_spawn(*args, **kwargs):
         observed.extend(kwargs["pass_fds"])
         raise OSError("synthetic spawn failure")
+
     monkeypatch.setattr(process.subprocess, "Popen", failed_spawn)
-    with settings.use(), accounts().credential_scope(settings, "codex", request):
-        parent_fd = accounts().credential_descriptor("codex")
-        home = accounts().get_settings().session_home
-        with pytest.raises(OSError):
-            process.run_cli(settings.bridge_command(request.cwd), cwd=request.cwd,
-                            input_text="", timeout_s=5, sandbox_wrapper=lambda spec: spec.argv)
-        assert len(observed) == 1
+    try:
+        with (
+            pytest.raises(OSError),
+            settings.use(),
+            accounts().credential_scope(settings, "codex", request),
+        ):
+            parent_fd = accounts().credential_descriptor("codex")
+            home = accounts().get_settings().session_home
+            process.run_cli(
+                settings.bridge_command(request.cwd),
+                cwd=request.cwd,
+                input_text="",
+                timeout_s=5,
+                env={settings.env_name("CODEX_AUTH_FD"): str(caller_fd)},
+                pass_fds=(caller_fd,),
+                sandbox_wrapper=lambda spec: spec.argv,
+            )
+        assert len(observed) == 1 and caller_fd not in observed
         with pytest.raises(OSError):
             os.fstat(observed[0])
-        os.fstat(parent_fd)
-    assert not home.exists()
-    with pytest.raises(OSError):
-        os.fstat(parent_fd)
+        assert not home.exists()
+        with pytest.raises(OSError):
+            os.fstat(parent_fd)
+        os.fstat(caller_fd)
+    finally:
+        os.close(caller_fd)
+
+
+def test_successful_adapter_probe_and_run_reach_contained_selected_credential(
+    tmp_path, monkeypatch
+):
+    settings, request, _source, _payload = fixture(tmp_path)
+    from loopzero.runners.contract import SubscriptionEligibility
+
+    request = replace(request, eligibility=SubscriptionEligibility.APPROVED)
+    wrapper = contained_wrapper(request)
+    probe = request.cwd / "selected_bridge.py"
+    probe.write_text("""import json,os,sys
+assert sys.argv[1:] == ["--require-brokered-credential"]
+assert "OPENAI_API_KEY" not in os.environ
+assert "CODEX_HOME" not in os.environ
+settings=json.loads(os.environ["LOOPZERO_RUNTIME_SETTINGS"])
+assert settings["declared_credential_vendor"] == "codex"
+assert "accounts" not in settings
+fd=int(os.environ["LOOPZERO_CODEX_AUTH_FD"])
+assert json.loads(os.read(fd,10000))["tokens"]["account_id"] == "selected"
+os.close(fd)
+request=json.load(sys.stdin)
+if request["vendor"] == "codex-probe":
+    print('{"type":"readiness","status":"ready"}')
+else:
+    print('{"type":"result","status":"completed","terminal_reason":"completed"}')
+""")
+    settings = replace(
+        settings, bridge_path=probe, toolchain_interpreter=Path("/usr/bin/python3")
+    )
+    calls = []
+    homes = []
+
+    def runner(command, **kwargs):
+        calls.append(command)
+        homes.append(accounts().get_settings().session_home)
+        return process.run_cli(command, sandbox_wrapper=wrapper, **kwargs)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "hostile")
+    monkeypatch.setenv("CODEX_HOME", "/hostile/home")
+    before = dict(os.environ)
+    with settings.use():
+        adapter = codex.CodexAdapter(
+            run_cli=runner,
+            run_probe=runner,
+            sdk_available=lambda *_: True,
+            which=lambda _: "/synthetic/codex",
+        )
+    assert adapter.probe(request).ready
+    result = adapter.run(request)
+    assert result.status.value == "completed"
+    assert result.billing_mode.value == "unknown"
+    assert result.attempt_id == "original-attempt"
+    assert len(calls) == 2
+    assert len(set(homes)) == 2
+    assert all(not home.exists() for home in homes)
+    assert dict(os.environ) == before
