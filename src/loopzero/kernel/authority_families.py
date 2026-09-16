@@ -46,6 +46,8 @@ _POLICY_FAMILIES = (
     "deposit-verification",
     "evidence-cleanup",
     "evidence-cleanup-friction",
+    "finding-publication-binding-v1",
+    "finding-recovery-admission-v1",
     "inline",
     "inconclusive-retry-authorization",
     "review-chain-advisory",

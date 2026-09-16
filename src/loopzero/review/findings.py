@@ -361,9 +361,16 @@ def _registered_dispatcher_delivery_terminals(
 
 def authenticated_delivery_run_pr(repo: Path, run_id: str) -> int:
     """Resolve one run's PR solely from authenticated controller records."""
+    from ..kernel.authority_store import load_authority_records
+    from .provisional_findings import authenticated_publication_bindings
+
+    authority_records = load_authority_records(_primary(repo), 30)
     prs = {
         row["pr"]
-        for row in _authenticated_delivery_run_records(_primary(repo))
+        for row in (
+            *_authenticated_delivery_run_records(_primary(repo)),
+            *authenticated_publication_bindings(authority_records).values(),
+        )
         if row.get("run_id") == run_id
         and type(row.get("pr")) is int
         and int(row["pr"]) > 0

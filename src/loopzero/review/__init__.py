@@ -15,6 +15,7 @@ from . import (
     findings,
     harness,
     preflight,
+    provisional_findings,
     risk,
     routing,
     stats,
@@ -62,7 +63,15 @@ def configure(
                 ["review is already configured with a different Profile"]
             )
         kernel_settings.configure(_merged_kernel_settings(profile))
-        for mechanism in (acceptance, chain, evidence, findings, risk, routing):
+        for mechanism in (
+            acceptance,
+            chain,
+            evidence,
+            findings,
+            provisional_findings,
+            risk,
+            routing,
+        ):
             mechanism.configure(profile)
         harness.configure(profile, append_authority=append_authoritative_record)
         authority.configure(
@@ -81,6 +90,7 @@ __all__ = [
     "findings",
     "harness",
     "preflight",
+    "provisional_findings",
     "risk",
     "routing",
     "stats",
