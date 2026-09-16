@@ -127,15 +127,14 @@ class _GitRunner(Protocol):
     def run(self, args: list[str], *, check: bool = ...) -> _CompletedLike: ...
 
 
-CheckerRunner = Callable[[Sequence[str], str], _CompletedLike]
+CheckerRunner = Callable[[Sequence[str]], _CompletedLike]
 
 
 def _run_trusted_body_checker(
-    argv: Sequence[str], checker_source: str
+    argv: Sequence[str],
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         list(argv),
-        input=checker_source,
         capture_output=True,
         text=True,
         check=False,
@@ -155,9 +154,10 @@ def validate_body_against_trusted_base(
     """Validate ``body`` with the checker PR Lint will actually run.
 
     The checker source is read from ``trusted_base_head`` and executed from
-    stdin under ``python -I -`` exactly as the sparse-checkout PR Lint job
-    would run it from a file. A checker that cannot be retrieved from the base
-    revision fails closed, and a contract failure raises ``error_type`` naming
+    a private temporary directory under its real basename with ``python -I``.
+    Rendered consumer facades use that basename to select their delegate.
+    A checker that cannot be retrieved from the base revision fails closed,
+    and a contract failure raises ``error_type`` naming
     the base revision and the failing rule.
     """
     shown = runner.run(
@@ -172,25 +172,26 @@ def validate_body_against_trusted_base(
             f"{detail[-1].strip() if detail else 'git show failed'}; fetch the "
             "pinned base before publication"
         )
-    handle = tempfile.NamedTemporaryFile(
-        "w", suffix=".md", delete=False, encoding="utf-8"
-    )
-    try:
-        with handle:
-            handle.write(body)
+    with tempfile.TemporaryDirectory(prefix="loopzero-pr-body-") as directory:
+        # Consumer facades may import from both their directory and its parent.
+        # Keep both inside the private boundary, never the shared temp root.
+        checker_directory = Path(directory) / "checker"
+        checker_directory.mkdir(mode=0o700)
+        checker_path = checker_directory / Path(TRUSTED_BODY_CHECKER_PATH).name
+        checker_path.write_text(shown.stdout, encoding="utf-8")
+        body_path = Path(directory) / "body.md"
+        body_path.write_text(body, encoding="utf-8")
         argv = [
             sys.executable,
             "-I",
-            "-",
+            str(checker_path),
             "--body-file",
-            handle.name,
+            str(body_path),
             "--ready",
             *(["--standalone"] if standalone else []),
         ]
         checker = run_checker or _run_trusted_body_checker
-        completed = checker(argv, shown.stdout)
-    finally:
-        Path(handle.name).unlink(missing_ok=True)
+        completed = checker(argv)
     if completed.returncode != 0:
         lines = (completed.stderr or completed.stdout or "").strip().splitlines()
         rule = lines[-1].strip() if lines else "unknown rule"

@@ -29,6 +29,7 @@ from loopzero.runners import claude, codex, cursor
 from loopzero.runners.contract import (
     RuntimeCapabilityProfile,
     RuntimeAdapter,
+    RuntimeBillingMode,
     RuntimeCostSource,
     RuntimeRequest,
     RuntimeResult,
@@ -506,17 +507,46 @@ def _run_with_credential(
     settings: RuntimeSettings,
     wrapper,
 ) -> RuntimeResult:
-    """Run through the adapter while preserving the broker-owned descriptor."""
+    """Attach a local billing observation from this run's brokered credential.
+
+    All current suite brokers validate subscription/browser-login credentials;
+    there is no metered broker. This is conformance evidence, not signed review
+    authority or an assertion that inference ran or incurred a payment.
+    """
     descriptor_name = settings.env_name(f"{vendor.upper()}_AUTH_FD")
     previous = os.environ.get(descriptor_name)
     with _credential(vendor, timeout_s, settings, wrapper) as snapshot:
+        # Inspect the exact held snapshot, not its original path, an environment
+        # label, or a mode supplied by the adapter/vendor. The private broker
+        # context above establishes its provenance; schema alone does not.
+        credential_seal._validate_access_only(
+            vendor, credential_seal._read_snapshot(snapshot)
+        )
         # The process launch path consumes and closes credential descriptors.
         # Transfer a duplicate so the broker retains its own snapshot until its
         # context exits, including when adapter.run raises after launch.
         child_descriptor = os.dup(snapshot)
         os.environ[descriptor_name] = str(child_descriptor)
         try:
-            return adapter.run(request)
+            result = adapter.run(request)
+            preferred = RUNTIME_REGISTRY.registration(vendor).preferred_transport
+            same_route = (
+                request.vendor == result.vendor == vendor
+                and request.attempt_id == result.attempt_id
+                and request.transport == result.transport == preferred
+                and all(
+                    attempt.transport == preferred
+                    for attempt in result.transport_attempts
+                )
+            )
+            return replace(
+                result,
+                billing_mode=(
+                    RuntimeBillingMode.SUBSCRIPTION
+                    if same_route
+                    else RuntimeBillingMode.UNKNOWN
+                ),
+            )
         finally:
             if previous is None:
                 os.environ.pop(descriptor_name, None)
@@ -619,6 +649,7 @@ def _normalized(result: RuntimeResult) -> dict[str, object]:
         "cost_usd": result.cost_usd,
         "cost_status": result.cost_status.value,
         "cost_source": result.cost_source.value,
+        "billing_mode": result.billing_mode.value,
         "returncode": result.returncode,
         "duration_s": result.duration_s,
         "diagnostics": list(result.diagnostics),
@@ -1107,10 +1138,12 @@ def test_live_runtime_contract(
             observed_cost: float | None = None
             invocation_costs: list[float | None] = []
             invocation_sources: list[RuntimeCostSource] = []
+            invocation_modes: list[RuntimeBillingMode] = []
             result: RuntimeResult | None = None
             try:
                 invocation_costs.append(None)
                 invocation_sources.append(RuntimeCostSource.UNKNOWN)
+                invocation_modes.append(RuntimeBillingMode.UNKNOWN)
                 result = _run_with_credential(
                     vendor,
                     adapter,
@@ -1119,6 +1152,7 @@ def test_live_runtime_contract(
                     settings=scenario_settings,
                     wrapper=wrapper,
                 )
+                invocation_modes[-1] = result.billing_mode
                 if result.cost_source in {
                     RuntimeCostSource.VENDOR,
                     RuntimeCostSource.ESTIMATED,
@@ -1136,6 +1170,7 @@ def test_live_runtime_contract(
                     )
                     invocation_costs.append(None)
                     invocation_sources.append(RuntimeCostSource.UNKNOWN)
+                    invocation_modes.append(RuntimeBillingMode.UNKNOWN)
                     resumed = _run_with_credential(
                         vendor,
                         resumed_adapter,
@@ -1150,6 +1185,7 @@ def test_live_runtime_contract(
                         settings=scenario_settings,
                         wrapper=wrapper,
                     )
+                    invocation_modes[-1] = resumed.billing_mode
                     if resumed.cost_source in {
                         RuntimeCostSource.VENDOR,
                         RuntimeCostSource.ESTIMATED,
@@ -1188,6 +1224,7 @@ def test_live_runtime_contract(
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
                     "cost_sources": [source.value for source in invocation_sources],
+                    "billing_modes": [mode.value for mode in invocation_modes],
                     "result": _normalized(result),
                 }
                 if vendor == "codex" and scenario == "permission-denial":
@@ -1223,6 +1260,9 @@ def test_live_runtime_contract(
                     "scenario": scenario,
                     "outcome": "failed",
                     "failure_class": type(exc).__name__,
+                    "billing_modes": [
+                        mode.value for mode in invocation_modes[:runner.scenario_invocations]
+                    ],
                     "accounting": accounting,
                     "charged_cost_usd": scenario_charge,
                     "cost_sources": [

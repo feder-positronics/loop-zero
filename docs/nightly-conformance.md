@@ -124,8 +124,36 @@ same refresh token, even after a restart or access-expiry edit. This is an
 indefinite backoff until recovery, not an hourly vendor retry. Obtain a new host
 login with a different refresh token and rerun renewal; the broker automatically
 clears the old marker. Do not delete the marker to retry an uncertain token.
+
+A matching, safely validated marker still permits a shorter run whose existing
+access token covers its full runtime plus the safety margin. The broker checks
+the current credential and marker under the same renewal lock, exports only the
+access-only snapshot, and leaves the marker bytes and permissions unchanged.
+This does not permit another refresh or establish recovery of the interrupted
+rotation. If access expires while admission is in progress, the final horizon
+check rejects the snapshot. Insufficient access lifetime still requires host
+recovery; inconsistent current account claims fail closed.
+
 Malformed or unsafe marker files fail closed and require host operator repair.
 A failure before vendor launch can conservatively require the same recovery.
+
+The broker checks account consistency using only the recognized
+`https://api.openai.com/auth.chatgpt_account_id` claim inside each decoded access
+or identity JWT: a present claim must be a nonempty string equal to outer
+`tokens.account_id`. Missing or null namespaces/claims remain unknown; malformed
+namespace or claim types are rejected. `sub`, email, `chatgpt_user_id`, `user_id`,
+and top-level account-like fields do not substitute for this claim. This matches
+the account namespace in the [pinned vendor parser](https://github.com/openai/codex/blob/6b9826e3aa83b1a5947db50f4332cb9c65f1b340/codex-rs/login/src/token_data.rs).
+
+Access tokens retain the JWT and expiry requirement. An identity token with
+exactly three dot-separated segments must decode to a valid JSON object; other
+nonempty identity strings remain opaque for compatibility, including strings
+with one or more than two dots. Claims are decoded without signature
+verification, solely to reject internal disagreement. Passing these checks does
+not authenticate an account, establish provenance, or authorize an alias.
+Inconsistent source credentials are rejected before refresh; inconsistent vendor
+replacements are never installed or exported, and retain the pending marker
+requiring host recovery described above.
 
 The workflow continues to validate and seal the snapshot before launching
 checked-out code. It fails if the access token no longer covers the job; it
@@ -153,5 +181,35 @@ unaccounted invocations and can exceed known usage. Read `accounting` and
 it does not report money paid.
 
 The configured USD ceiling and all existing charge, kill, and unknown-cost
-limits continue to enforce the same runaway bound. Credential-derived billing
-mode and account/model quota evidence remain follow-up work in #34 and #32.
+limits continue to enforce the same runaway bound.
+
+### Billing observations in conformance
+
+`RuntimeResult.billing_mode` is `subscription`, `metered`, or `unknown`; its
+backward-compatible default is `unknown`. Direct/ambient runtime calls continue
+to use that default. Only the live suite attaches a billing observation from its
+existing credential broker: it validates the exact held access-only snapshot
+before lending a duplicate to that invocation. The current brokers accept
+subscription OAuth/setup tokens and browser logins, so this producer can emit
+`subscription` or `unknown`, never `metered`. No mode is inferred from a vendor
+cost frame, requested commercial policy, environment label, or adapter claim.
+A result from another vendor, attempt, or transport remains `unknown`.
+
+The pinned Claude conformance model requires the SDK; its bridge overrides the
+OAuth token from the descriptor and filters API/gateway credentials. Protected
+Codex execution uses its SDK with a private credential home and a ChatGPT account
+check. Cursor uses the snapshot's private browser-auth home and filters API
+credentials. These existing routes are the scope of this observation; another
+transport or fallback is not covered by it.
+
+Each normalized result includes `billing_mode`; each scenario includes
+`billing_modes` in invocation order, including both restart/resume attempts.
+An invocation without a returned result retains `unknown`; older or unlaunched
+scenario rows display `unknown` in the nightly summary. The mode describes the
+selected credential class. It does not establish that a model launched, that
+subscription quota remained, or that money was charged. It is local conformance
+evidence, not signed review/ledger authority.
+
+Full governed-runtime credential provenance, signed telemetry propagation,
+metered credential support, and shared account/model quota evidence remain
+follow-up work in #34 and #32. No historical review records are rewritten.

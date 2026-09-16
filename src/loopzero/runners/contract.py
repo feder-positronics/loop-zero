@@ -156,6 +156,14 @@ class RuntimeCostSource(StrEnum):
     UNKNOWN = "unknown"
 
 
+class RuntimeBillingMode(StrEnum):
+    """Observed credential billing class, independent of spend authorization."""
+
+    SUBSCRIPTION = "subscription"
+    METERED = "metered"
+    UNKNOWN = "unknown"
+
+
 class RuntimeCommercialMode(StrEnum):
     """Owner-authorized commercial boundary for one native invocation."""
 
@@ -437,6 +445,7 @@ class RuntimeResult:
     final_output: str | None = field(default=None, repr=False)
     structured_output: dict[str, object] | None = field(default=None, repr=False)
     transport_attempts: tuple[RuntimeTransportAttempt, ...] = ()
+    billing_mode: RuntimeBillingMode = RuntimeBillingMode.UNKNOWN
 
 
 class RuntimeAdapter(Protocol):
