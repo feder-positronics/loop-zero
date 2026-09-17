@@ -121,25 +121,31 @@ unique attempt nonce and SHA-256 refresh-token fingerprint to the source path
 and stable lock inode; they never contain the refresh token itself. A private
 key in the owner-only lock authenticates this evidence. Existing exposed,
 hardlinked, replaced or malformed lock files are rejected rather than adopted.
+The broker does not repair permissions or adopt unsafe legacy lock/key material;
+an unsafe parent directory also prevents admission.
 
 Successful durable installation records an authenticated
 `.auth.json.refresh-installed` receipt before clearing the pending marker. After
 an interruption, an exact matching receipt permits recovery even when the
 vendor retained the same refresh token. It must bind the current attempt, lock,
 installed inode and exact credential contents. A stale or fabricated receipt
-cannot authorize a retry. The built-in process runner also clears its own
-attempt when the actual executable could not start; caller assertions, wrapper
-exit failures and parent I/O errors do not establish that evidence.
+cannot authorize a retry. Moving or rewriting the credential can change its
+inode, ctime or mtime and invalidate the receipt even when token contents match.
+Rekeyed or relocated evidence does not establish recovery. The built-in process
+runner also clears its own attempt when the actual executable could not start;
+caller assertions, wrapper exit failures and parent I/O errors do not establish
+that evidence.
 
 Timeout, interrupted refresh, invalid vendor output, or failure before the
 authenticated installation receipt retains uncertainty: subsequent runs refuse
 to reuse the same refresh token, even after a restart or access-expiry edit.
 This includes an installation that reached disk before its receipt was durable.
-Legacy fingerprint-only markers retain this conservative behavior. Obtain a
-new host login with a different refresh token and rerun renewal; the broker
-automatically clears the old marker. Do not delete the marker or lock to retry
-an uncertain token. This is an indefinite backoff until recovery, not an hourly
-vendor retry.
+Legacy fingerprint-only markers retain this conservative behavior. With an
+otherwise valid protected source and safely validated recovery state, a fresh
+host login with a different refresh token lets the broker retire the old marker.
+Fresh authentication does not repair unsafe locks or invalid evidence. Do not
+delete the marker or lock to retry an uncertain token. This is an indefinite
+backoff until recovery, not an hourly vendor retry.
 
 A matching, safely validated marker still permits a shorter run whose existing
 access token covers its full runtime plus the safety margin. The broker checks
@@ -150,8 +156,14 @@ rotation. If access expires while admission is in progress, the final horizon
 check rejects the snapshot. Insufficient access lifetime still requires host
 recovery; inconsistent current account claims fail closed.
 
-Malformed or unsafe marker files fail closed and require host operator repair.
-A failure before vendor launch can conservatively require the same recovery.
+Malformed or unsafe recovery state fails closed and requires the host operator
+or deployment owner. Preserve the uncertain material and its evidence; arrange
+fresh authentication and a separately validated protected source with that owner.
+Copying the uncertain token elsewhere is not recovery. No automatic migration or
+runnable repair procedure for unsafe or invalid state is established here. A
+failure before vendor launch can conservatively require the same recovery.
+These rules do not designate a renewal host or CI account; the deployment owner
+must establish both separately.
 
 The broker checks account consistency using only the recognized
 `https://api.openai.com/auth.chatgpt_account_id` claim inside each decoded access
