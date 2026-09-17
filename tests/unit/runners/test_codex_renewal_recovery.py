@@ -58,7 +58,8 @@ def test_unproven_failure_never_clears_native_pending(tmp_path, failure):
     assert pending.read_bytes() == before
 
 
-def test_killed_after_same_token_install_recovers_under_stable_lock(tmp_path):
+@pytest.mark.parametrize("boundary", ["receipt", "before-receipt", "forged-receipt"])
+def test_killed_after_same_token_install_recovers_under_stable_lock(tmp_path, boundary):
     path = tmp_path / "auth.json"
     _write_credential(path, _credential(expires_at_s=1_100))
     source_root = Path(__file__).resolve().parents[3] / "src"
@@ -69,6 +70,7 @@ sys.path.insert(0,sys.argv[1])
 from loopzero.runners import codex
 from loopzero.runners.settings import RuntimeSettings
 root,mode,label=Path(sys.argv[2]),sys.argv[3],sys.argv[4]
+boundary=sys.argv[5]
 settings=RuntimeSettings(env_prefix="RECOVERY_TEST",state_root=str(root/"state"))
 expiry=1200 if mode=="owner" else 3000
 claims=base64.urlsafe_b64encode(json.dumps({"exp":expiry}).encode()).decode().rstrip("=")
@@ -82,6 +84,13 @@ def pause_after_install(self,*args,**kwargs):
         while True: time.sleep(1)
     return original_unlink(self,*args,**kwargs)
 Path.unlink=pause_after_install
+original_write=codex._write_private_file
+def pause_before_receipt(path,payload):
+    if mode=="owner" and boundary=="before-receipt" and path.name.endswith(".refresh-installed"):
+        (root/"durable-install").write_text("ready")
+        while True: time.sleep(1)
+    return original_write(path,payload)
+codex._write_private_file=pause_before_receipt
 with settings.use():
     (root/(label+"-started")).write_text("started")
     with codex.codex_subscription_credential(credential_path=root/"auth.json",requested_runtime_s=600,clock=lambda:1000,refresh_command=(sys.executable,"-I","-c",program),sandbox_wrapper=lambda spec:spec.argv) as fd:
@@ -89,7 +98,7 @@ with settings.use():
 '''
     def spawn(mode, label):
         return subprocess.Popen(
-            [sys.executable, "-I", "-c", probe, str(source_root), str(tmp_path), mode, label],
+            [sys.executable, "-I", "-c", probe, str(source_root), str(tmp_path), mode, label, boundary],
             start_new_session=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
     def wait_for(path):
@@ -108,13 +117,25 @@ with settings.use():
             children.append(spawn("waiter", label))
             wait_for(tmp_path / f"{label}-started")
             assert not (tmp_path / f"{label}-snapshot").exists()
+        if boundary == "forged-receipt":
+            receipt = tmp_path / ".auth.json.refresh-installed"
+            fabricated = json.loads(receipt.read_text())
+            import hashlib
+            fabricated["mac"] = hashlib.sha256(json.dumps(fabricated["record"], sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            receipt.write_text(json.dumps(fabricated))
         os.killpg(owner.pid, signal.SIGKILL)
         owner.communicate(timeout=5)
         for child in children[1:]:
             stdout, stderr = child.communicate(timeout=5)
-            assert child.returncode == 0, (stdout, stderr)
+            if boundary == "receipt":
+                assert child.returncode == 0, (stdout, stderr)
+            else:
+                assert child.returncode != 0, (stdout, stderr)
         assert lock.stat().st_ino == inode
-        assert sum((tmp_path / f"contact-{label}").exists() for label in ("first", "second")) == 1
+        assert sum((tmp_path / f"contact-{label}").exists() for label in ("first", "second")) == (1 if boundary == "receipt" else 0)
+        if boundary != "receipt":
+            assert (tmp_path / ".auth.json.refresh-pending").exists()
+            return
         for label in ("first", "second"):
             tokens = json.loads((tmp_path / f"{label}-snapshot").read_text())["tokens"]
             assert tokens["refresh_token"] == tokens["access_token"]
@@ -166,4 +187,62 @@ def test_injected_broker_noexec_exception_cannot_clear_intent(tmp_path, route):
             refresh_command=(sys.executable, "-I", "-c", "raise SystemExit(127)"), **options,
         ):
             pytest.fail("injected evidence admitted snapshot")
+    assert path.with_name(".auth.json.refresh-pending").exists()
+
+
+def test_authentic_previous_same_token_receipt_cannot_resolve_new_intent(tmp_path, monkeypatch):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    pending = path.with_name(".auth.json.refresh-pending")
+    receipt = path.with_name(".auth.json.refresh-installed")
+    saved = []
+    unlink = Path.unlink
+    def capture_receipt(self, *args, **kwargs):
+        if self == pending and receipt.exists():
+            saved.append(receipt.read_bytes())
+        return unlink(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", capture_receipt)
+    def successful(command, *, env, **kwargs):
+        _write_credential(Path(env[codex.get_settings().env_name("CODEX_REFRESH_OUTPUT")]), _credential(expires_at_s=1_200))
+        return subprocess.CompletedProcess(command, 0, stdout='{"authenticated":true}')
+    args = dict(credential_path=path, requested_runtime_s=600, clock=lambda: 1_000, refresh_command=("synthetic",))
+    with pytest.raises(codex.CodexCredentialUnavailable):
+        with codex.codex_subscription_credential(**args, run_refresh=successful):
+            pytest.fail("short installed material admitted")
+    assert len(saved) == 1 and not pending.exists()
+    def uncertain(*args, **kwargs):
+        raise OSError("after unknown contact")
+    with pytest.raises(codex.CodexCredentialRefreshFailed):
+        with codex.codex_subscription_credential(**args, run_refresh=uncertain):
+            pytest.fail("uncertainty admitted")
+    # Source inode and bytes still exactly match the authentic old receipt.
+    # Only the new renewal nonce distinguishes this uncertainty.
+    receipt.write_bytes(saved[0])
+    receipt.chmod(0o600)
+    with pytest.raises(codex.CodexCredentialRefreshFailed):
+        with codex.codex_subscription_credential(**args, run_refresh=lambda *a, **k: pytest.fail("old receipt authorized new intent")):
+            pytest.fail("old receipt resolved new intent")
+    assert pending.exists()
+
+
+def test_parent_io_error_after_real_exec_is_not_noexec_evidence(tmp_path, monkeypatch):
+    import errno
+    from loopzero.runners import process
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    contact = tmp_path / "real-child-executed"
+    popen = process.subprocess.Popen
+    def exec_then_parent_failure(*args, **kwargs):
+        child = popen(*args, **kwargs)
+        child.communicate(input="", timeout=5)
+        raise OSError(errno.EIO, "synthetic parent pipe failure")
+    monkeypatch.setattr(process.subprocess, "Popen", exec_then_parent_failure)
+    command = (sys.executable, "-I", "-c", f"from pathlib import Path; Path({str(contact)!r}).write_text('executed')")
+    with pytest.raises(codex.CodexCredentialRefreshFailed):
+        with codex.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            refresh_command=command, sandbox_wrapper=lambda spec: spec.argv,
+        ):
+            pytest.fail("post-exec parent error admitted snapshot")
+    assert contact.exists()
     assert path.with_name(".auth.json.refresh-pending").exists()
