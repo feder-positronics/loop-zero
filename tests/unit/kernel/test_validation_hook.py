@@ -869,6 +869,33 @@ def test_preflight_completes_when_collectors_respond(tmp_path, monkeypatch):
     assert len(calls) == 2
 
 
+def test_validation_hook_passes_the_running_coordinator_runtime(tmp_path, monkeypatch):
+    repo, sha, signer, key, artifact = _signed_case(tmp_path)
+    captured = None
+
+    def child(argv, **kwargs):
+        nonlocal captured
+        captured = kwargs["python_runtime"]
+        return _direct_child(argv, **kwargs)
+
+    monkeypatch.setattr(validation, "run_validation_child", child)
+    assert validation.run_hook(
+        worktree=repo,
+        hook="acceptance",
+        base_sha=sha,
+        head_sha=sha,
+        task_id="task-1",
+        result_artifact=artifact,
+        coordinator_public_key=signer.public_key,
+        extra=[],
+    ) == 0
+    assert captured is not None
+    assert captured.interpreter == Path(
+        getattr(sys, "_base_executable", sys.executable)
+    ).resolve()
+    assert captured.base == Path(sys.base_prefix).resolve()
+
+
 @pytest.mark.parametrize("code", [1, 3])
 def test_preflight_preserves_collector_failure_codes(tmp_path, monkeypatch, code):
     repo, sha, signer, key, artifact = _script_case(tmp_path, f"echo collector exit {code} >&2\nexit {code}")
