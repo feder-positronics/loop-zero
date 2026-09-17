@@ -129,6 +129,7 @@ class RuntimeStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed-out"
+    LIMITED = "limited"
     SUBSCRIPTION_UNAVAILABLE = "subscription-unavailable"
 
 
@@ -206,6 +207,7 @@ class TerminalReason(StrEnum):
     """Bounded terminal reasons safe to retain in runtime telemetry."""
 
     COMPLETED = "completed"
+    USAGE_LIMIT = "usage-limit"
     PROCESS_EXIT = "process-exit"
     MALFORMED_EVENT = "malformed-event"
     MISSING_TERMINAL_EVENT = "missing-terminal-event"
@@ -418,6 +420,46 @@ class RuntimeHandle:
     transport: str
 
 
+class RuntimeLimitScope(StrEnum):
+    """Observed provider window; UNKNOWN grants no account exhaustion claim."""
+
+    UNKNOWN = "unknown"
+    FIVE_HOUR = "five_hour"
+    SEVEN_DAY = "seven_day"
+    SEVEN_DAY_OPUS = "seven_day_opus"
+    SEVEN_DAY_SONNET = "seven_day_sonnet"
+    OVERAGE = "overage"
+
+
+def normalized_limit_reset(value: object) -> float | None:
+    """Bounded Unix seconds, never a cooldown or a zero for missing evidence."""
+    if (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and 0 < value <= 253_402_300_799
+        and math.isfinite(value)
+    ):
+        return float(value)
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeUsageLimit:
+    """Observation only: neither retry/rotation permission nor slot settlement."""
+
+    scope: RuntimeLimitScope = RuntimeLimitScope.UNKNOWN
+    resets_at: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scope, RuntimeLimitScope):
+            raise ValueError("usage limit scope is invalid")
+        if self.resets_at is not None and (
+            self.scope is RuntimeLimitScope.UNKNOWN
+            or normalized_limit_reset(self.resets_at) is None
+        ):
+            raise ValueError("usage limit reset is invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeResult:
     """Normalized terminal evidence with no prompt, tool, or model-output body."""
@@ -446,6 +488,7 @@ class RuntimeResult:
     structured_output: dict[str, object] | None = field(default=None, repr=False)
     transport_attempts: tuple[RuntimeTransportAttempt, ...] = ()
     billing_mode: RuntimeBillingMode = RuntimeBillingMode.UNKNOWN
+    usage_limit: RuntimeUsageLimit | None = None
 
 
 class RuntimeAdapter(Protocol):

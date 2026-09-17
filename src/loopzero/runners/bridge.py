@@ -53,6 +53,9 @@ from .contract import (
     MAX_STRUCTURED_OUTPUT_BYTES,
     RUNTIME_PROGRESS_PROTOCOL_VERSION,
     RuntimePhase,
+    RuntimeLimitScope,
+    RuntimeUsageLimit,
+    normalized_limit_reset,
     RuntimeProgressSignal,
     RuntimeToolLabel,
     is_valid_resume_session_id,
@@ -2305,6 +2308,8 @@ async def _run_claude(
     accepted_structured_output: dict[str, object] | None = None
     saw_message = False
     model_output_seen = False
+    window_limit: RuntimeUsageLimit | None = None
+    assistant_limit = False
     denial_diagnostics: dict[str, int] = {}
 
     def terminal_protocol_failure() -> None:
@@ -2359,8 +2364,22 @@ async def _run_claude(
                     }
                 )
                 return
+            # Advisory state is not a terminal. Only a later unsuccessful
+            # native limit result can use this scope; permitted overage clears it.
+            window_limit = None
+            if status == "rejected" and overage_status not in {"allowed", "allowed_warning"}:
+                try:
+                    scope = RuntimeLimitScope(rate_type)
+                except (TypeError, ValueError):
+                    scope = RuntimeLimitScope.UNKNOWN
+                if scope is not RuntimeLimitScope.UNKNOWN:
+                    window_limit = RuntimeUsageLimit(
+                        scope=scope, resets_at=normalized_limit_reset(info.resets_at)
+                    )
             continue
         if isinstance(message, AssistantMessage):
+            if message.error == "rate_limit":
+                assistant_limit = True
             synthetic = message.model == "<synthetic>" or bool(message.error)
             if synthetic:
                 detail = sanitized_provider_error(message.error)
@@ -2515,6 +2534,11 @@ async def _run_claude(
             recovered_after_budget = (
                 budget_exhausted and accepted_structured_output is not None
             )
+            limited = message.is_error and not budget_exhausted and (
+                assistant_limit
+                or (message.api_error_status == 429 and window_limit is not None)
+            )
+            recovered_after_limit = limited and accepted_structured_output is not None
             status = "failed" if message.is_error else "completed"
             structured_output = message.structured_output
             if isinstance(structured_output, dict):
@@ -2538,6 +2562,14 @@ async def _run_claude(
             elif budget_exhausted:
                 reason = "budget-exhausted"
                 structured_output = None
+            elif recovered_after_limit:
+                status = "completed"
+                reason = "completed"
+                structured_output = accepted_structured_output
+                recovered_accepted_output = True
+            elif limited:
+                status = "limited"
+                reason = "usage-limit"
             elif recovered_accepted_output:
                 # Claude can acknowledge the StructuredOutput tool successfully
                 # yet omit the same object from ResultMessage. The observed
@@ -2558,6 +2590,14 @@ async def _run_claude(
                 "terminal_reason": reason,
                 "session_id": session_id,
             }
+            if status == "limited":
+                evidence = window_limit or RuntimeUsageLimit()
+                frame["usage_limit"] = {
+                    "scope": evidence.scope.value,
+                    "resets_at": evidence.resets_at,
+                }
+                if model_output_seen and output is not None:
+                    frame["output"] = output
             if effective_model is not None:
                 frame["effective_model"] = effective_model
             if request_id is not None:
