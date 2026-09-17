@@ -617,6 +617,9 @@ def launch_cli(
     caller may make an exceptional unsandboxed launch only by setting
     ``unsandboxed=True`` and supplying a nonempty reason, which is logged.
     """
+    from .accounts import declared_launch_command, declared_launch_environment
+
+    command = declared_launch_command(command, cwd=cwd)
     if os.name != "posix":
         raise ProcessGroupError("native runtime process groups require POSIX")
     if sandbox_wrapper is None:
@@ -664,19 +667,23 @@ def launch_cli(
     identity_prerequisites = (
         _launch_identity_prerequisites() if on_launch is not None else None
     )
-    process = subprocess.Popen(
-        launch_command,
-        cwd=cwd,
-        env=worker_child_environment(
-            filtered_child_environment(env, extra=child_markers),
-        ),
-        stdin=stdin,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-        pass_fds=tuple(pass_fds),
-    )
+    environment = worker_child_environment(filtered_child_environment(env, extra=child_markers))
+    with declared_launch_environment(
+        environment, pass_fds,
+        bridge="--require-brokered-credential" in command,
+        sandboxed=sandbox_wrapper is not None,
+    ) as (launch_environment, launch_fds):
+        process = subprocess.Popen(
+            launch_command,
+            cwd=cwd,
+            env=launch_environment,
+            stdin=stdin,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            pass_fds=tuple(launch_fds),
+        )
     handle = ProcessHandle(process=process, pid=process.pid, pgid=process.pid)
     if on_launch is not None:
         assert identity_prerequisites is not None
@@ -844,7 +851,12 @@ def _run_cli_with_private_tmpdir(
     progress_write_fd: int | None = None
     inherited_fds = tuple(pass_fds)
     owned_auth_fd: int | None = None
-    raw_auth_fd = (env or {}).get(get_settings().env_name("CODEX_AUTH_FD"))
+    from .accounts import active_scope
+
+    raw_auth_fd = (
+        (env or {}).get(get_settings().env_name("CODEX_AUTH_FD"))
+        if active_scope() is None else None
+    )
     if raw_auth_fd is not None:
         try:
             candidate_auth_fd = int(raw_auth_fd)

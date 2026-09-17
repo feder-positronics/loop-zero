@@ -1,5 +1,6 @@
 """Cursor CLI adapter using its structured stream-json protocol."""
 
+from .accounts import credential_reference
 from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_adapter_settings
 
 
@@ -154,7 +155,8 @@ def filtered_cursor_environment(
 def _cursor_subscription_environment():
     """Materialize one brokered access-only snapshot in private runner state."""
     environment = filtered_cursor_environment()
-    raw_fd = environment.pop(get_settings().env_name("CURSOR_AUTH_FD"), None)
+    environment.pop(get_settings().env_name("CURSOR_AUTH_FD"), None)
+    raw_fd = credential_reference("cursor")
     if raw_fd is None:
         yield environment, ()
         return

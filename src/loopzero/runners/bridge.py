@@ -595,6 +595,8 @@ def _claude_subscription_environment() -> dict[str, str]:
     if session_home is not None:
         environment["HOME"] = str(session_home)
     if raw_fd is None:
+        if get_settings().declared_credential_vendor is not None:
+            raise BridgeInputError("declared credential is missing")
         return environment
     try:
         fd = int(raw_fd)
@@ -653,6 +655,8 @@ def _materialize_codex_subscription_auth() -> (
     """Consume a one-run credential descriptor into a private SDK-only home."""
     raw_fd = os.environ.pop(get_settings().env_name("CODEX_AUTH_FD"), None)
     if raw_fd is None:
+        if get_settings().declared_credential_vendor is not None:
+            raise BridgeInputError("declared credential is missing")
         return None, {}, None
     try:
         fd = int(raw_fd)
@@ -2698,6 +2702,14 @@ async def main() -> int:
     try:
         try:
             request = _read_request()
+            if ("--require-brokered-credential" in sys.argv[1:]
+                    or get_settings().declared_credential_vendor is not None):
+                from .accounts import DeclaredAccountError, validate_child_credential
+
+                try:
+                    validate_child_credential(request["vendor"].removesuffix("-probe"))
+                except DeclaredAccountError:
+                    raise BridgeInputError("declared credential is invalid") from None
         except BridgeInputError:
             _error_frame("protocol")
             return 2
@@ -2788,6 +2800,8 @@ def codex_refresh() -> int:
 
 if __name__ == "__main__":
     with RuntimeSettings.from_environment().use():
+        if sys.argv[1:] not in ([], ["--require-brokered-credential"], ["--codex-refresh"]):
+            raise SystemExit(2)
         if sys.argv[1:] == ["--codex-refresh"]:
             raise SystemExit(codex_refresh())
         raise SystemExit(asyncio.run(main()))
