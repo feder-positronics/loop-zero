@@ -1,6 +1,7 @@
 """Legacy null lineage can be validated without rewriting signed history."""
 
 import copy
+import subprocess
 
 import pytest
 
@@ -244,3 +245,170 @@ def test_even_coherently_signed_rows_require_valid_identity(ordinary, mutation):
         kind = "coordinator" if row["type"] == "attempt-start" else "dispatcher"
         records[records.index(row)] = signer.seal(payload, authority_kind=kind)
     assert resolve(records) is None
+
+
+@pytest.fixture
+def synthetic_snapshot(ordinary):
+    repo, coordinator, dispatcher, records, completion = ordinary
+    start = next(row for row in records if row["type"] == "attempt-start")
+    source = start["source_identity"]["head"]
+    tree = start["snapshot_tree_sha"]
+    snapshot = (
+        subprocess.check_output(
+            ["git", "commit-tree", tree, "-p", source],
+            input=b"synthetic review snapshot\n",
+            cwd=repo,
+        )
+        .decode()
+        .strip()
+    )
+    assert snapshot != source
+    assert (
+        subprocess.check_output(
+            ["git", "rev-parse", f"{snapshot}^{{tree}}"],
+            cwd=repo,
+        )
+        .decode()
+        .strip()
+        == tree
+    )
+    payload = unsigned(start)
+    payload.update(snapshot_sha=snapshot, terminal_authority=dispatcher.registration())
+    records[records.index(start)] = coordinator.seal(
+        payload, authority_kind="coordinator"
+    )
+    completion = dispatcher.seal(
+        provisional.build_producer_completion(
+            records,
+            repo=repo,
+            task_id=payload["task_id"],
+            result_artifact=completion["result_artifact"],
+            result_sha256=completion["result_sha256"],
+        ),
+        authority_kind="dispatcher",
+    )
+    return repo, coordinator, dispatcher, records, completion
+
+
+def test_synthetic_commit_with_same_authenticated_tree_derives_lineage(
+    synthetic_snapshot,
+):
+    repo, _, _, records, _ = synthetic_snapshot
+    admission, receipt, terminal = finish(synthetic_snapshot)
+    assert authority.authenticated_review_terminals(records)["review-1"] is terminal
+    assert (
+        provisional.authenticated_capture_admissions(records)["review-1"] is admission
+    )
+    assert terminal["snapshot_sha"] != terminal["source_identity"]["head"]
+    assert (
+        terminal["patch_identity"]["candidate_sha"]
+        == terminal["source_identity"]["head"]
+    )
+    assert (
+        terminal["patch_identity"]["candidate_tree_sha"]
+        == terminal["snapshot_tree_sha"]
+    )
+    before = copy.deepcopy(records)
+    assert resolve(records) == {
+        key: terminal[key]
+        for key in (
+            "task_id",
+            "work_unit_id",
+            "root_work_unit_id",
+            "unit_attempt_number",
+            "task_contract_hash",
+        )
+    }
+    assert records == before
+    assert (
+        provisional.capture_provisional_findings(
+            repo,
+            authority_records=records,
+            admission=admission,
+        )
+        == receipt
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "none",
+        "different-tree",
+        "candidate-sha",
+        "candidate-tree",
+        "missing-patch",
+        "forged-patch",
+        "missing-head",
+        "invalid-head",
+        "empty-head",
+        "ambiguous",
+    ],
+)
+def test_synthetic_snapshot_binding_fails_closed(synthetic_snapshot, mutation):
+    repo, coordinator, dispatcher, records, _ = synthetic_snapshot
+    admission, _, terminal = finish(synthetic_snapshot)
+    records.remove(admission)
+    # Exercise the helper's own guards with an authenticated uncaptured legacy
+    # terminal, so upstream capture checks cannot mask a broken source binding.
+    original_source = terminal["source_identity"]["head"]
+    other_tree = None
+    other_snapshot = None
+    if mutation == "different-tree":
+        other_tree = (
+            subprocess.check_output(
+                ["git", "mktree"],
+                input=b"",
+                cwd=repo,
+            )
+            .decode()
+            .strip()
+        )
+        assert other_tree != terminal["snapshot_tree_sha"]
+        other_snapshot = (
+            subprocess.check_output(
+                ["git", "commit-tree", other_tree, "-p", original_source],
+                input=b"different snapshot tree\n",
+                cwd=repo,
+            )
+            .decode()
+            .strip()
+        )
+    for row in [
+        r for r in records if r["type"] in {"attempt-start", "attempt-terminal"}
+    ]:
+        payload = unsigned(row)
+        for key in tuple(payload):
+            if key.startswith("finding_capture") or key == "provisional_owner_id":
+                payload.pop(key)
+        if row["type"] == "attempt-start":
+            payload["terminal_authority"] = dispatcher.registration()
+        if mutation == "different-tree":
+            payload["snapshot_tree_sha"] = other_tree
+            payload["snapshot_sha"] = other_snapshot
+        elif mutation == "candidate-sha":
+            payload["patch_identity"]["candidate_sha"] = payload["snapshot_sha"]
+        elif mutation == "candidate-tree":
+            payload["patch_identity"]["candidate_tree_sha"] = "0" * 40
+        elif mutation == "missing-patch":
+            payload.pop("patch_identity")
+        elif mutation in {"missing-head", "invalid-head", "empty-head"}:
+            head = {"missing-head": None, "invalid-head": "g" * 40, "empty-head": ""}[
+                mutation
+            ]
+            payload["source_identity"]["head"] = head
+            payload["patch_identity"]["candidate_sha"] = head
+        signer = coordinator if row["type"] == "attempt-start" else dispatcher
+        kind = "coordinator" if row["type"] == "attempt-start" else "dispatcher"
+        records[records.index(row)] = signer.seal(payload, authority_kind=kind)
+    if mutation == "forged-patch":
+        records[-1]["patch_identity"]["candidate_sha"] = "0" * 40
+    elif mutation == "ambiguous":
+        records.append(copy.deepcopy(records[-1]))
+    else:
+        # Every signed malformed-identity case remains authenticated; only the
+        # helper's explicit binding checks reject it. The control is non-vacuous.
+        assert (
+            authority.authenticated_review_terminals(records)["review-1"] is records[-1]
+        )
+    assert bool(resolve(records)) is (mutation == "none")
