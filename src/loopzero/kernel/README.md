@@ -45,6 +45,25 @@ adapter; that adapter must also apply the environment and descriptor boundary.
 The lower-level `command` function retains its original explicit mount controls
 for privileged coordinators; it is not itself the validation-child API.
 
+When a validation child may start the coordinator's Python installation, the
+coordinator selects it explicitly with
+`sandbox.trusted_python_runtime(interpreter=..., base=..., forbidden_roots=...)`
+and passes the result as `python_runtime` to `run_validation_child` or
+`validation_command`. Both APIs revalidate the descriptor at consumption, mount
+only that base read-only (unless it is already visible under `/usr`), remove
+inherited `LD_LIBRARY_PATH` and `LD_PRELOAD`, and set `LD_LIBRARY_PATH` to the
+validated `base/lib` when that directory exists. Runtime selection is
+coordinator authority: ownership and path checks reject unsafe layouts but do
+not make a candidate-, argv-, or `PATH`-selected interpreter trusted.
+`validation.run_hook` uses this contract with the base interpreter of the
+already-running trusted coordinator process; consumers do not derive a runtime
+from hook argv. The contract deliberately supports only the conventional
+`base/lib` loader directory. Installations that need additional or multiarch
+search roots need an explicit future contract rather than ambient loader
+variables or broader mounts. Static, libraryless, and relative-RUNPATH runtimes
+continue to work without a library-path override. The credential-bearing
+`job.sh` host bootstrap remains outside this child-runtime contract.
+
 `sandbox.codex_subscription_credential` requires an injected `credential_broker`.
 The callable receives `requested_runtime_s` and returns a context manager yielding
 one owner-private descriptor. The broker owns renewal and closure. The kernel
@@ -172,11 +191,13 @@ and are read under a deadline. Unsigned/malformed/unreadable, tampered, and
 misbound artifacts are distinct failures. Candidate code is never imported or
 executed by that verifier.
 
-The toolchain also accepts `interpreter` (sandbox runtime mounting) and
-`formatter_modules` (the approved formatter installation). Missing formatter
-configuration produces no format-equivalence proof. IntelFlo interpreter
-discovery retains `fastapi_backend/.venv/bin/python`; other consumers configure
-`interpreter` explicitly.
+The toolchain also accepts `interpreter` for the existing sandbox symlink/runtime
+mount compatibility path and `formatter_modules` for the approved formatter
+installation. That compatibility setting does not select a loader search path;
+new validation launchers use the explicit trusted Python runtime contract above.
+Missing formatter configuration produces no format-equivalence proof. IntelFlo
+interpreter discovery retains `fastapi_backend/.venv/bin/python`; other consumers
+configure `interpreter` explicitly.
 
 ## Shipped hooks
 

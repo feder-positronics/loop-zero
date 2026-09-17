@@ -57,6 +57,14 @@ def test_loopzero_accepted_delta_replaces_closure_bookkeeping(
     )
     verdicts = {"current": {"verdict": "pass"}}
     monkeypatch.setattr(module, "authenticated_verdicts", lambda *a, **k: verdicts)
+    # Resolution now authenticates its own records rather than consuming the
+    # publisher's precomputed maps; patch that same authority seam here.
+    from loopzero.review import authority
+
+    monkeypatch.setattr(
+        authority, "authenticated_review_terminals", lambda *a, **k: terminals
+    )
+    monkeypatch.setattr(authority, "authenticated_verdicts", lambda *a, **k: verdicts)
     findings = [
         {
             "finding_id": "old",

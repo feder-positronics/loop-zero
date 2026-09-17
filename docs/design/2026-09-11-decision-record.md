@@ -17,7 +17,7 @@ assumed (proceed unless overruled) or deferred (blocks a named step).
 | D3 | Two cutovers: A mechanisms, B thin core | One-step plan withdrawn |
 | D4 | Developer experience must not break | Invariants are blocking gates in both windows |
 | D5 | Distribution: vendored `core/` snapshot plus package installed from the same SHA | Status tool checks both versions match |
-| D6 | Python 3.12 or later; CI on 3.12 and 3.14 | `uv python install 3.12` locally |
+| D6 | Python 3.14 or later; CI uses only 3.14 (updated 2026-09-17) | `uv python install 3.14` locally |
 | D11 | Vendored methodology skills: `grill-with-docs`, `tdd`, `code-review` from mattpocock/skills at a pinned SHA | Other Pocock skills not vendored; superpowers not adopted |
 | D14 | pytest for the package | Existing loop-zero tests kept, CI switches to pytest |
 | D15 | Release branch `release/0.3` with stacked PRs; final merge is R-A | Same pattern for B as `release/0.4` |

@@ -209,3 +209,17 @@ def test_unrecognized_sdk_message_prevents_absence_evidence(monkeypatch, capsys)
         ).model_output_seen
         is None
     )
+
+
+@pytest.mark.parametrize("output", [None, "partial review"])
+def test_merged_usage_limit_preserves_output_evidence(output, monkeypatch, tmp_path):
+    from tests.unit.runners.test_claude_usage_limits import event, result, run
+
+    _, frames = run([event(), result(output=output)], monkeypatch, tmp_path)
+    parsed = claude.parse_claude_stream(
+        "\n".join(json.dumps(frame) for frame in frames), sdk_bridge=True
+    )
+    assert parsed.status is contract.RuntimeStatus.LIMITED
+    assert parsed.terminal_reason is contract.TerminalReason.USAGE_LIMIT
+    assert parsed.usage_limit.scope is contract.RuntimeLimitScope.FIVE_HOUR
+    assert parsed.model_output_seen is (output is not None)

@@ -66,6 +66,7 @@ from .gitscope import (
 from .seams import (
     _latest_attempt_settlement_indices,
     accepted_review_terminals,
+    authenticated_capture_admissions,
     authenticated_publication_bindings,
     authenticated_recovery_admissions,
     authenticated_retry_outcomes,
@@ -102,6 +103,7 @@ def _governed_records_with_review_state(
     review_state = authenticated_review_state_records(records)
     finding_authority = (
         *authenticated_recovery_admissions(records).values(),
+        *authenticated_capture_admissions(records).values(),
         *authenticated_publication_bindings(records).values(),
     )
     reservation_ids = {
@@ -1049,6 +1051,10 @@ def _retention_live_record_ids(
         for worktree, units in open_units_by_worktree.items()
         for unit_id in units
     }
+    # Preserve complete native registration/admission context for ordinary
+    # provisional owners, including unpublished or retired owners. Dropping it
+    # would make a valid capture indistinguishable from a forged replacement.
+    ordinary_tasks = set(authenticated_capture_admissions(records))
     selected: set[int] = set()
     for index, record in enumerate(records):
         record_type = record.get("type")
@@ -1074,7 +1080,9 @@ def _retention_live_record_ids(
             record.get("alias"),
         )
         if (
-            id(record) in authenticated_reentry_ids
+            record.get("task_id") in ordinary_tasks
+            or record.get("superseded_task_id") in ordinary_tasks
+            or id(record) in authenticated_reentry_ids
             or id(record) in anchored_recovery_ids
             or id(record) in referenced_dependency_ids
             or record_type

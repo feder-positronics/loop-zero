@@ -100,7 +100,7 @@ existing Python project, with only the extras the consumer's runtimes need:
 uv add "loopzero[claude,codex] @ git+https://github.com/feder-positronics/loop-zero@$LOOP_ZERO_REVISION"
 ```
 
-The base package has no third-party dependencies and requires Python 3.12 or
+The base package has no third-party dependencies and requires Python 3.14 or
 later on Linux. `loopzero status` reports the installed package version and
 the vendored snapshot's `core/VERSION`; they must be equal. `loopzero sync`
 renders the consumer's runtime wiring from `workflow.toml` into checked-in

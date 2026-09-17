@@ -5,6 +5,7 @@ The system-Python dispatcher never imports ``claude_agent_sdk``.  It starts
 small, allow-listed JSONL protocol implemented here.
 """
 
+from .accounts import credential_reference
 from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_adapter_settings
 
 
@@ -33,6 +34,9 @@ from .contract import (
     RuntimeStatus,
     RuntimeTransportAttempt,
     RuntimeUsage,
+    RuntimeLimitScope,
+    RuntimeUsageLimit,
+    normalized_limit_reset,
     SubscriptionEligibility,
     TerminalReason,
     is_valid_resume_session_id,
@@ -140,6 +144,7 @@ class ParsedClaudeStream:
     final_output: str | None = field(default=None, repr=False)
     structured_output: dict[str, object] | None = field(default=None, repr=False)
     model_output_seen: bool | None = None
+    usage_limit: RuntimeUsageLimit | None = None
 
 
 def filtered_claude_environment(
@@ -296,7 +301,8 @@ def _has_scoped_tools(request: RuntimeRequest) -> bool:
 
 
 def _requires_sdk_transport(request: RuntimeRequest) -> bool:
-    return request.requested_model in MODELS_REQUIRING_SDK_COMPATIBILITY_PROBE
+    return (get_settings().accounts is not None
+            or request.requested_model in MODELS_REQUIRING_SDK_COMPATIBILITY_PROBE)
 
 
 # Explicit alias keeps call sites readable while allowing fixtures to use the
@@ -540,7 +546,7 @@ def _terminal_from_frame(
         wire_status = "failed" if is_error else "completed"
     if not isinstance(wire_status, str):
         raise ClaudeProtocolError("Claude terminal status was invalid")
-    if wire_status not in {RuntimeStatus.COMPLETED.value, RuntimeStatus.FAILED.value}:
+    if wire_status not in {RuntimeStatus.COMPLETED.value, RuntimeStatus.FAILED.value, RuntimeStatus.LIMITED.value}:
         raise ClaudeProtocolError("Claude terminal status was unknown")
     status = RuntimeStatus(wire_status)
 
@@ -613,6 +619,7 @@ def parse_claude_stream(
     final_output: str | None = None
     structured_output: dict[str, object] | None = None
     semantic_seen = False
+    usage_limit: RuntimeUsageLimit | None = None
     saw_frame = False
     model_output_seen: bool | None = None
     observation_complete = True
@@ -731,8 +738,39 @@ def parse_claude_stream(
                 and raw.get("model_output_seen") is False
             ):
                 model_output_seen = False
+            limit_payload = raw.get("usage_limit")
+            if (
+                (frame_status is RuntimeStatus.LIMITED) != (frame_reason is TerminalReason.USAGE_LIMIT)
+                or (frame_status is RuntimeStatus.LIMITED) != isinstance(limit_payload, dict)
+                or (limit_payload is not None and frame_status is not RuntimeStatus.LIMITED)
+            ):
+                raise ClaudeProtocolError("Claude usage limit terminal was inconsistent", semantic_event=semantic_seen)
+            if isinstance(limit_payload, dict):
+                try:
+                    scope = RuntimeLimitScope(limit_payload.get("scope"))
+                except (TypeError, ValueError) as exc:
+                    raise ClaudeProtocolError("Claude usage limit scope was invalid", semantic_event=semantic_seen) from exc
+                usage_limit = RuntimeUsageLimit(
+                    scope=scope,
+                    resets_at=(normalized_limit_reset(limit_payload.get("resets_at"))
+                               if scope is not RuntimeLimitScope.UNKNOWN else None),
+                )
             result_subtype = _bounded_string(raw.get("subtype"), "subtype")
+            if frame_reason is TerminalReason.USAGE_LIMIT_AFTER_RESULT:
+                if (
+                    frame_status is not RuntimeStatus.COMPLETED
+                    or raw.get("structured_output_recovery") != "accepted-tool-result"
+                    or frame_structured_output is None
+                    or raw.get("api_error_status") != 429
+                    or result_subtype not in {"success", "error_during_execution"}
+                ):
+                    raise ClaudeProtocolError(
+                        "Claude qualified usage-limit recovery was inconsistent",
+                        semantic_event=True,
+                    )
             if result_subtype == "error_max_budget_usd":
+                if usage_limit is not None:
+                    raise ClaudeProtocolError("Claude local budget cannot be a usage limit", semantic_event=semantic_seen)
                 if frame_structured_output is not None:
                     frame_status = RuntimeStatus.COMPLETED
                     frame_reason = TerminalReason.BUDGET_EXHAUSTED_AFTER_RESULT
@@ -747,7 +785,10 @@ def parse_claude_stream(
                 }
                 or (
                     frame_status is RuntimeStatus.COMPLETED
-                    and frame_reason is not TerminalReason.COMPLETED
+                    and frame_reason not in {
+                        TerminalReason.COMPLETED,
+                        TerminalReason.USAGE_LIMIT_AFTER_RESULT,
+                    }
                 )
                 or (
                     frame_status is RuntimeStatus.FAILED
@@ -936,6 +977,7 @@ def parse_claude_stream(
         events=tuple(events),
         semantic_event=semantic_seen,
         model_output_seen=model_output_seen,
+        usage_limit=usage_limit,
         diagnostics=tuple(diagnostics[:MAX_DIAGNOSTICS]),
         final_output=final_output,
         structured_output=structured_output,
@@ -1043,7 +1085,7 @@ class ClaudeAdapter:
                     failure=ReadinessFailure.SDK_VERSION_MISMATCH,
                     repair="restore the pinned Claude CLI version",
                 )
-        raw_auth_fd = os.environ.get(get_settings().env_name("CLAUDE_AUTH_FD"))
+        raw_auth_fd = credential_reference("claude")
         if raw_auth_fd is not None:
             try:
                 valid = protected_claude_credential_ready(int(raw_auth_fd))
@@ -1426,6 +1468,7 @@ class ClaudeAdapter:
             final_output=parsed.final_output,
             structured_output=parsed.structured_output,
             model_output_seen=parsed.model_output_seen,
+            usage_limit=parsed.usage_limit,
         )
 
     def _run_sdk(
@@ -1637,6 +1680,7 @@ class ClaudeAdapter:
             final_output=parsed.final_output,
             structured_output=parsed.structured_output,
             model_output_seen=parsed.model_output_seen,
+            usage_limit=parsed.usage_limit,
         )
 
     def _run_read_only_fallback(
@@ -1831,6 +1875,7 @@ class ClaudeAdapter:
         final_output: str | None = None,
         structured_output: dict[str, object] | None = None,
         model_output_seen: bool | None = None,
+        usage_limit: RuntimeUsageLimit | None = None,
     ) -> RuntimeResult:
         # Record positive evidence before budget normalization can discard bodies.
         if (
@@ -1854,6 +1899,7 @@ class ClaudeAdapter:
         ):
             status = RuntimeStatus.FAILED
             reason = TerminalReason.BUDGET_EXHAUSTED
+            usage_limit = None
             bounded_diagnostics = ["Claude normalized budget was exhausted"]
             final_output = None
             structured_output = None
@@ -1893,6 +1939,7 @@ class ClaudeAdapter:
             final_output=final_output,
             structured_output=structured_output,
             model_output_seen=model_output_seen,
+            usage_limit=usage_limit,
             transport_attempts=(
                 RuntimeTransportAttempt(
                     transport=request.transport,
@@ -2727,8 +2774,8 @@ def protected_token_available() -> bool:
     """Used only by host readiness; workers never receive this broker marker."""
 
     try:
-        return snapshot_token(int(os.environ[get_settings().env_name("CLAUDE_AUTH_FD")])) is not None
-    except (KeyError, ValueError, OSError, ClaudeCredentialError):
+        return snapshot_token(int(credential_reference("claude"))) is not None
+    except (KeyError, TypeError, ValueError, OSError, ClaudeCredentialError):
         return False
 
 

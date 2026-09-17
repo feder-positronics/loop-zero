@@ -176,6 +176,15 @@ def authenticated_review_verdict(
     ):
         return None
     mapped = cast(Sequence[dict[str, object]], records)
+    from .ordinary_findings import (
+        ADMISSION_TYPE,
+        COMPLETION_TYPE,
+        ordinary_terminal_matches,
+    )
+    if terminal.get("type") in {ADMISSION_TYPE, COMPLETION_TYPE}:
+        return None
+    if terminal.get("type") == "attempt-terminal" and not ordinary_terminal_matches(mapped, terminal):
+        return None
     terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
     coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
     retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
@@ -245,6 +254,15 @@ def classify_review_outcome(
     if not isinstance(terminal, Mapping):
         return ReviewOutcome.UNRESOLVED
     mapped = cast(Sequence[dict[str, object]], records)
+    from .ordinary_findings import (
+        ADMISSION_TYPE,
+        COMPLETION_TYPE,
+        ordinary_terminal_matches,
+    )
+    if terminal.get("type") in {ADMISSION_TYPE, COMPLETION_TYPE}:
+        return ReviewOutcome.UNRESOLVED
+    if terminal.get("type") == "attempt-terminal" and not ordinary_terminal_matches(mapped, terminal):
+        return ReviewOutcome.UNRESOLVED
     terminal_ids = set(_authenticated_attempt_terminal_ids(mapped))
     coordinator_ids = set(_authenticated_coordinator_record_ids(mapped))
     retained = getattr(terminal, "checkpoint_authenticated_retention", False) is True
@@ -1260,6 +1278,10 @@ def _review_terminal_authority_projection(
             and key is not None
             and id(record) in authenticated_terminal_ids
         ):
+            from .ordinary_findings import ordinary_terminal_matches
+            if not ordinary_terminal_matches(records, record):
+                authenticated_terminal_ids = authenticated_terminal_ids - {id(record)}
+                continue
             deposits_by_key.setdefault(key, []).append(record)
             continue
         if record.get("type") != "attempt-recovery":

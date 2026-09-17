@@ -12,7 +12,7 @@ cluster sizes inside `agent_dispatch.py` are estimates.
   the package from the same full commit SHA.
 - Linux only. `bwrap` is the only sandbox backend.
 - Distribution: the `core/` prose snapshot stays vendored; the package is
-  installed by a uv git dependency at the same full SHA. Python 3.12 or
+  installed by a uv git dependency at the same full SHA. Python 3.14 or
   later; tests run under pytest.
 - the first consumer's GitHub organization is on the Team plan (verified 2026-09-11).
   Rulesets are available; none are configured yet. Configuring them is a
@@ -143,7 +143,7 @@ supersede,abort,handoff,terminal-receipt}`, `review {preflight,chain,evidence}`,
 `delivery {ready,continue,settle,status}`, `evidence {render,verify}`,
 `checks`, `status`.
 
-Optional extras: `claude`, `codex`, `acp`, `guardian`. Python 3.12 or later.
+Optional extras: `claude`, `codex`, `acp`, `guardian`. Python 3.14 or later.
 
 ## Destination map
 

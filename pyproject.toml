@@ -3,7 +3,7 @@ name = "loopzero"
 description = "Executable mechanisms of the loop-zero shared agent workflow"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dynamic = ["version"]
 dependencies = []
 

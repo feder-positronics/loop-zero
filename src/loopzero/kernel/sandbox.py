@@ -37,6 +37,7 @@ _AUTHORITY_ENV_MARKERS = (
     "PRIVATE_KEY", "SIGNING", "API_KEY", "ACCESS_KEY", "PASSWORD",
     "COOKIE", "SESSION", "SSH_AUTH", "BEARER",
 )
+_LOADER_PATH_METACHARACTERS = frozenset(":;$")
 
 
 class SandboxError(RuntimeError):
@@ -45,6 +46,23 @@ class SandboxError(RuntimeError):
 
 class UnsafeCredentialError(SandboxError):
     """A provider credential exists but violates the owner-only safety contract."""
+
+
+@dataclass(frozen=True, init=False)
+class TrustedPythonRuntime:
+    """A coordinator-selected Python installation validated for sandbox use.
+
+    Call :func:`trusted_python_runtime`; direct construction is deliberately
+    unavailable.  The sandbox validates the returned value again when it is
+    consumed, because the filesystem can change between selection and launch.
+    """
+
+    interpreter: Path
+    base: Path
+    library_path: Path | None
+
+    def __init__(self, *_args, **_kwargs) -> None:
+        raise TypeError("use trusted_python_runtime()")
 
 
 MAX_CREDENTIAL_BYTES = 1024 * 1024
@@ -145,6 +163,12 @@ def environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
     selected = {
         name: value for name, value in original.items() if name in SAFE_PASSTHROUGH_ENV
     }
+    # Dynamic-loader controls are never ambient child configuration.  An
+    # explicit trusted Python runtime may add one validated library directory
+    # after the rest of the environment boundary has been applied.
+    for name in tuple(selected):
+        if name.startswith("LD_"):
+            selected.pop(name)
     selected.update(
         {
             "HOME": str(settings.sandbox_home),
@@ -452,6 +476,113 @@ def _protected_tool_path(path: Path, *, forbidden_roots: Sequence[Path]) -> Path
     return resolved
 
 
+def _python_runtime_paths(
+    *,
+    interpreter: Path,
+    base: Path,
+    forbidden_roots: Sequence[Path],
+) -> tuple[Path, Path, Path | None]:
+    """Validate one explicit runtime without deriving it from argv or PATH."""
+    if not interpreter.is_absolute() or not base.is_absolute():
+        raise SandboxError("trusted Python runtime paths must be absolute")
+    try:
+        resolved_base = base.resolve(strict=True)
+        resolved_interpreter = interpreter.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise SandboxError("trusted Python runtime is unavailable") from exc
+    if any(
+        character in str(path)
+        for path in (resolved_base, resolved_interpreter)
+        for character in _LOADER_PATH_METACHARACTERS
+    ):
+        raise SandboxError("trusted Python runtime path contains loader syntax")
+    if resolved_base == Path("/"):
+        raise SandboxError("trusted Python runtime base is too broad")
+    try:
+        account_home = Path(pwd.getpwuid(os.geteuid()).pw_dir).resolve(strict=True)
+    except (KeyError, OSError, RuntimeError) as exc:
+        raise SandboxError("trusted Python runtime account home is unavailable") from exc
+    if account_home == resolved_base or account_home.is_relative_to(resolved_base):
+        raise SandboxError("trusted Python runtime base is too broad")
+    roots = tuple(root.resolve(strict=True) for root in forbidden_roots)
+    if any(
+        resolved_base == root
+        or resolved_base.is_relative_to(root)
+        or root.is_relative_to(resolved_base)
+        for root in roots
+    ):
+        raise SandboxError("trusted Python runtime overlaps a writable source")
+    if not resolved_interpreter.is_relative_to(resolved_base):
+        raise SandboxError("trusted Python interpreter escapes its runtime base")
+    try:
+        state = resolved_interpreter.stat()
+    except OSError as exc:
+        raise SandboxError("trusted Python interpreter is unavailable") from exc
+    if not stat.S_ISREG(state.st_mode) or not os.access(resolved_interpreter, os.X_OK):
+        raise SandboxError("trusted Python interpreter is not executable")
+    _protected_tool_path(resolved_base, forbidden_roots=roots)
+    _protected_tool_path(resolved_interpreter, forbidden_roots=roots)
+    library_path = resolved_base / "lib"
+    if library_path.exists() or library_path.is_symlink():
+        library_path = _validated(library_path, directory=True)
+        if not library_path.is_relative_to(resolved_base):
+            raise SandboxError("trusted Python runtime library escapes its base")
+        _protected_tool_path(library_path, forbidden_roots=roots)
+        if any(
+            character in str(library_path)
+            for character in _LOADER_PATH_METACHARACTERS
+        ):
+            raise SandboxError(
+                "trusted Python runtime library path contains loader syntax"
+            )
+    else:
+        library_path = None
+    return resolved_interpreter, resolved_base, library_path
+
+
+def trusted_python_runtime(
+    *,
+    interpreter: Path,
+    base: Path,
+    forbidden_roots: Sequence[Path] = (),
+) -> TrustedPythonRuntime:
+    """Validate a coordinator-selected Python installation for sandbox launch.
+
+    Selection itself remains coordinator authority.  These ownership and path
+    checks reject unsafe layouts; they do not make an arbitrary caller choice
+    trusted.
+    """
+    resolved_interpreter, resolved_base, library_path = _python_runtime_paths(
+        interpreter=interpreter,
+        base=base,
+        forbidden_roots=forbidden_roots,
+    )
+    runtime = object.__new__(TrustedPythonRuntime)
+    object.__setattr__(runtime, "interpreter", resolved_interpreter)
+    object.__setattr__(runtime, "base", resolved_base)
+    object.__setattr__(runtime, "library_path", library_path)
+    return runtime
+
+
+def _validated_python_runtime(
+    runtime: TrustedPythonRuntime | None,
+    *,
+    forbidden_roots: Sequence[Path],
+) -> TrustedPythonRuntime | None:
+    if runtime is None:
+        return None
+    if not isinstance(runtime, TrustedPythonRuntime):
+        raise SandboxError("trusted Python runtime descriptor is invalid")
+    validated = trusted_python_runtime(
+        interpreter=runtime.interpreter,
+        base=runtime.base,
+        forbidden_roots=forbidden_roots,
+    )
+    if validated != runtime:
+        raise SandboxError("trusted Python runtime changed after validation")
+    return validated
+
+
 def _tool(name: str, *, forbidden_roots: Sequence[Path] = ()) -> Path:
     found = next(
         (
@@ -626,6 +757,7 @@ def command(
     deny_network: bool,
     include_model_runtime: bool = True,
     include_corepack_runtime: bool = False,
+    _python_runtime: TrustedPythonRuntime | None = None,
 ) -> list[str]:
     """Build a namespace with no host-root or host-home visibility.
 
@@ -659,6 +791,10 @@ def command(
     )
     emitted_mounts.append(worktree_mount)
     mounts = [worktree_mount]
+    python_runtime = _validated_python_runtime(
+        _python_runtime,
+        forbidden_roots=(resolved_worktree,),
+    )
 
     def add_mount(
         mode: str,
@@ -727,6 +863,17 @@ def command(
             label="sandbox Git destination",
             builder_emitted=True,
             kernel_owned_seal=git_mode == "--ro-bind",
+        )
+    if python_runtime is not None and not python_runtime.base.is_relative_to(
+        Path("/usr")
+    ):
+        add_mount(
+            "--ro-bind",
+            python_runtime.base,
+            python_runtime.base,
+            label="trusted Python runtime destination",
+            builder_emitted=True,
+            kernel_owned_seal=True,
         )
     for path in read_only_roots:
         add_mount(
@@ -831,6 +978,8 @@ def command(
     for link, target in runtime_links.items():
         add_symlink(target, link)
     for runtime_root in sorted(runtime_roots):
+        if python_runtime is not None and runtime_root == python_runtime.base:
+            continue
         add_mount(
             "--ro-bind",
             runtime_root,
@@ -964,6 +1113,10 @@ def command(
         "--chmod",
         "0555",
         "/",
+        "--unsetenv",
+        "LD_LIBRARY_PATH",
+        "--unsetenv",
+        "LD_PRELOAD",
         "--setenv",
         "HOME",
         str(settings.sandbox_home),
@@ -974,6 +1127,10 @@ def command(
         "PATH",
         _sandbox_path(corepack_runtime=corepack_runtime),
     ]
+    if python_runtime is not None and python_runtime.library_path is not None:
+        env_bindings.extend(
+            ["--setenv", "LD_LIBRARY_PATH", str(python_runtime.library_path)]
+        )
     if corepack_home is not None:
         env_bindings.extend(["--setenv", "COREPACK_HOME", str(GUARDIAN_COREPACK_HOME)])
     env_bindings.extend(
@@ -997,6 +1154,7 @@ def validation_command(
     worktree: Path,
     read_only_roots: Sequence[Path] = (),
     read_only_file_mounts: Sequence[tuple[Path, Path]] = (),
+    python_runtime: TrustedPythonRuntime | None = None,
     deny_network: bool = True,
 ) -> list[str]:
     """Build a validation child boundary covering linked-worktree Git metadata.
@@ -1024,12 +1182,14 @@ def validation_command(
         read_only_files=(git_entry,) if git_entry.is_file() else (),
         _builder_read_only_file_mounts=read_only_file_mounts,
         deny_network=deny_network, include_model_runtime=False,
+        _python_runtime=python_runtime,
     )
 
 
 def run_validation_child(argv: Sequence[str], *, worktree: Path,
                          source_environment: Mapping[str, str] | None = None,
                          read_only_roots: Sequence[Path] = (),
+                         python_runtime: TrustedPythonRuntime | None = None,
                          git_config_overlays: Sequence[tuple[Path, bytes]] | None = None,
                          timeout: float | None = None):
     """Spawn with filesystem and environment containment, including descendants."""
@@ -1048,10 +1208,16 @@ def run_validation_child(argv: Sequence[str], *, worktree: Path,
         git_config_overlays = tuple(
             (overlay.destination, overlay.payload) for overlay in overlays
         )
+    validated_runtime = _validated_python_runtime(
+        python_runtime,
+        forbidden_roots=(worktree.absolute(),),
+    )
     child_environment = environment(source_environment)
     child_environment.update(settings.child_environment())
     # A consumer allowlist must never reintroduce lease, nonce or credentials.
     child_environment = strip_authority_environment(child_environment)
+    if validated_runtime is not None and validated_runtime.library_path is not None:
+        child_environment["LD_LIBRARY_PATH"] = str(validated_runtime.library_path)
     for key in tuple(child_environment):
         if key == "GIT_CONFIG_COUNT" or key.startswith(
             ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
@@ -1084,6 +1250,7 @@ def run_validation_child(argv: Sequence[str], *, worktree: Path,
                 worktree=worktree,
                 read_only_roots=read_only_roots,
                 read_only_file_mounts=config_mounts,
+                python_runtime=validated_runtime,
             )
         from .capabilities import probe_bwrap
 

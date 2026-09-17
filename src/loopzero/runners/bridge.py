@@ -53,6 +53,9 @@ from .contract import (
     MAX_STRUCTURED_OUTPUT_BYTES,
     RUNTIME_PROGRESS_PROTOCOL_VERSION,
     RuntimePhase,
+    RuntimeLimitScope,
+    RuntimeUsageLimit,
+    normalized_limit_reset,
     RuntimeProgressSignal,
     RuntimeToolLabel,
     is_valid_resume_session_id,
@@ -592,6 +595,8 @@ def _claude_subscription_environment() -> dict[str, str]:
     if session_home is not None:
         environment["HOME"] = str(session_home)
     if raw_fd is None:
+        if get_settings().declared_credential_vendor is not None:
+            raise BridgeInputError("declared credential is missing")
         return environment
     try:
         fd = int(raw_fd)
@@ -650,6 +655,8 @@ def _materialize_codex_subscription_auth() -> (
     """Consume a one-run credential descriptor into a private SDK-only home."""
     raw_fd = os.environ.pop(get_settings().env_name("CODEX_AUTH_FD"), None)
     if raw_fd is None:
+        if get_settings().declared_credential_vendor is not None:
+            raise BridgeInputError("declared credential is missing")
         return None, {}, None
     try:
         fd = int(raw_fd)
@@ -2303,6 +2310,8 @@ async def _run_claude(
     saw_message = False
     model_output_seen = False
     output_observation_complete = True
+    window_limit: RuntimeUsageLimit | None = None
+    assistant_limit = False
     denial_diagnostics: dict[str, int] = {}
 
     def terminal_protocol_failure() -> None:
@@ -2357,8 +2366,22 @@ async def _run_claude(
                     }
                 )
                 return
+            # Advisory state is not a terminal. Only a later unsuccessful
+            # native limit result can use this scope; permitted overage clears it.
+            window_limit = None
+            if status == "rejected" and overage_status not in {"allowed", "allowed_warning"}:
+                try:
+                    scope = RuntimeLimitScope(rate_type)
+                except (TypeError, ValueError):
+                    scope = RuntimeLimitScope.UNKNOWN
+                if scope is not RuntimeLimitScope.UNKNOWN:
+                    window_limit = RuntimeUsageLimit(
+                        scope=scope, resets_at=normalized_limit_reset(info.resets_at)
+                    )
             continue
         if isinstance(message, AssistantMessage):
+            # A later assistant message supersedes a recoverable per-turn error.
+            assistant_limit = message.error == "rate_limit"
             synthetic = message.model == "<synthetic>" or bool(message.error)
             if synthetic:
                 if message.model != "<synthetic>":
@@ -2531,6 +2554,18 @@ async def _run_claude(
             recovered_after_budget = (
                 budget_exhausted and accepted_structured_output is not None
             )
+            # A prior assistant error cannot establish why this execution ended.
+            # The SDK documents API errors on is_error=True/subtype="success";
+            # retain its execution-error shape, but fail closed on local stops.
+            limited = (
+                message.is_error
+                and not budget_exhausted
+                and message.api_error_status == 429
+                and result_subtype in {"success", "error_during_execution"}
+                and message.terminal_reason in {None, "completed"}
+                and (assistant_limit or window_limit is not None)
+            )
+            recovered_after_limit = limited and accepted_structured_output is not None
             status = "failed" if message.is_error else "completed"
             structured_output = message.structured_output
             if isinstance(structured_output, dict):
@@ -2554,6 +2589,14 @@ async def _run_claude(
             elif budget_exhausted:
                 reason = "budget-exhausted"
                 structured_output = None
+            elif recovered_after_limit:
+                status = "completed"
+                reason = "usage-limit-after-result"
+                structured_output = accepted_structured_output
+                recovered_accepted_output = True
+            elif limited:
+                status = "limited"
+                reason = "usage-limit"
             elif recovered_accepted_output:
                 # Claude can acknowledge the StructuredOutput tool successfully
                 # yet omit the same object from ResultMessage. The observed
@@ -2574,6 +2617,14 @@ async def _run_claude(
                 "terminal_reason": reason,
                 "session_id": session_id,
             }
+            if status == "limited":
+                evidence = window_limit or RuntimeUsageLimit()
+                frame["usage_limit"] = {
+                    "scope": evidence.scope.value,
+                    "resets_at": evidence.resets_at,
+                }
+                if model_output_seen and output is not None:
+                    frame["output"] = output
             if effective_model is not None:
                 frame["effective_model"] = effective_model
             if request_id is not None:
@@ -2718,6 +2769,14 @@ async def main() -> int:
     try:
         try:
             request = _read_request()
+            if ("--require-brokered-credential" in sys.argv[1:]
+                    or get_settings().declared_credential_vendor is not None):
+                from .accounts import DeclaredAccountError, validate_child_credential
+
+                try:
+                    validate_child_credential(request["vendor"].removesuffix("-probe"))
+                except DeclaredAccountError:
+                    raise BridgeInputError("declared credential is invalid") from None
         except BridgeInputError:
             _error_frame("protocol")
             return 2
@@ -2808,6 +2867,8 @@ def codex_refresh() -> int:
 
 if __name__ == "__main__":
     with RuntimeSettings.from_environment().use():
+        if sys.argv[1:] not in ([], ["--require-brokered-credential"], ["--codex-refresh"]):
+            raise SystemExit(2)
         if sys.argv[1:] == ["--codex-refresh"]:
             raise SystemExit(codex_refresh())
         raise SystemExit(asyncio.run(main()))
