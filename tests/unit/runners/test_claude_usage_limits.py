@@ -74,7 +74,7 @@ def test_native_rejected_window_and_unsuccessful_429_are_typed(monkeypatch, tmp_
     assert parsed.terminal_reason.value == "usage-limit"
     assert parsed.usage_limit.scope.value == "five_hour"
     assert parsed.usage_limit.resets_at == 1_900_000_000
-    assert not parsed.semantic_event
+    assert parsed.semantic_event  # Provider attempt evidence prevents fallback.
 
 
 @pytest.mark.parametrize(
@@ -97,7 +97,7 @@ def test_assistant_typed_error_is_limited_with_unknown_scope(monkeypatch, tmp_pa
     assert parsed.status.value == "limited"
     assert parsed.usage_limit.scope.value == "unknown"
     assert parsed.usage_limit.resets_at is None
-    assert not parsed.semantic_event
+    assert parsed.semantic_event  # Provider attempt evidence prevents fallback.
 
 
 def test_limit_preserves_partial_output_and_semantic_activity(monkeypatch, tmp_path):
@@ -166,3 +166,58 @@ def test_rejected_advisory_does_not_downgrade_accepted_completion(
     assert parsed.status is contract.RuntimeStatus.COMPLETED
     assert parsed.structured_output == accepted
     assert getattr(parsed, "usage_limit", None) is None
+
+
+def test_accepted_tool_result_survives_later_limit(monkeypatch, tmp_path):
+    from claude_agent_sdk import ToolUseBlock, ToolResultBlock, UserMessage
+    accepted = {"task_id": "attempt-limit", "status": "completed", "summary": "done"}
+    parsed, _ = run([
+        AssistantMessage(content=[ToolUseBlock(id="accepted", name="StructuredOutput", input=accepted)], model="claude-opus-5"),
+        UserMessage(content=[ToolResultBlock(tool_use_id="accepted", content="Structured output provided successfully", is_error=False)]),
+        event(), result(),
+    ], monkeypatch, tmp_path)
+    assert parsed.status is contract.RuntimeStatus.COMPLETED
+    assert parsed.structured_output == accepted
+    assert parsed.usage_limit is None
+
+
+@pytest.mark.parametrize("overrides", [
+    {"terminal_reason": "process-exit"}, {"status": "failed"},
+    {"usage_limit": None}, {"usage_limit": {"scope": "invented"}},
+    {"subtype": "error_max_budget_usd"},
+])
+def test_limit_wire_contract_rejects_inconsistent_terminals(overrides):
+    frame = {"type": "result", "status": "limited", "terminal_reason": "usage-limit",
+             "usage_limit": {"scope": "five_hour", "resets_at": 1_900_000_000}}
+    frame.update(overrides)
+    with pytest.raises(claude.ClaudeProtocolError):
+        claude.parse_claude_stream(json.dumps(frame))
+
+
+def test_limit_adapter_retains_metadata_without_retry(tmp_path):
+    from loopzero.runners import process
+    from tests.unit.runners.test_agent_runtimes import claude_request, _auth_process_result
+    calls = []
+    def execute(command, **kwargs):
+        calls.append(command)
+        return process.ProcessResult(returncode=1, stdout=json.dumps({
+            "type": "result", "status": "limited", "terminal_reason": "usage-limit",
+            "usage_limit": {"scope": "seven_day", "resets_at": 1_900_000_000},
+        }), stderr="", duration_s=.01, timed_out=False)
+    adapter = claude.ClaudeAdapter(run_process=execute,
+        run_probe=lambda *args, **kwargs: _auth_process_result(),
+        sdk_available=lambda *_args: True, which=lambda _name: "/usr/bin/claude")
+    outcome = adapter.run(claude_request(tmp_path))
+    assert outcome.status is contract.RuntimeStatus.LIMITED
+    assert outcome.usage_limit.scope is contract.RuntimeLimitScope.SEVEN_DAY
+    assert len(calls) == 1
+
+
+def test_later_success_cannot_replace_a_terminal_limit():
+    frames = [
+        {"type": "result", "status": "limited", "terminal_reason": "usage-limit",
+         "usage_limit": {"scope": "five_hour", "resets_at": 1_900_000_000}},
+        {"type": "result", "status": "completed", "terminal_reason": "completed"},
+    ]
+    with pytest.raises(claude.ClaudeProtocolError, match="after its terminal"):
+        claude.parse_claude_stream("\n".join(map(json.dumps, frames)))
