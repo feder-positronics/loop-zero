@@ -480,7 +480,15 @@ echo "== Wait discipline =="
 # advance the existing baseline. Human pushes use the same baseline without
 # requiring an agent lifecycle. Canonical runtime identity lives in agent_event.
 started_ms="$(now_ms)"
-skill_runs_dir="$repo_root/${LOOPZERO_AUDIT_ROOT:-.audit}/skill-runs"
+# Match run_log's existing authority anchor, without moving validation away
+# from the delivery worktree or creating a second local run stream.
+authority_root="$("${LOOPZERO_PYTHON:-python3}" -c \
+    'from loopzero.kernel.events import repo_root; print(repo_root())')"
+audit_root="${LOOPZERO_AUDIT_ROOT:-.audit}"
+case "$audit_root" in
+    /*) skill_runs_dir="$audit_root/skill-runs" ;;
+    *) skill_runs_dir="$authority_root/$audit_root/skill-runs" ;;
+esac
 if ! runtime_kind="$("${LOOPZERO_PYTHON:-python3}" -m loopzero.kernel.events runtime-kind)"; then
     emit_tool_event "poll-gate" "$started_ms" "fail"
     echo "✗ Cannot classify this push as an agent or human runtime." >&2

@@ -170,7 +170,8 @@ def delivery(consumer, tmp_path, monkeypatch, isolated_ptrace_scope_path):
                 to_identity=identity,
                 transition_kind="substantive",
             )
-            rows.append(seal(link.to_dict()))
+            if identity != first.generation.patch_identity:
+                rows.append(seal(link.to_dict()))
         with authority_store.authority_ledger_lock(consumer):
             admitted = admission.admit_review(
                 consumer,
@@ -519,5 +520,76 @@ def test_delta_cannot_substitute_for_primary_with_unresolved_findings(delivery):
             runner=d.remote,
             worktree=d.repo,
             primary_task_id="delta",
+            current_identity=d.source(),
+        )
+
+
+def test_same_source_disposition_reserves_only_the_bounded_delta(delivery):
+    d = delivery
+    patch = d.change(1)
+    first = d.review("primary", patch)
+    delta = d.review("delta", patch, first=first, outcome="rejected")
+    assert delta.slot.slot_kind == "delta"
+    with authority_store.authority_ledger_lock(d.repo):
+        replay = admission.admit_review(
+            d.repo,
+            d.rows,
+            repository_binding=authority_store.authority_repository_binding(d.repo),
+            task=dict(delta.scoped_task),
+            current_source_identity=worktree_lease.source_identity(d.repo),
+            source_worktree=d.repo,
+            current_tree_sha=patch["candidate_tree_sha"],
+            patch_identity=patch,
+            required_sections=("code",),
+            equivalence_proof=None,
+            format_only_proof=None,
+            requested="delta",
+            changed_paths=None,
+            security_trigger_paths=(),
+            pr_review_runner=d.remote,
+        )
+    assert isinstance(replay, admission.Carry)
+    assert not replay.dispatch
+    with pytest.raises(AssertionError, match="Blocked"):
+        d.review("second-delta", patch, first=first, outcome="rejected")
+    for task_id in ("primary", "delta"):
+        pr_review.ensure_projection(
+            d.repo, d.rows, task_id, runner=d.remote, pr_identity=d.source()
+        )
+    pr_review.require_review_readiness(
+        d.repo,
+        d.rows,
+        runner=d.remote,
+        worktree=d.repo,
+        primary_task_id="primary",
+        delta_task_id="delta",
+        current_identity=d.source(),
+    )
+
+
+@pytest.mark.parametrize("empty_commit", [False, True])
+def test_unchanged_source_cannot_be_dispositioned_as_repaired(delivery, empty_commit):
+    d = delivery
+    patch = d.change(1)
+    first = d.review("primary", patch)
+    primary_identity = d.source()
+    if empty_commit:
+        git(d.repo, "commit", "--allow-empty", "-qm", "metadata only")
+        patch = patch_identity.capture_patch_identity(
+            d.repo, candidate_sha=d.source()["head"], base_ref=d.source()["base_sha"]
+        )
+    d.review("delta", patch, first=first, outcome="repaired")
+    for name, identity in (("primary", primary_identity), ("delta", d.source())):
+        pr_review.ensure_projection(
+            d.repo, d.rows, name, runner=d.remote, pr_identity=identity
+        )
+    with pytest.raises(pr_review.DispatchError, match="changed source"):
+        pr_review.require_review_readiness(
+            d.repo,
+            d.rows,
+            runner=d.remote,
+            worktree=d.repo,
+            primary_task_id="primary",
+            delta_task_id="delta",
             current_identity=d.source(),
         )

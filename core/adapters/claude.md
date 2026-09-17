@@ -17,7 +17,15 @@ a linked worktree alone is insufficient. Apply the same boundary to descendants.
 Only the owning parent may commit inspected changes. The status environment
 check does not prove filesystem isolation.
 
-Run deterministic gates before the frozen review handoff. Use one independent PR
-review and at most one bounded delta; mechanical repairs only rerun gates. Keep
-exact-head evidence in the single PR body block, preserve an adoptable diff on
-timeout, and follow the shared PR-scoped findings and capped known-gaps policy.
+Resume the original run's contract, immutable package artifact and copied
+consumer policy before importing workflow code. An adopted v2 task follows the
+shared [delivery procedure](../CONTRACT.md#delivery): owned draft, local checks,
+authenticated primary and bounded delta dispositions, result projection, mark
+ready, exact-source final CI, authorized merge and verified cleanup. Use the
+consumer's actual commands; this adapter grants no review or merge authority.
+
+Preserve historical contracts and every tracked or untracked task change on
+interruption. Keep one PR evidence summary and recover from authenticated results
+and remote facts. Thread resolution is not finding authority, failed projection
+is not another review, and missing or incompatible runtime evidence is not a
+reason to silently replace the task's selection.

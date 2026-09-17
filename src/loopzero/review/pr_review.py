@@ -359,10 +359,11 @@ def blocking_findings(
         or generation.tree != delta.get("snapshot_tree_sha")
     ):
         raise DispatchError("delta does not belong to the primary review lineage")
-    if any(
-        row["outcome"] == "repaired" for row in delta_result["dispositions"]
-    ) and not contract.get("acceptance_commands"):
-        raise DispatchError("repaired findings require affected validation")
+    if any(row["outcome"] == "repaired" for row in delta_result["dispositions"]):
+        if delta["snapshot_tree_sha"] == primary["snapshot_tree_sha"]:
+            raise DispatchError("repaired findings require changed source")
+        if not contract.get("acceptance_commands"):
+            raise DispatchError("repaired findings require affected validation")
     for row in delta_result["dispositions"]:
         if row["outcome"] in {"repaired", "rejected"}:
             open_findings.pop(row["finding_id"])

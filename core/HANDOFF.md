@@ -6,14 +6,16 @@ Update that block on head changes rather than making a second ledger or report.
 
 - Objective and acceptance criteria.
 - Repository, branch, base and exact current head; dirty/untracked changes.
-- Core source revision and selected profiles from `workflow.toml`.
+- Original delivery contract and runtime artifact identity, including its
+  copied consumer policy; core revision and selected profiles.
 - Current owner/session, allowed paths and shared-resource reservations.
 - Completed changes, deterministic gate commands, directories and pass/fail
   results at this head; inapplicable gates with reasons and missing gates as blockers.
 - Independent reviewer, exact reviewed commit and result; at most one bounded
   delta, or mechanical-change classification with gates rerun at the new head.
-- Critical/important findings resolved or explicitly waived by merge authority
-  in this PR, with rationale; unresolved blocking findings and review limits.
+- For v2, authenticated primary/delta result identities, material finding
+  dispositions and projection status; unresolved blockers and review limits.
+  Historical runs retain their original finding and publication evidence.
 - Publication head, remaining merge conditions and next action with its owner.
 - Closeout decision on the single capped `KNOWN-GAPS.md`; no automatic carryover
   of PR findings or suggestions, and no durable finding counts.
@@ -23,8 +25,12 @@ exact patch and acceptance evidence; the previous writer stays stopped until
 ownership returns. A timeout leaves an adoptable diff, including untracked files,
 with the next action recorded. Supersede stale READY evidence when the head
 changes, retaining the reviewed commit only as provenance in the same block.
-READY requires complete checks and review coverage for the current head; it
-does not mean merged. Stop at READY unless merge is explicitly authorized.
+Record draft/ready status separately from final CI and verified merge. V2 removes
+draft status after local checks and authenticated review; required final CI then
+runs against the exact head/base. Do not merge without existing authorization.
+Re-entry retains the original artifact and copied policy, verifies compatibility,
+and reconciles uncertain remote effects before retry. Never recreate a run or
+review identity to recover an interrupted handoff.
 
 ## Adopting generation-owned review authority from loop-zero 0.3.2
 

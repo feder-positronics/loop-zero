@@ -584,6 +584,17 @@ def admit_review(
             worktree=source_worktree or repository, source=current_source_identity,
             requested=requested, reviewed_tree=current_tree_sha,
         )
+        # An explicit disposition review can change blocking facts without
+        # changing source bytes. It uses the existing sole delta slot.
+        pr_disposition_delta = False
+        if requested == "delta" and task.get("required_finding_ids"):
+            from ..kernel.run_identity import uses_pr_review
+            from ..kernel.run_log import load_entries, settings
+
+            pr_disposition_delta = uses_pr_review(
+                load_entries(repository / settings.audit_root / "skill-runs"),
+                str(task.get("run_id")),
+            )
     except (DispatchError, ValueError, OSError, TypeError) as exc:
         return _blocked("missing-evidence", str(exc))
     try:
@@ -1293,7 +1304,16 @@ def admit_review(
                 coverage = full_coverage
                 append_before_slot.append(coverage.to_dict())
                 coverage_digest = canonical_record_digest(coverage.to_dict())
-        if carry_eligible and not released_retry_reverification:
+        settled_same_delta = any(
+            reservation.slot_kind == "delta"
+            and reservation.task_id == task_id
+            and state.settlement_for(reservation.reservation_id) is not None
+            for reservation in state.reservations
+        )
+        if (
+            carry_eligible and not released_retry_reverification
+            and (not pr_disposition_delta or settled_same_delta)
+        ):
             receipts = (
                 tuple(
                     dict.fromkeys(

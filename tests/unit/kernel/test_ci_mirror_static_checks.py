@@ -109,9 +109,20 @@ esac
 
 def _run_hook(
     tmp_path: Path, failure: str | None, *, packaged: bool = False,
-    audit_root: str = ".audit",
+    audit_root: str = ".audit", linked: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     repo = _prepare_hook_repo(tmp_path)
+    if linked:
+        primary = repo
+        repo = tmp_path / "task-worktree"
+        _git(primary, "worktree", "add", "-q", "-b", "task-branch", str(repo))
+        (repo / "nextjs-frontend/fixture.ts").write_text("export const fixture = 3;\n")
+        canonical_runs = primary / audit_root / "skill-runs"
+        canonical_runs.mkdir(parents=True)
+        (canonical_runs / "2026-09-18.jsonl").write_text(
+            '{"run_id":"sr_11111111111111111111111111111111",'
+            '"git_branch":"task-branch","outcome":"in_progress"}\n'
+        )
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _install_command_stubs(bin_dir)
@@ -235,3 +246,15 @@ def test_packaged_hook_discovers_consumer_and_configured_audit_root(tmp_path: Pa
     poll = next(command for command in commands if command.startswith("poll "))
     assert "--skill-runs-dir" in poll
     assert "/evidence/skill-runs" in poll
+
+
+@pytest.mark.parametrize("packaged", (False, True))
+def test_linked_hook_reads_canonical_run_stream_but_checks_task_worktree(tmp_path: Path, packaged: bool) -> None:
+    result, commands = _run_hook(tmp_path, None, packaged=packaged, linked=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    poll = next(command for command in commands if command.startswith("poll "))
+    assert f"--skill-runs-dir {tmp_path / 'repo/.audit/skill-runs'} " in poll
+    assert f"--worktree {tmp_path / 'task-worktree'} " in poll
+    assert "--git-branch task-branch " in poll
+    assert "pnpm run tsc" in commands
+    assert not (tmp_path / 'task-worktree/.audit/skill-runs').exists()
