@@ -221,3 +221,102 @@ def test_later_success_cannot_replace_a_terminal_limit():
     ]
     with pytest.raises(claude.ClaudeProtocolError, match="after its terminal"):
         claude.parse_claude_stream("\n".join(map(json.dumps, frames)))
+
+
+@pytest.mark.parametrize(
+    "ordering,accepted_output,terminal_subtype",
+    [
+        ("accepted-first", True, "error_during_execution"),  # B: P1 B2
+        ("error-first", True, "error_during_execution"),  # B: P3
+        ("error-first", False, "error_during_execution"),  # B: P1 B3
+        ("error-first", True, "success"),  # SDK-documented API-error subtype
+    ],
+)
+def test_stale_assistant_limit_cannot_upgrade_unrelated_terminal(
+    ordering, accepted_output, terminal_subtype, monkeypatch, tmp_path
+):
+    from claude_agent_sdk import ToolUseBlock, ToolResultBlock, UserMessage
+
+    accepted = {"task_id": "attempt-limit", "status": "completed", "summary": "done"}
+    acceptance = [
+        AssistantMessage(
+            content=[ToolUseBlock(id="accepted", name="StructuredOutput", input=accepted)],
+            model="claude-opus-5",
+        ),
+        UserMessage(content=[ToolResultBlock(
+            tool_use_id="accepted",
+            content="Structured output provided successfully",
+            is_error=False,
+        )]),
+    ] if accepted_output else []
+    stale_error = AssistantMessage(
+        content=[TextBlock(text="provider limit")],
+        model="<synthetic>",
+        error="rate_limit",
+    )
+    messages = (acceptance + [stale_error] if ordering == "accepted-first"
+                else [stale_error] + acceptance + [AssistantMessage(
+                    content=[TextBlock(text="resumed model activity")],
+                    model="claude-opus-5",
+                )])
+    parsed, frames = run(
+        messages + [result(status=500, subtype=terminal_subtype)], monkeypatch, tmp_path
+    )
+    assert parsed.status is contract.RuntimeStatus.FAILED
+    assert parsed.terminal_reason.value == "process-exit"
+    assert parsed.usage_limit is None
+    terminal = [frame for frame in frames if frame["type"] == "result"][-1]
+    assert terminal.get("structured_output_recovery") is None
+
+
+def qualified_recovery_frame():
+    return {
+        "type": "result", "status": "completed",
+        "terminal_reason": "usage-limit-after-result",
+        "structured_output_recovery": "accepted-tool-result",
+        "structured_output": {"task_id": "attempt-limit", "status": "completed"},
+        "api_error_status": 429, "subtype": "success",
+    }
+
+
+def test_qualified_limit_recovery_wire_has_explicit_reason():
+    parsed = claude.parse_claude_stream(json.dumps(qualified_recovery_frame()))
+    assert parsed.status is contract.RuntimeStatus.COMPLETED
+    assert parsed.terminal_reason.value == "usage-limit-after-result"
+    assert parsed.usage_limit is None
+
+
+@pytest.mark.parametrize("overrides", [
+    {"status": "failed"}, {"status": "limited"},
+    {"structured_output_recovery": None},
+    {"structured_output_recovery": "invented"},
+    {"structured_output": None}, {"structured_output": "not an object"},
+    {"api_error_status": None}, {"api_error_status": 500},
+    {"api_error_status": "429"}, {"api_error_status": True},
+    {"subtype": "error_max_budget_usd"}, {"subtype": "error_max_turns"},
+    {"subtype": "unknown"}, {"subtype": None},
+    {"usage_limit": {"scope": "five_hour"}},
+])
+def test_qualified_limit_recovery_wire_rejects_unearned_verdict(overrides):
+    frame = qualified_recovery_frame()
+    frame.update(overrides)
+    with pytest.raises(claude.ClaudeProtocolError):
+        claude.parse_claude_stream(json.dumps(frame))
+
+
+@pytest.mark.parametrize("subtype,status,terminal_reason", [
+    ("success", None, None), ("error_max_turns", 429, None),
+    ("unknown", 429, None), ("success", 429, "aborted_streaming"),
+    ("success", 429, "unknown"),
+])
+def test_assistant_limit_requires_correlated_terminal(
+    subtype, status, terminal_reason, monkeypatch, tmp_path
+):
+    native_result = result(status=status, subtype=subtype)
+    native_result.terminal_reason = terminal_reason
+    parsed, _ = run([
+        AssistantMessage(content=[], model="<synthetic>", error="rate_limit"),
+        native_result,
+    ], monkeypatch, tmp_path)
+    assert parsed.status is contract.RuntimeStatus.FAILED
+    assert parsed.terminal_reason.value == "process-exit"
