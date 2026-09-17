@@ -273,10 +273,18 @@ def publication_predecessor_terminal(
     matches = []
     for current_id, current in authority.accepted_review_terminals(records).items():
         if head is not None and current.get("snapshot_sha") != head:
-            continue
-        resolved = resolved_review_predecessors(
-            Path(repo), records, current_review_task_id=current_id
-        )
+            source = current.get("source_identity")
+            if not isinstance(source, Mapping) or source.get("head") != head:
+                continue
+            # The actual PR head may differ from its synthetic review commit.
+            # Reuse every full-replacement source/patch/tree and lineage guard.
+            resolved = _full_replacement_predecessors(
+                Path(repo), records, current_review_task_id=current_id
+            )
+        else:
+            resolved = resolved_review_predecessors(
+                Path(repo), records, current_review_task_id=current_id
+            )
         if task_id in resolved:
             matches.append(resolved[task_id])
     return matches[0] if len(matches) == 1 else None

@@ -532,6 +532,7 @@ def test_current_important_finding_remains_blocking(replacement):
     ) == ("new",)
 
 
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_binding_cannot_use_replacement_at_a_different_head(replacement):
     repo, _, _, records, admission, receipt, *_ = replacement
     with pytest.raises(provisional.ProvisionalFindingError):
@@ -674,8 +675,9 @@ def test_current_provisional_important_finding_is_not_resolved(replacement):
 
 @pytest.mark.parametrize("adopted", [False, True])
 @pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
+@pytest.mark.parametrize("publication_head", ["snapshot", "source"])
 def test_actual_rss_callback_requires_authenticated_terminal_mapping(
-    replacement, monkeypatch, adopted
+    replacement, monkeypatch, adopted, publication_head
 ):
     import sys
     from pathlib import Path
@@ -685,6 +687,11 @@ def test_actual_rss_callback_requires_authenticated_terminal_mapping(
     from loopzero.review.findings import load_finding_records
 
     repo, coordinator, _, records, admission, _, _, current = replacement
+    head = (
+        current["source_identity"]["head"]
+        if publication_head == "source"
+        else current["snapshot_sha"]
+    )
     source = (
         Path(__file__).parents[2] / "fixtures/rss_publication_callback.py"
     ).read_text()
@@ -737,12 +744,10 @@ def test_actual_rss_callback_requires_authenticated_terminal_mapping(
         body="reviewed",
         head="fix/18",
         base="main",
-        expected_head=current["snapshot_sha"],
+        expected_head=head,
         review_task_id="review-2",
     )
-    request.bind_provisional_findings(
-        18, current["snapshot_sha"], "main", "fixture/repo"
-    )
+    request.bind_provisional_findings(18, head, "main", "fixture/repo")
     owner = admission["provisional_owner_id"]
     bindings = provisional.authenticated_publication_bindings(records)
     assert (owner in bindings) is adopted
@@ -751,9 +756,7 @@ def test_actual_rss_callback_requires_authenticated_terminal_mapping(
     if adopted:
         assert {row["review_task_id"] for row in materialized} == {"review-1"}
         assert all(row["state"] == "open" for row in materialized)
-        request.bind_provisional_findings(
-            18, current["snapshot_sha"], "main", "fixture/repo"
-        )
+        request.bind_provisional_findings(18, head, "main", "fixture/repo")
         assert load_finding_records(repo) == materialized
 
 
@@ -875,3 +878,12 @@ def test_current_source_snapshot_patch_binding_fails_closed(replacement, damage)
     if not damage.startswith("forged-"):
         assert "review-2" in authority.accepted_review_terminals(records)
     assert resolved(replacement) == ({"review-1"} if damage == "none" else set())
+
+    from loopzero.review.predecessors import publication_predecessor_terminal
+
+    assert publication_predecessor_terminal(
+        records,
+        replacement[0],
+        task_id="review-1",
+        head=replacement[-1]["source_identity"]["head"],
+    ) is (replacement[-2] if damage == "none" else None)
