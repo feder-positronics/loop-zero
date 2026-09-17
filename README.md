@@ -16,7 +16,7 @@ plus a generator for consumer wiring and Claude/Codex/Cursor skill layouts. The 
 dashboard, cloud control plane or installer beyond that generator.
 
 See [setup and revision updates](SETUP.md). Run the source tests with
-`.venv/bin/python -m pytest -q` (Python 3.12+ and Git).
+`.venv/bin/python -m pytest -q` (Python 3.14+ and Git).
 
 A deposit is not evidence of product portability. That requires real changes in
 two consumers on the same final core revision, both runtime entry points used,

@@ -136,6 +136,16 @@ issues, records review date/outcome in those issues, and appends closure IDs to
 its log when resolved. An override applies only to the named PR/check; it never
 weakens a threshold or exempts future PRs. No override is used by this release.
 
+## Loop-zero Python runtime
+
+Loop-zero uses Python 3.14 as its single supported validation runtime. Use 3.14
+for source development, deterministic CI, package installation checks and
+nightly conformance. Keep package metadata, lockfile and setup instructions
+aligned with that baseline. Do not add a multi-version CI matrix or compatibility
+work for older Python versions without an explicit policy decision. Consumer
+repositories retain authority over their own application runtimes; installing
+loop-zero requires its declared Python minimum.
+
 ## Validation children
 
 Hooks, formatters, test lanes and every validation child have no commit
