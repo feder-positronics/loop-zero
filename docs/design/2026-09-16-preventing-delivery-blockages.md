@@ -3,6 +3,8 @@
 Status: proposed direction, 2026-09-16. This assessment guides existing issues;
 it creates no new authority, automatic retry permission, or parallel backlog.
 
+The [migration and simplification exploration](2026-09-17-workflow-migration-simplification.md) develops the removal and convergence direction under #105. This document retains its narrower prevention/recovery scope and existing issue owners.
+
 ## Outcome and evidence
 
 A coordinator should know whether work can finish before admitting it, and a
