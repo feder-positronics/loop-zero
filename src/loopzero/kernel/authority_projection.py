@@ -61,6 +61,8 @@ RETENTION_STATE_VERSION = 2
 RETENTION_STATE_LEGACY_VERSION = 1
 RETENTION_ANCHOR_ENCODING = authority_ledger.RETENTION_ANCHOR_ENCODING
 RETENTION_ANCHOR_FIELDS = authority_ledger.RETENTION_ANCHOR_FIELDS
+KEPT_POSTMERGE_SETTLEMENT_TYPE = "kept-postmerge-settlement-v1"
+KEPT_POSTMERGE_SETTLEMENT_STATUS = "postmerge-settled"
 
 
 class RetainedRetryOutcome(dict[str, object]):
@@ -1667,8 +1669,157 @@ def _require_authenticated_supersession(
         )
 
 
+def _is_sha1(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
+
+
+def _is_sha256(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def authenticated_kept_postmerge_settlements(
+    records: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Project rare owner settlements without converting them into acceptance.
+
+    The consumer proves the remote/local merge facts before signing.  This
+    projection authenticates that signed claim against the complete immutable
+    kept-plan and failure lineage before it can release a write scope.
+    """
+    authority_history = _authority_record_list(records)
+    governed = current_telemetry(authority_history)
+    coordinator_ids = _authenticated_coordinator_record_ids(authority_history)
+    accepted: list[dict[str, object]] = []
+    for index, record in enumerate(governed):
+        if (
+            record.get("type") != KEPT_POSTMERGE_SETTLEMENT_TYPE
+            or record.get("status") != KEPT_POSTMERGE_SETTLEMENT_STATUS
+            or id(record) not in coordinator_ids
+        ):
+            continue
+        run_id = record.get("run_id")
+        unit_id = record.get("work_unit_id")
+        task_id = record.get("task_id")
+        worktree = resolved_record_worktree(record.get("worktree"))
+        contract_hash = record.get("task_contract_hash")
+        owner_reason = record.get("owner_reason")
+        proof = record.get("source_proof")
+        settled_source = record.get("settled_source_identity")
+        if (
+            not isinstance(run_id, str)
+            or not isinstance(unit_id, str)
+            or not unit_id
+            or not isinstance(task_id, str)
+            or not task_id
+            or worktree is None
+            or not _is_sha256(contract_hash)
+            or not isinstance(owner_reason, str)
+            or not owner_reason.strip()
+            or len(owner_reason) > 1000
+            or not isinstance(proof, Mapping)
+            or not isinstance(settled_source, Mapping)
+            or not isinstance(proof.get("repository"), str)
+            or re.fullmatch(
+                r"github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",
+                proof["repository"],
+            )
+            is None
+            or isinstance(proof.get("pr"), bool)
+            or not isinstance(proof.get("pr"), int)
+            or int(proof["pr"]) < 1
+            or not all(
+                _is_sha1(proof.get(field))
+                for field in (
+                    "original_head",
+                    "materialized_commit",
+                    "materialized_tree",
+                    "head_sha",
+                    "merge_commit",
+                    "head_tree",
+                    "merge_tree",
+                )
+            )
+            or proof.get("head_tree") != proof.get("merge_tree")
+            or settled_source.get("head") != proof.get("head_sha")
+            or settled_source.get("tree_sha") != proof.get("head_tree")
+        ):
+            continue
+        prior = governed[:index]
+        plans = [
+            row
+            for row in prior
+            if row.get("type") == "route"
+            and row.get("kept") is True
+            and row.get("run_id") == run_id
+            and row.get("work_unit_id") == unit_id
+            and row.get("task_id") == task_id
+            and resolved_record_worktree(row.get("worktree")) == worktree
+            and id(row) in coordinator_ids
+        ]
+        if len(plans) != 1:
+            continue
+        plan = plans[0]
+        if (
+            plan.get("read_only") is not False
+            or plan.get("terminal_authority_required") is not True
+            or plan.get("task_contract_hash") != contract_hash
+            or record.get("route_record_sha256") != canonical_record_digest(plan)
+            or record.get("acceptance_commands") != plan.get("acceptance_commands")
+            or record.get("original_source_identity") != plan.get("source_identity")
+            or not isinstance(plan.get("source_identity"), Mapping)
+            or proof.get("original_head") != plan["source_identity"].get("head")
+        ):
+            continue
+        failures = [
+            row
+            for row in prior
+            if row.get("type") == "inline"
+            and row.get("run_id") == run_id
+            and row.get("work_unit_id") == unit_id
+            and resolved_record_worktree(row.get("worktree")) == worktree
+        ]
+        expected_failure_digests = [canonical_record_digest(row) for row in failures]
+        if (
+            not failures
+            or record.get("failed_inline_record_sha256s") != expected_failure_digests
+            or any(
+                row.get("status") != "acceptance-failure"
+                or row.get("task_id") != task_id
+                or row.get("task_contract_hash") != contract_hash
+                or row.get("scope_violations") not in (None, [])
+                or id(row) not in coordinator_ids
+                for row in failures
+            )
+        ):
+            continue
+        raw_index = next(
+            (offset for offset, row in enumerate(authority_history) if row is record),
+            None,
+        )
+        if raw_index is None or _authenticated_open_dispatch_attempts(
+            authority_history[:raw_index], worktree=worktree
+        ):
+            continue
+        open_units: dict[str, list[str]] = {}
+        accepted_ids = {id(row) for row in accepted}
+        for row in prior:
+            if resolved_record_worktree(row.get("worktree")) == worktree:
+                _apply_open_write_record(
+                    open_units,
+                    row,
+                    authenticated_postmerge_settlement_ids=accepted_ids,
+                )
+        if set(open_units) != {unit_id}:
+            continue
+        accepted.append(record)
+    return accepted
+
+
 def _apply_open_write_record(
-    open_units: dict[str, list[str]], record: Mapping[str, object]
+    open_units: dict[str, list[str]],
+    record: Mapping[str, object],
+    *,
+    authenticated_postmerge_settlement_ids: Collection[int] = (),
 ) -> None:
     """Fold one governed record into a worktree's open write-scope map."""
     unit_id = str(record.get("work_unit_id") or record.get("task_id") or "")
@@ -1693,6 +1844,13 @@ def _apply_open_write_record(
         if record.get("status") in {"completed", "scope-violation"}:
             open_units.pop(unit_id, None)
         return
+    if (
+        record_type == KEPT_POSTMERGE_SETTLEMENT_TYPE
+        and record.get("status") == KEPT_POSTMERGE_SETTLEMENT_STATUS
+        and id(record) in authenticated_postmerge_settlement_ids
+    ):
+        open_units.pop(unit_id, None)
+        return
     if record_type in {*ATTEMPT_TERMINAL_TYPES, *ATTEMPT_ABORT_TYPES}:
         open_units.pop(unit_id, None)
 
@@ -1702,11 +1860,18 @@ def open_write_units(
 ) -> dict[str, list[str]]:
     """Return write scopes whose governed attempt or inline plan is still open."""
     target = worktree.resolve()
+    settlement_ids = {
+        id(record) for record in authenticated_kept_postmerge_settlements(records)
+    }
     open_units: dict[str, list[str]] = {}
     for record in records:
         if resolved_record_worktree(record.get("worktree")) != target:
             continue
-        _apply_open_write_record(open_units, record)
+        _apply_open_write_record(
+            open_units,
+            record,
+            authenticated_postmerge_settlement_ids=settlement_ids,
+        )
     return open_units
 
 

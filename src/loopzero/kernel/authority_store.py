@@ -49,6 +49,7 @@ from .authority_projection import (
     _is_coordinator_cutover_attempt,
     _terminal_authority_attempt_key,
     _terminal_authority_work_unit,
+    authenticated_kept_postmerge_settlements,
     authenticated_review_state_records,
     current_telemetry,
     encode_retention_anchor_fields,
@@ -902,6 +903,16 @@ def _retention_live_record_ids(
     # Keep the exact signed grant and its entire bounded unit history together.
     # Raw signed starts are the consumption barrier; summary retry flags are not authority.
     coordinator_ids = _authenticated_coordinator_record_ids(records)
+    postmerge_settlements = authenticated_kept_postmerge_settlements(records)
+    postmerge_settlement_ids = {id(record) for record in postmerge_settlements}
+    postmerge_units = {
+        (
+            record.get("run_id"),
+            record.get("work_unit_id"),
+            resolved_record_worktree(record.get("worktree")),
+        )
+        for record in postmerge_settlements
+    }
     retry_units = {
         (record.get("run_id"), record.get("work_unit_id"))
         for record in records
@@ -1032,7 +1043,9 @@ def _retention_live_record_ids(
         unit_id = str(record.get("work_unit_id") or record.get("task_id") or "")
         if worktree is not None and unit_id:
             _apply_open_write_record(
-                open_units_by_worktree.setdefault(str(worktree), {}), record
+                open_units_by_worktree.setdefault(str(worktree), {}),
+                record,
+                authenticated_postmerge_settlement_ids=postmerge_settlement_ids,
             )
         if (
             not isinstance(record.get("run_id"), str)
@@ -1085,6 +1098,12 @@ def _retention_live_record_ids(
             or id(record) in authenticated_reentry_ids
             or id(record) in anchored_recovery_ids
             or id(record) in referenced_dependency_ids
+            or (
+                record.get("run_id"),
+                record.get("work_unit_id"),
+                resolved_record_worktree(record.get("worktree")),
+            )
+            in postmerge_units
             or record_type
             in {
                 "review-generation-v1",
@@ -1282,6 +1301,10 @@ def authority_projection_bundle_v1(
         )
 
     coordinator_ids = _authenticated_coordinator_record_ids(authority_history)
+    postmerge_settlement_ids = {
+        id(record)
+        for record in authenticated_kept_postmerge_settlements(authority_history)
+    }
     registration_ids = _authenticated_registration_start_ids(authority_history)
     open_before_ids = _authenticated_open_before_record_ids(authority_history)
     review_terminals = authenticated_review_terminals(authority_history)
@@ -1308,7 +1331,11 @@ def authority_projection_bundle_v1(
         if worktree is None or not unit_id:
             continue
         units = open_units_by_worktree.setdefault(str(worktree), {})
-        _apply_open_write_record(units, record)
+        _apply_open_write_record(
+            units,
+            record,
+            authenticated_postmerge_settlement_ids=postmerge_settlement_ids,
+        )
     retry_outcomes = _retry_outcome_projection(authority_history)
     return AuthorityProjectionBundleV1(
         coordinator=_stable_record_digests(
