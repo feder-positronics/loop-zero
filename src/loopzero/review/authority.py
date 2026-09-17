@@ -161,6 +161,10 @@ def authenticated_review_verdict(
     """Return the authenticated pass/fail fact carried by one terminal."""
     if not isinstance(terminal, Mapping):
         return None
+    from .outage_recovery import outage_recovery_terminal_matches
+
+    if not outage_recovery_terminal_matches(records, terminal):
+        return None
     valid_family, terminal_family = _terminal_verdict_family(
         terminal,
         require_intent=expected_family is not None and not allow_missing_intent,
@@ -187,6 +191,16 @@ def authenticated_review_verdict(
     if id(terminal) not in terminal_ids | coordinator_ids and not retained:
         return None
     task_id = terminal.get("task_id")
+    # Outage recovery preserves the task ID, so its verdict must name the
+    # exact terminal. A later replacement verdict cannot consume an earlier
+    # failed receipt merely because both attempts share that task ID.
+    outage_task = any(
+        id(record) in coordinator_ids
+        and record.get("type") == "provider-outage-recovery-authorization-v1"
+        and record.get("task_id") == task_id
+        and record.get("run_id") == terminal.get("run_id")
+        for record in records
+    )
     if isinstance(task_id, str) and any(
         id(record) in coordinator_ids
         and record.get("type") == "review-nonverdict-launch-v1"
@@ -211,6 +225,10 @@ def authenticated_review_verdict(
                 and record.get("type") == "verdict"
                 and record.get("task_id") == task_id
                 and record.get("verdict") in {"pass", "fail"}
+                and (
+                    not outage_task
+                    or record.get("terminal_ref") == canonical_record_digest(terminal)
+                )
                 and (
                     terminal.get("run_id") is None
                     or record.get("run_id") == terminal.get("run_id")
@@ -1357,6 +1375,10 @@ def accepted_review_terminals(
     coordinator_ids = _authenticated_coordinator_record_ids(records)
     record_positions = {id(row): index for index, row in enumerate(records)}
     for task_id, terminal in latest_by_task.items():
+        from .outage_recovery import outage_recovery_terminal_matches
+
+        if not outage_recovery_terminal_matches(records, terminal):
+            continue
         finding_recovery_has_verdict = terminal.get(
             "recovery_classification"
         ) != "finding-deposition-only" or any(

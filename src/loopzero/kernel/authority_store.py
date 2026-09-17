@@ -41,6 +41,7 @@ from .authority_projection import (
     AuthorityLedgerSnapshot,
     AuthorityRecordView,
     _apply_open_write_record,
+    _authenticated_attempt_terminal_ids,
     _authenticated_coordinator_record_ids,
     _authenticated_open_before_record_ids,
     _authenticated_registration_start_ids,
@@ -904,7 +905,10 @@ def _retention_live_record_ids(
     retry_units = {
         (record.get("run_id"), record.get("work_unit_id"))
         for record in records
-        if record.get("type") == "inconclusive-retry-authorization" and id(record) in coordinator_ids
+        if record.get("type") in {
+            "inconclusive-retry-authorization",
+            "provider-outage-recovery-authorization-v1",
+        } and id(record) in coordinator_ids
     }
     retry_tasks = {
         (record.get("run_id"), record.get("task_id"))
@@ -918,6 +922,29 @@ def _retention_live_record_ids(
         if record.get("type") == "review-slot-settlement-v1"
         and isinstance(record.get("terminal_ref"), str)
     }
+    # The executor's authenticated output identity establishes whose work is
+    # being reviewed. Retain it as soon as a prospective review references it,
+    # including compaction before an outage authorization exists.
+    terminal_ids = _authenticated_attempt_terminal_ids(records)
+    for record in records:
+        if id(record) in terminal_ids:
+            contract = record.get("task_contract")
+            if isinstance(contract, Mapping):
+                reference = contract.get("reviewed_executor_terminal_ref")
+                if isinstance(reference, str):
+                    settlement_terminal_refs.add(reference)
+        if (
+            id(record) in coordinator_ids
+            and record.get("type") == "provider-outage-recovery-authorization-v1"
+        ):
+            reference = record.get("reviewed_executor_terminal_ref")
+            if isinstance(reference, str):
+                settlement_terminal_refs.add(reference)
+            references = record.get("failed_terminal_refs")
+            if isinstance(references, list):
+                settlement_terminal_refs.update(
+                    reference for reference in references if isinstance(reference, str)
+                )
     referenced_terminals = [
         record
         for record in records

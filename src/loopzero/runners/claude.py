@@ -43,6 +43,7 @@ from .contract import (
     sanitized_bridge_failure,
     sanitized_bridge_text,
     sanitized_provider_error,
+    usage_observes_model_output,
 )
 from .process import (
     ProcessHandle,
@@ -142,6 +143,7 @@ class ParsedClaudeStream:
     diagnostics: tuple[str, ...] = ()
     final_output: str | None = field(default=None, repr=False)
     structured_output: dict[str, object] | None = field(default=None, repr=False)
+    model_output_seen: bool | None = None
     usage_limit: RuntimeUsageLimit | None = None
 
 
@@ -598,7 +600,9 @@ def _terminal_from_frame(
     return status, reason, output, structured_output, usage, cost_usd
 
 
-def parse_claude_stream(stream: str) -> ParsedClaudeStream:
+def parse_claude_stream(
+    stream: str, *, sdk_bridge: bool = False
+) -> ParsedClaudeStream:
     """Parse bridge JSONL or the CLI's one-object JSON output.
 
     Only allow-listed metadata is copied into the normalized result.  Unknown
@@ -617,6 +621,8 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
     semantic_seen = False
     usage_limit: RuntimeUsageLimit | None = None
     saw_frame = False
+    model_output_seen: bool | None = None
+    observation_complete = True
 
     for line in stream.splitlines():
         if not line.strip():
@@ -658,6 +664,20 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                     "Claude event semantic marker was invalid",
                     semantic_event=semantic_seen,
                 )
+            if (
+                kind in {"tool_use", "tool_result"}
+                or (kind == "assistant" and subtype != "error")
+                or (
+                    kind == "stream"
+                    and subtype in {"content_block_start", "content_block_delta"}
+                )
+            ):
+                model_output_seen = True
+            if kind not in {
+                "assistant", "tool_use", "tool_result", "stream", "system",
+                "rate_limit", "provider_start", "provider_error",
+            }:
+                observation_complete = False
             event = RuntimeEvent(kind=kind, subtype=subtype, semantic=event_semantic)
             _append_event(events, event)
             semantic_seen = semantic_seen or event.semantic
@@ -698,6 +718,26 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                     str(exc),
                     semantic_event=True,
                 ) from exc
+            usage_output = usage_observes_model_output(
+                raw.get("usage"), raw.get("model_usage"), raw.get("modelUsage")
+            )
+            observation_complete &= usage_output is not None
+            if (
+                raw.get("model_output_seen") is True
+                or bool(output)
+                or frame_structured_output is not None
+                or usage_output is True
+            ):
+                model_output_seen = True
+            elif (
+                model_output_seen is not True
+                and sdk_bridge
+                and observation_complete
+                and type(raw.get("model_output_evidence_version")) is int
+                and raw["model_output_evidence_version"] == 1
+                and raw.get("model_output_seen") is False
+            ):
+                model_output_seen = False
             limit_payload = raw.get("usage_limit")
             if (
                 (frame_status is RuntimeStatus.LIMITED) != (frame_reason is TerminalReason.USAGE_LIMIT)
@@ -910,6 +950,7 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                 diagnostics.append(f"Claude SDK failure: {failure}")
             continue
 
+        observation_complete = False
         if len(diagnostics) < MAX_DIAGNOSTICS:
             diagnostics.append("Claude emitted an unknown protocol frame")
 
@@ -935,6 +976,7 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
         cost_usd=cost_usd,
         events=tuple(events),
         semantic_event=semantic_seen,
+        model_output_seen=model_output_seen,
         usage_limit=usage_limit,
         diagnostics=tuple(diagnostics[:MAX_DIAGNOSTICS]),
         final_output=final_output,
@@ -1425,6 +1467,7 @@ class ClaudeAdapter:
             diagnostics=diagnostics,
             final_output=parsed.final_output,
             structured_output=parsed.structured_output,
+            model_output_seen=parsed.model_output_seen,
             usage_limit=parsed.usage_limit,
         )
 
@@ -1518,7 +1561,7 @@ class ClaudeAdapter:
                 diagnostics=("Claude SDK bridge output exceeded the safe limit",),
             )
         try:
-            parsed = parse_claude_stream(outcome.stdout)
+            parsed = parse_claude_stream(outcome.stdout, sdk_bridge=True)
         except ClaudeProtocolError as exc:
             if _bridge_killed_by_signal(outcome):
                 if exc.incomplete_stream:
@@ -1636,6 +1679,7 @@ class ClaudeAdapter:
             diagnostics=diagnostics,
             final_output=parsed.final_output,
             structured_output=parsed.structured_output,
+            model_output_seen=parsed.model_output_seen,
             usage_limit=parsed.usage_limit,
         )
 
@@ -1830,8 +1874,19 @@ class ClaudeAdapter:
         diagnostics: tuple[str, ...] = (),
         final_output: str | None = None,
         structured_output: dict[str, object] | None = None,
+        model_output_seen: bool | None = None,
         usage_limit: RuntimeUsageLimit | None = None,
     ) -> RuntimeResult:
+        # Record positive evidence before budget normalization can discard bodies.
+        if (
+            final_output
+            or structured_output is not None
+            or (
+                usage is not None
+                and ((usage.output_tokens or 0) > 0 or (usage.reasoning_tokens or 0) > 0)
+            )
+        ):
+            model_output_seen = True
         bounded_diagnostics = list(diagnostics[:MAX_DIAGNOSTICS])
         normalized_cost, cost_source = resolved_cost_usd(
             request.requested_model, usage, cost_usd
@@ -1883,6 +1938,7 @@ class ClaudeAdapter:
             duration_s=outcome.duration_s if outcome is not None else None,
             final_output=final_output,
             structured_output=structured_output,
+            model_output_seen=model_output_seen,
             usage_limit=usage_limit,
             transport_attempts=(
                 RuntimeTransportAttempt(

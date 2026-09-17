@@ -402,6 +402,31 @@ class RuntimeEvent:
     item_id: str | None = None
 
 
+def usage_observes_model_output(*payloads: object) -> bool | None:
+    """Positive counters win; malformed counters make absence unprovable."""
+    output_keys = {
+        "output_tokens", "outputTokens", "completion_tokens", "reasoning_tokens",
+        "reasoningTokens", "reasoning_output_tokens", "reasoningOutputTokens",
+    }
+    pending = list(payloads)
+    complete = True
+    while pending:
+        payload = pending.pop()
+        if not isinstance(payload, dict):
+            if payload is not None:
+                complete = False
+            continue
+        for key, value in payload.items():
+            if key in output_keys:
+                if type(value) in {int, float} and value > 0:
+                    return True
+                if type(value) is not int or value < 0:
+                    complete = False
+            if isinstance(value, dict):
+                pending.append(value)
+    return False if complete else None
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeUsage:
     """Optional native usage counters; ``None`` means unavailable, not zero."""
@@ -489,6 +514,8 @@ class RuntimeResult:
     structured_output: dict[str, object] | None = field(default=None, repr=False)
     transport_attempts: tuple[RuntimeTransportAttempt, ...] = ()
     billing_mode: RuntimeBillingMode = RuntimeBillingMode.UNKNOWN
+    # Unknown for legacy/unobserved streams; False requires complete SDK evidence.
+    model_output_seen: bool | None = None
     usage_limit: RuntimeUsageLimit | None = None
 
 
