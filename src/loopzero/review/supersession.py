@@ -112,13 +112,15 @@ def effective_supersession_lineage(
         return None
     if contract.get("root_work_unit_id") != terminal["root_work_unit_id"]:
         return None
+    # A review snapshot may be a synthetic commit of the authenticated source
+    # tree. Bind the patch to the source commit and the snapshot to its tree.
     source, patch = terminal.get("source_identity"), terminal.get("patch_identity")
     if (
         not isinstance(source, dict)
         or not source.get("ref")
-        or source.get("head") != terminal.get("snapshot_sha")
+        or not _hex_digest(source.get("head"), 40)
         or not isinstance(patch, dict)
-        or patch.get("candidate_sha") != terminal.get("snapshot_sha")
+        or patch.get("candidate_sha") != source.get("head")
         or patch.get("candidate_tree_sha") != terminal.get("snapshot_tree_sha")
     ):
         return None
