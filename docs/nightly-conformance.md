@@ -116,14 +116,30 @@ persists the validated same-account rotated login on the host, then refuses to
 export it. The next scheduled run uses the replacement refresh token.
 
 Before contacting the vendor, the broker writes and fsyncs a private
-`.auth.json.refresh-pending` file beside the source login. It contains only a
-SHA-256 fingerprint of the refresh token, never the token itself. Successful
-durable installation clears it. Timeout, interrupted refresh, invalid vendor
-output, or failed installation retains it: subsequent runs refuse to reuse the
-same refresh token, even after a restart or access-expiry edit. This is an
-indefinite backoff until recovery, not an hourly vendor retry. Obtain a new host
-login with a different refresh token and rerun renewal; the broker automatically
-clears the old marker. Do not delete the marker to retry an uncertain token.
+`.auth.json.refresh-pending` file beside the source login. New markers bind a
+unique attempt nonce and SHA-256 refresh-token fingerprint to the source path
+and stable lock inode; they never contain the refresh token itself. A private
+key in the owner-only lock authenticates this evidence. Existing exposed,
+hardlinked, replaced or malformed lock files are rejected rather than adopted.
+
+Successful durable installation records an authenticated
+`.auth.json.refresh-installed` receipt before clearing the pending marker. After
+an interruption, an exact matching receipt permits recovery even when the
+vendor retained the same refresh token. It must bind the current attempt, lock,
+installed inode and exact credential contents. A stale or fabricated receipt
+cannot authorize a retry. The built-in process runner also clears its own
+attempt when the actual executable could not start; caller assertions, wrapper
+exit failures and parent I/O errors do not establish that evidence.
+
+Timeout, interrupted refresh, invalid vendor output, or failure before the
+authenticated installation receipt retains uncertainty: subsequent runs refuse
+to reuse the same refresh token, even after a restart or access-expiry edit.
+This includes an installation that reached disk before its receipt was durable.
+Legacy fingerprint-only markers retain this conservative behavior. Obtain a
+new host login with a different refresh token and rerun renewal; the broker
+automatically clears the old marker. Do not delete the marker or lock to retry
+an uncertain token. This is an indefinite backoff until recovery, not an hourly
+vendor retry.
 
 A matching, safely validated marker still permits a shorter run whose existing
 access token covers its full runtime plus the safety margin. The broker checks

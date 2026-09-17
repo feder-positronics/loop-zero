@@ -11,6 +11,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 import json
 import math
+import hmac
 import os
 import re
 import shutil
@@ -2214,28 +2215,83 @@ def _read_credential(path: Path) -> _ValidatedCredential:
     return _validate_payload(payload)
 
 
+_RECOVERY_KEY_HEADER = b"loopzero-codex-renewal-key-v1\n"
+
+
+@dataclass(frozen=True)
+class _RenewalRecovery:
+    path: Path
+    descriptor: int
+    identity: tuple[int, int]
+    key: bytes = field(repr=False)
+
+    def check(self) -> None:
+        held = os.fstat(self.descriptor)
+        named = self.path.stat(follow_symlinks=False)
+        parent = self.path.parent.stat(follow_symlinks=False)
+        if (
+            not stat.S_ISREG(named.st_mode)
+            or named.st_uid != os.getuid()
+            or named.st_nlink != 1
+            or stat.S_IMODE(named.st_mode) != 0o600
+            or (named.st_dev, named.st_ino) != self.identity
+            or (held.st_dev, held.st_ino) != self.identity
+            or parent.st_uid != os.getuid()
+            or not stat.S_ISDIR(parent.st_mode)
+            or stat.S_IMODE(parent.st_mode) != 0o700
+        ):
+            raise UnsafeCodexCredential("Codex renewal lock is unsafe")
+
+    def encode(self, record: dict) -> bytes:
+        self.check()
+        record = {**record, "lock": list(self.identity)}
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        signature = hmac.new(self.key, payload, hashlib.sha256).hexdigest()
+        return json.dumps({"record": record, "mac": signature}, separators=(",", ":")).encode()
+
+    def decode(self, payload: bytes, kind: str) -> dict:
+        self.check()
+        try:
+            envelope = json.loads(payload)
+            record = envelope["record"]
+            canonical = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+            expected = hmac.new(self.key, canonical, hashlib.sha256).hexdigest()
+            if (set(envelope) != {"record", "mac"}
+                    or not hmac.compare_digest(expected, envelope["mac"])
+                    or record["kind"] != kind or record["lock"] != list(self.identity)):
+                raise ValueError
+            return record
+        except (KeyError, TypeError, ValueError):
+            raise UnsafeCodexCredential("Codex renewal recovery evidence is invalid") from None
+
+
 @contextmanager
-def _renewal_lock(path: Path) -> Iterator[None]:
-    flags = (
-        os.O_RDWR
-        | os.O_CREAT
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
+def _renewal_lock(path: Path) -> Iterator[_RenewalRecovery]:
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags, 0o600)
     except OSError as exc:
         raise UnsafeCodexCredential("Codex renewal lock is unavailable") from exc
     try:
         metadata = os.fstat(descriptor)
-        if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
-            raise UnsafeCodexCredential("Codex renewal lock is unsafe")
-        if stat.S_IMODE(metadata.st_mode) != 0o600:
-            os.fchmod(descriptor, 0o600)
-            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o600:
-                raise UnsafeCodexCredential("Codex renewal lock is unsafe")
+        recovery = _RenewalRecovery(path, descriptor, (metadata.st_dev, metadata.st_ino), b"")
+        recovery.check()
         fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
+        recovery.check()
+        payload = os.pread(descriptor, len(_RECOVERY_KEY_HEADER) + 33, 0)
+        if not payload:
+            # Empty legacy locks contain no secret to adopt. Initialize a new
+            # key only after validating the protected inode under its flock.
+            payload = _RECOVERY_KEY_HEADER + os.urandom(32)
+            if os.pwrite(descriptor, payload, 0) != len(payload):
+                raise UnsafeCodexCredential("Codex renewal key initialization failed")
+            os.fsync(descriptor)
+            _sync_credential_directory(path)
+        if not payload.startswith(_RECOVERY_KEY_HEADER) or len(payload) != len(_RECOVERY_KEY_HEADER) + 32:
+            raise UnsafeCodexCredential("Codex renewal key is invalid")
+        recovery = replace(recovery, key=payload[len(_RECOVERY_KEY_HEADER):])
+        recovery.check()
+        yield recovery
     finally:
         try:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
@@ -2332,6 +2388,13 @@ def _default_refresh_command() -> tuple[str, ...]:
     return (*settings.bridge_command(root), "--codex-refresh")
 
 
+from .process import _ProcessNotStarted
+
+
+class _CodexRefreshNotStarted(CodexCredentialRefreshFailed):
+    """Evidence accepted only from the built-in process runner."""
+
+
 def _refresh_credential(
     credential: _ValidatedCredential,
     *,
@@ -2367,6 +2430,13 @@ def _refresh_credential(
                 runner_arguments["private_mounts"] = (staging_home,)
                 runner_arguments["sandbox_wrapper"] = sandbox_wrapper
             outcome = run_refresh(command, **runner_arguments)
+        except _CodexRefreshNotStarted:
+            # Caller callbacks cannot originate this broker decision.
+            raise CodexCredentialRefreshFailed("Codex credential refresh failed") from None
+        except _ProcessNotStarted:
+            if run_refresh is _run_refresh_process_group:
+                raise _CodexRefreshNotStarted("Codex credential refresh did not exec") from None
+            raise CodexCredentialRefreshFailed("Codex credential refresh failed") from None
         except subprocess.TimeoutExpired as exc:
             raise CodexCredentialRefreshTimeout(
                 "Codex credential refresh timed out"
@@ -2407,46 +2477,87 @@ def _sync_credential_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _check_pending_refresh(
-    path: Path, credential: _ValidatedCredential, *, horizon_s: float
-) -> None:
-    """A token possibly consumed by an interrupted renewal must never be retried."""
+def _read_recovery_file(path: Path) -> bytes | None:
     try:
-        descriptor = os.open(
-            path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0),
-        )
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0))
     except FileNotFoundError:
-        return
+        return None
     except OSError as exc:
         raise UnsafeCodexCredential("Codex renewal recovery state is unsafe") from exc
     try:
         metadata = os.fstat(descriptor)
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_nlink != 1
-            or metadata.st_uid != os.getuid()
-            or stat.S_IMODE(metadata.st_mode) != 0o600
-            or metadata.st_size != 64
-        ):
+        if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                or metadata.st_uid != os.getuid() or stat.S_IMODE(metadata.st_mode) != 0o600
+                or not 1 <= metadata.st_size <= 4096):
             raise UnsafeCodexCredential("Codex renewal recovery state is unsafe")
-        fingerprint = os.pread(descriptor, 65, 0)
-        if len(fingerprint) != 64 or any(c not in b"0123456789abcdef" for c in fingerprint):
-            raise UnsafeCodexCredential("Codex renewal recovery state is unsafe")
+        payload = os.pread(descriptor, 4097, 0)
+        if len(payload) != metadata.st_size:
+            raise UnsafeCodexCredential("Codex renewal recovery state is incomplete")
+        return payload
     finally:
         os.close(descriptor)
+
+
+def _source_binding(path: Path) -> str:
+    return hashlib.sha256(os.fsencode(path.resolve())).hexdigest()
+
+
+def _installed_evidence(path: Path, credential: _ValidatedCredential) -> dict:
+    metadata = path.stat(follow_symlinks=False)
+    if metadata.st_nlink != 1 or _read_credential(path).payload != credential.payload:
+        raise UnsafeCodexCredential("Codex installed credential identity changed")
+    return {"device": metadata.st_dev, "inode": metadata.st_ino,
+            "ctime_ns": metadata.st_ctime_ns, "mtime_ns": metadata.st_mtime_ns,
+            "payload": hashlib.sha256(credential.payload).hexdigest()}
+
+
+def _retire_recovery(pending: Path, receipt: Path, recovery: _RenewalRecovery) -> None:
+    recovery.check()
+    # Pending disappears first. If interrupted, its stale receipt cannot
+    # authenticate the next unique intent and is retired before that intent.
+    pending.unlink()
+    _sync_credential_directory(pending)
+    receipt.unlink(missing_ok=True)
+    _sync_credential_directory(receipt)
+
+
+def _check_pending_refresh(
+    path: Path, credential: _ValidatedCredential, *, horizon_s: float,
+    recovery: _RenewalRecovery, source: Path, receipt: Path,
+) -> None:
+    """Only authenticated installation evidence can resolve a same-token intent."""
+    payload = _read_recovery_file(path)
+    if payload is None:
+        return
+    legacy = len(payload) == 64 and all(c in b"0123456789abcdef" for c in payload)
+    if legacy:
+        fingerprint = payload
+    else:
+        intent = recovery.decode(payload, "intent")
+        if (set(intent) != {"kind", "lock", "source", "nonce", "fingerprint"}
+                or intent["source"] != _source_binding(source)
+                or not isinstance(intent["nonce"], str) or len(intent["nonce"]) != 64
+                or not isinstance(intent["fingerprint"], str) or len(intent["fingerprint"]) != 64):
+            raise UnsafeCodexCredential("Codex renewal intent is invalid")
+        fingerprint = intent["fingerprint"].encode("ascii")
+        completed = _read_recovery_file(receipt)
+        if completed is not None:
+            installed = recovery.decode(completed, "installed")
+            expected = {"kind": "installed", "lock": list(recovery.identity),
+                        "intent": intent, "target": _installed_evidence(source, credential)}
+            if installed == expected:
+                _retire_recovery(path, receipt, recovery)
+                return
+            # Authentic evidence for another intent or modified source never
+            # grants retry, even if the refresh token happens to be the same.
     if fingerprint == _refresh_fingerprint(credential):
         if credential.expires_at_s > horizon_s:
-            # This admits only existing access material. The uncertainty marker
-            # remains unchanged and still forbids any future renewal attempt.
-            return
+            return  # Access-only admission leaves uncertainty unchanged.
         raise CodexCredentialRefreshFailed(
             "Codex renewal requires a new host login after an uncertain refresh"
         )
-    # A different host refresh token is the explicit recovery boundary. Access
-    # expiry or last_refresh edits alone cannot make a spent token retryable.
-    path.unlink()
-    _sync_credential_directory(path)
+    _retire_recovery(path, receipt, recovery)
 
 
 def _validate_credential_directory(path: Path) -> None:
@@ -2536,12 +2647,14 @@ def codex_subscription_credential(
     path = credential_path or Path.home() / ".codex" / "auth.json"
     _validate_credential_directory(path)
     try:
-        with _renewal_lock(path.parent / get_settings().lock_name("codex-refresh")):
+        with _renewal_lock(path.parent / get_settings().lock_name("codex-refresh")) as recovery:
             now_s = clock()
             horizon_s = now_s + requested_runtime_s + REFRESH_SAFETY_MARGIN_S
             credential = _read_credential(path)
             pending = path.with_name(f".{path.name}.refresh-pending")
-            _check_pending_refresh(pending, credential, horizon_s=horizon_s)
+            receipt = path.with_name(f".{path.name}.refresh-installed")
+            _check_pending_refresh(pending, credential, horizon_s=horizon_s,
+                                   recovery=recovery, source=path, receipt=receipt)
             if credential.expires_at_s <= horizon_s:
                 if _is_access_only_credential(credential):
                     raise CodexCredentialUnavailable(
@@ -2550,14 +2663,27 @@ def codex_subscription_credential(
                 command = refresh_command or _default_refresh_command()
                 # Durable intent precedes any vendor call. Keep it on every uncertain
                 # exit, including process death, invalid output and install failure.
-                _write_private_file(pending, _refresh_fingerprint(credential))
+                recovery.check()
+                receipt.unlink(missing_ok=True)
+                _sync_credential_directory(receipt)
+                encoded_intent = recovery.encode({"kind": "intent", "source": _source_binding(path),
+                                                  "nonce": os.urandom(32).hex(),
+                                                  "fingerprint": _refresh_fingerprint(credential).decode("ascii")})
+                _write_private_file(pending, encoded_intent)
                 _sync_credential_directory(pending)
-                refreshed = _refresh_credential(
-                    credential,
-                    run_refresh=run_refresh or _run_refresh_process_group,
-                    refresh_command=command,
-                    sandbox_wrapper=sandbox_wrapper,
-                )
+                try:
+                    refreshed = _refresh_credential(
+                        credential,
+                        run_refresh=run_refresh or _run_refresh_process_group,
+                        refresh_command=command,
+                        sandbox_wrapper=sandbox_wrapper,
+                    )
+                except _CodexRefreshNotStarted:
+                    recovery.check()
+                    if _read_recovery_file(pending) != encoded_intent:
+                        raise UnsafeCodexCredential("Codex renewal intent changed") from None
+                    _retire_recovery(pending, receipt, recovery)
+                    raise
                 if _read_credential(path).payload != credential.payload:
                     raise CodexCredentialRefreshFailed(
                         "Codex credential changed during trusted refresh"
@@ -2573,8 +2699,12 @@ def codex_subscription_credential(
                     raise UnsafeCodexCredential(
                         "Codex credential changed during trusted installation"
                     )
-                pending.unlink()
-                _sync_credential_directory(pending)
+                intent = recovery.decode(encoded_intent, "intent")
+                installed = {"kind": "installed", "intent": intent,
+                             "target": _installed_evidence(path, credential)}
+                _write_private_file(receipt, recovery.encode(installed))
+                _sync_credential_directory(receipt)
+                _retire_recovery(pending, receipt, recovery)
             # Host rotation and executor admission are separate decisions. Even an
             # equal/shorter-lived replacement may be the only usable refresh token.
             if credential.expires_at_s <= clock() + requested_runtime_s + REFRESH_SAFETY_MARGIN_S:
