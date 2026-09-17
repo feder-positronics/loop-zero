@@ -167,3 +167,42 @@ def test_thread_interfaces_reject_incomplete_or_cyclic_evidence(by_number, conne
             publish.require_resolved_review_threads(Github(), pr=7)
         else:
             publish.require_resolved_review_threads(Github(), "https://example.invalid/pull/7")
+
+
+@pytest.mark.parametrize("by_number", [False, True])
+@pytest.mark.parametrize("resolved,outdated,errors", [
+    (True, False, []), (True, True, []),
+    (False, False, []), (False, True, []),
+    (True, False, [{"message": "partial result"}]),
+])
+def test_thread_interfaces_require_explicit_resolution(by_number, resolved, outdated, errors):
+    class Github:
+        def repository(self):
+            return type("Repo", (), {"owner": "o", "name": "r"})()
+
+        def response(self):
+            connection = {"reviewThreads": {
+                "nodes": [{"id": "thread", "isResolved": resolved, "isOutdated": outdated}],
+                "pageInfo": {"hasNextPage": False},
+            }}
+            data = {"repository": {"pullRequest": connection}} if by_number else {"resource": connection}
+            return {"data": data, "errors": errors}
+
+        def api(self, endpoint, *, fields):
+            assert "isOutdated" in fields["query"]
+            return self.response()
+
+        def run_json(self, args):
+            return self.response()
+
+    def check():
+        if by_number:
+            publish.require_resolved_review_threads(Github(), pr=7)
+        else:
+            publish.require_resolved_review_threads(Github(), "https://example.invalid/pull/7")
+
+    if resolved and not errors:
+        check()
+    else:
+        with pytest.raises(publish.PublicationError):
+            check()
