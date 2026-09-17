@@ -144,6 +144,30 @@ def replacement(ordinary, request):
         reservation_id=reservation.reservation_id,
         review_reservation_id=reservation.reservation_id,
     )
+    if getattr(request, "param", None) == "synthetic":
+        # Sanitized RSS shape: the source/patch commit and review snapshot
+        # differ, but both Git objects contain the same authenticated tree.
+        snapshot = subprocess.check_output(
+            [
+                "git",
+                "commit-tree",
+                current["snapshot_tree_sha"],
+                "-p",
+                source["head"],
+                "-m",
+                "RSS synthetic review snapshot",
+            ],
+            cwd=repo,
+            text=True,
+        ).strip()
+        assert snapshot != source["head"]
+        assert (
+            subprocess.check_output(
+                ["git", "rev-parse", snapshot + "^{tree}"], cwd=repo, text=True
+            ).strip()
+            == current["snapshot_tree_sha"]
+        )
+        current["snapshot_sha"] = snapshot
     result = {
         "review_sections": {
             "code": {"completion": "completed", "verdict": "clean", "findings": []},
@@ -177,7 +201,7 @@ def replacement(ordinary, request):
         **result,
         "task_id": "review-2",
     }
-    if getattr(request, "param", False):
+    if getattr(request, "param", False) is True:
         finding = {
             "severity": "important",
             "claim": "replacement still has a defect",
@@ -249,6 +273,7 @@ def replacement(ordinary, request):
     return repo, coordinator, dispatcher, records, admission, receipt, prior, terminal
 
 
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_full_replacement_resolves_and_materializes_exact_predecessor(replacement):
     repo, coordinator, _, records, admission, receipt, prior, current = replacement
     assert resolved_loopzero_predecessors(
@@ -327,6 +352,7 @@ def replace_row(case, row, payload, *, coordinator=False):
         "late-supersession",
     ],
 )
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_invalid_supersession_cannot_resolve_or_bind(replacement, damage):
     repo, _, _, records, admission, receipt, _, current = replacement
     row = next(row for row in records if row["type"] == "attempt-supersession")
@@ -402,6 +428,7 @@ def test_invalid_supersession_cannot_resolve_or_bind(replacement, damage):
         "not-full",
     ],
 )
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_replacement_identity_and_replay_boundaries(replacement, damage):
     repo, coordinator, dispatcher, records, admission, receipt, _, current = replacement
     if damage in {"failed-verdict", "unsigned-verdict"}:
@@ -524,6 +551,7 @@ def test_binding_cannot_use_replacement_at_a_different_head(replacement):
     "field", ["family", "root_work_unit_id", "delivery_family_id", "slice_id"]
 )
 @pytest.mark.parametrize("value", ["", "unrelated"])
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_replacement_family_and_delivery_lineage_are_exact(replacement, field, value):
     current = replacement[-1]
     payload = unsigned(current)
@@ -551,6 +579,7 @@ def test_even_empty_delta_field_is_not_a_full_replacement(replacement, value):
 
 
 @pytest.mark.parametrize("state", ["missing", "unrelated", "invalid", "changed"])
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_missing_or_invalid_run_cannot_resolve_or_bind(replacement, state):
     import json
 
@@ -644,6 +673,7 @@ def test_current_provisional_important_finding_is_not_resolved(replacement):
 
 
 @pytest.mark.parametrize("adopted", [False, True])
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
 def test_actual_rss_callback_requires_authenticated_terminal_mapping(
     replacement, monkeypatch, adopted
 ):
@@ -774,3 +804,74 @@ def test_unrelated_malformed_run_does_not_break_publication_scan(
         lambda records: {**verdicts, "unrelated": {"verdict": "pass"}},
     )
     assert publication_predecessor_terminal(records, repo, task_id="review-1") is prior
+
+
+@pytest.mark.parametrize("replacement", [False, "synthetic"], indirect=True)
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "none",
+        "candidate-sha",
+        "candidate-tree",
+        "snapshot-tree",
+        "source-head",
+        "missing-patch",
+        "forged-head",
+        "forged-tree",
+        "forged-patch",
+    ],
+)
+def test_current_source_snapshot_patch_binding_fails_closed(replacement, damage):
+    records = replacement[3]
+    # Accepted uncaptured signed records exercise the resolver guards directly.
+    # The separate liveness fixture above retains the real capture path.
+    records[:] = [
+        row
+        for row in records
+        if not (
+            row.get("task_id") == "review-2"
+            and row["type"] == "finding-capture-admission-v1"
+        )
+    ]
+    for row in list(records):
+        if row.get("task_id") != "review-2" or row["type"] not in {
+            "attempt-start",
+            "attempt-terminal",
+        }:
+            continue
+        payload = unsigned(row)
+        for key in tuple(payload):
+            if key.startswith("finding_capture") or key == "provisional_owner_id":
+                payload.pop(key)
+        if damage in {"candidate-sha", "forged-patch"}:
+            payload["patch_identity"]["candidate_sha"] = "c" * 40
+        elif damage == "candidate-tree":
+            payload["patch_identity"]["candidate_tree_sha"] = "c" * 40
+        elif damage in {"snapshot-tree", "forged-tree"}:
+            payload["snapshot_tree_sha"] = "c" * 40
+        elif damage in {"source-head", "forged-head"}:
+            payload["source_identity"]["head"] = "c" * 40
+        elif damage == "missing-patch":
+            payload.pop("patch_identity")
+        payload["review_chain_receipt"] = chain.build_review_chain_receipt(
+            task={**payload["task_contract"], "task_id": "review-2"},
+            snapshot_sha=payload["snapshot_sha"],
+            snapshot_tree_sha=payload["snapshot_tree_sha"],
+            patch_identity=payload.get("patch_identity"),
+            result=json.loads(
+                (replacement[0] / replacement[-1]["result_artifact"]).read_text()
+            ),
+            finding_ids=[],
+        )
+        if damage.startswith("forged-"):
+            # Keep the original proof: shape/self-digest cannot grant authority.
+            records[records.index(row)] = {**row, **payload}
+        else:
+            if row["type"] == "attempt-start":
+                payload["terminal_authority"] = replacement[2].registration()
+            replace_row(
+                replacement, row, payload, coordinator=row["type"] == "attempt-start"
+            )
+    if not damage.startswith("forged-"):
+        assert "review-2" in authority.accepted_review_terminals(records)
+    assert resolved(replacement) == ({"review-1"} if damage == "none" else set())

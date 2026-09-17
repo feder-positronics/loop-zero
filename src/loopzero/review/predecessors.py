@@ -168,15 +168,15 @@ def _full_replacement_predecessors(repo, records, *, current_review_task_id):
     contract = current.get("task_contract")
     source = current.get("source_identity")
     patch = current.get("patch_identity")
+    # Synthetic review commits bind to source by their authenticated tree.
     if (
         not isinstance(contract, Mapping)
         or "delta_from_snapshot" in contract
         or not isinstance(source, Mapping)
-        or current.get("snapshot_sha") != source.get("head")
         or not source.get("head")
         or not source.get("ref")
         or not isinstance(patch, Mapping)
-        or patch.get("candidate_sha") != current.get("snapshot_sha")
+        or patch.get("candidate_sha") != source.get("head")
         or not current.get("snapshot_tree_sha")
         or patch.get("candidate_tree_sha") != current.get("snapshot_tree_sha")
         or not _loopzero_run(repo, current.get("run_id"))
