@@ -123,3 +123,31 @@ with settings.use():
             if child.poll() is None:
                 os.killpg(child.pid, signal.SIGKILL)
             child.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("unsafe", ["exposed", "hardlinked", "unknown-key", "replaced"])
+def test_recovery_key_never_adopts_unsafe_or_replaced_stable_lock(tmp_path, monkeypatch, unsafe):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    lock = tmp_path / codex.get_settings().lock_name("codex-refresh")
+    lock.write_bytes(b"not-a-package-key" if unsafe == "unknown-key" else b"")
+    lock.chmod(0o644 if unsafe == "exposed" else 0o600)
+    if unsafe == "hardlinked":
+        os.link(lock, tmp_path / "lock-alias")
+    if unsafe == "replaced":
+        flock = codex.fcntl.flock
+        def replace_after_lock(fd, operation):
+            flock(fd, operation)
+            if operation == codex.fcntl.LOCK_EX:
+                lock.rename(tmp_path / "old-lock")
+                lock.write_bytes(b"")
+                lock.chmod(0o600)
+        monkeypatch.setattr(codex.fcntl, "flock", replace_after_lock)
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsafe lock admitted renewal authority")
+    with pytest.raises(codex.UnsafeCodexCredential):
+        with codex.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            run_refresh=forbidden, refresh_command=("unused",),
+        ):
+            pytest.fail("unsafe lock exported snapshot")
