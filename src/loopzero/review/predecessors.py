@@ -168,15 +168,15 @@ def _full_replacement_predecessors(repo, records, *, current_review_task_id):
     contract = current.get("task_contract")
     source = current.get("source_identity")
     patch = current.get("patch_identity")
+    # Synthetic review commits bind to source by their authenticated tree.
     if (
         not isinstance(contract, Mapping)
         or "delta_from_snapshot" in contract
         or not isinstance(source, Mapping)
-        or current.get("snapshot_sha") != source.get("head")
         or not source.get("head")
         or not source.get("ref")
         or not isinstance(patch, Mapping)
-        or patch.get("candidate_sha") != current.get("snapshot_sha")
+        or patch.get("candidate_sha") != source.get("head")
         or not current.get("snapshot_tree_sha")
         or patch.get("candidate_tree_sha") != current.get("snapshot_tree_sha")
         or not _loopzero_run(repo, current.get("run_id"))
@@ -273,10 +273,18 @@ def publication_predecessor_terminal(
     matches = []
     for current_id, current in authority.accepted_review_terminals(records).items():
         if head is not None and current.get("snapshot_sha") != head:
-            continue
-        resolved = resolved_review_predecessors(
-            Path(repo), records, current_review_task_id=current_id
-        )
+            source = current.get("source_identity")
+            if not isinstance(source, Mapping) or source.get("head") != head:
+                continue
+            # The actual PR head may differ from its synthetic review commit.
+            # Reuse every full-replacement source/patch/tree and lineage guard.
+            resolved = _full_replacement_predecessors(
+                Path(repo), records, current_review_task_id=current_id
+            )
+        else:
+            resolved = resolved_review_predecessors(
+                Path(repo), records, current_review_task_id=current_id
+            )
         if task_id in resolved:
             matches.append(resolved[task_id])
     return matches[0] if len(matches) == 1 else None
