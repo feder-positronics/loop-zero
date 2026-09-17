@@ -93,7 +93,7 @@ def test_assistant_typed_error_is_limited_with_unknown_scope(monkeypatch, tmp_pa
         model="<synthetic>",
         error="rate_limit",
     )
-    parsed, _ = run([error, result(status=None)], monkeypatch, tmp_path)
+    parsed, _ = run([error, result(status=429)], monkeypatch, tmp_path)
     assert parsed.status.value == "limited"
     assert parsed.usage_limit.scope.value == "unknown"
     assert parsed.usage_limit.resets_at is None
@@ -179,6 +179,7 @@ def test_accepted_tool_result_survives_later_limit(monkeypatch, tmp_path):
     assert parsed.status is contract.RuntimeStatus.COMPLETED
     assert parsed.structured_output == accepted
     assert parsed.usage_limit is None
+    assert parsed.terminal_reason.value == "usage-limit-after-result"
 
 
 @pytest.mark.parametrize("overrides", [

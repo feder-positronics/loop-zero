@@ -1,17 +1,25 @@
 # Claude structured usage-limit observations
 
 The Claude SDK bridge reports `limited` / `usage-limit` when an unsuccessful
-native result follows an assistant `rate_limit` error, or a rejected known
-provider window plus HTTP 429. A generic 429 or matching error text alone does
+native result has terminal HTTP 429 plus a current assistant `rate_limit` error
+or rejected known provider window. Only `success` (the SDK's documented API-error
+subtype) and `error_during_execution` are supported; local, cancellation, unknown
+terminal causes and missing HTTP status remain failed. A later assistant message
+supersedes the prior assistant error. A generic 429 or matching error text alone does
 not establish a subscription-window limit. Advisory events alone cannot turn a
 successful completion into a limit; a previously accepted StructuredOutput tool
-result survives a later limit terminal.
+result survives a correlated later limit terminal as `completed` with the explicit
+`usage-limit-after-result` reason and `accepted-tool-result` recovery marker.
+The parser requires this marker, bounded structured output, terminal HTTP 429,
+and a supported subtype; other status/reason combinations fail closed.
 
 `RuntimeResult.usage_limit` contains only a closed window scope and optional
 bounded Unix reset timestamp. Missing, malformed, boolean, nonfinite, nonpositive,
 or out-of-range reset values remain unknown (`None`). An assistant rate-limit
 error without a known rejected window has unknown scope and reset. This is an
 observation, not proof that every credential for an account is exhausted.
+Recovered completed results retain their qualified reason, but not the window
+scope/reset payload: `usage_limit` remains restricted to `limited` terminals.
 
 Commercial-boundary checks retain precedence. Permitted overage clears the
 rejected base-window observation, and local budget exhaustion remains a distinct

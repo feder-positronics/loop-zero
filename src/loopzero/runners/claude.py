@@ -716,6 +716,18 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                                if scope is not RuntimeLimitScope.UNKNOWN else None),
                 )
             result_subtype = _bounded_string(raw.get("subtype"), "subtype")
+            if frame_reason is TerminalReason.USAGE_LIMIT_AFTER_RESULT:
+                if (
+                    frame_status is not RuntimeStatus.COMPLETED
+                    or raw.get("structured_output_recovery") != "accepted-tool-result"
+                    or frame_structured_output is None
+                    or raw.get("api_error_status") != 429
+                    or result_subtype not in {"success", "error_during_execution"}
+                ):
+                    raise ClaudeProtocolError(
+                        "Claude qualified usage-limit recovery was inconsistent",
+                        semantic_event=True,
+                    )
             if result_subtype == "error_max_budget_usd":
                 if usage_limit is not None:
                     raise ClaudeProtocolError("Claude local budget cannot be a usage limit", semantic_event=semantic_seen)
@@ -733,7 +745,10 @@ def parse_claude_stream(stream: str) -> ParsedClaudeStream:
                 }
                 or (
                     frame_status is RuntimeStatus.COMPLETED
-                    and frame_reason is not TerminalReason.COMPLETED
+                    and frame_reason not in {
+                        TerminalReason.COMPLETED,
+                        TerminalReason.USAGE_LIMIT_AFTER_RESULT,
+                    }
                 )
                 or (
                     frame_status is RuntimeStatus.FAILED

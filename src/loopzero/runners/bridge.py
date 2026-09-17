@@ -2378,8 +2378,8 @@ async def _run_claude(
                     )
             continue
         if isinstance(message, AssistantMessage):
-            if message.error == "rate_limit":
-                assistant_limit = True
+            # A later assistant message supersedes a recoverable per-turn error.
+            assistant_limit = message.error == "rate_limit"
             synthetic = message.model == "<synthetic>" or bool(message.error)
             if synthetic:
                 detail = sanitized_provider_error(message.error)
@@ -2534,9 +2534,16 @@ async def _run_claude(
             recovered_after_budget = (
                 budget_exhausted and accepted_structured_output is not None
             )
-            limited = message.is_error and not budget_exhausted and (
-                assistant_limit
-                or (message.api_error_status == 429 and window_limit is not None)
+            # A prior assistant error cannot establish why this execution ended.
+            # The SDK documents API errors on is_error=True/subtype="success";
+            # retain its execution-error shape, but fail closed on local stops.
+            limited = (
+                message.is_error
+                and not budget_exhausted
+                and message.api_error_status == 429
+                and result_subtype in {"success", "error_during_execution"}
+                and message.terminal_reason in {None, "completed"}
+                and (assistant_limit or window_limit is not None)
             )
             recovered_after_limit = limited and accepted_structured_output is not None
             status = "failed" if message.is_error else "completed"
@@ -2564,7 +2571,7 @@ async def _run_claude(
                 structured_output = None
             elif recovered_after_limit:
                 status = "completed"
-                reason = "completed"
+                reason = "usage-limit-after-result"
                 structured_output = accepted_structured_output
                 recovered_accepted_output = True
             elif limited:

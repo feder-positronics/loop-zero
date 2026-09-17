@@ -208,6 +208,7 @@ class TerminalReason(StrEnum):
 
     COMPLETED = "completed"
     USAGE_LIMIT = "usage-limit"
+    USAGE_LIMIT_AFTER_RESULT = "usage-limit-after-result"
     PROCESS_EXIT = "process-exit"
     MALFORMED_EVENT = "malformed-event"
     MISSING_TERMINAL_EVENT = "missing-terminal-event"
