@@ -12,7 +12,7 @@ def test_workflow_recreates_venv_interpreter_aliases_before_binding_target() -> 
     )
     validation_body = workflow[validation_step:]
 
-    assert 'PYTHON_BIN=$(readlink -f "$(uv python find 3.13)")' in validation_body
+    assert 'PYTHON_BIN=$(readlink -f "$(uv python find 3.14)")' in validation_body
     assert 'for interpreter in "$ROOT"/.venv/bin/python*; do' in validation_body
     assert 'raw_target=$(readlink "$interpreter")' in validation_body
     assert 'resolved_target=$(readlink -f "$raw_target")' in validation_body

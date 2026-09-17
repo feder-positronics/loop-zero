@@ -61,7 +61,7 @@ Reviewed examples are in [examples/renew-codex-nightly.sh](examples/renew-codex-
 [examples/loopzero-codex-renew.timer](examples/loopzero-codex-renew.timer).
 
 1. Install the reviewed wheel and its `codex` extra in a dedicated environment
-   outside any checkout. Use Python 3.12 or later, either a system installation
+   outside any checkout. Use Python 3.14 or later, either a system installation
    under `/usr` or a managed CPython installation (for example, uv). Venvs with
    copied or symlinked executables retain their SDK imports during refresh:
 
@@ -75,7 +75,7 @@ Reviewed examples are in [examples/renew-codex-nightly.sh](examples/renew-codex-
    commit; the released v0.4.3 wheel does not contain this command. The refresh
    command needs Linux user namespaces and `bwrap`. To use managed Python,
    replace the venv creation command with
-   `uv venv --python 3.12 "$HOME/.local/share/loopzero-renew"`.
+   `uv venv --python 3.14 "$HOME/.local/share/loopzero-renew"`.
    The trusted sealer preserves the venv interpreter identity and mounts its
    environment plus the running Python's `sys.base_prefix` and
    `sys.base_exec_prefix` read-only. This exposes the selected installation's

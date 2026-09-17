@@ -12,10 +12,6 @@ permissions:
 jobs:
   checks:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.12", "3.14"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,15 +30,15 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Resolve dependencies with read-only Git metadata
         run: |
-          uv python install "${{ matrix.python }}"
+          uv python install "3.14"
           UV_BIN=$(readlink -f "$(command -v uv)")
           PYTHON_INSTALL_ROOT=$(readlink -f "$(uv python dir)")
           # uv exposes a minor-version directory that is a symlink to the versioned
           # install; resolve it so the path stays valid under /opt/uv-python.
-          PYTHON_BIN=$(readlink -f "$(uv python find "${{ matrix.python }}")")
+          PYTHON_BIN=$(readlink -f "$(uv python find "3.14")")
           PYTHON_RELATIVE=${PYTHON_BIN#"$PYTHON_INSTALL_ROOT"/}
           test "$PYTHON_RELATIVE" != "$PYTHON_BIN"
-          VENV_ROOT="$RUNNER_TEMP/loopzero-python-${{ matrix.python }}/.venv"
+          VENV_ROOT="$RUNNER_TEMP/loopzero-python-3.14/.venv"
           UV_CACHE_ROOT=$(mktemp -d "$RUNNER_TEMP/loopzero-uv-cache-XXXXXX")
           mkdir -p "$VENV_ROOT"
           trap 'rm -rf -- "$UV_CACHE_ROOT"' EXIT
@@ -78,7 +74,7 @@ jobs:
           CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
           CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          VENV_ROOT="$RUNNER_TEMP/loopzero-python-${{ matrix.python }}/.venv"
+          VENV_ROOT="$RUNNER_TEMP/loopzero-python-3.14/.venv"
           PYTHON_INSTALL_ROOT=$(uv python dir)
           UV_BIN=$(readlink -f "$(command -v uv)")
           # The kernel keeps job authority under the passwd home of the sandbox
@@ -125,7 +121,7 @@ jobs:
       - name: Installed-artifact test
         run: |
           ARTIFACT_ROOT=$(mktemp -d /tmp/loopzero-artifacts-XXXXXX)
-          VENV_ROOT="$RUNNER_TEMP/loopzero-python-${{ matrix.python }}/.venv"
+          VENV_ROOT="$RUNNER_TEMP/loopzero-python-3.14/.venv"
           trap 'rm -rf -- "$ARTIFACT_ROOT"' EXIT
           UV_BIN=$(readlink -f "$(command -v uv)")
           PYTHON_INSTALL_ROOT=$(uv python dir)

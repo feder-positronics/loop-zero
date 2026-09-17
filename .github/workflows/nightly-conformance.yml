@@ -55,12 +55,12 @@ jobs:
 
       - name: Resolve locked Python environment
         run: |
-          uv python install 3.13
+          uv python install 3.14
           VENV_ROOT="$RUNNER_TEMP/loopzero-live/.venv"
           UV_CACHE_ROOT="$RUNNER_TEMP/loopzero-live/uv-cache"
           mkdir -p "$UV_CACHE_ROOT"
           UV_CACHE_DIR="$UV_CACHE_ROOT" UV_PROJECT_ENVIRONMENT="$VENV_ROOT" \
-            uv sync --locked --python 3.13 --group dev --no-install-project
+            uv sync --locked --python 3.14 --group dev --no-install-project
 
       - name: Build and install the credential broker from reviewed main
         env:
@@ -84,7 +84,7 @@ jobs:
           git archive --format=tar "$RELEASE_SHA" | tar -xf - -C "$RELEASE_SOURCE"
           UV_CACHE_DIR="$ROOT/uv-cache" uv build --wheel \
             --out-dir "$WHEEL_DIR" "$RELEASE_SOURCE"
-          uv venv --python 3.13 "$BROKER_VENV"
+          uv venv --python 3.14 "$BROKER_VENV"
           WHEEL=$(find "$WHEEL_DIR" -maxdepth 1 -type f -name 'loopzero-*.whl' -print)
           test -n "$WHEEL" && test "$(printf '%s\n' "$WHEEL" | wc -l)" -eq 1
           INSTALL_TARGET="$WHEEL"
@@ -181,7 +181,7 @@ jobs:
           test ! -e "$ROOT/credential-source.json"
           ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
           test -n "$ACCOUNT_HOME" && test "$ACCOUNT_HOME" != /
-          PYTHON_BIN=$(readlink -f "$(uv python find 3.13)")
+          PYTHON_BIN=$(readlink -f "$(uv python find 3.14)")
           PYTHON_INSTALL_ROOT=${PYTHON_BIN%/bin/*}
           test "$PYTHON_INSTALL_ROOT" != "$PYTHON_BIN"
           PYTHON_ALIAS_LAYOUT=()
