@@ -151,3 +151,19 @@ def test_recovery_key_never_adopts_unsafe_or_replaced_stable_lock(tmp_path, monk
             run_refresh=forbidden, refresh_command=("unused",),
         ):
             pytest.fail("unsafe lock exported snapshot")
+
+
+@pytest.mark.parametrize("route", ["wrapper", "refresh"])
+def test_injected_broker_noexec_exception_cannot_clear_intent(tmp_path, route):
+    path = tmp_path / "auth.json"
+    _write_credential(path, _credential(expires_at_s=1_100))
+    def impersonate(*args, **kwargs):
+        raise codex._CodexRefreshNotStarted("caller invented evidence")
+    options = {"sandbox_wrapper": impersonate} if route == "wrapper" else {"run_refresh": impersonate}
+    with pytest.raises(codex.CodexCredentialRefreshFailed):
+        with codex.codex_subscription_credential(
+            credential_path=path, requested_runtime_s=600, clock=lambda: 1_000,
+            refresh_command=(sys.executable, "-I", "-c", "raise SystemExit(127)"), **options,
+        ):
+            pytest.fail("injected evidence admitted snapshot")
+    assert path.with_name(".auth.json.refresh-pending").exists()
