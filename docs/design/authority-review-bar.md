@@ -5,6 +5,8 @@ content generations, trust claims, credential sealing, sandbox mounts, the
 authority ledger and its compaction. Written after the D29 work, where each
 of the rules below cost at least one review round before it was stated.
 
+The [v2 implementation proposal](2026-09-17-workflow-migration-implementation.md#selected-amendments-and-completion-authority) explicitly refines Methods 2 and 4: no extra review slot, and no automatic severity downgrade for liveness acceptance failures. Those changes take effect through reviewed adoption; original runs retain their original contract.
+
 ## Method
 
 1. **Probes first.** Every finding from a review is committed as a test in the

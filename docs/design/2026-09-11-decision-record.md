@@ -1,5 +1,7 @@
 # Decision record: loop-zero executable core
 
+Design follow-up (2026-09-17): [workflow migration and simplification](2026-09-17-workflow-migration-simplification.md), under #105, proposes completing the removal work. It does not supersede this record or amend the active core contract; accepted replacements must name the decisions they change. The [selected implementation proposal](2026-09-17-workflow-migration-implementation.md#selected-amendments-and-completion-authority) now names the D3/D4/D17/D18/D21 amendments for v2 adoption; original runs retain their existing authority.
+
 <!-- Generic decisions only. Decisions that are properties of a
 particular consumer's repository (its protection ruleset, environment
 prefix, throughput thresholds, dependency wiring, operator staffing and
