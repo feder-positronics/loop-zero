@@ -29,7 +29,7 @@ from .authority import (
     verify_terminal_authority,
 )
 from .git_config_security import validated_git_config_entries
-from .sandbox import SandboxError, run_validation_child
+from .sandbox import SandboxError, run_validation_child, trusted_python_runtime
 from .settings import settings
 
 RESULT_SCHEMA = "loopzero-validation-result-v2"
@@ -789,6 +789,14 @@ def run_hook(
     timeout = settings.toolchain.get("validation_timeout_s", 1800)
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
         raise ValidationHookError("validation timeout setting is invalid")
+    # job.sh starts this module with the coordinator-selected installed-package
+    # interpreter.  Derive the runtime only from that already-running process;
+    # candidate hook argv, PATH and workflow fields cannot select it.
+    python_runtime = trusted_python_runtime(
+        interpreter=Path(getattr(sys, "_base_executable", sys.executable)),
+        base=Path(sys.base_prefix),
+        forbidden_roots=(root,),
+    )
     actual_commands: list[str] = []
     for command in commands:
         argv = _command_argv(root, command, extra)
@@ -796,6 +804,7 @@ def run_hook(
         result = run_validation_child(
             argv,
             worktree=root,
+            python_runtime=python_runtime,
             timeout=float(timeout),
             git_config_overlays=tuple(
                 (overlay.destination, overlay.payload) for overlay in config_overlays
