@@ -405,6 +405,7 @@ def authenticated_provisional_findings(
     repo: Path | str,
     *,
     admission: Mapping[str, object],
+    publication_head: str | None = None,
 ) -> list[dict[str, object]]:
     """Load findings only when a signed review terminal binds their exact receipt."""
     task_id = str(admission.get("task_id") or "")
@@ -413,6 +414,12 @@ def authenticated_provisional_findings(
     owner = str(admission.get("provisional_owner_id") or "")
     persisted_receipt = _capture_receipts(_stream_records(repo)).get(owner)
     recovery = authenticated_review_terminals(records).get(task_id)
+    if recovery is None:
+        from .predecessors import publication_predecessor_terminal
+
+        recovery = publication_predecessor_terminal(
+            records, repo, task_id=task_id, head=publication_head
+        )
     if (
         persisted_receipt is None
         or recovery is None
@@ -891,7 +898,9 @@ def build_publication_binding(
         or capture_receipt.get("result_sha256") != admission.get("result_sha256")
     ):
         raise ProvisionalFindingError("publication binding capture receipt is invalid")
-    authenticated_provisional_findings(records, repo, admission=admission)
+    authenticated_provisional_findings(
+        records, repo, admission=admission, publication_head=head
+    )
     existing = authenticated_publication_bindings(records).get(owner)
     payload = {
         "type": BINDING_TYPE,
@@ -989,7 +998,7 @@ def materialize_publication_binding(
     if admission is None:
         raise ProvisionalFindingError("publication binding owner is not authenticated")
     findings = authenticated_provisional_findings(
-        authority_records, repo, admission=admission
+        authority_records, repo, admission=admission, publication_head=str(binding["head"])
     )
     request = build_finding_capture_request(
         pr=int(binding["pr"]),
