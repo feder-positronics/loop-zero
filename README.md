@@ -1,202 +1,94 @@
 # loop-zero
 
-A small, versioned agent workflow shared by repositories. This repository owns
-the core; product repositories consume identical pinned snapshots and retain
-their own commands, architecture, security and release policy.
+A versioned workflow core for repository-based coding agents: shared operating
+rules, sandboxed execution, review evidence, and delivery mechanisms. Product
+repositories keep their own commands, architecture, security, and release policy.
 
-The portable distribution has two parts pinned by one commit SHA. The vendored
-[`core/`](core/CONTRACT.md) snapshot holds the contract, governance skills,
-three pinned methodology skills with overlays, one handoff, thin Codex and
-Claude entry points, four conditional framework profiles and read-only pin and
-check-policy tools. The `loopzero` Python
-package, installed from the same SHA, holds the executable mechanisms: the
-worktree lease, sandboxed validation children, the signed evidence ledger,
-detached jobs, runner adapters, the dispatcher and the delivery state machine,
-plus a generator for consumer wiring and Claude/Codex/Cursor skill layouts. The core ships no scheduler service,
-dashboard, cloud control plane or installer beyond that generator.
+loop-zero makes that workflow explicit and reusable across consumers. It is
+intended for repositories that need more than a collection of agent prompts:
+validation and review results must remain tied to the work they actually cover.
 
-See [setup and revision updates](SETUP.md). Run the source tests with
-`.venv/bin/python -m pytest -q` (Python 3.14+ and Git).
+## How it fits together
 
-A deposit is not evidence of product portability. That requires real changes in
-two consumers on the same final core revision, both runtime entry points used,
-and the repositories' ordinary validation and review evidence.
+Consumers pin two artifacts to the **same full Git commit SHA**:
 
-Version 0.2.1 fixes release-metadata environment checks and adds check classes,
-evidence-backed overrides, and an offline check-policy report. Consumers must
-bump their snapshot and full commit pin to the reviewed 0.2.1 merge commit as
-described in SETUP.md. The
-single durable debt list is [KNOWN-GAPS.md](KNOWN-GAPS.md), curated at closeout.
-CI runs the tests and `python3 core/tools/status.py --known-gaps KNOWN-GAPS.md
---check-child-env`; run `git diff --check` before freezing a review candidate.
-There are no configured lint, type or complexity ratchets in this source package;
-consumers must run every applicable gate from their own contract.
+| Part | Responsibility |
+| --- | --- |
+| [`core/`](core/CONTRACT.md), vendored into the consumer | Shared contract, governance and methodology skills, runtime entry points, framework profiles, handoff template, and pin/check-policy tools |
+| [`loopzero`](src/loopzero/), installed as a Python package | Worktree leases, sandboxed validation, signed evidence, detached jobs, runner adapters, dispatch, delivery, and consumer wiring generation |
+| Consumer-owned configuration | Commands, paths, required checks, runtime wiring, and product-specific policy |
 
-The optional [code-health collector](docs/code-health.md) provides committed
-snapshot inventories and advisory base/head comparisons for size, Python
-complexity, and duplication. Existing health/drift audits can consume its
-source-bound artifact without changing required gates.
+The executable package separates [kernel mechanisms](src/loopzero/kernel/README.md),
+review policy, [runner adapters](src/loopzero/runners/), and delivery.
+See the [architecture record](docs/design/2026-09-11-executable-core-architecture.md)
+for the boundaries and their rationale.
+
+## Adopt it
+
+Use Python **3.14** and Git. Sandboxed execution also requires the host facilities
+documented by the [kernel](src/loopzero/kernel/README.md); CI uses Linux and
+bubblewrap. Runtime integrations have their own optional dependencies.
+
+Follow [setup and revision updates](SETUP.md) to:
+
+1. Select and inspect a full source commit.
+2. Deposit its `core/` snapshot and install the Python package from that same commit.
+3. Define the consumer's `workflow.toml`, generate its wiring, and connect its runtimes.
+4. Verify the pin and run the consumer's required checks.
+
+A branch or tag is not a consumer pin. Package metadata comes from
+[`core/VERSION`](core/VERSION); dependency and runtime pins live in
+[`pyproject.toml`](pyproject.toml), [`uv.lock`](uv.lock), and the relevant workflows.
+
+## Develop and validate
+
+The [deterministic CI workflow](.github/workflows/checks.yml) is the executable
+reference for source validation: Python 3.14, locked dependencies, tests, the
+core status check, and installed wheel/sdist checks. It runs validation with
+read-only source and Git metadata, an isolated account home, and no network.
+Use that containment when running candidate code locally; see the
+[validation boundary and delivery contract](core/CONTRACT.md#delivery).
+Run `git diff --check` before freezing a candidate. This source package has no
+configured lint, type, or complexity ratchets.
+
+Changes to authority mechanisms must also satisfy the scoped
+[authority review policy](docs/design/authority-review-bar.md).
+
+The optional [code-health collector](docs/code-health.md) reports size,
+complexity, and duplication. Its comparisons are advisory. Consumers retain
+responsibility for every applicable gate in their own contract.
 
 ## Nightly real-runtime conformance
 
-[`nightly-conformance.yml`](.github/workflows/nightly-conformance.yml) runs at
-02:17 UTC and by manual dispatch from `refs/heads/main` only.  Its three independent jobs install and
-verify Claude Code `2.1.269`, Codex CLI and Python SDK `0.154.0`, and Cursor
-Agent `2026.09.08-6caf4ff`.  Each job then explicitly invokes the otherwise
-uncollected live suite for success, malformed adapter input, permission denial,
-cancellation, child disconnect, restart/resume, and timeout.  The validation
-shell follows the ordinary `checks.yml` bubblewrap layout, but deliberately
-retains network access for these jobs.  Every adapter child is nested in its
-own mandatory filesystem wrapper; the child environment allowlist and sealed
-credential boundary remain active. Neither the outer validation bubble nor the
-per-launch wrapper uses `--unshare-net`: version/readiness probes and provider
-scenarios require outbound network, while filesystem visibility remains the
-positive allowlist described above.
+See the [nightly operations guide](docs/nightly-runtime-conformance.md) for
+runtime pins, credentials, diagnostic commands, budgets, and release acceptance.
 
-The per-launch wrapper mounts a private tmpfs over `/run`, so it also binds
-the resolved target of `/etc/resolv.conf` read-only when that symlink points
-into `/run` (systemd-resolved hosts); without that bind every provider request
-fails name resolution and both CLIs retry until the scenario timeout.  Codex
-`0.154.0` has no `debug.config_lockfile` export, so the SDK bridge applies the
-restrictive runtime overrides directly, then uses app-server `config/read`
-after initialization and before account or thread use.  It refuses the turn as
-unavailable unless every top-level and nested effective key matches the pinned
-allowlist: request-specific pins, empty capability registries, and reviewed
-native defaults. Unknown keys and changed values fail closed, including shell
-environment settings, notification commands, endpoints, providers, and features.
-The bridge reads raw configuration dictionaries so SDK decoding cannot discard
-unknown nested keys. TUI configuration must be null; local history must retain
-its recorded native defaults.  The private `CODEX_HOME` remains empty apart
-from its sealed credential and holds no project trust entry, which keeps
-project-level `.codex` configuration out of scope.  An enterprise-managed or
-cloud-managed behavior not represented by `config/read` remains an explicit
-consumer residual requiring acceptance. Every setting returned by `config/read`
-is attested; the check does not attest omitted settings such as the pinned
-binary's legacy `output_token_limit` override.
-The Codex access-only snapshot keeps the source's `last_refresh`
-timestamp because `0.154.0` treats a missing timestamp as stale and would
-otherwise attempt the refresh the snapshot deliberately cannot perform.  Codex
-permission-denial always launches: it passes only with observed denial evidence
-from a simple `/etc/shadow` read whose SDK started action and nonzero completion
-share an item ID and whose tool output contains the matching complete denial
-line. Ambiguous shell syntax, option errors, and denial text without the read
-action yield no evidence. An otherwise valid turn without that evidence is
-recorded as `unsupported`, with its reason, observed command outcomes, and
-charged cost; accepted evidence also records the SDK item ID.  SDK
-bridge error frames carry a sanitized `diagnostics` object (exception class and
-a redacted, bounded message) that the normalized result surfaces as
-`<Vendor> SDK failure: ...`; CLI retry events surface as
-`<Vendor> API retry: ...`, and a bridge killed by an external signal before its
-terminal frame is a `transport-disconnect` only if its stream is otherwise valid.
-Malformed protocol remains a protocol failure even after a signal.
+## Runtime support and limits
 
-Create a GitHub Actions environment named `nightly-conformance`, restrict its
-deployment branches to `main`, and configure **no required reviewers** so the
-scheduled job runs unattended. Configure these environment secrets (not
-repository-level secrets) with the credential expected by the corresponding
-runner broker:
+Runner integrations cover Claude, Codex, and Cursor. Capabilities are explicit:
+a runtime that cannot satisfy a required contract produces an unsupported or
+unavailable outcome. In particular, the pinned Cursor CLI cannot enforce
+`output_schema`, so schema-dependent live success and restart/resume scenarios
+are recorded as unsupported.
 
-- `LOOPZERO_CONFORMANCE_CLAUDE_CREDENTIAL`: the single-line output from
-  `claude setup-token`, not browser-login OAuth JSON
-- `LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL`
-- `LOOPZERO_CONFORMANCE_CURSOR_CREDENTIAL`
+Ordinary tests use deterministic fixtures and replay. Live provider behavior is
+validated separately by [nightly conformance](docs/nightly-runtime-conformance.md),
+with pinned runtimes, credential isolation, cost accounting, and explicit release
+acceptance criteria. See [credential operations](docs/nightly-conformance.md)
+before running that suite.
 
-A missing secret is a hard job failure. Before checked-out code starts, a
-separate host step builds a wheel from the run-pinned commit at `release/0.3`,
-installs it into a dedicated venv below `RUNNER_TEMP`, and runs
-`loopzero-credential-seal`. The trusted broker validates and, when needed,
-refreshes the mode-0600 source, then creates a mode-0600 access-only snapshot
-with no refresh token and a clamped expiry. The workflow deletes the source
-before starting bubblewrap. Only the snapshot is bound read-only into the
-validation bubble, and an access-only snapshot that can no longer cover a
-launch becomes cleanly unavailable without any refresh attempt. Neither file
-is placed in the checkout or artifacts, and credential contents are never
-printed; the seal reports only its bounded source kind (for example,
-`oauth-file`, `setup-token-file`, or `token-file(default)`). See
-[nightly conformance credentials](docs/nightly-conformance.md) for the exact
-Claude snapshot shape and secret rationale. The remaining risk is explicit:
-checked-out code on `main` can read
-and exfiltrate the short-lived access token while the network-enabled live job
-runs. The GitHub environment limits secret scope, but is not a per-run human
-approval boundary.
+A deposited snapshot does not establish product portability. That requires real
+changes in two consumers on the same final core revision, both runtime entry
+points used, and their ordinary validation and review evidence. Current debt is
+curated in [KNOWN-GAPS.md](KNOWN-GAPS.md).
 
-For a host login, the zero-cost readiness preflight uses normal credential
-discovery, seals one access-only snapshot outside the scenario wrapper, probes
-the exact CLI version and SDK/app-server readiness, and prints only a sanitized
-table. Select one runtime and its exact executable:
+The core ships no scheduler service, dashboard, or cloud control plane. Its
+consumer wiring generator is not a replacement for repository-owned setup and
+release decisions.
 
-```bash
-LOOPZERO_LIVE_RUNTIMES=codex \
-LOOPZERO_LIVE_CLI_PATH=/absolute/path/to/codex \
-LOOPZERO_LIVE_CREDENTIAL_SEAL=/absolute/trusted/bin/loopzero-credential-seal \
-.venv/bin/python -m pytest -q -s -p no:cacheprovider \
-  --basetemp=/tmp/loopzero-live-diagnose --diagnose \
-  tests/conformance/live/live_conformance.py
-```
+## Documentation
 
-The paid live run uses the same once-per-suite host seal and passes only its
-access-only result to scenario launches:
+Start with the [documentation map](docs/README.md) for adoption, development,
+operations, design decisions, and proposals.
 
-```bash
-LOOPZERO_LIVE_RUNTIMES=codex \
-LOOPZERO_LIVE_CLI_PATH=/absolute/path/to/codex \
-LOOPZERO_LIVE_CREDENTIAL_SEAL=/absolute/trusted/bin/loopzero-credential-seal \
-.venv/bin/python -m pytest -q -p no:cacheprovider \
-  --basetemp=/tmp/loopzero-live-run \
-  tests/conformance/live/live_conformance.py
-```
-
-Set `LOOPZERO_LIVE_CREDENTIAL_SOURCE` only when intentionally overriding normal
-host discovery with a mode-0600 credential file. Claude accepts either its
-OAuth credential JSON or a validated `sk-ant-oat01-` token file; the other
-runtimes require their native credential JSON. Set
-`LOOPZERO_LIVE_CREDENTIAL_SEAL` to select a separately installed trusted
-`loopzero-credential-seal` entry point.
-
-The release broker becomes available only after this branch merges into
-`release/0.3`: that branch does not contain `credential_seal.py` beforehand,
-so the first nightly broker is built from this branch's code after the merge.
-
-The optional repository variable `LOOPZERO_CONFORMANCE_BUDGET_USD` is the
-aggregate charged-cost ceiling per runtime and defaults to USD 2.  Before each
-launch, its remaining allowance narrows the per-run `RuntimeSettings.budget`.
-The realistic per-turn output/task cap is 32,768 tokens: Claude receives native
-turn, task-output and USD caps, while Codex runs one SDK turn with the pinned
-CLI's top-level `output_token_limit`.  That Codex key is present in 0.154.0's
-compiled configuration schema and is passed through both CLI and SDK config
-layers.  Normalized enforcement compares `RuntimeUsage.output_tokens` with
-this output cap; input and cache counters are used for price reporting, not
-miscompared with an output-only limit.  There is no separate total-token cap.
-
-Reporting uses the frozen [`2026-09-12 price table`](src/loopzero/runners/pricing.py),
-not a live lookup. A bounded vendor-reported cost takes precedence and is
-reported with source `vendor`; otherwise complete usage for a priced model is
-reported with source `estimated`. A completed turn with zero output tokens, including one
-that reports positive input, and incomplete usage remain unknown rather than
-priced and retains source `unknown`. Every started invocation with an unknown
-cost source is charged
-Claude's native per-run USD cap, Codex's output cap plus a conservative
-estimate of one input token per prompt byte, or a fixed USD 0.10 for Cursor,
-whose pinned CLI exposes no native cost/token cap. Such invocations count
-toward `LOOPZERO_CONFORMANCE_MAX_UNACCOUNTED_RUNS` (default 3). Killed runs count
-toward `LOOPZERO_CONFORMANCE_MAX_KILLED_RUNS` (default 3), after which the suite
-stops; the aggregate ceiling also stops further launches. Each runtime gets
-one private state-root session home bound read-write into both restart/resume
-launches and scrubbed at suite end. Offline tests verify the repeated home and
-resume argument/SDK option for every vendor; actual provider resume behavior
-is verified only by the nightly job's normalized artifact. Cursor success and
-restart/resume are recorded as `unsupported` because the pinned CLI cannot
-enforce `output_schema`; free-text JSON is never treated as a pass. Each job
-uploads only normalized fields, reports each cost source, and separates known
-from conservative charges.
-
-Gate A-G2 means two consecutive **scheduled** UTC nights on the default branch
-are green for all three runtime jobs. Both nights must have artifacts showing
-the exact pins (including Cursor's build hash), every supported scenario
-passing, Cursor's schema-dependent success and restart/resume scenarios
-explicitly unsupported, and the named **Codex permission-denial exception**
-explicitly accepted by the release decision when a launched turn lacks observable
-denial evidence and is recorded as unsupported. Both nights must also show
-charged aggregate cost within the configured ceiling and known or documented
-conservative accounting. A manual dispatch, missing night, skip, cancellation, replay-only run, absent artifact, unknown cost, or failed
-runtime cannot substitute for either green night.
+License: MIT (declared in [package metadata](pyproject.toml)).
