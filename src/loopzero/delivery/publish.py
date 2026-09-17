@@ -551,9 +551,8 @@ def open_important_finding_ids(
     standing_review_terminals = authenticated_review_terminals(records)
     resolved_predecessors = resolved_loopzero_predecessors(
         repo,
-        terminals=standing_review_terminals,
+        records=records,
         current_review_task_id=current_review_task_id,
-        verdicts=authenticated_verdicts(records) if current_review_task_id else {},
     )
     failed_review_supersessions = [
         record
