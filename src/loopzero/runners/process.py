@@ -4,6 +4,7 @@ from .settings import DEFAULT_SETTINGS, RuntimeSettings, get_settings, using_ada
 
 
 import json
+import errno
 import logging
 import os
 import pwd
@@ -163,6 +164,10 @@ UPTIME_PATH = PROC_ROOT / "uptime"
 
 class ProcessGroupError(RuntimeError):
     """Raised when a child cannot be owned and reaped as one process group."""
+
+
+class _ProcessNotStarted(OSError):
+    """The package Popen call failed before a successful exec."""
 
 
 class ProcessIdentityError(ProcessGroupError):
@@ -652,7 +657,11 @@ def launch_cli(
             private_mounts=resolved_mounts,
             private_tmpdir=resolved_tmpdir,
         )
-        launch_command = list(sandbox_wrapper(launch_spec))
+        try:
+            launch_command = list(sandbox_wrapper(launch_spec))
+        except _ProcessNotStarted:
+            # A caller callback cannot impersonate evidence from our Popen seam.
+            raise ProcessGroupError("sandbox wrapper failed before launch") from None
         if not launch_command:
             raise ProcessGroupError("sandbox wrapper returned an empty command")
         private_tmpdir = resolved_tmpdir
@@ -673,17 +682,26 @@ def launch_cli(
         bridge="--require-brokered-credential" in command,
         sandboxed=sandbox_wrapper is not None,
     ) as (launch_environment, launch_fds):
-        process = subprocess.Popen(
-            launch_command,
-            cwd=cwd,
-            env=launch_environment,
-            stdin=stdin,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-            pass_fds=tuple(launch_fds),
-        )
+        try:
+            process = subprocess.Popen(
+                launch_command,
+                cwd=cwd,
+                env=launch_environment,
+                stdin=stdin,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+                pass_fds=tuple(launch_fds),
+            )
+        except OSError as exc:
+            # Only the structured exec/chdir error from Popen's private child
+            # error pipe is no-exec evidence. Generic parent-side I/O failures
+            # may follow a successful fork/exec and remain uncertain.
+            if (exc.errno in {errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.ENOEXEC}
+                    and exc.filename in {os.fspath(launch_command[0]), os.fspath(cwd)}):
+                raise _ProcessNotStarted("runtime executable did not start") from None
+            raise
     handle = ProcessHandle(process=process, pid=process.pid, pgid=process.pid)
     if on_launch is not None:
         assert identity_prerequisites is not None
