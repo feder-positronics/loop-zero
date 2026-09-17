@@ -399,6 +399,9 @@ def normalize_review_result(
                 f"governed trust result is inconsistent: {exc}"
             ) from exc
     _validate_result_findings(result.get("findings"))
+    from .pr_review import validate_dispositions
+
+    validate_dispositions(result, task)
     return dict(result)
 
 

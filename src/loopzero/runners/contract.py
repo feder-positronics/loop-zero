@@ -692,6 +692,14 @@ def governed_result_schema(
             bounded_string=bounded_string,
         )
         required.append("review_sections")
+    if task is not None:
+        from ..review.pr_review import disposition_schema
+
+        disposition_properties = disposition_schema(task)
+        properties, required = schema["properties"], schema["required"]
+        assert isinstance(properties, dict) and isinstance(required, list)
+        properties.update(disposition_properties)
+        required.extend(disposition_properties)
     if is_trust_verification:
         properties = schema["properties"]
         required = schema["required"]

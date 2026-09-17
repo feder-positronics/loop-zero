@@ -566,6 +566,7 @@ def admit_review(
     source_worktree: Path | None = None,
     outage_authorization_sha256: str | None = None,
     replacement_route: Mapping[str, object] | None = None,
+    pr_review_runner: object | None = None,
 ) -> Admission:
     """Resolve content, carry valid coverage, or reserve one bounded review."""
     assert_authority_ledger_lock_held(repository)
@@ -575,6 +576,16 @@ def admit_review(
         current_source_identity, Mapping
     ):
         return _blocked("missing-evidence", "review source evidence is missing")
+    try:
+        from .pr_review import prepare_review_task
+
+        task = prepare_review_task(
+            repository, records, task, runner=pr_review_runner,
+            worktree=source_worktree or repository, source=current_source_identity,
+            requested=requested, reviewed_tree=current_tree_sha,
+        )
+    except (DispatchError, ValueError, OSError, TypeError) as exc:
+        return _blocked("missing-evidence", str(exc))
     try:
         patch_content_digest(patch_identity)
     except (AttributeError, ReviewStateError) as exc:

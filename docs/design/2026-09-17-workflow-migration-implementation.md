@@ -28,7 +28,7 @@ version conditionals. This migration's already-started shared run
 
 The PR body owns objective, acceptance and the delivery evidence summary.
 Authenticated primary/delta result receipts own findings and their dispositions;
-PR review threads project those facts for people. Thread text, resolution clicks
+PR review bodies/comments project those facts for people. Thread text, resolution clicks
 and a digest without authenticated provenance cannot confer authority. Existing
 review budget, source-equivalence, credential containment and merge permissions
 survive. No new lifecycle, database, scheduler or readiness-state engine is added.
@@ -44,7 +44,7 @@ or command per name. Extend existing functions where doing so is smaller.
 | Formal-review registration | Existing authenticated registration plus verified repository and PR identity, exact source/base and existing review obligations | Host verifies live PR identity before signing registration. Refuse v2 formal review without it. Bind PR to the attempt, not to a subsequent publication callback. |
 | Review result | Existing signed terminal/result artifact, primary findings or delta dispositions, exact registered source | Keep existing authentication, source coverage and atomic budget admission. Derive material finding identities from the authenticated result and existing stable finding-ID primitive. |
 | Readiness verification | Current PR/source/base, admitted primary/delta receipts, applicable validation and required coverage | Pure fail-closed verification; no new writable readiness record. Returns pass/fail and diagnostics. Recompute at source-sensitive boundaries. |
-| PR projection | Authenticated result/disposition identities plus exact repository/PR | Idempotent review-thread projection. Existing matching authenticated content may be reused; unrelated or edited text cannot substitute. Projection failure leaves a recoverable unpublished result and blocks readiness, not a new review attempt. |
+| PR projection | Authenticated result/disposition identities plus exact repository/PR | Idempotent PR review-body/comment projection. Existing matching authenticated content may be reused; unrelated or edited text cannot substitute. Projection failure leaves a recoverable unpublished result and blocks readiness, not a new review attempt. |
 | Mark ready and final CI | Verified current candidate and PR | Mark ready only after local validation/review readiness. Then obtain consumer-required final CI against exact head/base and existing merge authorization. Draft creation never means ready. |
 
 IntelFlo `scripts/util/pr_publish.py::main` currently assembles review/ledger

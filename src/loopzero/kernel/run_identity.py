@@ -99,7 +99,7 @@ def run_delivery_contract(entries: list[dict[str, object]], run_id: str) -> str:
     if not rows:
         raise ValueError("delivery contract requires an existing run")
     contract = rows[0].get("delivery_contract", settings.legacy_contract)
-    if contract not in {settings.legacy_contract, "loop-zero-v1"} or any(
+    if contract not in {settings.legacy_contract, "loop-zero-v1", "loop-zero-v2"} or any(
         row.get("delivery_contract", contract) != contract for row in rows
     ):
         raise ValueError("delivery contract is invalid or changed within the run")
@@ -107,12 +107,63 @@ def run_delivery_contract(entries: list[dict[str, object]], run_id: str) -> str:
 
 
 def bind_delivery_contract(
-    entry: dict[str, object], entries: list[dict[str, object]], *, start: bool = False
+    entry: dict[str, object], entries: list[dict[str, object]], *, start: bool = False,
+    new_task_contract: str = "loop-zero-v1",
+    runtime_artifact: dict[str, str] | None = None,
 ) -> None:
     """Bind new tasks once; never migrate a resumed or frozen old task."""
+    if new_task_contract not in {"loop-zero-v1", "loop-zero-v2"}:
+        raise ValueError("new task delivery contract is invalid")
     run_id = str(entry["run_id"])
+    prior_artifact = (
+        run_runtime_artifact(entries, run_id)
+        if any(row.get("run_id") == run_id for row in entries) else None
+    )
+    if runtime_artifact is not None:
+        validate_runtime_artifact(runtime_artifact)
+        if any(row.get("run_id") == run_id for row in entries) and runtime_artifact != prior_artifact:
+            raise ValueError("runtime artifact cannot change within an existing run")
+        if not start and prior_artifact is None:
+            raise ValueError("runtime artifact requires original run admission")
+    selected = prior_artifact if prior_artifact is not None else runtime_artifact
+    if selected is not None:
+        entry["runtime_artifact"] = dict(selected)
     entry["delivery_contract"] = (
         run_delivery_contract(entries, run_id)
         if any(row.get("run_id") == run_id for row in entries)
-        else "loop-zero-v1" if start else settings.legacy_contract
+        else new_task_contract if start else settings.legacy_contract
     )
+
+
+def uses_pr_review(entries: list[dict[str, object]], run_id: str) -> bool:
+    """Select PR-owned review only from the immutable original run contract."""
+    return run_delivery_contract(entries, run_id) == "loop-zero-v2"
+
+
+RUNTIME_ARTIFACT_FIELDS = {
+    "artifact_id": 64, "manifest_sha256": 64, "package_revision": 40,
+    "consumer_revision": 40, "policy_sha256": 64, "core_tree": 40, "python_sha256": 64,
+}
+
+
+def validate_runtime_artifact(value: object) -> None:
+    """Validate portable identity only; host selection verifies installed bytes."""
+    if not isinstance(value, dict) or set(value) != set(RUNTIME_ARTIFACT_FIELDS):
+        raise ValueError("runtime artifact fields are invalid")
+    if any(not isinstance(value[key], str) or
+           re.fullmatch(f"[0-9a-f]{{{length}}}", value[key]) is None
+           for key, length in RUNTIME_ARTIFACT_FIELDS.items()):
+        raise ValueError("runtime artifact identity is invalid")
+
+
+def run_runtime_artifact(entries: list[dict[str, object]], run_id: str) -> dict[str, str] | None:
+    """Read the original runtime selection; never retrofit historical records."""
+    rows = [row for row in entries if row.get("run_id") == run_id]
+    if not rows:
+        raise ValueError("runtime artifact requires an existing run")
+    original = rows[0].get("runtime_artifact")
+    if original is not None:
+        validate_runtime_artifact(original)
+    if any(row.get("runtime_artifact", original) != original for row in rows):
+        raise ValueError("runtime artifact changed within the run")
+    return dict(original) if isinstance(original, dict) else None

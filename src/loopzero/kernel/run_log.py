@@ -53,6 +53,8 @@ from .run_identity import (
     parse_ts,
     require_run_owner,
     run_delivery_contract,
+    run_runtime_artifact,
+    validate_runtime_artifact,
 )
 
 TERMINAL_OUTCOMES = {"merged", "abandoned", "blocked", "resolved_no_change"}
@@ -1206,7 +1208,10 @@ def cmd_reconcile_stale(args: argparse.Namespace, entries: list[dict]) -> list[d
     return closures
 
 
-def main() -> int:
+def main(*, new_task_contract: str = "loop-zero-v1",
+         runtime_artifact: dict[str, str] | None = None) -> int:
+    if new_task_contract not in {"loop-zero-v1", "loop-zero-v2"}:
+        raise ValueError("new task delivery contract is invalid")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--skill", help="Canonical skill name")
     parser.add_argument("--start", action="store_true", help="Start or reuse a run")
@@ -1347,6 +1352,14 @@ def main() -> int:
             else fcntl.LOCK_EX,
         )
         entries = load_entries(audit_dir)
+        if runtime_artifact is not None:
+            try:
+                validate_runtime_artifact(runtime_artifact)
+                if args.run_id and any(row.get("run_id") == args.run_id for row in entries):
+                    if run_runtime_artifact(entries, args.run_id) != runtime_artifact:
+                        raise ValueError("runtime artifact cannot change within an existing run")
+            except ValueError as exc:
+                parser.error(str(exc))
 
         if args.print_delivery_contract and not args.check_owner:
             try:
@@ -1435,7 +1448,7 @@ def main() -> int:
                 parser.error("run_id is already owned by another skill")
             if run_rows[-1].get("outcome") != "in_progress":
                 parser.error("phase transition requires an active logical run")
-            if run_delivery_contract(entries, args.run_id) == "loop-zero-v1":
+            if run_delivery_contract(entries, args.run_id) in {"loop-zero-v1", "loop-zero-v2"}:
                 print(
                     "loop-zero delivery has no phase transitions; retain current source and evidence"
                 )
@@ -1493,7 +1506,10 @@ def main() -> int:
                 parser.error("--run-id is required for lifecycle transitions")
 
         entry = build_entry(args)
-        bind_delivery_contract(entry, entries, start=args.start)
+        bind_delivery_contract(
+            entry, entries, start=args.start, new_task_contract=new_task_contract,
+            runtime_artifact=runtime_artifact,
+        )
         day = str(entry["ts"])[:10]
         log_path = audit_dir / f"{day}.jsonl"
         allow_stale_abandoned_merge = False

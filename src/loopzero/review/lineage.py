@@ -184,6 +184,7 @@ def admit_linked_delta(
     load_records: Callable[[], Sequence[dict[str, object]]],
     append_records: Callable[[Sequence[Mapping[str, object]]], None],
     required_sections: tuple[str, ...],
+    pr_review_runner: object | None = None,
 ) -> admission.Admission:
     """Derive, persist and admit under writer ownership and the authority lock.
 
@@ -199,6 +200,12 @@ def admit_linked_delta(
         binding = authority_store.authority_repository_binding(repository)
         records = load_records()
         try:
+            from .pr_review import prepare_review_task
+
+            task = prepare_review_task(
+                repository, records, task, runner=pr_review_runner,
+                worktree=worktree, source=expected_source, requested="delta",
+            )
             link, existing = _derive(
                 repository, worktree, records, task, expected_source, snapshot
             )
@@ -233,6 +240,8 @@ def admit_linked_delta(
                 requested="delta",
                 changed_paths=None,
                 security_trigger_paths=(),
+                source_worktree=worktree,
+                pr_review_runner=pr_review_runner,
             )
             if not isinstance(result, admission.Reserved) or result.slot.existing:
                 return admission.Blocked(

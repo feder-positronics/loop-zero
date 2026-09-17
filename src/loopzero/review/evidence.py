@@ -396,6 +396,13 @@ def append_finding_records(
     source head), the anchor, and the claim. Producer-operation replay is
     resolved before that source identity is consulted.
     """
+    if delivery_run_id and result.get("findings"):
+        from ..kernel.run_identity import uses_pr_review
+        from ..kernel.run_log import load_entries
+
+        if uses_pr_review(load_entries(_audit_root(repo) / "skill-runs"), delivery_run_id):
+            # v2 result bytes and signed terminal own findings; no second capture.
+            return None
     if review_intent == "trust-manifest-verification":
         from .authority import normalize_review_result
 
