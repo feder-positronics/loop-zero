@@ -253,15 +253,23 @@ def _checks_section(wt: Path, head: str) -> str:
 
 
 def _pr_body(wt: Path, head: str) -> str:
+    """task.md with its `## Checks` section regenerated in place (appended when absent)."""
     task = worktree.task_text(wt).rstrip()
-    task = re.sub(r"\n## Checks\n.*?(?=\n## |\Z)", "", task, flags=re.DOTALL).rstrip()
-    return f"{task}\n\n## Checks\n{_checks_section(wt, head)}\n"
+    section = f"## Checks\n{_checks_section(wt, head)}\n"
+    pattern = re.compile(r"^## Checks\n.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE)
+    if pattern.search(task):
+        return pattern.sub(lambda _: section + "\n", task, count=1).rstrip() + "\n"
+    return f"{task}\n\n{section}"
+
+
+_SECTIONS = {"objective", "acceptance", "base", "checks", "review", "notes"}
 
 
 def _pr_title(wt: Path, branch: str) -> str:
-    first = worktree.task_text(wt).strip().splitlines()[:1]
-    title = first[0].lstrip("# ").strip() if first else ""
-    return title or branch
+    """First heading of task.md that is not a template section name; else the branch."""
+    lines = worktree.task_text(wt).splitlines()
+    headings = [line.lstrip("#").strip() for line in lines if line.startswith("#")]
+    return next((t for t in headings if t and t.lower() not in _SECTIONS), branch)
 
 
 # --------------------------------------------------------------------------- commands
@@ -269,12 +277,10 @@ def _pr_title(wt: Path, branch: str) -> str:
 
 def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
-    current = _proc.run(
-        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
-        cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
-    ).stdout.strip()
-    if current.startswith("lz/"):
-        raise CliError(f"already inside task worktree {root} ({current}); run start from the main checkout")
+    argv = ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
+    current = _proc.run(argv, cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
+    if current.stdout.strip().startswith("lz/"):
+        raise CliError(f"already inside task worktree {root}; run start from the main checkout")
     config = _load_config(args, root)
     print(worktree.start(root, args.slug, config.base_branch))
     return 0
@@ -289,6 +295,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 2
     for result in report.results:
         print(f"exit {result.exit_code:<3} {result.duration_s:7.1f}s  {result.command}")
+    for result in report.results:
+        if result.exit_code != 0:
+            print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
+            print(_proc.tail(result.tail), file=sys.stderr)
     _save_report(wt, report)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
@@ -483,8 +493,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _one_line(exc: BaseException) -> str:
-    text = str(exc) or exc.__class__.__name__
-    return " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    return " | ".join(ln.strip() for ln in (str(exc) or type(exc).__name__).splitlines() if ln.strip())
 
 
 if __name__ == "__main__":

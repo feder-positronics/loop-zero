@@ -142,9 +142,19 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
 
 def test_check_fail_exits_one(wt: Path, capsys) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok"', '"echo no; exit 3"'))
-    code, out, _ = run(capsys, "check")
+    code, out, err = run(capsys, "check")
     assert code == 1 and out.splitlines()[-1] == "FAIL"
     assert out.splitlines()[0].startswith("exit 3")
+    assert err == "--- echo no; exit 3 (exit 3) ---\nno\n", "failing tail goes to stderr"
+
+
+def test_check_failure_tail_is_capped_at_40_lines(wt: Path, capsys) -> None:
+    cmd = "seq 1 50; exit 1"
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', f'"{cmd}"'))
+    code, _, err = run(capsys, "check")
+    lines = err.splitlines()
+    assert code == 1 and lines[0] == f"--- {cmd} (exit 1) ---"
+    assert lines[1:] == [str(i) for i in range(11, 51)]
 
 
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
@@ -175,11 +185,30 @@ def test_pr_pushes_and_creates_draft(wt: Path, repo: Path, gh: FakeGh, capsys) -
     assert git(origin, "rev-parse", "lz/t1").strip() == head
     create = next(c for c in gh.calls if c["argv"][:2] == ["pr", "create"])
     assert "--draft" in create["argv"]
-    assert create["argv"][create["argv"].index("--title") + 1] == "Task: t1"
+    heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
+    assert create["argv"][create["argv"].index("--title") + 1] == heading
     body = create["--body-file"]
-    assert "## Objective" in body and f"Base: {git(repo, 'rev-parse', 'origin/main').strip()}" in body
-    assert "## Checks" in body and f"Recorded for `{head[:12]}`" in body
+    assert "## Objective" in body and git(repo, "rev-parse", "origin/main").strip() in body
+    assert body.count("## Checks") == 1 and f"Recorded for `{head[:12]}`" in body
+    assert "(filled by `loopzero pr`" not in body, "placeholder replaced in place"
+    assert body.index("## Checks") < body.index("## Review") < body.index("## Notes")
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
+
+
+def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text("## Objective\nx\n\n# Add the feature flag\n\nBase: "
+                    + git(wt, "rev-parse", "HEAD~1"))
+    gh.respond("pr list", [], [pr_json(headRefOid=head_of(wt))])
+    gh.respond("pr create", URL + "\n")
+    assert run(capsys, "pr")[0] == 0
+    argv = gh.calls[1]["argv"]
+    assert argv[argv.index("--title") + 1] == "Add the feature flag"
+    task.write_text("## Objective\nonly sections\n")
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
+    gh.respond("pr edit", "")
+    assert run(capsys, "pr")[0] == 0
+    assert cli._pr_title(wt, "lz/t1") == "lz/t1"
 
 
 def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
@@ -222,7 +251,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert payload["commit_id"] == head and payload["event"] == "REQUEST_CHANGES"
     assert marker(head, "primary") in payload["body"]
     prompt = (fake_bin / "claude.stdin").read_text()
-    assert "+print('hi')" in prompt and "primary review" in prompt and "# Task: t1" in prompt
+    assert "+print('hi')" in prompt and "primary review" in prompt and "## Objective" in prompt
 
 
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
