@@ -293,7 +293,8 @@ def test_update_body(gh: FakeGh) -> None:
 
 def review(verdict: str = "request_changes", findings: tuple[Finding, ...] = ()) -> ReviewResult:
     return ReviewResult(family="codex", head=HEAD, kind="primary", verdict=verdict,
-                        findings=findings, raw="RAW MODEL OUTPUT")
+                        findings=findings, raw="RAW MODEL OUTPUT", model="gpt-5.3-codex",
+                        duration_s=12.34)
 
 
 FINDINGS = (
@@ -323,6 +324,7 @@ def test_post_review_payload(gh: FakeGh) -> None:
     assert "loopzero:finding" not in comments[2]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
     body = payload["body"]
+    assert "model gpt-5.3-codex, 12.3s" in body
     assert "<details>" in body and "RAW MODEL OUTPUT" in body and "</details>" in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
@@ -398,9 +400,11 @@ def test_post_review_body_prefix_is_first_line(gh: FakeGh) -> None:
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
     arm_review(gh)
-    github.post_review(REPO, 7, HEAD, review(verdict="approve"))
+    result = ReviewResult("codex", HEAD, "primary", "approve", (), "RAW", duration_s=0.25)
+    github.post_review(REPO, 7, HEAD, result)
     payload = review_payloads(gh)[0]
     assert payload["event"] == "APPROVE" and payload["comments"] == []
+    assert "model unknown, 0.2s: **approve**" in payload["body"]
 
 
 @pytest.mark.parametrize("verdict,msg", [

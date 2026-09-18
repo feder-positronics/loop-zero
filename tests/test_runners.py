@@ -126,11 +126,12 @@ def test_prompt_contains_task_diff_and_json_contract() -> None:
 
 
 def test_claude_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"claude-sonnet-4-6": {}}))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
     result = _review("claude", tmp_path)
     assert result.verdict == "approve" and result.findings == ()
     assert result.family == "claude" and result.head == "abc123" and result.kind == "primary"
+    assert result.model == "claude-sonnet-4-6" and result.duration_s is not None
     assert json.loads(result.raw)["structured_output"] == APPROVE
     argv = _argv(fake_bin, "claude")
     stdin = (fake_bin / "claude.stdin").read_text()
@@ -246,6 +247,7 @@ def test_codex_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.Monke
     _fake_codex(fake_bin, json.dumps(APPROVE))
     result = _review("codex", tmp_path)
     assert result.verdict == "approve" and result.family == "codex"
+    assert result.model is None and result.duration_s is not None
     argv = _argv(fake_bin, "codex")
     assert argv[:4] == ["exec", "--sandbox", "read-only", "--cd"]
     assert argv[4] == str(tmp_path) and "--ephemeral" in argv
