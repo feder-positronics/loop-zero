@@ -10,7 +10,7 @@ generations/slots/leases, no provisional bindings, no settlement capsules, no
 compatibility mode for old runs. The old tree exists only in git history
 (`git show main:<path>`) and may be read for facts, never copied wholesale.
 
-Budget: `src/` <= 2,500 lines, `tests/` <= 3,000 lines, `core/` <= 600 lines
+Budget: `src/` <= 2,500 lines, `tests/` <= 3,500 lines, `core/` <= 600 lines
 of Markdown, one CI workflow. Anything that pushes past the budget needs a
 reason in the PR.
 
