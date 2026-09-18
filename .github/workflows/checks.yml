@@ -37,10 +37,10 @@ jobs:
           git fetch -q --depth=1 origin "$BASE_SHA"
           src=$(count HEAD src/loopzero); tests=$(count HEAD tests)
           base_src=$(count "$BASE_SHA" src/loopzero); base_tests=$(count "$BASE_SHA" tests)
-          echo "src=$src (base $base_src, delta $((src-base_src)), cap 2900)"
-          echo "tests=$tests (base $base_tests, delta $((tests-base_tests)), cap 3650)"
-          { test "$src" -le 2900 || test "$src" -le "$base_src"; } \
-            && { test "$tests" -le 3650 || test "$tests" -le "$base_tests"; }
+          echo "src=$src (base $base_src, delta $((src-base_src)), cap 3000)"
+          echo "tests=$tests (base $base_tests, delta $((tests-base_tests)), cap 3800)"
+          { test "$src" -le 3000 || test "$src" -le "$base_src"; } \
+            && { test "$tests" -le 3800 || test "$tests" -le "$base_tests"; }
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q

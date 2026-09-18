@@ -283,7 +283,7 @@ _LEGACY_CHECKS = re.compile(
 
 def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
-    body = existing if existing is not None else worktree.task_text(wt)
+    body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
     block = f"{_CHECKS_START}\n{_validation_section(wt, head)}\n{_CHECKS_END}"
     pattern = re.compile(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)",
                          re.DOTALL | re.MULTILINE)
@@ -312,7 +312,8 @@ def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
 def _sync_task_narrative(wt: Path, existing: str) -> str:
     """Explicit pr updates task-owned sections; live evidence/reviews stay authoritative."""
     pattern = re.compile(r"^## ([^\n]+)\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
-    task = worktree.task_text(wt)
+    task = worktree.task_text(wt).replace("\r\n", "\n")
+    existing = existing.replace("\r\n", "\n")
     owned = {m.group(1): m.group() for m in pattern.finditer(task)
              if m.group(1) not in {"Validation", "Checks", "Review"}}
     first = pattern.search(existing)
@@ -335,7 +336,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
 
 def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
     body = _pr_body(wt, head, pr.body)
-    if body != pr.body:
+    if body != (pr.body or "").replace("\r\n", "\n"):
         github.update_body(config.repo, pr.number, body)
 
 
@@ -377,7 +378,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         pr = github.pr_for_branch(config.repo, branch)
         if pr is not None and pr.state == "OPEN":
             _update_pr_checks(wt, head, config, pr)
-    except (github.GhError, OSError, ValueError) as exc:
+    except (github.GhError, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
@@ -451,7 +452,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     pr = github.pr_for_branch(config.repo, branch)
     if pr is not None and pr.state == "OPEN":
         body = _pr_body(wt, head, _sync_task_narrative(wt, pr.body or ""))
-        if body != pr.body:
+        if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(

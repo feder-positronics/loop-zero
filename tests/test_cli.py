@@ -187,8 +187,11 @@ def test_check_with_open_pr_patches_validation_section(
     assert "- `echo ok`: exit 0" in body
 
 
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize("command", ["check", "pr"])
-def test_refresh_preserves_live_pr_evidence(wt: Path, gh: FakeGh, capsys, command: str) -> None:
+def test_refresh_preserves_live_pr_evidence(
+    wt: Path, gh: FakeGh, capsys, command: str, newline: str,
+) -> None:
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     live = (
         "# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
@@ -199,7 +202,7 @@ def test_refresh_preserves_live_pr_evidence(wt: Path, gh: FakeGh, capsys, comman
         "- delta, claude, bbbbbbbbbbbb, approve\n\n"
         "## Evidence\nProduction probe returned 100 records.\n"
     )
-    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=live)])
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=live.replace("\n", newline))])
     gh.respond(f"api repos/{REPO}/pulls/7", {})
     assert run(capsys, command)[0] == 0
     body = json.loads(gh.calls[-1]["--input"])["body"]
@@ -238,8 +241,6 @@ def test_repeated_pr_does_not_rewrite_unchanged_body(wt: Path, gh: FakeGh, capsy
     gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=body)])
     before = len(gh.calls)
     assert run(capsys, "pr")[0] == 0
-    if len(gh.calls) > before + 1:
-        assert json.loads(gh.calls[-1]["--input"])["body"] == body
     assert [c["argv"][:2] for c in gh.calls[before:]] == [["pr", "list"]]
 
 
@@ -286,6 +287,21 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
         if text in body:
             assert text in updated
+
+
+@pytest.mark.parametrize("command,exit_code", [("check", 0), ("pr", 1)])
+def test_malformed_live_markers_do_not_mask_check_verdict(
+    wt: Path, gh: FakeGh, capsys, command: str, exit_code: int,
+) -> None:
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    body = "# PR\n\n## Validation\n<!-- loopzero:checks:start -->\nHuman evidence.\n"
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=body)])
+    code, out, err = run(capsys, command)
+    assert code == exit_code and "malformed loopzero checks block" in err
+    assert all(c["argv"][:2] == ["pr", "list"] for c in gh.calls)
+    if command == "check":
+        assert out.endswith("PASS\n")
+        assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
 
 
 def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None:
