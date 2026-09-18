@@ -19,6 +19,7 @@ class Config:
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
+    sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox
 
 
 @dataclass(frozen=True)

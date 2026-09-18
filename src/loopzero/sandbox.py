@@ -11,8 +11,13 @@ from .types import CheckReport, CheckResult, Config, LoopZeroError
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
+TIMEOUT_EXIT = 124
 SANDBOX_HOME = "/tmp/home"
-_PROBE = ("bwrap", "--ro-bind", "/", "/", "true")
+# Host directories exposed read-only by default. Nothing else from the host is visible:
+# /home, /root, /run, /var/run, /proc/1 and every Unix socket stay outside. Tool caches
+# under the user's home (~/.local/bin, ~/.local/share/uv, ~/.cache/uv, ...) must be listed
+# explicitly in `[checks] ro_paths` (Config.sandbox_ro).
+SYSTEM_RO = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt")
 
 
 class SandboxUnavailable(LoopZeroError):
@@ -22,13 +27,15 @@ class SandboxUnavailable(LoopZeroError):
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT) -> CheckReport:
     """Run every `config.checks` command in order inside the sandbox and report results.
 
-    The sandbox exposes the host filesystem read-only (including the worktree and its
-    Git directories), a private /tmp, a fresh HOME, no network unless `config.network`,
-    and only `config.env_allowlist` variables. Each command's exit code is recorded;
-    nothing raises for a failing check.
+    The sandbox sees only `SYSTEM_RO`, `config.sandbox_ro`, the worktree and its Git
+    directories (all read-only), fresh tmpfs at /tmp, /run and /var/run, a private HOME
+    at /tmp/home, no network unless `config.network`, and only `config.env_allowlist`
+    variables. Each command's exit code is recorded; a timeout is recorded as exit
+    `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check.
     """
     worktree = worktree.resolve()
-    ensure_available(config)
+    if shutil.which("bwrap") is None:
+        raise SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     common_dir = _git_dir(config, worktree, "--git-common-dir")
@@ -36,37 +43,44 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 
     results = []
     with tempfile.TemporaryDirectory(prefix="loopzero-home-") as home:
+        prefix = bwrap_argv(config, worktree, Path(home), common_dir, git_dir)
+        _probe(config, worktree, prefix)
         for command in config.checks:
-            argv = bwrap_argv(config, worktree, Path(home), common_dir, git_dir) + [
-                "/bin/sh",
-                "-c",
-                command,
-            ]
-            done = _proc.run(
-                argv,
-                cwd=worktree,
-                env_allowlist=config.env_allowlist,
-                timeout=timeout,
-                merge_output=True,
-            )
-            results.append(
-                CheckResult(
-                    command=command,
-                    exit_code=done.exit_code,
-                    duration_s=done.duration_s,
-                    tail=_proc.tail(done.stdout),
-                )
-            )
+            results.append(_run_one(config, worktree, prefix, command, timeout))
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
 
 
-def ensure_available(config: Config) -> None:
-    """Raise `SandboxUnavailable` unless bwrap exists and can build a trivial sandbox."""
-    if shutil.which("bwrap") is None:
-        raise SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+def _run_one(
+    config: Config, worktree: Path, prefix: list[str], command: str, timeout: float
+) -> CheckResult:
+    try:
+        done = _proc.run(
+            [*prefix, "/bin/sh", "-c", command],
+            cwd=worktree,
+            env_allowlist=config.env_allowlist,
+            timeout=timeout,
+            merge_output=True,
+        )
+    except _proc.ProcTimeout as exc:
+        return CheckResult(
+            command=command,
+            exit_code=TIMEOUT_EXIT,
+            duration_s=timeout,
+            tail=_proc.tail(exc.output + f"\n[loopzero] timed out after {timeout:g}s"),
+        )
+    return CheckResult(
+        command=command,
+        exit_code=done.exit_code,
+        duration_s=done.duration_s,
+        tail=_proc.tail(done.stdout),
+    )
+
+
+def _probe(config: Config, worktree: Path, prefix: list[str]) -> None:
+    """Raise `SandboxUnavailable` unless bwrap can build the exact sandbox we will use."""
     try:
         probe = _proc.run(
-            _PROBE, cwd="/", env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
+            [*prefix, "true"], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
         )
     except (_proc.ToolMissing, _proc.ProcTimeout) as exc:
         raise SandboxUnavailable(f"bwrap probe failed: {exc}") from exc
@@ -87,19 +101,16 @@ def bwrap_argv(
         *(["--share-net"] if config.network else []),
         "--cap-drop",
         "ALL",
-        "--ro-bind",
-        "/",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-        "--bind",
-        str(home),
-        SANDBOX_HOME,
     ]
+    for path in SYSTEM_RO:
+        if Path(path).exists():
+            argv += ["--ro-bind", path, path]
+    for path in config.sandbox_ro:
+        argv += ["--ro-bind-try", path, path]
+    argv += ["--dev", "/dev", "--proc", "/proc"]
+    for path in ("/tmp", "/run", "/var/run"):
+        argv += ["--tmpfs", path]
+    argv += ["--bind", str(home), SANDBOX_HOME]
     # Bind the worktree and every Git directory read-only *after* the /tmp tmpfs so
     # they stay visible even when they live under /tmp, and are never writable.
     binds = [worktree]

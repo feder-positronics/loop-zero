@@ -15,9 +15,7 @@ from .conftest import git
 
 FAKE_BWRAP = """#!/bin/sh
 : > {log}
-found=
-for a in "$@"; do printf '%s\\n' "$a" >> {log}; [ "$a" = -- ] && found=1; done
-[ -n "$found" ] || exit 0  # the availability probe has no separator
+for a in "$@"; do printf '%s\\n' "$a" >> {log}; done
 while [ "$1" != -- ]; do shift; done
 shift
 exec "$@"
@@ -45,6 +43,7 @@ def bwrap_log(fake_tool, tmp_path) -> Path:
 
 
 def argv_of(log: Path) -> list[str]:
+    """argv of the last bwrap invocation (the probe runs first, checks overwrite it)."""
     return log.read_text().splitlines()
 
 
@@ -84,8 +83,14 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
         assert flag in head
     assert "--share-net" not in head
     assert head[head.index("--cap-drop") + 1] == "ALL"
-    assert _pairs(head, "--ro-bind") == [("/", "/"), (str(git_repo), str(git_repo))]
-    assert ("--tmpfs", "/tmp") in _windows(head)
+    system = [p for p in sandbox.SYSTEM_RO if Path(p).exists()]
+    assert _pairs(head, "--ro-bind") == [(p, p) for p in system] + [(str(git_repo),) * 2]
+    assert "/" not in system and "/home" not in system
+    assert _pairs(head, "--ro-bind-try") == []
+    windows = _windows(head)
+    for path in ("/tmp", "/run", "/var/run"):
+        assert ("--tmpfs", path) in windows
+    assert ("--dev", "/dev") in windows and ("--proc", "/proc") in windows
     assert head[head.index("--chdir") + 1] == str(git_repo)
     setenv = dict(_pairs(head, "--setenv"))
     assert setenv["PATH"] == os.environ["PATH"]
@@ -101,6 +106,32 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert tail == ["/bin/sh", "-c", "echo hello"]
 
 
+def test_probe_uses_real_flags_then_checks_run(git_repo, bwrap_log):
+    sandbox.run_checks(make_config(checks=()), git_repo)
+    argv = argv_of(bwrap_log)  # only the probe ran
+    assert argv[argv.index("--") + 1 :] == ["true"]
+    assert "--unshare-all" in argv and "--clearenv" in argv
+    assert ("/", "/") not in _pairs(argv, "--ro-bind")
+
+
+def test_extra_ro_paths_are_bound_try(git_repo, bwrap_log, tmp_path):
+    extra = tmp_path / "cache"
+    sandbox.run_checks(make_config(sandbox_ro=(str(extra),)), git_repo)
+    assert _pairs(argv_of(bwrap_log), "--ro-bind-try") == [(str(extra),) * 2]
+
+
+def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
+    report = sandbox.run_checks(
+        make_config(checks=("echo partial; sleep 5", "echo after")), git_repo, timeout=0.3
+    )
+    first, second = report.results
+    assert first.exit_code == sandbox.TIMEOUT_EXIT
+    assert first.tail.splitlines()[0] == "partial"
+    assert "timed out" in first.tail
+    assert (second.exit_code, second.tail) == (0, "after")
+    assert report.ok is False
+
+
 def test_network_flag(git_repo, bwrap_log):
     sandbox.run_checks(make_config(network=True), git_repo)
     argv = argv_of(bwrap_log)
@@ -113,7 +144,7 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     sandbox.run_checks(make_config(), linked)
     binds = _pairs(argv_of(bwrap_log), "--ro-bind")
     common = (git_repo / ".git").resolve()
-    assert binds == [("/", "/"), (str(linked.resolve()),) * 2, (str(common),) * 2]
+    assert binds[-2:] == [(str(linked.resolve()),) * 2, (str(common),) * 2]
 
 
 def test_bwrap_missing(git_repo, fake_bin, monkeypatch):
@@ -137,7 +168,9 @@ def _real_bwrap_works() -> bool:
     # Hosts with AppArmor or no unprivileged user namespaces cannot run bwrap; skip there.
     if shutil.which("bwrap") is None:
         return False
-    probe = ["bwrap", "--unshare-all", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"]
+    probe = ["bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin"]
+    probe += ["--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--dev", "/dev"]
+    probe += ["--proc", "/proc", "--tmpfs", "/tmp", "true"]
     try:
         return subprocess.run(probe, capture_output=True, timeout=30, check=False).returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -159,6 +192,21 @@ def test_real_sandbox_denies_writes(git_repo):
     assert not (git_repo / "escaped.txt").exists()
     assert not (git_repo / ".git" / "escaped").exists()
     assert report.head
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+def test_real_sandbox_hides_host_sockets_and_homes(git_repo):
+    uid = os.getuid()
+    checks = (
+        f"test ! -e /run/user/{uid}",
+        "test ! -e /var/run/docker.sock && test ! -e /run/docker.sock",
+        "test ! -e /home && test ! -e /root",
+        "test -z \"$(ls -A /run 2>/dev/null)\"",
+        "test -d /usr && test -d /etc && test -w /tmp",
+        'test "$(cat /proc/1/comm)" = bwrap',  # private pid namespace: pid 1 is not host init
+    )
+    report = sandbox.run_checks(make_config(checks=checks), git_repo)
+    assert [r.exit_code for r in report.results] == [0] * len(checks), report
 
 
 def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:

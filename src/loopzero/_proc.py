@@ -19,7 +19,11 @@ class ToolMissing(LoopZeroError):
 
 
 class ProcTimeout(LoopZeroError):
-    """The command did not finish within the timeout."""
+    """The command did not finish within the timeout; `output` holds what it printed."""
+
+    def __init__(self, message: str, output: str = "") -> None:
+        super().__init__(message)
+        self.output = output
 
 
 @dataclass(frozen=True)
@@ -80,8 +84,9 @@ def run(
         raise ToolMissing(f"{argv[0]}: executable not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
+        out = out or ""
         raise ProcTimeout(
-            f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out or '')}"
+            f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}", out
         ) from exc
     return Completed(
         exit_code=proc.returncode,

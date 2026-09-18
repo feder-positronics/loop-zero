@@ -15,6 +15,7 @@ commands = ["uv run pytest -q", "uv run ruff check ."]
 required_ci = ["checks"]
 network = true
 env_allowlist = ["PATH", "HOME"]
+ro_paths = ["/nonexistent/cache", "/tmp/whatever/../cache"]
 
 [delivery]
 merge = "rebase"
@@ -38,6 +39,7 @@ def test_load_full_config(tmp_path):
         reviewers=("codex",),
         network=True,
         env_allowlist=("PATH", "HOME"),
+        sandbox_ro=("/nonexistent/cache", "/tmp/whatever/../cache"),
     )
 
 
@@ -53,6 +55,7 @@ def test_load_applies_defaults(tmp_path):
     )
     assert loaded.network is False
     assert loaded.env_allowlist == ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
+    assert loaded.sandbox_ro == ()
 
 
 def test_missing_file(tmp_path):
@@ -79,9 +82,29 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\n[repo2]\nx = 1\n', "unknown key\\(s\\) in top level: repo2"),
         ('[repo]\nname = "o/n"\nnmae = "x"\n', "unknown key\\(s\\) in \\[repo\\]: nmae"),
         ('repo = "o/n"\n', "\\[repo\\] must be a table"),
+        ('[repo]\nname = "o/n"\nbase = ""\n', "repo.base must not be empty"),
+        ('[repo]\nname = "o/n"\n[delivery]\nreviewers = []\n', "at least one reviewer"),
+        ('[repo]\nname = "o/n"\n[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
     ],
 )
 def test_invalid_content(tmp_path, text, message):
     with pytest.raises(config.ConfigError, match=message) as info:
         config.load(write(tmp_path, text))
     assert str(info.value).startswith(str(tmp_path / "workflow.toml"))
+
+
+FORBIDDEN = ["/", "/home", "/root", "/run", "/var/run", "/run/user/1000", "/proc/1", "/dev"]
+FORBIDDEN += ["/var/run/docker.sock", "/sys/fs", "/tmp/../run"]
+
+
+@pytest.mark.parametrize("path", FORBIDDEN)
+def test_ro_paths_reject_host_secrets(tmp_path, path):
+    text = f'[repo]\nname = "o/n"\n[checks]\nro_paths = ["{path}"]\n'
+    with pytest.raises(config.ConfigError, match="must not expose"):
+        config.load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/usr/local", "/tmp/x"])
+def test_ro_paths_accept_explicit_subpaths(tmp_path, path):
+    text = f'[repo]\nname = "o/n"\n[checks]\nro_paths = ["{path}"]\n'
+    assert config.load(write(tmp_path, text)).sandbox_ro == (path,)

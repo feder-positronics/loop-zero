@@ -10,10 +10,21 @@ from .types import Config, LoopZeroError
 
 MERGE_STRATEGIES = ("squash", "merge", "rebase")
 REVIEWER_FAMILIES = ("claude", "codex")
+# Host locations that must never be exposed to the sandbox, even read-only, because they
+# hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home
+# are allowed so tool caches such as ~/.local/bin can be listed explicitly.
+FORBIDDEN_RO = ("/", "/home", "/root", "/run", "/var/run", "/proc", "/dev", "/sys")
+FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 
 _SECTIONS: dict[str, dict[str, type]] = {
     "repo": {"name": str, "base": str},
-    "checks": {"commands": list, "required_ci": list, "network": bool, "env_allowlist": list},
+    "checks": {
+        "commands": list,
+        "required_ci": list,
+        "network": bool,
+        "env_allowlist": list,
+        "ro_paths": list,
+    },
     "delivery": {"merge": str, "reviewers": list},
 }
 
@@ -59,10 +70,15 @@ def _build(data: dict[str, Any]) -> Config:
     if name.count("/") != 1 or not all(name.split("/")):
         raise ConfigError(f'repo.name must look like "owner/name", got {name!r}')
 
+    base = repo.get("base", "main")
+    if not base:
+        raise ConfigError("repo.base must not be empty")
     merge = delivery.get("merge", "squash")
     if merge not in MERGE_STRATEGIES:
         raise ConfigError(f"delivery.merge must be one of {MERGE_STRATEGIES}, got {merge!r}")
     reviewers = _strings("delivery.reviewers", delivery.get("reviewers", list(REVIEWER_FAMILIES)))
+    if not reviewers:
+        raise ConfigError("delivery.reviewers must list at least one reviewer")
     for reviewer in reviewers:
         if reviewer not in REVIEWER_FAMILIES:
             raise ConfigError(
@@ -72,9 +88,11 @@ def _build(data: dict[str, Any]) -> Config:
     kwargs: dict[str, Any] = {}
     if "env_allowlist" in checks:
         kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
+    if "ro_paths" in checks:
+        kwargs["sandbox_ro"] = _ro_paths(_strings("checks.ro_paths", checks["ro_paths"]))
     return Config(
         repo=name,
-        base_branch=repo.get("base", "main"),
+        base_branch=base,
         checks=_strings("checks.commands", checks.get("commands", [])),
         required_ci=_strings("checks.required_ci", checks.get("required_ci", [])),
         merge_strategy=merge,
@@ -94,3 +112,15 @@ def _strings(label: str, value: list[Any]) -> tuple[str, ...]:
     if not all(isinstance(item, str) and item for item in value):
         raise ConfigError(f"{label} must be a list of non-empty strings")
     return tuple(value)
+
+
+def _ro_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    for raw in paths:
+        if not raw.startswith("/"):
+            raise ConfigError(f"checks.ro_paths entries must be absolute, got {raw!r}")
+        path = Path(raw).resolve()
+        if str(path) in FORBIDDEN_RO or any(
+            path.is_relative_to(tree) for tree in FORBIDDEN_RO_TREES
+        ):
+            raise ConfigError(f"checks.ro_paths must not expose {raw!r} (host sockets or secrets)")
+    return paths
