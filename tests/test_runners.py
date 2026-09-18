@@ -254,6 +254,71 @@ def test_claude_auth_failure_in_error_envelope(fake_bin: Path, tmp_path: Path) -
         _review("claude", tmp_path)
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_claude_expired_oauth_envelope(fake_bin: Path, tmp_path: Path, exit_code: int) -> None:
+    envelope = {
+        "is_error": True,
+        "api_error_status": 401,
+        "terminal_reason": "api_error",
+        "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. "
+                  "Re-authenticate to continue.",
+    }
+    _fake_claude(fake_bin, envelope, exit_code=exit_code)
+    with pytest.raises(RunnerAuthFailed, match="claude: CLI is not authenticated"):
+        _review("claude", tmp_path)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("status", [401, 403])
+def test_claude_auth_failure_api_status(
+    fake_bin: Path, tmp_path: Path, exit_code: int, status: int,
+) -> None:
+    _fake_claude(fake_bin, {"api_error_status": status, "result": "Denied"}, exit_code=exit_code)
+    with pytest.raises(RunnerAuthFailed):
+        _review("claude", tmp_path)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("result", ["Cannot authenticate", "OAuth failure", "Session expired", "401"])
+def test_claude_auth_failure_terminal_reason(
+    fake_bin: Path, tmp_path: Path, exit_code: int, result: str,
+) -> None:
+    _fake_claude(fake_bin, {"terminal_reason": "api_error", "result": result}, exit_code=exit_code)
+    with pytest.raises(RunnerAuthFailed):
+        _review("claude", tmp_path)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code: int) -> None:
+    _fake_claude(fake_bin, {"is_error": True, "api_error_status": 500,
+                           "terminal_reason": "api_error", "result": "Internal server error"},
+                 exit_code=exit_code)
+    with pytest.raises(RunnerBadOutput):
+        _review("claude", tmp_path)
+
+
+@pytest.mark.parametrize("family,message", [
+    ("claude", "OAuth access token has expired"),
+    ("claude", "Failed to authenticate"),
+    ("codex", "401 Unauthorized"),
+    ("codex", "token expired"),
+    ("codex", "Please run codex login"),
+])
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_auth_phrases_only_fail_on_nonzero_exit(
+    fake_bin: Path, tmp_path: Path, family: str, message: str, exit_code: int,
+) -> None:
+    if family == "claude":
+        _fake_claude(fake_bin, _claude_envelope(APPROVE, result=message), exit_code=exit_code)
+    else:
+        _fake_codex(fake_bin, json.dumps(APPROVE), stderr=message, exit_code=exit_code)
+    if exit_code:
+        with pytest.raises(RunnerAuthFailed):
+            _review(family, tmp_path)
+    else:
+        assert _review(family, tmp_path).verdict == "approve"
+
+
 AUTH_WORDS = {
     "verdict": "approve",
     "findings": [{"severity": "suggestion", "path": "auth.py", "line": 7,
