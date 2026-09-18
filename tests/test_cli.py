@@ -145,8 +145,9 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     code, out, _ = run(capsys, "check")
     lines = out.splitlines()
     assert code == 0 and lines[-1] == "PASS"
-    assert lines[0].startswith("exit 0") and lines[0].endswith("  echo ok")
-    assert lines[1].endswith("  test -f README.md")
+    assert lines[0].startswith("checks pinned to origin/main@")
+    assert lines[1].startswith("exit 0") and lines[1].endswith("  echo ok")
+    assert lines[2].endswith("  test -f README.md")
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
     assert report["dirty"] is False
@@ -182,9 +183,10 @@ def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None
 
 def test_check_fail_exits_one(wt: Path, capsys) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok"', '"echo no; exit 3"'))
-    code, out, err = run(capsys, "check")
+    code, out, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
     assert code == 1 and out.splitlines()[-1] == "FAIL"
-    assert out.splitlines()[0].startswith("exit 3")
+    assert out.splitlines()[0] == "checks are unpinned because --config was provided"
+    assert out.splitlines()[1].startswith("exit 3")
     assert "README.md" not in out
     assert err == "--- echo no; exit 3 (exit 3) ---\nno\n", "failing tail goes to stderr"
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
@@ -194,18 +196,23 @@ def test_check_fail_exits_one(wt: Path, capsys) -> None:
 def test_check_failure_tail_is_capped_at_40_lines(wt: Path, capsys) -> None:
     cmd = "seq 1 50; exit 1"
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', f'"{cmd}"'))
-    code, _, err = run(capsys, "check")
+    code, _, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
     lines = err.splitlines()
     assert code == 1 and lines[0] == f"--- {cmd} (exit 1) ---"
     assert lines[1:] == [str(i) for i in range(11, 51)]
 
 
-def test_check_offline_fetch_failure_explains_cache_remedy(wt: Path, capsys) -> None:
+def test_check_offline_fetch_failure_explains_cache_remedy(
+    wt: Path, repo: Path, capsys
+) -> None:
     workflow = WORKFLOW.replace(
         'commands = ["echo ok", "test -f README.md"]',
         'commands = ["echo uv: Failed to fetch package; exit 1"]',
     ).replace("[delivery]", '[checks.env]\nUV_CACHE_DIR = "/host/cache/uv"\n\n[delivery]')
-    (wt / "workflow.toml").write_text(workflow)
+    (repo / "workflow.toml").write_text(workflow)
+    git(repo, "add", "workflow.toml")
+    git(repo, "commit", "-q", "-m", "offline check")
+    git(repo, "push", "-q", "origin", "main")
 
     code, _, err = run(capsys, "check")
 
@@ -222,7 +229,7 @@ def test_check_offline_fetch_failure_explains_cache_remedy(wt: Path, capsys) -> 
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
     fake_tool("bwrap", "echo 'bwrap: No permissions' >&2\nexit 1\n")
     code, out, err = run(capsys, "check")
-    assert code == 2 and out == "" and "No permissions" in err
+    assert code == 2 and out.startswith("checks pinned to origin/main@") and "No permissions" in err
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
@@ -231,6 +238,50 @@ def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys) -> None:
     alt.write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo alt"'))
     code, out, _ = run(capsys, "--config", str(alt), "check")
     assert code == 0 and "echo alt" in out and "README" not in out
+    assert out.startswith("checks are unpinned because --config was provided\n")
+
+
+def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -> None:
+    (wt / "workflow.toml").write_text(
+        WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"')
+    )
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 0 and err == ""
+    assert "  echo ok" in out and "  test -f README.md" in out
+    assert "  true" not in out
+
+
+def test_check_uses_worktree_checks_when_base_has_no_workflow(
+    wt: Path, repo: Path, capsys
+) -> None:
+    (wt / "workflow.toml").write_text(
+        WORKFLOW.replace('"echo ok", "test -f README.md"', '"echo worktree"')
+    )
+    git(repo, "rm", "-q", "workflow.toml")
+    git(repo, "commit", "-q", "-m", "remove workflow")
+    git(repo, "push", "-q", "origin", "main")
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 0 and err == ""
+    assert "  echo worktree" in out
+    assert not out.startswith("checks pinned")
+
+
+def test_check_fails_when_base_workflow_is_malformed(
+    wt: Path, repo: Path, capsys
+) -> None:
+    (repo / "workflow.toml").write_text("[checks\n")
+    git(repo, "add", "workflow.toml")
+    git(repo, "commit", "-q", "-m", "break workflow")
+    git(repo, "push", "-q", "origin", "main")
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 1 and out == ""
+    assert "origin/main:workflow.toml: invalid TOML" in err
 
 
 # --- pr ------------------------------------------------------------------------------------
@@ -527,6 +578,21 @@ def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys) -> None:
 
     assert (code, err) == (1, "")
     assert out == "not ready: PR targets release, configured base is main\n"
+
+
+def test_ready_uses_base_required_ci_when_worktree_empties_it(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', "[]"))
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt, conclusion="failure")
+
+    code, out, err = run(capsys, "ready")
+
+    assert (code, err) == (1, "")
+    assert out == "not ready: required check 'checks' is failure\n"
 
 
 def test_ready_marks_draft_with_skipped_required_check_then_waits(

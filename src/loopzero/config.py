@@ -7,6 +7,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from . import _proc
+from . import worktree as worktree_mod
 from .types import Config, LoopZeroError, ResourceLimits
 
 MERGE_STRATEGIES = ("squash", "merge", "rebase")
@@ -39,7 +41,7 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str) -> Config:
+def load(path: Path | str, *, checks: dict[str, Any] | None = None) -> Config:
     """Parse `path` as workflow.toml and return a validated `Config`."""
     path = Path(path)
     try:
@@ -49,10 +51,57 @@ def load(path: Path | str) -> Config:
         raise ConfigError(f"{path}: config file not found") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
+    if checks is not None:
+        data["checks"] = checks
     try:
         return _build(data)
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from None
+
+
+def _base_source(worktree: Path, base_branch: str) -> tuple[str, str]:
+    done = _proc.run(
+        ["git", "show-ref", "--verify", f"refs/remotes/origin/{base_branch}"],
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+    )
+    if done.exit_code == 0:
+        return f"origin/{base_branch}", done.stdout.split()[0]
+    if done.exit_code == 1:
+        revision = worktree_mod.base_sha(worktree)
+        return revision, revision
+    message = _proc.tail(done.stderr or done.stdout, 1)
+    raise ConfigError(f"git show-ref origin/{base_branch} failed: {message}")
+
+
+def base_revision(worktree: Path, base_branch: str) -> str:
+    """Resolve the remote base, or the task's recorded base when the ref is absent."""
+    return _base_source(worktree, base_branch)[1]
+
+
+def load_base(worktree: Path, base_branch: str) -> dict[str, Any] | None:
+    """Read the base revision's `[checks]`, or None when it has no workflow file."""
+    base, revision = _base_source(worktree, base_branch)
+    shown = _proc.run(
+        ["git", "show", f"{base}:workflow.toml"],
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+    )
+    if shown.exit_code != 0:
+        listed = _proc.run(
+            ["git", "ls-tree", revision, "--", "workflow.toml"],
+            cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
+        )
+        if listed.exit_code == 0 and not listed.stdout.strip():
+            return None
+        message = _proc.tail(shown.stderr or shown.stdout, 1)
+        raise ConfigError(f"git show origin/{base_branch}:workflow.toml failed: {message}")
+    try:
+        data = tomllib.loads(shown.stdout)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"origin/{base_branch}:workflow.toml: invalid TOML: {exc}") from exc
+    checks = data.get("checks", {})
+    if not isinstance(checks, dict):
+        raise ConfigError(f"origin/{base_branch}:workflow.toml: [checks] must be a table")
+    return checks
 
 
 def _build(data: dict[str, Any]) -> Config:
