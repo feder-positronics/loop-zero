@@ -40,8 +40,12 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     assert worktree.head(wt) == upstream
     assert worktree.base_sha(wt) == upstream
     text = worktree.task_text(wt)
-    assert "# Task: my-task" in text and "## Objective" in text and "## Acceptance" in text
-    assert f"Base: {upstream}" in text
+    assert text.startswith("# My task\n")
+    headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
+    assert headings == ["## Objective", "## Acceptance", "## Base", "## Checks", "## Review",
+                        "## Notes"], "matches core/HANDOFF.md"
+    base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
+    assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
 
 
@@ -76,6 +80,15 @@ def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     with pytest.raises(worktree.WorktreeError, match="invalid slug"):
         worktree.start(repo, slug, "main")
     assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
+
+
+@pytest.mark.parametrize("slug,title", [
+    ("add-workflow-config-note", "Add workflow config note"),
+    ("fix_bug--123", "Fix bug 123"),
+    ("x", "X"),
+])
+def test_title_from_slug(slug: str, title: str) -> None:
+    assert worktree.title_from_slug(slug) == title
 
 
 def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:

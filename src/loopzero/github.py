@@ -102,7 +102,8 @@ def _paged(endpoint: str) -> list:
     items: list = []
     page = 1
     while True:
-        chunk = _gh_json("api", endpoint, "-F", f"per_page={PAGE}", "-F", f"page={page}") or []
+        chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
+                         "-F", f"page={page}") or []
         if isinstance(chunk, dict):  # check-runs wraps the list
             chunk = chunk.get("check_runs") or []
         items += chunk
@@ -385,7 +386,8 @@ def check_runs(repo: str, head_sha: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
         out[cr["name"]] = cr.get("conclusion") or cr.get("status") or "unknown"
-    status = _gh_json("api", f"repos/{repo}/commits/{head_sha}/status", "-F", "per_page=100")
+    status = _gh_json("api", f"repos/{repo}/commits/{head_sha}/status", "--method", "GET",
+                      "-F", "per_page=100")
     for st in (status or {}).get("statuses") or []:
         out.setdefault(st["context"], st.get("state") or "unknown")
     return out

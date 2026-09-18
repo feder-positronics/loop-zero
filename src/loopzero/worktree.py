@@ -10,17 +10,27 @@ from loopzero._proc import run
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 EXCLUDES = (".worktrees/", ".loopzero/")
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
-_TASK_TEMPLATE = """# Task: {slug}
+_TASK_TEMPLATE = """# {title}
 
 ## Objective
-
-(what must change and why)
+One paragraph: what changes and why it is worth a PR.
 
 ## Acceptance
+- [ ] Observable condition 1 (a test, a command, a screenshot)
+- [ ] Observable condition 2
 
-- [ ] (observable criteria)
-
+## Base
+{base_branch} @ {base}
 Base: {base}
+
+## Checks
+(filled by `loopzero pr`: command, exit code, duration per check)
+
+## Review
+(filled by `loopzero review`: family, reviewed head, verdict, blocking count)
+
+## Notes
+Anything the reviewer must know: trade-offs, follow-ups you chose not to do.
 """
 
 
@@ -53,6 +63,12 @@ def branch_name(repo_root: Path, slug: str) -> str:
     if done.exit_code != 0:
         raise WorktreeError(f"invalid slug: {slug!r} ({done.stderr.strip()})")
     return name
+
+
+def title_from_slug(slug: str) -> str:
+    """`add-workflow_config-note` -> `Add workflow config note`."""
+    words = re.sub(r"[-_]+", " ", slug).split()
+    return " ".join(words)[:1].upper() + " ".join(words)[1:]
 
 
 def worktree_dir(repo_root: Path, slug: str) -> Path:
@@ -101,7 +117,8 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
     task = task_file(wt)
     task.parent.mkdir(parents=True, exist_ok=True)
-    task.write_text(_TASK_TEMPLATE.format(slug=slug, base=base))
+    task.write_text(_TASK_TEMPLATE.format(
+        title=title_from_slug(slug), base_branch=base_branch, base=base))
     return wt
 
 

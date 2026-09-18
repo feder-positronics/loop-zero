@@ -209,7 +209,8 @@ FINDINGS = (
 def test_post_review_payload(gh: FakeGh) -> None:
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS))
-    assert gh.argv(0) == ["api", FILES_KEY.split(" ", 1)[1], "-F", "per_page=100", "-F", "page=1"]
+    assert gh.argv(0) == ["api", FILES_KEY.split(" ", 1)[1], "--method", "GET",
+                          "-F", "per_page=100", "-F", "page=1"]
     call = gh.calls[1]
     assert call["argv"][:5] == ["api", f"repos/{REPO}/pulls/7/reviews", "--method", "POST",
                                 "--input"]
@@ -425,6 +426,18 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
 
 
 # --- checks --------------------------------------------------------------------------------
+
+
+def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
+    arm_review(gh)
+    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/status", {"statuses": []})
+    github.check_runs(REPO, HEAD)
+    reads = [c["argv"] for c in gh.calls if c["argv"][0] == "api" and "-F" in c["argv"]]
+    assert len(reads) == 3, "files, check-runs and status all pass -F"
+    for argv in reads:
+        assert argv[argv.index("--method") + 1] == "GET", argv
 
 
 def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
