@@ -97,7 +97,12 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
 
 
 def _primary_base(wt: Path, config: Config) -> str:
-    return config_mod.base_revision(wt, config.base_branch)
+    base = config_mod.base_revision(wt, config.base_branch)
+    done = _proc.run(
+        ["git", "merge-base", base, "HEAD"],
+        cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
+    )
+    return done.stdout.strip() if done.exit_code == 0 else base
 
 
 def _require_clean(wt: Path) -> None:
