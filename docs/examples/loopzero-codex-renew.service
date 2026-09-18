@@ -1,9 +1,0 @@
-[Unit]
-Description=Renew the access-only Codex nightly credential from its owning host
-
-[Service]
-Type=oneshot
-UMask=0077
-TimeoutStartSec=5min
-# Edit the executable paths, login path and repository for this host.
-ExecStart=/bin/bash %h/.local/libexec/renew-codex-nightly.sh %h/.local/share/loopzero-renew/bin/loopzero %h/.codex/auth.json /usr/bin/gh feder-positronics/loop-zero nightly-conformance LOOPZERO_CONFORMANCE_CODEX_CREDENTIAL

@@ -1,2 +1,0 @@
-Consumer supporting file
-Preserve exact bytes.
