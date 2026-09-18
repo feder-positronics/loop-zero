@@ -718,7 +718,7 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
         thread(f"{marker('critical')}\n**critical: Current**", outdated=True),
         thread(f"{marker('critical')}\n**critical: Resolved**", resolved=True),
     ))
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
     assert result.reasons == (
         "open important finding at src/a.py:3: Still applies",
         "open critical finding at src/a.py:3: Current",
