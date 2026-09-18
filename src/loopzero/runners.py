@@ -1,12 +1,6 @@
 """Model review adapters: thin subprocess wrappers around ``claude -p`` and ``codex exec``.
 
-Both adapters share one prompt builder and one JSON findings schema, and both
-return a :class:`~loopzero.types.ReviewResult`. Nothing here retries.
-
-Reviewer authentication is bound read-write from the host into the private sandbox
-HOME rather than copied. OAuth refreshes therefore persist, and the host and sandbox
-keep using one token instead of allowing a refresh of a disposable copy to rotate and
-invalidate the host's token.
+Host authentication is bound read-write into the sandbox HOME so OAuth refreshes persist.
 """
 
 from __future__ import annotations
@@ -278,9 +272,7 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
 
 
 def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
-    done = _proc.run(
-        ["git", "rev-parse", flag], cwd=cwd, env_allowlist=env_allowlist, timeout=30
-    )
+    done = _proc.run(["git", "rev-parse", flag], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
     if done.exit_code != 0:
         raise RunnerBadOutput(f"git rev-parse {flag} exited {done.exit_code}", _tail(done.stderr))
     raw = Path(done.stdout.strip())
@@ -327,8 +319,7 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     if family == "claude":
         source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")).resolve()
         if source_dir.is_dir():
-            destination = home / ".claude"
-            destination.mkdir()
+            (home / ".claude").mkdir()
             binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".claude"))
         state_file = (Path.home() / ".claude.json").resolve()
         if state_file.is_file():
@@ -337,8 +328,7 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     else:
         source_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
         if source_dir.is_dir():
-            destination = home / ".codex"
-            destination.mkdir()
+            (home / ".codex").mkdir()
             binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".codex"))
     return tuple(binds)
 
@@ -526,9 +516,7 @@ def _review_codex(
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         auth_binds = _auth_binds("codex", home)
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
-        ignore_user_config = _codex_supports_ignore_user_config(
-            binary, cwd, config.env_allowlist
-        )
+        ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
             str(binary),
             "exec",
