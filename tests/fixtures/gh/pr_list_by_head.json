@@ -11,7 +11,7 @@
     "--limit",
     "10",
     "--json",
-    "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author"
+    "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author,body"
   ],
   "exit_code": 0,
   "stdout": "[{\"author\":{\"id\":\"<NODE_ID_1>\",\"is_bot\":false,\"login\":\"<LOGIN_1>\",\"name\":\"\"},\"baseRefName\":\"v2/minimal-rewrite\",\"headRefOid\":\"<SHA_2>\",\"isDraft\":false,\"mergeable\":\"UNKNOWN\",\"number\":\"<PR>\",\"state\":\"MERGED\",\"url\":\"<URL_1>\"}]\n",

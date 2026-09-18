@@ -12,25 +12,27 @@ EXCLUDES = (".worktrees/", ".loopzero/")
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
-## Objective
-One paragraph: what changes and why it is worth a PR.
+## Context and goal
+- **Context:** <one or two sentences: where this sits, what exists today>
+- **Problem:** <what is wrong or missing, observable>
+- **Goal:** <what will be true when done>
+
+Closes #<issue number, or remove this line>
 
 ## Acceptance
-- [ ] Observable condition 1 (a test, a command, a screenshot)
-- [ ] Observable condition 2
+- <verifiable criterion>
 
 ## Base
 {base_branch} @ {base}
 Base: {base}
 
-## Checks
-(filled by `loopzero pr`: command, exit code, duration per check)
+## Validation
+(filled by `loopzero check`)
 
 ## Review
-(filled by `loopzero review`: family, reviewed head, verdict, blocking count)
+(filled by `loopzero review`)
 
 ## Notes
-Anything the reviewer must know: trade-offs, follow-ups you chose not to do.
 """
 
 

@@ -19,7 +19,7 @@ MARKER_RE = re.compile(
     r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
-PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author"
+PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author,body"
 PAGE = 100
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -72,6 +72,7 @@ class PR:
     state: str  # "OPEN" | "CLOSED" | "MERGED"
     mergeable: str  # "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
     author: str = ""  # login of the PR author
+    body: str = ""
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ def _pr_from_json(data: dict) -> PR:
             state=data["state"],
             mergeable=data.get("mergeable") or "UNKNOWN",
             author=str((data.get("author") or {}).get("login") or ""),
+            body=str(data.get("body") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"

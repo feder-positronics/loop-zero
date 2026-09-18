@@ -17,10 +17,10 @@ finding is open and required CI is green. The full rules fit in
 
 | Command | What it does |
 | --- | --- |
-| `loopzero start <slug>` | Create a worktree and branch from base; write `.loopzero/task.md`. |
+| `loopzero start <slug>` | Create a worktree and branch from base; write the Context/Problem/Goal task template. |
 | `loopzero check` | Run `workflow.toml` checks in a bwrap sandbox; exit code is the verdict. |
-| `loopzero pr` | Push and open a draft PR whose body is the task file plus check summary. |
-| `loopzero review` | Run one Claude or Codex review on the exact head; post it as a PR review. |
+| `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
+| `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. |
 | `loopzero ready` | Verify head, findings and CI; mark the PR ready for review. |
 | `loopzero merge` | Recheck readiness, merge with the configured strategy, remove branch and worktree. |
 
