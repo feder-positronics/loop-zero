@@ -54,6 +54,7 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     github.check_runs(REPO, HEAD)
     github.mark_ready(REPO, 7)
     github.merge(REPO, 7, "squash", HEAD)
+    github.delete_remote_branch(REPO, "lz/x")
     return fake.calls
 
 

@@ -411,6 +411,16 @@ def test_review_refuses_without_pr(wt: Path, gh: FakeGh, capsys) -> None:
     assert code == 1 and out == "" and "no pull request for lz/t1" in err
 
 
+def test_review_refuses_retargeted_pr(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
+    arm_pr(gh, head_of(wt), baseRefName="release")
+
+    code, out, err = run(capsys, "review")
+
+    assert code == 1 and out == ""
+    assert "PR targets release, configured base is main" in err
+    assert not (fake_bin / "claude.stdin").exists()
+
+
 def test_review_refuses_dirty_and_unpushed(wt: Path, gh: FakeGh, capsys) -> None:
     (wt / "scratch.txt").write_text("x")
     code, _, err = run(capsys, "review")
@@ -505,6 +515,18 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, baseRefName="release")
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+
+    code, out, err = run(capsys, "ready")
+
+    assert (code, err) == (1, "")
+    assert out == "not ready: PR targets release, configured base is main\n"
 
 
 def test_ready_marks_draft_with_skipped_required_check_then_waits(
@@ -640,6 +662,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}})
+    gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
     assert (code, out, err) == (0, f"{'c' * 40}\ncd {repo}\n", "")
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
@@ -655,11 +678,41 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "d" * 40}})
+    gh.respond("api -X", "")
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("worktree is dirty")))
     code, out, err = run(capsys, "merge")
     assert code == 0 and out.splitlines()[0] == "d" * 40
     assert err.startswith("warning: merged but worktree cleanup failed")
+
+
+def test_second_merge_retries_remote_branch_cleanup(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    head = head_of(wt)
+    gh.respond(
+        "pr list",
+        [pr_json(headRefOid=head, isDraft=False)],
+        [pr_json(headRefOid=head, isDraft=False, state="MERGED")],
+    )
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}})
+    gh.respond(
+        "api -X",
+        {"stdout": "", "stderr": "HTTP 500: delete failed", "exit": 1},
+        "",
+    )
+    monkeypatch.setattr(cli, "_cleanup", lambda _: None)
+
+    first = run(capsys, "merge")
+    second = run(capsys, "merge")
+
+    assert first[0] == 0 and "remote branch cleanup failed for lz/t1" in first[2]
+    assert second[0] == 0 and second[2] == ""
+    deletes = [call for call in gh.calls if call["argv"][:2] == ["api", "-X"]]
+    assert len(deletes) == 2
 
 
 def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
@@ -749,6 +802,7 @@ def test_review_and_ready_refuse_closed_pr(wt: Path, gh: FakeGh, capsys) -> None
 def test_merge_of_externally_merged_pr_only_cleans_up(wt: Path, repo: Path, gh: FakeGh,
                                                        capsys) -> None:
     arm_pr(gh, head_of(wt), state="MERGED", isDraft=False)
+    gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
     assert (code, err) == (0, "")
     assert out.splitlines()[-1] == f"cd {repo}"

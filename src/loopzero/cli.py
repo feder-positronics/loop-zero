@@ -199,7 +199,9 @@ def _readiness(
         wt, reviews if reviews is not None else _pr_reviews(config.repo, pr.number), head
     )
     latest = markers[-1] if markers else None
-    result = github.readiness(config.repo, pr, config.required_ci, latest.head if latest else None)
+    result = github.readiness(
+        config.repo, pr, config.base_branch, config.required_ci, latest.head if latest else None
+    )
     report = _load_report(wt)
     if report is None or report.head != head or report.dirty or not report.ok:
         result = github.Readiness(
@@ -357,6 +359,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     _require_clean(wt)
     pr = _require_pr(config, branch)
     _require_pushed(pr, head)
+    if pr.base_ref != config.base_branch:
+        raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
     kind, reviewed = _decide_kind(
         _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
     )
@@ -494,17 +498,27 @@ def _draft_checks_waiting(
 
 def cmd_merge(args: argparse.Namespace) -> int:
     wt, config = _context(args)
+    branch = worktree.branch(wt)
     pr, readiness = _pr_readiness(wt, config, allow_merged=True)
     if readiness is None:
         print(f"PR #{pr.number} was already merged externally at {pr.head_sha[:12]}; cleaning up")
+        _delete_remote_branch(config, branch)
         _cleanup(wt)
         return 0
     if not readiness.ready:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
     print(sha)
+    _delete_remote_branch(config, branch)
     _cleanup(wt)
     return 0
+
+
+def _delete_remote_branch(config: Config, branch: str) -> None:
+    try:
+        github.delete_remote_branch(config.repo, branch)
+    except github.GhError as exc:
+        print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}", file=sys.stderr)
 
 
 def cmd_status(args: argparse.Namespace) -> int:

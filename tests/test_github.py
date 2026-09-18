@@ -672,24 +672,24 @@ def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
 def test_readiness_ready(gh: FakeGh) -> None:
     arm_readiness(gh)
     pr = github._pr_from_json(pr_json())
-    assert github.readiness(REPO, pr, ("checks",), HEAD) == github.Readiness(True, ())
+    assert github.readiness(REPO, pr, "main", ("checks",), HEAD) == github.Readiness(True, ())
 
 
 def test_readiness_head_moved(gh: FakeGh) -> None:
     arm_readiness(gh)
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), "b" * 40)
+    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), "b" * 40)
     assert not r.ready and any("differs from reviewed" in x for x in r.reasons)
 
 
 def test_readiness_no_review(gh: FakeGh) -> None:
     arm_readiness(gh)
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), None)
+    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), None)
     assert r.reasons == ("no review recorded for the current head",)
 
 
 def test_readiness_blocking_finding(gh: FakeGh) -> None:
     arm_readiness(gh, threads=(thread(f"{marker('important')}\n**important: Oops**"),))
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD)
+    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
     assert r.reasons == ("open important finding at src/a.py:3: Oops",)
 
 
@@ -697,7 +697,7 @@ def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
     body = f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n" \
            "**critical: Global**\n\nno file"
     arm_readiness(gh, threads=(thread(body, path="src/first.py", line=12),))
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD)
+    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
     assert not r.ready
     assert r.reasons == ("open critical finding at src/first.py:12: Global",)
 
@@ -705,7 +705,7 @@ def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
 def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> None:
     arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
                                thread(f"{marker('suggestion')}\nY")))
-    assert github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD).ready
+    assert github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD).ready
 
 
 def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
@@ -727,7 +727,9 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
 
 def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
     arm_readiness(gh, runs={"checks": "failure"})
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks", "e2e"), HEAD)
+    r = github.readiness(
+        REPO, github._pr_from_json(pr_json()), "main", ("checks", "e2e"), HEAD
+    )
     assert r.reasons == (
         "required check 'checks' is failure",
         f"required check 'e2e' missing on {HEAD[:12]}",
@@ -737,19 +739,21 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
 def test_readiness_conflicting(gh: FakeGh) -> None:
     arm_readiness(gh)
     pr = github._pr_from_json(pr_json(mergeable="CONFLICTING"))
-    r = github.readiness(REPO, pr, ("checks",), HEAD)
+    r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
     assert r.reasons == ("PR #7 has merge conflicts with main",)
 
 
 def test_readiness_pr_not_open(gh: FakeGh) -> None:
     arm_readiness(gh)
-    r = github.readiness(REPO, github._pr_from_json(pr_json(state="MERGED")), ("checks",), HEAD)
+    r = github.readiness(
+        REPO, github._pr_from_json(pr_json(state="MERGED")), "main", ("checks",), HEAD
+    )
     assert r.reasons == ("PR #7 is MERGED, not open",)
 
 
 def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json())
-    assert github.readiness(REPO, github._pr_from_json(pr_json()), (), HEAD).ready
+    assert github.readiness(REPO, github._pr_from_json(pr_json()), "main", (), HEAD).ready
     assert [c["argv"][:2] for c in gh.calls] == [["api", "graphql"]]
 
 
@@ -762,24 +766,21 @@ def test_mark_ready(gh: FakeGh) -> None:
     assert gh.argv(0) == ["pr", "ready", "7", "--repo", REPO]
 
 
-def test_merge_success_replays_recorded_verification_and_deletes_remote_branch(
+def test_merge_success_replays_recorded_verification(
     gh: FakeGh,
 ) -> None:
-    branch = "lz/add-workflow-config-note"
     gh.expect(
         ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
     )
     gh.load_scenario("pr_view_merged", {
         "<REPO>": REPO, "<PR>": "7", "<SHA_1>": "c" * 40,
     })
-    gh.expect(["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/{branch}"])
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
                           "--match-head-commit", HEAD]
     assert "--delete-branch" not in gh.argv(0)
     assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json",
                           "mergeCommit,state,headRefName"]
-    assert gh.argv(2) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/{branch}"]
     gh.assert_complete()
 
 
@@ -791,13 +792,9 @@ def test_merge_command_failure(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize("status", [404, 422])
-def test_merge_accepts_already_deleted_remote_ref(gh: FakeGh, status: int) -> None:
-    gh.respond("pr merge", "")
-    gh.respond("pr view", {
-        "state": "MERGED", "mergeCommit": {"oid": "c" * 40}, "headRefName": "lz/x",
-    })
+def test_delete_remote_branch_accepts_already_deleted_ref(gh: FakeGh, status: int) -> None:
     gh.fail("api -X", f"HTTP {status}: Reference does not exist")
-    assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
+    github.delete_remote_branch(REPO, "lz/x")
 
 
 def test_merge_unverified(gh: FakeGh) -> None:
