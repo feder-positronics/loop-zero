@@ -36,12 +36,14 @@ A PR is ready when none of these hold:
   exact head.
 
 Resolve a blocker by pushing a fix or resolving the thread with a reason. There
-is no waiver file and no override flag.
+is no waiver file and no override flag. Readiness is a checklist derived from
+Git and GitHub, not a tamper-proof boundary: anyone with write access can edit
+or resolve threads; branch protection and CI remain the enforced gates.
 
 ## Findings
 
 - Findings live only in PR review threads. Each blocking finding is marked with
-  `<!-- loopzero:finding severity=critical -->` or `severity=important`.
+  `<!-- loopzero:finding severity=critical head=<sha> -->` (or `important`).
 - Severities: `critical` (wrong or unsafe; must fix), `important` (defect
   that ships a bug or breaks acceptance; must fix), `suggestion` (never
   counted, never blocks).
@@ -64,15 +66,13 @@ is no waiver file and no override flag.
 
 Every command in `[checks].commands` runs with:
 
-- The source tree mounted read-only; writes go to a scratch directory.
-- No write access to `.git`. Hooks and checks cannot commit, tag or push.
-- An isolated `HOME`; no user dotfiles, credentials or caches leak in.
+- The source tree read-only, writes to scratch, no write access to `.git`.
+- An isolated `HOME`; only `[checks].ro_paths` from your home are visible.
 - No network unless `[checks].network = true`.
-- Environment reduced to the allowlist (`PATH`, `HOME`, `LANG`, `LC_ALL`,
-  `TERM` by default).
+- Environment reduced to the allowlist (`PATH HOME LANG LC_ALL TERM` default).
 
-If `bwrap` cannot run, `loopzero check` fails with `SandboxUnavailable`. It
-does not fall back to running checks unsandboxed.
+If `bwrap` cannot run, `loopzero check` fails with `SandboxUnavailable`; it
+never runs checks unsandboxed.
 
 ## Failure
 

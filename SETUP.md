@@ -32,13 +32,15 @@ uv run loopzero --help
 ## Configure
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root. Three fields matter most:
+repository root and set `[repo] name`. Then:
 
-- `[repo] name` — `owner/name` as GitHub knows it.
 - `[checks] commands` — what must exit zero before a PR opens; start with
   your test and lint commands.
 - `[checks] required_ci` — exact GitHub check names that must be green before
   merge. Match them to your branch protection rule.
+- `[checks] ro_paths` — the sandbox hides `/home`; list every toolchain path
+  under it, e.g. `~/.local/bin`, `~/.local/share/uv`, `~/.cache/uv` (spelled
+  out, no `~`). `/`, `/run`, `/var/run`, `/proc`, `/dev`, `/sys`, `/root` are refused.
 
 ## First run
 
@@ -55,5 +57,4 @@ loopzero ready                        # marks PR ready if head/findings/CI pass
 loopzero merge                        # merges, deletes branch and worktree
 ```
 
-`loopzero status` tells you which step is next and why the previous one is or
-is not satisfied.
+`loopzero status` tells you which step is next and why.
