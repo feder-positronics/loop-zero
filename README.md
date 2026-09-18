@@ -37,6 +37,27 @@ finding is open and required CI is green. The full rules fit in
    `implement`, `review`, `security-review`, `diagnose`.
 5. Run `loopzero start first-task`, make a change, and walk the six commands.
 
+## Configuration
+
+All configuration lives in one file, `workflow.toml`, at the repository root
+(start from [workflow.example.toml](workflow.example.toml)). This repository's
+own [workflow.toml](workflow.toml) is a working example.
+
+| Key | Meaning |
+| --- | --- |
+| `repo.name` | GitHub repository as `owner/name`; used for every `gh` call. |
+| `repo.base` | Branch that `start` branches from and `merge` merges into. |
+| `checks.commands` | Shell commands `check` runs in order inside the sandbox; the first nonzero exit fails the run. |
+| `checks.required_ci` | Exact GitHub check-run or commit-status names required on the head before `ready` and `merge`; every signal with a required name must succeed. |
+| `checks.ro_paths` | Absolute host paths mounted read-only into the sandbox. `/home` is hidden, so list every toolchain path under it (for example `~/.local/bin` and `~/.local/share/uv`, spelled out); put writable caches in `checks.writable`. |
+| `checks.writable` | Absolute host paths mounted read-write into the sandbox, such as a shared `~/.cache/uv`; this is a trust decision and the forbidden-path rules from `checks.ro_paths` apply. |
+| `checks.scratch` | Worktree-relative directories given a fresh writable mount per run; defaults to `.venv`, `.ruff_cache`, `.pytest_cache` and `node_modules/.cache`. |
+| `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |
+| `checks.network` | Allow network inside the sandbox; default `false`. |
+| `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
+| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge` or `rebase`. |
+| `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`); when the author family is known, `review` only uses a different family. |
+
 ## What it deliberately does not do
 
 - No ledger, evidence store or run log. The PR is the record.
