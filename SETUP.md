@@ -62,3 +62,5 @@ loopzero ready                        # marks PR ready if head/findings/CI pass
 loopzero merge                        # merges, deletes branch and worktree
 loopzero status                       # at any point: next step and why
 ```
+
+Smoke-tested end to end on 2026-09-18.
