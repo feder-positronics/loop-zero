@@ -169,3 +169,70 @@ def test_authorization_value_never_reaches_wire_or_diagnostics(
         assert secret not in wire
         assert secret not in str(parsed.diagnostics)
         assert secret not in str(hostile_terminal.diagnostics)
+
+
+@pytest.mark.parametrize(
+    "evidence", ["none", "assistant", "stream", "tool", "structured", "usage", "partial_result"]
+)
+def test_typed_authentication_diagnostic_echo_is_not_model_output(
+    monkeypatch, capsys, evidence
+):
+    """Constructed SDK shape; historical failures did not retain their raw stream."""
+    import claude_agent_sdk as sdk
+
+    diagnostic = "Not logged in · Please run /login"
+
+    async def query(**kwargs):
+        if evidence == "assistant":
+            yield sdk.AssistantMessage(content=[sdk.TextBlock(text="Actual partial answer")], model="claude-fable-5-1")
+        elif evidence == "stream":
+            yield sdk.StreamEvent(uuid="event", session_id="session", event={
+                "type": "content_block_delta", "delta": {"type": "text_delta", "text": "Partial"},
+            })
+        elif evidence == "tool":
+            yield sdk.AssistantMessage(content=[sdk.ToolUseBlock(id="tool", name="Read", input={})], model="claude-fable-5-1")
+        yield sdk.AssistantMessage(
+            content=[sdk.TextBlock(text=diagnostic)], model="<synthetic>",
+            error="authentication_failed",
+        )
+        yield sdk.ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=0, is_error=True,
+            num_turns=1, session_id="session", stop_reason="stop_sequence",
+            result="Actual partial result" if evidence == "partial_result" else diagnostic,
+            structured_output={} if evidence == "structured" else None,
+            usage={"input_tokens": 0, "output_tokens": 1 if evidence == "usage" else 0},
+            errors=["Authentication failed"],
+        )
+
+    monkeypatch.setattr(sdk, "query", query)
+    monkeypatch.setattr(bridge, "_options", lambda *args, **kwargs: None)
+    asyncio.run(bridge._run_claude({"prompt": "test", "commercial_mode": "subscription-only"}))
+    wire = capsys.readouterr().out
+    frame = json.loads(wire.splitlines()[-1])
+    assert frame["model_output_seen"] is (evidence != "none")
+    parsed = claude.parse_claude_stream(wire, sdk_bridge=True)
+    assert parsed.model_output_seen is (evidence != "none")
+    assert parsed.semantic_event is True  # The provider request still occurred.
+    assert parsed.status is contract.RuntimeStatus.FAILED
+
+
+@pytest.mark.parametrize("model,error,is_error", [
+    ("<synthetic>", "unknown", True),
+    ("claude-fable-5-1", "authentication_failed", True),
+    ("<synthetic>", "authentication_failed", False),
+])
+def test_unknown_or_successful_diagnostic_shaped_result_still_counts_output(
+    monkeypatch, capsys, model, error, is_error
+):
+    import claude_agent_sdk as sdk
+    async def query(**kwargs):
+        yield sdk.AssistantMessage(content=[sdk.TextBlock(text="Not logged in")], model=model, error=error)
+        yield sdk.ResultMessage(
+            subtype="success", duration_ms=1, duration_api_ms=0, is_error=is_error,
+            num_turns=1, session_id="session", result="Not logged in",
+            usage={"output_tokens": 0},
+        )
+    monkeypatch.setattr(sdk, "query", query)
+    monkeypatch.setattr(bridge, "_options", lambda *args, **kwargs: None)
+    asyncio.run(bridge._run_claude({"prompt": "test", "commercial_mode": "subscription-only"}))
+    assert json.loads(capsys.readouterr().out.splitlines()[-1])["model_output_seen"] is True

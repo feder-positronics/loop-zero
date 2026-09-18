@@ -2296,6 +2296,7 @@ async def _run_claude(
         ResultMessage,
         StreamEvent,
         SystemMessage,
+        TextBlock,
         ToolResultBlock,
         ToolUseBlock,
         UserMessage,
@@ -2312,6 +2313,7 @@ async def _run_claude(
     output_observation_complete = True
     window_limit: RuntimeUsageLimit | None = None
     assistant_limit = False
+    authentication_diagnostics: tuple[str, ...] = ()
     denial_diagnostics: dict[str, int] = {}
 
     def terminal_protocol_failure() -> None:
@@ -2382,6 +2384,11 @@ async def _run_claude(
         if isinstance(message, AssistantMessage):
             # A later assistant message supersedes a recoverable per-turn error.
             assistant_limit = message.error == "rate_limit"
+            authentication_diagnostics = (
+                tuple(block.text for block in message.content[:4] if isinstance(block, TextBlock))
+                if message.model == "<synthetic>" and message.error == "authentication_failed"
+                else ()
+            )
             synthetic = message.model == "<synthetic>" or bool(message.error)
             if synthetic:
                 if message.model != "<synthetic>":
@@ -2526,11 +2533,16 @@ async def _run_claude(
             request_id = _metadata(message.uuid) or request_id
             model_from_usage = _model_from_usage(message.model_usage)
             effective_model = effective_model or model_from_usage
+            # A typed synthetic authentication diagnostic may be echoed as the
+            # error result. It is not output; prior activity and positive usage
+            # still win, and unknown/partial result strings remain conservative.
             # Capture before normalization discards partial or budget-limited output.
             usage_output = usage_observes_model_output(message.usage, message.model_usage)
             output_observation_complete &= usage_output is not None
             if (
-                message.result is not None
+                (message.result is not None and not (
+                    message.is_error and message.result in authentication_diagnostics
+                ))
                 or message.structured_output is not None
                 or usage_output is True
             ):
