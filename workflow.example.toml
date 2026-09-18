@@ -9,9 +9,19 @@ base = "main"
 
 [checks]
 # Shell commands run in order by `loopzero check`, each inside the sandbox
-# (read-only source, no Git write, isolated HOME). The first nonzero exit
-# fails the run. Keep these fast; they run before every PR and delta review.
-commands = ["uv run pytest -q", "uv run ruff check ."]
+# (read-only worktree, no Git write, isolated HOME). The first nonzero exit
+# fails the run and prints the failing tails; the full report is written to
+# .loopzero/checks.json. These work out of the box for a uv project.
+commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
+
+# Worktree-relative paths that get a fresh writable scratch mount per run.
+# This is the default list; checks cannot write anywhere else in the tree.
+scratch = [".venv", ".ruff_cache", ".pytest_cache"]
+
+# Host paths mounted writable. A shared tool cache must be listed here or the
+# first check in a fresh worktree fails without network. This is a trust
+# decision: a check can write to these paths.
+writable = ["/home/<you>/.cache/uv"]
 
 # Exact names of GitHub check runs that must be green on the PR head before
 # `loopzero ready` and `loopzero merge` proceed. Match your branch protection.
@@ -20,10 +30,11 @@ required_ci = ["checks"]
 # Host paths mounted read-only into the sandbox. The sandbox does not expose
 # /home, so any toolchain under your home directory (uv, cargo, nvm, ...) must
 # be listed. /, /run, /var/run, /proc, /dev, /sys and /root are refused.
-ro_paths = ["/home/<you>/.local/bin", "/home/<you>/.local/share/uv", "/home/<you>/.cache/uv"]
+ro_paths = ["/home/<you>/.local/bin", "/home/<you>/.local/share/uv"]
 
-# Allow network inside the sandbox. Leave false unless a check truly needs it
-# (for example an integration test against a local service you start yourself).
+# Allow network inside the sandbox. Needed for the first check in a fresh
+# worktree unless a warm uv cache is in `writable`. PYTHONDONTWRITEBYTECODE,
+# RUFF_CACHE_DIR, UV_CACHE_DIR and PYTEST_ADDOPTS are preset for you.
 network = false
 
 [delivery]

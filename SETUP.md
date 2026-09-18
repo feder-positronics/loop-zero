@@ -2,15 +2,13 @@
 
 ## Prerequisites
 
-- `gh` logged in with `repo` scope as the account that opens and merges PRs.
-- `bwrap` (bubblewrap) on `PATH` (`apt`/`dnf install bubblewrap`); without it
-  `loopzero check` refuses to run.
-- At least one reviewer CLI logged in: `claude` (`claude -p "hi"` answers) or
-  `codex` (`codex exec "hi"` answers). Install both if you want the reviewer
-  to be a different family from the author.
-- If `loopzero review` runs from CI or any unattended host, give Claude a
-  non-rotating API key or setup token: the interactive OAuth login rotates its
-  refresh token, so the stored login is revoked on the second unattended run.
+- `gh` logged in with `repo` scope; `bwrap` on `PATH` (`apt`/`dnf install
+  bubblewrap`), without which `loopzero check` refuses to run.
+- A reviewer CLI logged in: `claude` (`claude -p hi` answers) or `codex`
+  (`codex exec hi` answers); both if the reviewer must differ from the author.
+- On CI or any unattended host give Claude a non-rotating API key or setup
+  token: interactive OAuth rotates its refresh token and the stored login is
+  revoked on the second unattended run.
 - `git` 2.40+, Python 3.14 and [uv](https://docs.astral.sh/uv/).
 
 ## Install
@@ -19,14 +17,12 @@ Pin to a full commit SHA; upgrade by re-running with a new SHA. User-wide:
 
 ```sh
 uv tool install "git+https://github.com/feder-positronics/loop-zero@<sha>"
-loopzero --help
 ```
 
 As a dev dependency of your repository:
 
 ```sh
 uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
-uv run loopzero --help
 ```
 
 ## Configure
@@ -34,13 +30,18 @@ uv run loopzero --help
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
 repository root and set `[repo] name`. Then:
 
-- `[checks] commands` — what must exit zero before a PR opens; start with
-  your test and lint commands.
-- `[checks] required_ci` — exact GitHub check names that must be green before
-  merge. Match them to your branch protection rule.
-- `[checks] ro_paths` — the sandbox hides `/home`; list every toolchain path
-  under it, e.g. `~/.local/bin`, `~/.local/share/uv`, `~/.cache/uv` (spelled
-  out, no `~`). `/`, `/run`, `/var/run`, `/proc`, `/dev`, `/sys`, `/root` are refused.
+- `[checks] commands` — must exit zero before a PR opens. For a uv project
+  `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work
+  out of the box.
+- `[checks] required_ci` — exact GitHub check names green before merge.
+- `[checks] ro_paths` — `/home` is hidden; list toolchain paths under it in
+  full (`/home/<you>/.local/bin`, `/home/<you>/.local/share/uv`).
+- `[checks] writable` — the worktree is read-only except per-run scratch over
+  `[checks] scratch` (default `.venv`, `.ruff_cache`, `.pytest_cache`). List a
+  shared cache like `~/.cache/uv` here; a check can then write to it (trust).
+- The first `check` in a fresh worktree needs `network = true` or a warm uv
+  cache in `writable`. `PYTHONDONTWRITEBYTECODE`, `RUFF_CACHE_DIR`,
+  `UV_CACHE_DIR`, `PYTEST_ADDOPTS` are preset in the sandbox.
 
 ## First run
 
@@ -48,13 +49,12 @@ repository root and set `[repo] name`. Then:
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
 $EDITOR .loopzero/task.md             # fill Objective and Acceptance
 # ...make a small change and add a test...
-loopzero check                        # sandboxed checks; fix until exit 0
+loopzero check                        # exit 0, or FAIL with the failing tails; report in .loopzero/checks.json
 loopzero pr                           # draft PR opens; URL printed
 loopzero review                       # model review posted on the PR
 # fix critical/important threads, push, then:
 loopzero check && loopzero review     # delta review of the new commits
 loopzero ready                        # marks PR ready if head/findings/CI pass
 loopzero merge                        # merges, deletes branch and worktree
+loopzero status                       # at any point: next step and why
 ```
-
-`loopzero status` tells you which step is next and why.
