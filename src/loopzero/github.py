@@ -241,6 +241,8 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
             f"**{result.verdict}** ({summary})"
         ),
     ]
+    if result.chunk_count > 1:
+        lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]

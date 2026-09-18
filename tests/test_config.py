@@ -25,6 +25,7 @@ limits = { memory_mb = 1024, processes = 64, file_mb = 512 }
 merge = "rebase"
 reviewers = ["codex"]
 reviewer_ro_paths = ["/opt/claude", "/opt/codex"]
+review_chunk_bytes = 12345
 """
 
 
@@ -43,6 +44,7 @@ def test_load_full_config(tmp_path):
         merge_strategy="rebase",
         reviewers=("codex",),
         reviewer_ro_paths=("/opt/claude", "/opt/codex"),
+        review_chunk_bytes=12345,
         network=True,
         env_allowlist=("PATH", "HOME"),
         sandbox_ro=("/nonexistent/cache", "/tmp/whatever/../cache"),
@@ -98,6 +100,7 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\nbase = ""\n', "repo.base must not be empty"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = []\n', "at least one reviewer"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewer_ro_paths = ["relative"]\n', "must be absolute"),
+        ('[repo]\nname = "o/n"\n[delivery]\nreview_chunk_bytes = 0\n', "positive int"),
         ('[repo]\nname = "o/n"\n[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
         ('[repo]\nname = "o/n"\n[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
         ('[repo]\nname = "o/n"\n[checks]\nscratch = ["../x"]\n', "scratch entries must be relative"),
