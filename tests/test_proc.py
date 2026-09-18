@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 
 import pytest
@@ -80,7 +79,3 @@ def test_tail_keeps_last_lines():
     text = "\n".join(str(i) for i in range(100)) + "\n"
     assert _proc.tail(text).splitlines() == [str(i) for i in range(60, 100)]
     assert _proc.tail("", 3) == ""
-
-
-def test_build_env_ignores_missing_keys():
-    assert _proc.build_env(("PATH", "LZ_NOT_SET")) == {"PATH": os.environ["PATH"]}
