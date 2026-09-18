@@ -62,3 +62,10 @@ loopzero ready                        # marks PR ready if head/findings/CI pass
 loopzero merge                        # merges, deletes branch and worktree
 loopzero status                       # at any point: next step and why
 ```
+
+## Merging under a merge queue
+
+When the base branch uses a GitHub merge queue, `loopzero merge` enqueues the
+PR and exits after printing that it is queued. Nothing polls. Run
+`loopzero merge` again once the queue has landed it; that run verifies the
+merge commit, deletes the remote branch and removes the worktree.
