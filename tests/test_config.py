@@ -18,6 +18,7 @@ env_allowlist = ["PATH", "HOME"]
 ro_paths = ["/nonexistent/cache", "/tmp/whatever/../cache"]
 writable = ["/home/me/.cache/uv"]
 scratch = [".venv"]
+env = { UV_CACHE_DIR = "/home/me/.cache/uv", UV_PYTHON_DOWNLOADS = "never" }
 
 [delivery]
 merge = "rebase"
@@ -44,6 +45,7 @@ def test_load_full_config(tmp_path):
         sandbox_ro=("/nonexistent/cache", "/tmp/whatever/../cache"),
         writable=("/home/me/.cache/uv",),
         scratch=(".venv",),
+        env=(("UV_CACHE_DIR", "/home/me/.cache/uv"), ("UV_PYTHON_DOWNLOADS", "never")),
     )
 
 
@@ -93,6 +95,11 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\n[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
         ('[repo]\nname = "o/n"\n[checks]\nscratch = ["../x"]\n', "scratch entries must be relative"),
         ('[repo]\nname = "o/n"\n[checks]\nscratch = ["/abs"]\n', "scratch entries must be relative"),
+        ('[repo]\nname = "o/n"\n[checks.env]\nlower = "x"\n', "invalid variable name 'lower'"),
+        ('[repo]\nname = "o/n"\n[checks.env]\nPATH = "/x"\n', "must not override PATH"),
+        ('[repo]\nname = "o/n"\n[checks.env]\nHOME = "/x"\n', "must not override HOME"),
+        ('[repo]\nname = "o/n"\n[checks.env]\nX = 1\n', "checks.env.X must be a str"),
+        ('[repo]\nname = "o/n"\n[checks]\nenv = ["X=1"]\n', "checks.env must be a dict"),
     ],
 )
 def test_invalid_content(tmp_path, text, message):

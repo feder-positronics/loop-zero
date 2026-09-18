@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ REVIEWER_FAMILIES = ("claude", "codex")
 # hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home
 # are allowed so tool caches such as ~/.local/bin can be listed explicitly.
 FORBIDDEN_RO = ("/", "/home", "/root", "/run", "/var/run", "/proc", "/dev", "/sys")
+_ENV_NAME = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 
 _SECTIONS: dict[str, dict[str, type]] = {
@@ -26,6 +28,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "ro_paths": list,
         "writable": list,
         "scratch": list,
+        "env": dict,
     },
     "delivery": {"merge": str, "reviewers": list},
 }
@@ -94,6 +97,8 @@ def _build(data: dict[str, Any]) -> Config:
         kwargs["sandbox_ro"] = _host_paths("checks.ro_paths", checks["ro_paths"])
     if "writable" in checks:
         kwargs["writable"] = _host_paths("checks.writable", checks["writable"])
+    if "env" in checks:
+        kwargs["env"] = _env_table(checks["env"])
     if "scratch" in checks:
         kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
         for entry in kwargs["scratch"]:
@@ -134,3 +139,14 @@ def _host_paths(label: str, value: list[Any]) -> tuple[str, ...]:
         ):
             raise ConfigError(f"{label} must not expose {raw!r} (host sockets or secrets)")
     return paths
+
+
+def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    for name, value in table.items():
+        if not _ENV_NAME.match(name):
+            raise ConfigError(f"checks.env has invalid variable name {name!r}")
+        if name in ("PATH", "HOME"):
+            raise ConfigError(f"checks.env must not override {name}")
+        if not isinstance(value, str):
+            raise ConfigError(f"checks.env.{name} must be a str")
+    return tuple(table.items())

@@ -32,12 +32,8 @@ def test_run_strips_environment_to_allowlist(tmp_path, monkeypatch):
 
 
 def test_run_uses_cwd(tmp_path):
-    done = _proc.run(
-        [sys.executable, "-c", "import os; print(os.getcwd())"],
-        cwd=tmp_path,
-        env_allowlist=(),
-        timeout=30,
-    )
+    argv = [sys.executable, "-c", "import os; print(os.getcwd())"]
+    done = _proc.run(argv, cwd=tmp_path, env_allowlist=(), timeout=30)
     assert done.stdout.strip() == str(tmp_path.resolve())
 
 

@@ -9,27 +9,17 @@ from pathlib import Path
 
 import pytest
 
-GIT_ENV = {
-    "GIT_AUTHOR_NAME": "test",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_COMMITTER_NAME": "test",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
-    "GIT_CONFIG_GLOBAL": "/dev/null",
-    "GIT_CONFIG_NOSYSTEM": "1",
-}
+GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+for _role in ("AUTHOR", "COMMITTER"):
+    GIT_ENV |= {f"GIT_{_role}_NAME": "test", f"GIT_{_role}_EMAIL": "test@example.com"}
 
 
 def git(repo: Path, *args: str) -> str:
     """Run git in `repo` with a deterministic identity; return stdout."""
-    done = subprocess.run(
-        ["git", *args],
-        cwd=repo,
-        env={**os.environ, **GIT_ENV},
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return done.stdout
+    env = {**os.environ, **GIT_ENV}
+    return subprocess.run(
+        ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
+    ).stdout
 
 
 @pytest.fixture

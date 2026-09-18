@@ -22,7 +22,7 @@ SYSTEM_RO = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt"
 # consumer (e.g. a shared ~/.cache/uv so checks work offline); a check can poison that cache.
 # `Config.scratch` entries are per-run empty tmp dirs bound over <worktree>/<entry> so tools
 # can create venvs and caches without the tree itself being writable.
-# Defaults below are set before allowlisted host variables, so the host can override them.
+# Precedence inside the sandbox: SANDBOX_ENV defaults < allowlisted host vars < Config.env.
 SANDBOX_ENV = {
     "PYTHONDONTWRITEBYTECODE": "1",
     "RUFF_CACHE_DIR": "/tmp/ruff-cache",
@@ -41,8 +41,9 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     The sandbox sees only `SYSTEM_RO`, `config.sandbox_ro`, the worktree and its Git
     directories (all read-only), `config.writable` read-write, per-run scratch dirs over
     `config.scratch`, fresh tmpfs at /tmp, /run and /var/run, a private HOME at /tmp/home,
-    no network unless `config.network`, and `SANDBOX_ENV` plus `config.env_allowlist`. Each command's exit code is recorded; a timeout is recorded as exit
-    `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check.
+    no network unless `config.network`, and `SANDBOX_ENV` overlaid by `config.env_allowlist`
+    host values and then `config.env`. Each command's exit code is recorded; a timeout is
+    recorded as exit `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check.
     """
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
@@ -146,7 +147,7 @@ def bwrap_argv(
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), "--clearenv"]
-    env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist)}
+    env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist), **dict(config.env)}
     for key, value in env.items():
         if key != "HOME":
             argv += ["--setenv", key, value]

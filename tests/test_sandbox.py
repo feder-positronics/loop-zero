@@ -23,16 +23,9 @@ exec "$@"
 
 
 def make_config(**overrides) -> Config:
-    values = {
-        "repo": "o/n",
-        "base_branch": "main",
-        "checks": ("echo hello",),
-        "required_ci": (),
-        "merge_strategy": "squash",
-        "reviewers": ("claude",),
-        "env_allowlist": ("PATH", "HOME", "LZ_KEEP"),
-    }
-    return Config(**{**values, **overrides})
+    values = {"repo": "o/n", "base_branch": "main", "checks": ("echo hello",), "required_ci": ()}
+    values |= {"merge_strategy": "squash", "reviewers": ("claude",)}
+    return Config(**{**values, "env_allowlist": ("PATH", "HOME", "LZ_KEEP"), **overrides})
 
 
 @pytest.fixture
@@ -119,13 +112,16 @@ def test_probe_uses_real_flags(git_repo, bwrap_log):
 def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch):
     extra, cache = tmp_path / "ro", tmp_path / "rw"
     monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+    monkeypatch.setenv("RUFF_CACHE_DIR", "host-ruff")
     cfg = make_config(sandbox_ro=(str(extra),), writable=(str(cache),), scratch=())
-    sandbox.run_checks(Config(**{**cfg.__dict__, "env_allowlist": ("PATH", "UV_CACHE_DIR")}), git_repo)
+    cfg = Config(**{**cfg.__dict__, "env_allowlist": ("PATH", "UV_CACHE_DIR", "RUFF_CACHE_DIR")})
+    sandbox.run_checks(Config(**{**cfg.__dict__, "env": (("RUFF_CACHE_DIR", "cfg"),)}), git_repo)
     argv = argv_of(bwrap_log)
     assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
     assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
     assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
-    assert dict(_pairs(argv, "--setenv"))["UV_CACHE_DIR"] == str(cache)
+    setenv = dict(_pairs(argv, "--setenv"))  # defaults < host allowlist < config.env
+    assert (setenv["UV_CACHE_DIR"], setenv["RUFF_CACHE_DIR"]) == (str(cache), "cfg")
 
 
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
@@ -210,20 +206,17 @@ def test_real_sandbox_hides_host_sockets_and_homes(git_repo):
 @pytest.mark.skipif(
     not _real_bwrap_works() or shutil.which("uv") is None, reason="needs real bwrap and uv"
 )
-def test_real_sandbox_uv_run_offline(git_repo, monkeypatch):
+def test_real_sandbox_uv_run_offline(git_repo):
     home = Path.home()
-    (git_repo / "pyproject.toml").write_text(
-        '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
-        "[dependency-groups]\ndev = []\n"
-    )
-    monkeypatch.setenv("UV_CACHE_DIR", str(home / ".cache/uv"))
-    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(home / ".local/share/uv/python"))
+    pyproject = '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
+    (git_repo / "pyproject.toml").write_text(pyproject + "[dependency-groups]\ndev = []\n")
     subprocess.run(["uv", "lock", "-q"], cwd=git_repo, check=True)  # projects commit uv.lock
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "uv project")
     cfg = make_config(
         checks=("uv run --group dev python -c 1 && test -e .venv/bin/python && test ! -w .",),
-        env_allowlist=("PATH", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"),
+        env=(("UV_CACHE_DIR", f"{home}/.cache/uv"),
+             ("UV_PYTHON_INSTALL_DIR", f"{home}/.local/share/uv/python")),
         sandbox_ro=(str(home / ".local/bin"), str(home / ".local/share/uv")),
         writable=(str(home / ".cache/uv"),),
     )

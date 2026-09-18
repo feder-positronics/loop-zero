@@ -22,6 +22,7 @@ class Config:
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox
     writable: tuple[str, ...] = ()  # host paths bound read-write (shared tool caches)
     scratch: tuple[str, ...] = (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
+    env: tuple[tuple[str, str], ...] = ()  # fixed variables set inside the sandbox; win over host
 
 
 @dataclass(frozen=True)
