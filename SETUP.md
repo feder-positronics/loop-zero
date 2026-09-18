@@ -68,4 +68,7 @@ loopzero status                       # at any point: next step and why
 When the base branch uses a GitHub merge queue, `loopzero merge` enqueues the
 PR and exits after printing that it is queued. Nothing polls. Run
 `loopzero merge` again once the queue has landed it; that run verifies the
-merge commit, deletes the remote branch and removes the worktree.
+merge commit, deletes the remote branch and removes the worktree. The
+repository must allow auto-merge (Settings, General, "Allow auto-merge"),
+otherwise `gh pr merge` fails with "Auto merge is not allowed". Set
+`delivery.merge = "queue"` so the queue owns the merge method.
