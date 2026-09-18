@@ -1,0 +1,23 @@
+{
+  "argv": [
+    "pr",
+    "list",
+    "--repo",
+    "<REPO>",
+    "--head",
+    "lz/add-workflow-config-note",
+    "--state",
+    "all",
+    "--limit",
+    "10",
+    "--json",
+    "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author"
+  ],
+  "exit_code": 0,
+  "stdout": "[{\"author\":{\"id\":\"<NODE_ID_1>\",\"is_bot\":false,\"login\":\"<LOGIN_1>\",\"name\":\"\"},\"baseRefName\":\"v2/minimal-rewrite\",\"headRefOid\":\"<SHA_2>\",\"isDraft\":false,\"mergeable\":\"UNKNOWN\",\"number\":\"<PR>\",\"state\":\"MERGED\",\"url\":\"<URL_1>\"}]\n",
+  "stderr": "",
+  "input_files": {},
+  "gh_version": "gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)",
+  "recorded_at": "2026-09-18T12:07:16.649268+00:00",
+  "scenario": "pr_list_by_head"
+}

@@ -1,0 +1,21 @@
+{
+  "argv": [
+    "api",
+    "graphql",
+    "-f",
+    "query=\nquery($owner: String!, $name: String!, $number: Int!, $after: String) {\n  repository(owner: $owner, name: $name) {\n    pullRequest(number: $number) {\n      reviewThreads(first: 100, after: $after) {\n        pageInfo { hasNextPage endCursor }\n        nodes {\n          isResolved isOutdated path line\n          comments(first: 1) { nodes { body } }\n        }\n      }\n    }\n  }\n}\n",
+    "-F",
+    "owner=<OWNER>",
+    "-F",
+    "name=<NAME>",
+    "-F",
+    "number=<PR>"
+  ],
+  "exit_code": 0,
+  "stdout": "{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":\"<NODE_ID_2>\"},\"nodes\":[{\"isResolved\":true,\"isOutdated\":true,\"path\":\"README.md\",\"line\":null,\"comments\":{\"nodes\":[{\"body\":\"**suggestion: Describe reviewer independence as a preference**\\n\\nThe implementation can fall back to the author's family: `pick_reviewer` returns the first configured family when no different family exists, and `cmd_review` retries other configured families after failures. Say that a different family is preferred, rather than implying it is guaranteed.\"}]}},{\"isResolved\":true,\"isOutdated\":true,\"path\":\"README.md\",\"line\":null,\"comments\":{\"nodes\":[{\"body\":\"<!-- loopzero:finding severity=important head=<SHA_4> -->\\n**important: Configuration table misses keys the merged config.py now reads**\\n\\nThis merge adds `checks.writable`, `checks.scratch` and `checks.env` to `_SECTIONS` in src/loopzero/config.py, and `_build` parses them. The README Configuration table (lines 46-56) still lists only the original nine keys. The objective says every `workflow.toml` key must appear with a one-line meaning, so a new adopter could configure loop-zero from the README alone. Without these rows they cannot set up an offline uv cache or override the sandbox env. Add three rows. `checks.writable`: absolute host paths bound read-write (a trust decision, e.g. a shared `~/.cache/uv`), with the same forbidden-path rules as ro_paths. `checks.scratch`: worktree-relative dirs that get a fresh writable mount per run; the default is `.venv`, `.ruff_cache`, `.pytest_cache`, `node_modules/.cache`. `checks.env`: a table of fixed variables that wins over sandbox defaults and host variables; PATH and HOME are refused.\"}]}},{\"isResolved\":true,\"isOutdated\":true,\"path\":\"README.md\",\"line\":null,\"comments\":{\"nodes\":[{\"body\":\"<!-- loopzero:finding severity=important head=<SHA_4> -->\\n**important: ro_paths advice contradicts the merged sandbox model**\\n\\nThe `checks.ro_paths` row tells adopters to list `~/.cache/uv` as read-only. After this merge, SETUP.md, workflow.example.toml and the repo's own workflow.toml all move `~/.cache/uv` to `writable`. They also set `UV_CACHE_DIR` through `env`, because uv must write its cache. An adopter following the README would mount the cache read-only, and uv runs would fail. Drop `~/.cache/uv` from this example and point to `checks.writable` for caches.\"}]}},{\"isResolved\":true,\"isOutdated\":true,\"path\":\"README.md\",\"line\":null,\"comments\":{\"nodes\":[{\"body\":\"**suggestion: reviewers description predates the stricter independence rule**\\n\\nThe merged `_run_review` now only tries families that differ from the author. With `reviewers = [\\\"claude\\\"]` and a Claude-authored head, review fails with 'no independent reviewer configured'; there is no fallback to the same family. The README wording ('picks the first one installed whose family differs from the author's when known') suggests softer behaviour. Consider saying that a reviewer of the author's own family is never used. Similarly, `checks.required_ci` now matches commit statuses as well as check runs, and every same-name signal must succeed.\"}]}}]}}}}}",
+  "stderr": "",
+  "input_files": {},
+  "gh_version": "gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)",
+  "recorded_at": "2026-09-18T12:07:16.649268+00:00",
+  "scenario": "review_threads"
+}
