@@ -813,8 +813,9 @@ def _queue_json(queued: bool) -> dict:
 
 
 def test_merge_unverified(gh: FakeGh) -> None:
+    unmerged = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"}
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("pr view", unmerged, unmerged)
     gh.respond("api graphql", _queue_json(False))
     with pytest.raises(github.MergeFailed, match="neither merged nor queued"):
         github.merge(REPO, 7, "merge", HEAD)
@@ -828,6 +829,14 @@ def test_merge_queued_returns_none(gh: FakeGh) -> None:
     assert github.merge(REPO, 7, "squash", HEAD) is None
     query = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"])
     assert "isInMergeQueue" in query[3] and "number=7" in query
+
+
+def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None},
+               {"state": "MERGED", "mergeCommit": {"oid": "d" * 40}})
+    gh.respond("api graphql", _queue_json(False))
+    assert github.merge(REPO, 7, "squash", HEAD) == "d" * 40
 
 
 def test_merged_sha_only_for_merged_state(gh: FakeGh) -> None:

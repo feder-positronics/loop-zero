@@ -525,6 +525,10 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         return sha
     if in_merge_queue(repo, number):
         return None
+    # The queue may have landed the PR between the two reads; look once more.
+    sha = merged_sha(repo, number)
+    if sha:
+        return sha
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
