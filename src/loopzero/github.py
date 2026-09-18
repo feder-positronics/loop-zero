@@ -118,9 +118,27 @@ def _with_file(content: str) -> Path:
     return Path(name)
 
 
+def api_get(endpoint: str) -> object:
+    """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
+    return _gh_json("api", endpoint)
+
+
+def login() -> str:
+    """Login of the user the `gh` token belongs to."""
+    data = api_get("user")
+    name = data.get("login") if isinstance(data, dict) else None
+    if not name:
+        raise GhError(("gh", "api", "user"), f"no login in response: {data!r}")
+    return str(name)
+
+
+def _not_found(number: int, exc: Exception) -> GhError:
+    return GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})")
+
+
 def _api(endpoint: str, payload: dict | None = None, method: str = "POST") -> object:
     if payload is None:
-        return _gh_json("api", endpoint)
+        return api_get(endpoint)
     path = _with_file(json.dumps(payload))
     try:
         return _gh_json("api", endpoint, "--method", method, "--input", str(path))
@@ -129,15 +147,19 @@ def _api(endpoint: str, payload: dict | None = None, method: str = "POST") -> ob
 
 
 def _pr_from_json(data: dict) -> PR:
-    return PR(
-        number=int(data["number"]),
-        url=data["url"],
-        head_sha=data["headRefOid"],
-        base_ref=data["baseRefName"],
-        is_draft=bool(data["isDraft"]),
-        state=data["state"],
-        mergeable=data.get("mergeable") or "UNKNOWN",
-    )
+    try:
+        return PR(
+            number=int(data["number"]),
+            url=data["url"],
+            head_sha=data["headRefOid"],
+            base_ref=data["baseRefName"],
+            is_draft=bool(data["isDraft"]),
+            state=data["state"],
+            mergeable=data.get("mergeable") or "UNKNOWN",
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        number = data.get("number", "?") if isinstance(data, dict) else "?"
+        raise _not_found(number, exc) from exc
 
 
 def pr_for_branch(repo: str, branch: str) -> PR | None:
@@ -186,11 +208,12 @@ def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
     return text
 
 
-def _review_body(result: ReviewResult, unplaced: list[Finding]) -> str:
+def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "") -> str:
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in
               ("critical", "important", "suggestion")}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
-    lines = [
+    lines = [prefix.rstrip("\n")] if prefix else []
+    lines += [
         (
             f"loopzero {result.kind} review by {result.family} on `{result.head}`: "
             f"**{result.verdict}** ({summary})"
@@ -239,8 +262,12 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
     return commentable, anchor
 
 
-def post_review(repo: str, number: int, head_sha: str, result: ReviewResult) -> None:
+def post_review(
+    repo: str, number: int, head_sha: str, result: ReviewResult, body_prefix: str = ""
+) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
+
+    `body_prefix`, when given, becomes the first line of the review body.
 
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk, so every blocking finding creates a review thread.
@@ -264,7 +291,7 @@ def post_review(repo: str, number: int, head_sha: str, result: ReviewResult) -> 
     payload = {
         "commit_id": head_sha,
         "event": event,
-        "body": _review_body(result, loose),
+        "body": _review_body(result, loose, body_prefix),
         "comments": comments,
     }
     endpoint = f"repos/{repo}/pulls/{number}/reviews"
@@ -290,7 +317,7 @@ class _Login:
 
     def get(self) -> str:
         if self.value is None:
-            self.value = str((_gh_json("api", "user") or {}).get("login") or "")
+            self.value = login()
         return self.value
 
 
@@ -336,17 +363,21 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
         if after:
             args += ["-F", f"after={after}"]
         data = _gh_json(*args)
-        threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
-        for node in threads.get("nodes") or []:
-            if node.get("isResolved"):
-                continue
-            finding = _parse_thread(node, login)
-            if finding:
-                found.append(finding)
-        page = threads.get("pageInfo") or {}
-        if not page.get("hasNextPage"):
-            return found
-        after = page["endCursor"]
+        try:
+            threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = threads["nodes"]
+            page = threads["pageInfo"]
+            for node in nodes:
+                if node.get("isResolved"):
+                    continue
+                finding = _parse_thread(node, login)
+                if finding:
+                    found.append(finding)
+            if not page["hasNextPage"]:
+                return found
+            after = page["endCursor"]
+        except (KeyError, TypeError) as exc:
+            raise _not_found(number, exc) from exc
 
 
 def check_runs(repo: str, head_sha: str) -> dict[str, str]:

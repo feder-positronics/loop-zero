@@ -286,6 +286,17 @@ def test_post_review_paginates_files(gh: FakeGh) -> None:
     assert comments_posted(gh)[0]["path"] == "src/a.py"
 
 
+def test_post_review_body_prefix_is_first_line(gh: FakeGh) -> None:
+    arm_review(gh)
+    github.post_review(REPO, 7, HEAD, review(), body_prefix="<!-- loopzero:review head=abc -->")
+    body = json.loads(gh.calls[1]["--input"])["body"]
+    assert body.split("\n")[0] == "<!-- loopzero:review head=abc -->"
+    assert body.split("\n")[1].startswith("loopzero primary review")
+    arm_review(gh)
+    github.post_review(REPO, 7, HEAD, review())
+    assert json.loads(gh.calls[3]["--input"])["body"].startswith("loopzero primary review")
+
+
 def test_post_review_approve_event(gh: FakeGh) -> None:
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(verdict="approve"))
@@ -341,6 +352,35 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "lastEditedAt" in a and "author" in a for a in argv)
+
+
+@pytest.mark.parametrize("data", [
+    {"data": {"repository": {"pullRequest": None}}},
+    {"data": {"repository": None}},
+    {"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": []}}}}},
+    {"errors": [{"message": "nope"}]},
+])
+def test_open_blocking_findings_missing_pr_is_gh_error(gh: FakeGh, data: dict) -> None:
+    gh.respond("api graphql", data)
+    with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
+        github.open_blocking_findings(REPO, 7)
+
+
+def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
+    gh.respond("pr list", [{"number": 7, "url": "u"}])
+    with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
+        github.pr_for_branch(REPO, "lz/x")
+
+
+def test_api_get_and_login_helpers(gh: FakeGh) -> None:
+    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api repos/acme/widgets", {"default_branch": "main"})
+    assert github.api_get("repos/acme/widgets") == {"default_branch": "main"}
+    assert gh.argv(0) == ["api", "repos/acme/widgets"]
+    assert github.login() == "bot-user"
+    gh.respond("api user", {})
+    with pytest.raises(github.GhError, match="no login"):
+        github.login()
 
 
 def test_marker_regex_accepts_missing_head() -> None:
