@@ -190,11 +190,13 @@ def bwrap_argv(
     scratch: dict[str, Path] | None = None,
     *,
     clearenv: bool = True,
+    writable_binds: tuple[tuple[Path, Path], ...] = (),
 ) -> list[str]:
     """Build the bwrap command line up to and including the `--` separator.
 
     With ``clearenv=False`` the caller's (already filtered) environment is inherited
     instead of cleared, so secrets never appear as ``--setenv`` arguments.
+    ``writable_binds`` overlays specific paths inside the otherwise private HOME.
     """
     argv = [
         "bwrap",
@@ -228,6 +230,8 @@ def bwrap_argv(
     for path in config.writable:
         argv += ["--bind-try", path, path]
     argv += ["--bind", str(home), SANDBOX_HOME]
+    for source, destination in writable_binds:
+        argv += ["--bind", str(source), str(destination)]
     # Bind the worktree and every Git directory read-only *after* the /tmp tmpfs so
     # they stay visible even when they live under /tmp, and are never writable.
     binds = [worktree]

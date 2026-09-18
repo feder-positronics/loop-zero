@@ -2,6 +2,11 @@
 
 Both adapters share one prompt builder and one JSON findings schema, and both
 return a :class:`~loopzero.types.ReviewResult`. Nothing here retries.
+
+Reviewer authentication is bound read-write from the host into the private sandbox
+HOME rather than copied. OAuth refreshes therefore persist, and the host and sandbox
+keep using one token instead of allowing a refresh of a disposable copy to rotate and
+invalidate the host's token.
 """
 
 from __future__ import annotations
@@ -283,7 +288,11 @@ def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
 
 
 def _sandbox_prefix(
-    family: str, cwd: Path, home: Path, ro_paths: tuple[str, ...]
+    family: str,
+    cwd: Path,
+    home: Path,
+    ro_paths: tuple[str, ...],
+    auth_binds: tuple[tuple[Path, Path], ...],
 ) -> tuple[list[str], Config, Path]:
     binary_name = shutil.which(family)
     if binary_name is None:
@@ -299,23 +308,55 @@ def _sandbox_prefix(
             )
     common_dir = _git_dir(cwd, "--git-common-dir", config.env_allowlist)
     git_dir = _git_dir(cwd, "--git-dir", config.env_allowlist)
-    prefix = sandbox.bwrap_argv(config, cwd, home, common_dir, git_dir, clearenv=False)
+    prefix = sandbox.bwrap_argv(
+        config,
+        cwd,
+        home,
+        common_dir,
+        git_dir,
+        clearenv=False,
+        writable_binds=auth_binds,
+    )
     sandbox.probe(config, cwd, prefix)
     return prefix, config, binary
 
 
-def _copy_auth(family: str, home: Path) -> None:
+def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
+    """Prepare mount points and return existing host auth paths to bind read-write."""
+    binds: list[tuple[Path, Path]] = []
     if family == "claude":
-        source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
-        source = source_dir / ".credentials.json"
-        destination = home / ".claude" / ".credentials.json"
+        source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")).resolve()
+        if source_dir.is_dir():
+            destination = home / ".claude"
+            destination.mkdir()
+            binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".claude"))
+        state_file = (Path.home() / ".claude.json").resolve()
+        if state_file.is_file():
+            (home / ".claude.json").touch()
+            binds.append((state_file, Path(sandbox.SANDBOX_HOME) / ".claude.json"))
     else:
-        source_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        source = source_dir / "auth.json"
-        destination = home / ".codex" / "auth.json"
-    if source.is_file():
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, destination)
+        source_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
+        if source_dir.is_dir():
+            destination = home / ".codex"
+            destination.mkdir()
+            binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".codex"))
+    return tuple(binds)
+
+
+def _codex_supports_ignore_user_config(
+    binary: Path, cwd: Path, env_allowlist: tuple[str, ...]
+) -> bool:
+    """Return whether this Codex version can avoid loading bound ``config.toml``."""
+    try:
+        done = _proc.run(
+            [str(binary), "exec", "--help"],
+            cwd=cwd,
+            env_allowlist=env_allowlist,
+            timeout=30,
+        )
+    except (_proc.ToolMissing, _proc.ProcTimeout, FileNotFoundError):
+        return False
+    return done.exit_code == 0 and "--ignore-user-config" in f"{done.stdout}\n{done.stderr}"
 
 
 def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
@@ -434,8 +475,8 @@ def _review_claude(
     ]
     with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
         home = Path(tmp)
-        _copy_auth("claude", home)
-        prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths)
+        auth_binds = _auth_binds("claude", home)
+        prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
         argv[0] = str(binary)
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt, extra_env={},
@@ -480,14 +521,18 @@ def _review_codex(
 ) -> ReviewResult:
     with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
         home = Path(tmp)
-        _copy_auth("codex", home)
         schema_file = home / "schema.json"
         last_file = home / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
-        prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths)
+        auth_binds = _auth_binds("codex", home)
+        prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
+        ignore_user_config = _codex_supports_ignore_user_config(
+            binary, cwd, config.env_allowlist
+        )
         argv = [
             str(binary),
             "exec",
+            *(["--ignore-user-config"] if ignore_user_config else []),
             "--json",
             "--sandbox",
             "read-only",
