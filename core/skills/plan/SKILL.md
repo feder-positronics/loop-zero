@@ -16,7 +16,9 @@ enough for one PR.
    whose output changes, a page that renders. No adjectives.
 3. List the paths you expect to touch and the checks from `workflow.toml`
    that exercise them. Add a new check only if no existing one covers the
-   behavior.
+   behavior. When the request splits into several tasks, list the paths for
+   each; two tasks that share a file are stacked or done in sequence, never
+   in parallel from the same base.
 4. Decide routine implementation choices yourself from the code you can read.
    Ask only when a decision would change the acceptance criteria or touch a
    surface someone else owns.

@@ -15,7 +15,9 @@ smallest complete change that satisfies every acceptance line.
 2. Write or extend the test that proves the behavior before or alongside the
    code. A change without a proof is not complete.
 3. Run `loopzero check` before pushing. Fix nonzero exits; do not edit the
-   check list to make them pass.
+   check list to make them pass. Running the test command directly is for
+   iteration only: the sandbox hides host tools that CI also lacks, so only
+   the `loopzero check` report counts as proof.
 4. Commit in small steps with messages that state what changed. Keep the
    diff free of unrelated formatting churn.
 5. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped
