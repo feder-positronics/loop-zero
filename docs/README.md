@@ -11,3 +11,5 @@ Start with the top-level files; this directory only holds the contributor spec.
   `security-review`, `diagnose`.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — module map, shared types, budgets, and
   rules for anyone changing `src/`.
+- [design/2026-09-18-feature-plan.md](design/2026-09-18-feature-plan.md) —
+  post-rewrite feature plan with one design note per selected change.
