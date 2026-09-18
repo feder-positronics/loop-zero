@@ -83,8 +83,8 @@ def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = N
             "commit_id": commit or head, "user": {"login": login}}
 
 
-def reviews_key() -> str:
-    return f"api repos/{REPO}/pulls/7/reviews?per_page=100"
+def reviews_key(page: int = 1) -> str:
+    return f"api repos/{REPO}/pulls/7/reviews?per_page=100&page={page}"
 
 
 def post_key() -> str:
@@ -286,7 +286,7 @@ def test_review_refuses_dirty_and_unpushed(wt: Path, gh: FakeGh, capsys) -> None
     (wt / "scratch.txt").unlink()
     arm_pr(gh, "0" * 40)
     code, _, err = run(capsys, "review")
-    assert code == 1 and "push first" in err
+    assert code == 1 and "push or pull first" in err
 
 
 def test_review_falls_through_when_preferred_family_fails(
@@ -302,6 +302,7 @@ def test_review_falls_through_when_preferred_family_fails(
     code, out, err = run(capsys, "review")
     assert code == 0 and out.startswith("primary review by claude")
     assert "reviewer codex unavailable, trying next: codex: CLI is not authenticated" in err
+    assert "note: reviewer claude shares the author's model family" in err
 
 
 def test_review_fails_when_every_reviewer_fails(
@@ -409,7 +410,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     gh.respond("pr merge", "")
     gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "c" * 40}})
     code, out, err = run(capsys, "merge")
-    assert (code, out, err) == (0, "c" * 40 + "\n", "")
+    assert (code, out, err) == (0, f"{'c' * 40}\ncd {repo}\n", "")
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
     assert "--squash" in merge and merge[merge.index("--match-head-commit") + 1] == head
     assert not wt.exists()
@@ -426,7 +427,7 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("worktree is dirty")))
     code, out, err = run(capsys, "merge")
-    assert code == 0 and out == "d" * 40 + "\n"
+    assert code == 0 and out.splitlines()[0] == "d" * 40
     assert err.startswith("warning: merged but worktree cleanup failed")
 
 
@@ -463,3 +464,90 @@ def test_help_lists_all_commands(capsys) -> None:
     assert info.value.code == 0
     out = capsys.readouterr().out
     assert all(word in out for word in ("start", "check", "pr", "review", "ready", "merge", "status"))
+
+
+# --- review findings -------------------------------------------------------------------
+
+
+def test_commands_refuse_non_task_branch(wt: Path, gh: FakeGh, capsys) -> None:
+    git(wt, "checkout", "-q", "-b", "feature")
+    for command in ("pr", "review", "ready", "merge"):
+        code, out, err = run(capsys, command)
+        assert code == 1 and out == "" and "not a loopzero task branch" in err, command
+    assert gh.calls == []
+    git(wt, "symbolic-ref", "HEAD", "refs/heads/main")  # base branch itself
+    assert run(capsys, "pr")[0] == 1 and gh.calls == []
+
+
+def test_ready_and_merge_refuse_when_pr_head_differs(wt: Path, gh: FakeGh, capsys) -> None:
+    arm_pr(gh, "0" * 40, isDraft=False)
+    for command in ("ready", "merge"):
+        code, out, err = run(capsys, command)
+        assert code == 1 and out == "" and "push or pull first" in err, command
+    assert wt.exists() and all(c["argv"][:2] not in (["pr", "merge"], ["pr", "ready"])
+                               for c in gh.calls)
+
+
+def test_review_and_ready_refuse_closed_pr(wt: Path, gh: FakeGh, capsys) -> None:
+    arm_pr(gh, head_of(wt), state="CLOSED")
+    for command in ("review", "ready", "merge"):
+        code, _, err = run(capsys, command)
+        assert code == 1 and "PR #7 is CLOSED, not open" in err, command
+
+
+def test_merge_of_externally_merged_pr_only_cleans_up(wt: Path, repo: Path, gh: FakeGh,
+                                                       capsys) -> None:
+    arm_pr(gh, head_of(wt), state="MERGED", isDraft=False)
+    code, out, err = run(capsys, "merge")
+    assert (code, err) == (0, "")
+    assert out.splitlines()[-1] == f"cd {repo}"
+    assert "PR #7 was already merged externally" in out and not wt.exists()
+    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+
+
+def test_pr_ignores_corrupt_checks_report(wt: Path, gh: FakeGh, capsys) -> None:
+    (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
+    gh.respond("pr edit", "")
+    code, _, err = run(capsys, "pr")
+    assert code == 0 and "warning: ignoring unreadable" in err
+    assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--body-file"]
+
+
+def test_unexpected_and_interrupt_exit_codes(wt: Path, capsys, monkeypatch) -> None:
+    def boom(*_):
+        raise KeyError("headRefOid")
+    monkeypatch.setattr(cli.github, "pr_for_branch", boom)
+    code, _, err = run(capsys, "status")
+    assert code == 1 and err == "loopzero status: unexpected response: 'headRefOid'\n"
+
+    def interrupt(*_):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(cli.github, "pr_for_branch", interrupt)
+    assert run(capsys, "status")[0] == 130
+
+
+def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, capsys) -> None:
+    code, out, err = run(capsys, "start", "nested")
+    assert code == 1 and out == "" and "already inside task worktree" in err
+    assert not (repo / ".worktrees" / "nested").exists()
+    assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
+
+
+def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(1), [rev("f" * 40, "primary", login="x")] * 100)
+    gh.respond(reviews_key(2), [rev(head, "primary")])
+    arm_readiness(gh, head)
+    gh.respond("pr ready", "")
+    code, out, _ = run(capsys, "ready")
+    assert code == 0 and out == f"ready: {URL}\n"
+
+
+def test_budget_message_explains_rewrite(wt: Path, gh: FakeGh, capsys) -> None:
+    base, head = git(wt, "rev-parse", "HEAD~1").strip(), head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(base, "primary"), rev(head, "delta")])
+    code, _, err = run(capsys, "review")
+    assert code == 1 and "rewrite the reviewed commits (squash/amend)" in err

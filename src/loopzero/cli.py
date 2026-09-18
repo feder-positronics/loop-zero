@@ -21,6 +21,8 @@ REVIEW_MARKER_RE = re.compile(
 )
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
+UNEXPECTED = (KeyError, TypeError)
+PAGE = 100
 
 
 class CliError(LoopZeroError):
@@ -82,11 +84,28 @@ def _require_clean(wt: Path) -> None:
         raise CliError("worktree has uncommitted or untracked changes; commit or remove them first")
 
 
-def _require_pr(config: Config, branch: str) -> github.PR:
+def _require_task_branch(config: Config, branch: str) -> None:
+    if branch == config.base_branch or not branch.startswith("lz/"):
+        raise CliError(
+            f"branch {branch!r} is not a loopzero task branch (lz/<slug>); run from a worktree "
+            "created by `loopzero start`"
+        )
+
+
+def _require_pr(config: Config, branch: str, *, allow_merged: bool = False) -> github.PR:
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
         raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
+    if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
+        raise CliError(f"PR #{pr.number} is {pr.state}, not open: {pr.url}")
     return pr
+
+
+def _require_pushed(pr: github.PR, head: str) -> None:
+    if pr.head_sha != head:
+        raise CliError(
+            f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first"
+        )
 
 
 # --------------------------------------------------------------------------- review markers
@@ -108,8 +127,15 @@ def _gh_api(endpoint: str) -> object:
 
 
 def _pr_reviews(repo: str, number: int) -> list[dict]:
-    """All reviews on the PR, oldest first."""
-    return list(_gh_api(f"repos/{repo}/pulls/{number}/reviews?per_page=100") or [])
+    """All reviews on the PR, oldest first, following pages until a short one."""
+    reviews: list[dict] = []
+    page = 1
+    while True:
+        batch = list(_gh_api(f"repos/{repo}/pulls/{number}/reviews?per_page={PAGE}&page={page}") or [])
+        reviews += batch
+        if len(batch) < PAGE:
+            return reviews
+        page += 1
 
 
 @functools.cache
@@ -164,7 +190,8 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     if deltas:
         raise CliError(
             "review budget exhausted for this lineage (primary and delta already posted); "
-            "start a fresh lineage with new commits on a new branch or rebase before reviewing"
+            "rewrite the reviewed commits (squash/amend) so they are no longer ancestors of "
+            "HEAD, then run review again"
         )
     if len(primaries) > 1:
         raise CliError("more than one primary review marker found for this lineage; refusing")
@@ -204,9 +231,13 @@ def _load_report(wt: Path) -> tuple[str, tuple[CheckResult, ...]] | None:
     path = wt / CHECKS_FILE
     if not path.exists():
         return None
-    data = json.loads(path.read_text())
-    results = tuple(CheckResult(**item) for item in data.get("results", []))
-    return str(data.get("head", "")), results
+    try:
+        data = json.loads(path.read_text())
+        results = tuple(CheckResult(**item) for item in data["results"])
+        return str(data["head"]), results
+    except (TypeError, KeyError, ValueError) as exc:
+        print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
+        return None
 
 
 def _checks_section(wt: Path, head: str) -> str:
@@ -237,7 +268,13 @@ def _pr_title(wt: Path, branch: str) -> str:
 
 
 def cmd_start(args: argparse.Namespace) -> int:
-    root = Path.cwd()
+    root = _toplevel()
+    current = _proc.run(
+        ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+        cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
+    ).stdout.strip()
+    if current.startswith("lz/"):
+        raise CliError(f"already inside task worktree {root} ({current}); run start from the main checkout")
     config = _load_config(args, root)
     print(worktree.start(root, args.slug, config.base_branch))
     return 0
@@ -259,8 +296,9 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 def cmd_pr(args: argparse.Namespace) -> int:
     wt, config = _context(args)
-    _require_clean(wt)
     branch, head = worktree.branch(wt), worktree.head(wt)
+    _require_task_branch(config, branch)
+    _require_clean(wt)
     _git(wt, "push", "-u", "origin", branch)
     body = _pr_body(wt, head)
     pr = github.pr_for_branch(config.repo, branch)
@@ -276,21 +314,24 @@ def cmd_pr(args: argparse.Namespace) -> int:
 
 def cmd_review(args: argparse.Namespace) -> int:
     wt, config = _context(args)
-    _require_clean(wt)
     branch, head = worktree.branch(wt), worktree.head(wt)
+    _require_task_branch(config, branch)
+    _require_clean(wt)
     pr = _require_pr(config, branch)
-    if pr.head_sha != head:
-        raise CliError(f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push first")
+    _require_pushed(pr, head)
     kind, reviewed = _decide_kind(
         _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
     )
     since = reviewed if kind == "delta" else _primary_base(wt, config)
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
-    first = runners.pick_reviewer(config.reviewers, runners.author_family(wt, head))
+    author = runners.author_family(wt, head)
+    first = runners.pick_reviewer(config.reviewers, author)
     failures: list[str] = []
     result = None
     for family in [first, *(f for f in config.reviewers if f != first)]:
+        if family == author:
+            print(f"note: reviewer {family} shares the author's model family", file=sys.stderr)
         try:
             result = runners.review_with(
                 family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task
@@ -302,23 +343,41 @@ def cmd_review(args: argparse.Namespace) -> int:
             print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
     if result is None:
         raise CliError("every configured reviewer failed: " + "; ".join(failures))
-    tagged = dataclasses.replace(result, raw=f"{review_marker(head, kind)}\n{result.raw}")
-    github.post_review(config.repo, pr.number, head, tagged)
+    github.post_review(
+        config.repo, pr.number, head, result, body_prefix=review_marker(head, kind)
+    )
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")
     return 0
 
 
-def _pr_readiness(wt: Path, config: Config) -> tuple[github.PR, github.Readiness]:
+def _pr_readiness(
+    wt: Path, config: Config, *, allow_merged: bool = False
+) -> tuple[github.PR, github.Readiness | None]:
+    """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     branch, head = worktree.branch(wt), worktree.head(wt)
-    pr = _require_pr(config, branch)
+    _require_task_branch(config, branch)
+    pr = _require_pr(config, branch, allow_merged=allow_merged)
+    _require_pushed(pr, head)
+    if pr.state == "MERGED":
+        return pr, None
     return pr, _readiness(wt, config, pr, head)
+
+
+def _cleanup(wt: Path) -> None:
+    root = _repo_root(wt)
+    try:
+        worktree.cleanup(root, wt)
+    except (worktree.WorktreeError, OSError) as exc:
+        print(f"warning: merged but worktree cleanup failed: {exc}", file=sys.stderr)
+    print(f"cd {root}")
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     pr, readiness = _pr_readiness(wt, config)
+    assert readiness is not None
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
@@ -331,15 +390,16 @@ def cmd_ready(args: argparse.Namespace) -> int:
 
 def cmd_merge(args: argparse.Namespace) -> int:
     wt, config = _context(args)
-    pr, readiness = _pr_readiness(wt, config)
+    pr, readiness = _pr_readiness(wt, config, allow_merged=True)
+    if readiness is None:
+        print(f"PR #{pr.number} was already merged externally at {pr.head_sha[:12]}; cleaning up")
+        _cleanup(wt)
+        return 0
     if not readiness.ready:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
     print(sha)
-    try:
-        worktree.cleanup(_repo_root(wt), wt)
-    except (worktree.WorktreeError, OSError) as exc:
-        print(f"warning: merged but worktree cleanup failed: {exc}", file=sys.stderr)
+    _cleanup(wt)
     return 0
 
 
@@ -412,9 +472,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except HANDLED as exc:
-        message = " | ".join(line.strip() for line in str(exc).splitlines() if line.strip())
-        print(f"loopzero {args.command}: {message}", file=sys.stderr)
+        print(f"loopzero {args.command}: {_one_line(exc)}", file=sys.stderr)
         return 1
+    except UNEXPECTED as exc:
+        print(f"loopzero {args.command}: unexpected response: {_one_line(exc)}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print(f"loopzero {args.command}: interrupted", file=sys.stderr)
+        return 130
+
+
+def _one_line(exc: BaseException) -> str:
+    text = str(exc) or exc.__class__.__name__
+    return " | ".join(line.strip() for line in text.splitlines() if line.strip())
 
 
 if __name__ == "__main__":
