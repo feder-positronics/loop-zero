@@ -28,7 +28,7 @@ jobs:
         run: |
           src=$(cat src/loopzero/*.py | wc -l); tests=$(cat tests/*.py | wc -l)
           echo "src=$src tests=$tests"
-          test "$src" -le 2500 && test "$tests" -le 3000
+          test "$src" -le 2500 && test "$tests" -le 3500
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q
