@@ -56,6 +56,9 @@ is no waiver file and no override flag.
 - Fixes after the delta review require a fresh lineage: new commits, new
   primary review.
 - Mechanical fixes (format, lint, rename) need checks rerun, not a review.
+- A reviewer run that yields no verdict (missing tool, authentication failure,
+  unparseable output) does not consume the budget; `loopzero review` moves to
+  the next configured family and exits nonzero with each reason if all fail.
 
 ## Sandbox rules for checks
 

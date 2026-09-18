@@ -44,6 +44,8 @@ Return exactly one JSON object and nothing else:
 }
 ```
 
+Every `critical` or `important` finding must carry `path` and `line`; a
+finding without them is anchored to the first changed file.
 `verdict` is `request_changes` when any finding is `critical` or
 `important`, otherwise `approve`. An empty `findings` list with `approve` is
 a valid, complete result. If you cannot see the diff, return one `critical`

@@ -15,6 +15,8 @@ GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", 
 BLOCKING = frozenset({"critical", "important"})
 MARKER_RE = re.compile(r"<!--\s*loopzero:finding\s+severity=(\w+)\s+head=([0-9a-fA-F]+)\s*-->")
 PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable"
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)", re.MULTILINE)
+_ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
 _SELF_REVIEW = re.compile(r"(approve|request changes on) your own pull request", re.IGNORECASE)
 _THREADS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -159,8 +161,8 @@ def finding_marker(severity: str, head_sha: str) -> str:
     return f"<!-- loopzero:finding severity={severity} head={head_sha} -->"
 
 
-def _comment_body(f: Finding, head_sha: str) -> str:
-    text = f"**{f.severity}: {f.title}**\n\n{f.body}".rstrip()
+def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
+    text = f"{prefix}**{f.severity}: {f.title}**\n\n{f.body}".rstrip()
     if f.severity in BLOCKING:
         return f"{finding_marker(f.severity, head_sha)}\n{text}"
     return text
@@ -185,19 +187,43 @@ def _review_body(result: ReviewResult, unplaced: list[Finding]) -> str:
     return "\n".join(lines)
 
 
+def _anchor(repo: str, number: int) -> dict:
+    """Pick the first changed file of the PR and its first added line as a comment anchor."""
+    files = _gh_json("api", f"repos/{repo}/pulls/{number}/files", "-F", "per_page=1") or []
+    if not files:
+        raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"), "PR has no files")
+    first = files[0]
+    match = _HUNK_RE.search(first.get("patch") or "")
+    if match:
+        return {"path": first["filename"], "line": int(match.group(1)), "side": "RIGHT"}
+    return {"path": first["filename"], "subject_type": "file"}
+
+
 def post_review(repo: str, number: int, head_sha: str, result: ReviewResult) -> None:
-    """Post `result` as a PR review on `head_sha`, one inline comment per located finding."""
-    placed = [f for f in result.findings if f.path and f.line]
-    unplaced = [f for f in result.findings if not (f.path and f.line)]
+    """Post `result` as a PR review on `head_sha`, one inline comment per finding.
+
+    Blocking findings without a location are anchored on the first changed file so
+    they still create a review thread that `open_blocking_findings` can see.
+    """
+    located = [f for f in result.findings if f.path and f.line]
+    unlocated = [f for f in result.findings if not (f.path and f.line)]
+    anchored = [f for f in unlocated if f.severity in BLOCKING]
+    loose = [f for f in unlocated if f.severity not in BLOCKING]
+    comments = [
+        {"path": f.path, "line": f.line, "side": "RIGHT", "body": _comment_body(f, head_sha)}
+        for f in located
+    ]
+    if anchored:
+        anchor = _anchor(repo, number)
+        comments += [
+            {**anchor, "body": _comment_body(f, head_sha, prefix=_ANCHOR_NOTE)} for f in anchored
+        ]
     event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
     payload = {
         "commit_id": head_sha,
         "event": event,
-        "body": _review_body(result, unplaced),
-        "comments": [
-            {"path": f.path, "line": f.line, "side": "RIGHT", "body": _comment_body(f, head_sha)}
-            for f in placed
-        ],
+        "body": _review_body(result, loose),
+        "comments": comments,
     }
     endpoint = f"repos/{repo}/pulls/{number}/reviews"
     try:
@@ -217,7 +243,8 @@ def _parse_thread(node: dict) -> Finding | None:
     match = MARKER_RE.search(first)
     if not match or match.group(1) not in BLOCKING:
         return None
-    title_line = rest.strip().splitlines()[0] if rest.strip() else ""
+    lines = [ln for ln in rest.strip().splitlines() if ln.strip()]
+    title_line = next((ln for ln in lines if ln.startswith("**")), lines[0] if lines else "")
     title = re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
     return Finding(
         severity=match.group(1), path=node.get("path"), line=node.get("line"),

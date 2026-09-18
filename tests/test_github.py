@@ -186,22 +186,63 @@ FINDINGS = (
 
 def test_post_review_payload(gh: FakeGh) -> None:
     gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [{"filename": "src/first.py",
+                                                    "patch": "@@ -1,3 +12,4 @@\n+y"}])
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS))
-    call = gh.calls[0]
+    call = gh.calls[1]
     assert call["argv"][:5] == ["api", f"repos/{REPO}/pulls/7/reviews", "--method", "POST",
                                 "--input"]
     payload = json.loads(call["--input"])
     assert payload["commit_id"] == HEAD and payload["event"] == "REQUEST_CHANGES"
     comments = payload["comments"]
     assert [(c["path"], c["line"], c["side"]) for c in comments] == [
-        ("src/a.py", 10, "RIGHT"), ("src/b.py", 2, "RIGHT"), ("src/c.py", 5, "RIGHT")]
+        ("src/a.py", 10, "RIGHT"), ("src/b.py", 2, "RIGHT"), ("src/c.py", 5, "RIGHT"),
+        ("src/first.py", 12, "RIGHT")]
     assert comments[0]["body"].split("\n")[0] == marker("critical")
     assert comments[1]["body"].split("\n")[0] == marker("important")
     assert "loopzero:finding" not in comments[2]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
     body = payload["body"]
     assert "<details>" in body and "RAW MODEL OUTPUT" in body and "</details>" in body
-    assert "Global concern" in body
+    assert "Global concern" not in body, "blocking finding was anchored, not listed"
+    assert comments[3]["path"] == "src/first.py" and comments[3]["line"] == 12
+    assert "subject_type" not in comments[3]
+
+
+def test_post_review_anchors_unlocated_blocking_findings(gh: FakeGh) -> None:
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [
+        {"filename": "src/first.py", "patch": "@@ -1,3 +12,4 @@\n x\n+y"},
+        {"filename": "src/second.py", "patch": "@@ -1 +1 @@\n-a\n+b"},
+    ])
+    findings = (Finding("critical", None, None, "Global", "no file"),
+                Finding("suggestion", None, None, "Nit", "loose"))
+    github.post_review(REPO, 7, HEAD, review(findings=findings))
+    assert gh.argv(0)[:2] == ["api", f"repos/{REPO}/pulls/7/files"]
+    payload = json.loads(gh.calls[1]["--input"])
+    (comment,) = payload["comments"]
+    assert comment["path"] == "src/first.py" and comment["line"] == 12
+    assert comment["side"] == "RIGHT" and "subject_type" not in comment
+    lines = comment["body"].split("\n")
+    assert lines[0] == marker("critical")
+    assert lines[1] == "No file location given by the reviewer; anchored here."
+    assert "Global" in comment["body"] and "no file" in comment["body"]
+    assert "Nit" in payload["body"] and "Global" not in payload["body"]
+
+
+def test_post_review_anchor_falls_back_to_file_level(gh: FakeGh) -> None:
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [{"filename": "img.png"}])
+    github.post_review(REPO, 7, HEAD, review(findings=(Finding("important", None, None, "G", ""),)))
+    (comment,) = json.loads(gh.calls[1]["--input"])["comments"]
+    assert comment["path"] == "img.png" and "line" not in comment
+    assert comment["subject_type"] == "file"
+
+
+def test_post_review_no_files_lookup_without_unlocated_blockers(gh: FakeGh) -> None:
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
+    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:3]))
+    assert [c["argv"][:2] for c in gh.calls] == [["api", f"repos/{REPO}/pulls/7/reviews"]]
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
@@ -315,6 +356,15 @@ def test_readiness_blocking_finding(gh: FakeGh) -> None:
     arm_readiness(gh, threads=(thread(f"{marker('important')}\n**important: Oops**"),))
     r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD)
     assert r.reasons == ("open important finding at src/a.py:3: Oops",)
+
+
+def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
+    body = f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n" \
+           "**critical: Global**\n\nno file"
+    arm_readiness(gh, threads=(thread(body, path="src/first.py", line=12),))
+    r = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD)
+    assert not r.ready
+    assert r.reasons == ("open critical finding at src/first.py:12: Global",)
 
 
 def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> None:
