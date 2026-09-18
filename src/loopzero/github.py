@@ -16,7 +16,7 @@ BLOCKING = frozenset({"critical", "important"})
 MARKER_RE = re.compile(
     r"<!--\s*loopzero:finding\s+severity=(\w+)(?:\s+head=([0-9a-fA-F]+))?\s*-->"
 )
-PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable"
+PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author"
 PAGE = 100
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -67,6 +67,7 @@ class PR:
     is_draft: bool
     state: str  # "OPEN" | "CLOSED" | "MERGED"
     mergeable: str  # "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
+    author: str = ""  # login of the PR author
 
 
 @dataclass(frozen=True)
@@ -82,7 +83,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
     except ToolMissing as exc:
         raise GhMissing(argv, str(exc)) from exc
     if done.exit_code != 0:
-        tail = done.stderr or done.stdout
+        tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(argv, tail)
         raise GhError(argv, tail)
@@ -157,6 +158,7 @@ def _pr_from_json(data: dict) -> PR:
             is_draft=bool(data["isDraft"]),
             state=data["state"],
             mergeable=data.get("mergeable") or "UNKNOWN",
+            author=str((data.get("author") or {}).get("login") or ""),
         )
     except (KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
@@ -173,6 +175,13 @@ def pr_for_branch(repo: str, branch: str) -> PR | None:
     if not prs:
         return None
     return next((p for p in prs if p.state == "OPEN"), prs[0])
+
+
+def pr_view(repo: str, number: int) -> PR:
+    data = _gh_json("pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS)
+    if not isinstance(data, dict):
+        raise _not_found(number, ValueError(repr(data)))
+    return _pr_from_json(data)
 
 
 def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) -> PR:
@@ -264,15 +273,27 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
 
 
 def post_review(
-    repo: str, number: int, head_sha: str, result: ReviewResult, body_prefix: str = ""
+    repo: str,
+    number: int,
+    head_sha: str,
+    result: ReviewResult,
+    body_prefix: str = "",
+    pr: PR | None = None,
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
-    `body_prefix`, when given, becomes the first line of the review body.
+    `body_prefix`, when given, becomes the first line of the review body. When the
+    token user authored the PR (`pr` is fetched if not given) the review is posted
+    as a COMMENT, since GitHub rejects self-approval and self-request-changes.
 
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk, so every blocking finding creates a review thread.
     """
+    author = (pr or pr_view(repo, number)).author
+    if author and author == login():
+        event = "COMMENT"
+    else:
+        event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
     commentable, anchor = _diff_map(repo, number)
     comments: list[dict] = []
     loose: list[Finding] = []
@@ -288,7 +309,6 @@ def post_review(
         else:
             note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
-    event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
     payload = {
         "commit_id": head_sha,
         "event": event,
@@ -299,7 +319,7 @@ def post_review(
     try:
         _api(endpoint, payload)
     except GhError as exc:
-        if not _SELF_REVIEW.search(exc.tail):
+        if event == "COMMENT" or not _SELF_REVIEW.search(exc.tail):
             raise
         _api(endpoint, {**payload, "event": "COMMENT"})
 

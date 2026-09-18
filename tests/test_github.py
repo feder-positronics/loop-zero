@@ -84,6 +84,7 @@ def pr_json(**over: object) -> dict:
     base = {
         "number": 7, "url": f"https://github.com/{REPO}/pull/7", "headRefOid": HEAD,
         "baseRefName": "main", "isDraft": True, "state": "OPEN", "mergeable": "MERGEABLE",
+        "author": {"login": "someone-else"},
     }
     return {**base, **over}
 
@@ -116,13 +117,23 @@ PR_FILES = [
 ]
 
 
-def arm_review(gh: FakeGh, files: list | None = None) -> None:
+def arm_review(gh: FakeGh, files: list | None = None, author: str = "someone-else") -> None:
+    gh.respond("pr view", pr_json(author={"login": author}))
+    gh.respond("api user", {"login": "bot-user"})
     gh.respond(REVIEWS_KEY, {"id": 1})
     gh.respond(FILES_KEY, PR_FILES if files is None else files)
 
 
+def calls_for(gh: FakeGh, key: str) -> list[dict]:
+    return [c for c in gh.calls if " ".join(c["argv"][:2]) == key]
+
+
+def review_payloads(gh: FakeGh) -> list[dict]:
+    return [json.loads(c["--input"]) for c in calls_for(gh, REVIEWS_KEY)]
+
+
 def comments_posted(gh: FakeGh, index: int = -1) -> list[dict]:
-    return json.loads(gh.calls[index]["--input"])["comments"]
+    return review_payloads(gh)[index]["comments"]
 
 
 # --- errors ------------------------------------------------------------------------
@@ -166,7 +177,7 @@ def test_pr_for_branch_prefers_open(gh: FakeGh) -> None:
     gh.respond("pr list", [pr_json(number=3, state="CLOSED"), pr_json(number=9)])
     pr = github.pr_for_branch(REPO, "lz/x")
     assert pr == github.PR(9, f"https://github.com/{REPO}/pull/7", HEAD, "main", True,
-                           "OPEN", "MERGEABLE")
+                           "OPEN", "MERGEABLE", "someone-else")
 
 
 def test_create_draft_pr_passes_body_file_and_returns_pr(gh: FakeGh) -> None:
@@ -209,9 +220,9 @@ FINDINGS = (
 def test_post_review_payload(gh: FakeGh) -> None:
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS))
-    assert gh.argv(0) == ["api", FILES_KEY.split(" ", 1)[1], "--method", "GET",
-                          "-F", "per_page=100", "-F", "page=1"]
-    call = gh.calls[1]
+    assert calls_for(gh, FILES_KEY)[0]["argv"] == [
+        "api", FILES_KEY.split(" ", 1)[1], "--method", "GET", "-F", "per_page=100", "-F", "page=1"]
+    (call,) = calls_for(gh, REVIEWS_KEY)
     assert call["argv"][:5] == ["api", f"repos/{REPO}/pulls/7/reviews", "--method", "POST",
                                 "--input"]
     payload = json.loads(call["--input"])
@@ -235,7 +246,7 @@ def test_post_review_anchors_unlocated_blocking_findings(gh: FakeGh) -> None:
     findings = (Finding("critical", None, None, "Global", "no file"),
                 Finding("suggestion", None, None, "Nit", "loose"))
     github.post_review(REPO, 7, HEAD, review(findings=findings))
-    payload = json.loads(gh.calls[1]["--input"])
+    payload = review_payloads(gh)[0]
     (comment,) = payload["comments"]
     assert comment == {**comment, "path": "src/a.py", "line": 11, "side": "RIGHT"}
     lines = comment["body"].split("\n")
@@ -254,7 +265,7 @@ def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
         Finding("suggestion", "src/a.py", 99, "Nit off diff", "stays loose"),
     )
     github.post_review(REPO, 7, HEAD, review(findings=findings))
-    payload = json.loads(gh.calls[1]["--input"])
+    payload = review_payloads(gh)[0]
     comments = payload["comments"]
     assert [(c["path"], c["line"]) for c in comments] == [("src/a.py", 11)] * 3
     assert comments[0]["body"].split("\n")[1] == (
@@ -275,33 +286,33 @@ def test_post_review_fails_loud_when_nothing_to_anchor(gh: FakeGh) -> None:
     arm_review(gh, files=[{"filename": "img.png"}])
     with pytest.raises(github.GhError, match="no diff hunks"):
         github.post_review(REPO, 7, HEAD, review(findings=(Finding("critical", None, None, "G", ""),)))
-    assert len(gh.calls) == 1
+    assert calls_for(gh, REVIEWS_KEY) == []
 
 
 def test_post_review_paginates_files(gh: FakeGh) -> None:
     page1 = [{"filename": f"f{i}.py", "patch": f"@@ -1 +1 @@\n+l{i}"} for i in range(100)]
+    arm_review(gh)
     gh.respond(FILES_KEY, page1, PR_FILES)
-    gh.respond(REVIEWS_KEY, {"id": 1})
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
-    assert [c["argv"][-1] for c in gh.calls[:2]] == ["page=1", "page=2"]
+    assert [c["argv"][-1] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
     assert comments_posted(gh)[0]["path"] == "src/a.py"
 
 
 def test_post_review_body_prefix_is_first_line(gh: FakeGh) -> None:
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(), body_prefix="<!-- loopzero:review head=abc -->")
-    body = json.loads(gh.calls[1]["--input"])["body"]
+    body = review_payloads(gh)[0]["body"]
     assert body.split("\n")[0] == "<!-- loopzero:review head=abc -->"
     assert body.split("\n")[1].startswith("loopzero primary review")
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review())
-    assert json.loads(gh.calls[3]["--input"])["body"].startswith("loopzero primary review")
+    assert review_payloads(gh)[1]["body"].startswith("loopzero primary review")
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(verdict="approve"))
-    payload = json.loads(gh.calls[1]["--input"])
+    payload = review_payloads(gh)[0]
     assert payload["event"] == "APPROVE" and payload["comments"] == []
 
 
@@ -310,22 +321,52 @@ def test_post_review_approve_event(gh: FakeGh) -> None:
     ("request_changes", "Can not request changes on your own pull request"),
 ])
 def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, msg: str) -> None:
-    gh.respond(FILES_KEY, PR_FILES)
-    gh.respond(REVIEWS_KEY, {"stdout": "", "stderr": f'gh: Unprocessable Entity (HTTP 422)\n{msg}\n',
-                             "exit": 1}, {"stdout": '{"id": 2}', "exit": 0})
+    """Author lookup says someone else, but GitHub still rejects: stdout JSON, short stderr."""
+    arm_review(gh)
+    body = {"message": "Unprocessable Entity", "errors": [{"message": msg}],
+            "documentation_url": "https://docs.github.com/rest"}
+    gh.respond(REVIEWS_KEY,
+               {"stdout": json.dumps(body), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
+                "exit": 1},
+               {"stdout": '{"id": 2}', "exit": 0})
     github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
-    events = [json.loads(c["--input"])["event"] for c in gh.calls[1:]]
-    assert events == [verdict.upper(), "COMMENT"]
-    first, second = (json.loads(c["--input"]) for c in gh.calls[1:])
+    first, second = review_payloads(gh)
+    assert (first["event"], second["event"]) == (verdict.upper(), "COMMENT")
     assert first["comments"] == second["comments"] and first["body"] == second["body"]
 
 
+def test_gh_error_tail_joins_stderr_and_stdout(gh: FakeGh) -> None:
+    gh.respond("pr ready", {"stdout": '{"message": "detail on stdout"}', "stderr": "gh: HTTP 422\n",
+                            "exit": 1})
+    with pytest.raises(github.GhError) as info:
+        github.mark_ready(REPO, 7)
+    assert info.value.tail == 'gh: HTTP 422\n\n{"message": "detail on stdout"}'
+
+
+@pytest.mark.parametrize("verdict", ["approve", "request_changes"])
+def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str) -> None:
+    arm_review(gh, author="bot-user")
+    github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
+    (payload,) = review_payloads(gh)
+    assert payload["event"] == "COMMENT"
+    assert [c["argv"][:2] for c in gh.calls[:2]] == [["pr", "view"], ["api", "user"]]
+    assert gh.argv(0) == ["pr", "view", "7", "--repo", REPO, "--json", github.PR_FIELDS]
+
+
+def test_post_review_uses_given_pr_without_lookup(gh: FakeGh) -> None:
+    arm_review(gh)
+    pr = github._pr_from_json(pr_json(author={"login": "bot-user"}))
+    github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr)
+    assert calls_for(gh, "pr view") == []
+    assert review_payloads(gh)[0]["event"] == "COMMENT"
+
+
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
-    gh.respond(FILES_KEY, PR_FILES)
+    arm_review(gh)
     gh.fail(REVIEWS_KEY, "HTTP 500 server error")
     with pytest.raises(github.GhError):
         github.post_review(REPO, 7, HEAD, review())
-    assert len(gh.calls) == 2
+    assert len(calls_for(gh, REVIEWS_KEY)) == 1
 
 
 # --- blocking findings ------------------------------------------------------------
