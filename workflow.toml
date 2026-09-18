@@ -2,7 +2,7 @@
 
 [repo]
 name = "feder-positronics/loop-zero"
-base = "v2/minimal-rewrite"
+base = "main"
 
 [checks]
 # Omit scratch to use the built-in default directories.
