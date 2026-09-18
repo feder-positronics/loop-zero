@@ -33,7 +33,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "env": dict,
         "limits": dict,
     },
-    "delivery": {"merge": str, "reviewers": list},
+    "delivery": {"merge": str, "reviewers": list, "reviewer_ro_paths": list},
 }
 
 
@@ -157,6 +157,9 @@ def _build(data: dict[str, Any]) -> Config:
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     if "limits" in checks:
         kwargs["limits"] = _limits(checks["limits"])
+    reviewer_ro_paths = _host_paths(
+        "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])
+    )
     return Config(
         repo=name,
         base_branch=base,
@@ -164,6 +167,7 @@ def _build(data: dict[str, Any]) -> Config:
         required_ci=_strings("checks.required_ci", checks.get("required_ci", [])),
         merge_strategy=merge,
         reviewers=reviewers,
+        reviewer_ro_paths=reviewer_ro_paths,
         network=checks.get("network", False),
         **kwargs,
     )

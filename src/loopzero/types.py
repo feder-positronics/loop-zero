@@ -24,6 +24,7 @@ class Config:
     required_ci: tuple[str, ...]  # exact GitHub check names that must be green
     merge_strategy: str  # "squash" | "merge" | "rebase"
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
+    reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox

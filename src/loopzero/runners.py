@@ -14,8 +14,8 @@ import tempfile
 from dataclasses import replace
 from pathlib import Path
 
-from loopzero import _proc
-from loopzero.types import Finding, LoopZeroError, ReviewResult
+from loopzero import _proc, sandbox
+from loopzero.types import Config, Finding, LoopZeroError, ReviewResult
 
 FAMILIES = ("claude", "codex")
 SEVERITIES = ("critical", "important", "suggestion")
@@ -23,7 +23,9 @@ BLOCKING = ("critical", "important")
 TAIL_CHARS = 2000
 
 # Extra environment each CLI needs to authenticate; forwarded only if present.
-CLAUDE_AUTH_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
+CLAUDE_AUTH_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+CODEX_AUTH_ENV = ("OPENAI_API_KEY",)
+BASE_ENV = ("PATH", "LANG", "LC_ALL", "TERM")
 _CODEX_MODEL_RE = re.compile(r"^\s*model\s*:\s*(\S.*?)\s*$", re.IGNORECASE | re.MULTILINE)
 
 _AUTH_PATTERNS = (
@@ -190,6 +192,7 @@ def _run(
     cwd: Path,
     prompt: str,  # delivered on stdin
     extra_env: dict[str, str],
+    env_allowlist: tuple[str, ...],
     timeout: int,
     family: str,
 ) -> _proc.Completed:
@@ -197,7 +200,7 @@ def _run(
         done = _proc.run(
             argv,
             cwd=cwd,
-            env_allowlist=_ALLOWLIST,
+            env_allowlist=env_allowlist,
             extra_env=extra_env,
             timeout=timeout,
             input=prompt,
@@ -217,14 +220,77 @@ def _run(
 _ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 
 
-def _auth_env(names: tuple[str, ...]) -> dict[str, str]:
-    return {name: os.environ[name] for name in names if os.environ.get(name)}
+def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
+    """Build a networked, read-only sandbox config independent of check settings."""
+    return Config(
+        repo="review/sandbox",
+        base_branch="main",
+        checks=(),
+        required_ci=(),
+        merge_strategy="squash",
+        reviewers=(family,),
+        network=True,
+        env_allowlist=BASE_ENV,
+        sandbox_ro=ro_paths or (str(binary.resolve().parent),),
+        writable=(),
+        scratch=(),
+        env=(),
+    )
+
+
+def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
+    done = _proc.run(
+        ["git", "rev-parse", flag], cwd=cwd, env_allowlist=env_allowlist, timeout=30
+    )
+    if done.exit_code != 0:
+        raise RunnerBadOutput(f"git rev-parse {flag} exited {done.exit_code}", _tail(done.stderr))
+    raw = Path(done.stdout.strip())
+    return (raw if raw.is_absolute() else cwd / raw).resolve()
+
+
+def _sandbox_prefix(
+    family: str, cwd: Path, home: Path, ro_paths: tuple[str, ...]
+) -> tuple[list[str], Config, Path]:
+    binary_name = shutil.which(family)
+    if binary_name is None:
+        raise RunnerMissing(f"{family}: {family!r} not found on PATH")
+    binary = Path(binary_name).resolve()
+    config = _review_config(family, binary, ro_paths)
+    if shutil.which("bwrap") is None:
+        raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+    for exposed in config.sandbox_ro:
+        if home.resolve().is_relative_to(Path(exposed).resolve()):
+            raise sandbox.SandboxUnavailable(
+                f"sandbox path {exposed!r} would expose private reviewer directories"
+            )
+    common_dir = _git_dir(cwd, "--git-common-dir", config.env_allowlist)
+    git_dir = _git_dir(cwd, "--git-dir", config.env_allowlist)
+    prefix = sandbox.bwrap_argv(config, cwd, home, common_dir, git_dir, clearenv=False)
+    sandbox.probe(config, cwd, prefix)
+    return prefix, config, binary
+
+
+def _copy_auth(family: str, home: Path) -> None:
+    if family == "claude":
+        source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+        source = source_dir / ".credentials.json"
+        destination = home / ".claude" / ".credentials.json"
+    else:
+        source_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        source = source_dir / "auth.json"
+        destination = home / ".codex" / "auth.json"
+    if source.is_file():
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
 
 
 # --------------------------------------------------------------------------- adapters
 
 
-def _review_claude(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int) -> ReviewResult:
+def _review_claude(
+    prompt: str, *, cwd: Path, head: str, kind: str, timeout: int,
+    ro_paths: tuple[str, ...],
+) -> ReviewResult:
     argv = [
         "claude",
         "-p",
@@ -243,10 +309,16 @@ def _review_claude(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int
         "--disallowedTools",
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
-    done = _run(
-        argv, cwd=cwd, prompt=prompt, extra_env=_auth_env(CLAUDE_AUTH_ENV),
-        timeout=timeout, family="claude",
-    )
+    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
+        home = Path(tmp)
+        _copy_auth("claude", home)
+        prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths)
+        argv[0] = str(binary)
+        done = _run(
+            [*prefix, *argv], cwd=cwd, prompt=prompt, extra_env={},
+            env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV), timeout=timeout,
+            family="claude",
+        )
     raw = done.stdout
     try:
         envelope = _extract_json_object(raw)
@@ -274,20 +346,19 @@ def _review_claude(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int
     )
 
 
-def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int) -> ReviewResult:
-    with tempfile.TemporaryDirectory(prefix="loopzero-codex-") as tmp:
-        root = Path(tmp)
-        codex_home = root / "home"
-        codex_home.mkdir()
-        configured_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
-        auth = configured_home / "auth.json"
-        if auth.is_file():
-            shutil.copyfile(auth, codex_home / "auth.json")
-        schema_file = root / "schema.json"
-        last_file = root / "last.json"
+def _review_codex(
+    prompt: str, *, cwd: Path, head: str, kind: str, timeout: int,
+    ro_paths: tuple[str, ...],
+) -> ReviewResult:
+    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
+        home = Path(tmp)
+        _copy_auth("codex", home)
+        schema_file = home / "schema.json"
+        last_file = home / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
+        prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths)
         argv = [
-            "codex",
+            str(binary),
             "exec",
             "--sandbox",
             "read-only",
@@ -298,15 +369,16 @@ def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int)
             "-c",
             "mcp_servers={}",
             "--output-schema",
-            str(schema_file),
+            f"{sandbox.SANDBOX_HOME}/schema.json",
             "--output-last-message",
-            str(last_file),
+            f"{sandbox.SANDBOX_HOME}/last.json",
             "-",
         ]
         done = _run(
-            argv, cwd=cwd, prompt=prompt,
-            extra_env={**_auth_env(("OPENAI_API_KEY",)), "CODEX_HOME": str(codex_home)},
-            timeout=timeout, family="codex",
+            [*prefix, *argv], cwd=cwd, prompt=prompt,
+            extra_env={},
+            env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
+            family="codex",
         )
         raw = last_file.read_text(encoding="utf-8") if last_file.exists() else ""
     if not raw.strip():
@@ -330,6 +402,7 @@ def review_with(
     kind: str,
     diff: str,
     task_text: str,
+    reviewer_ro_paths: tuple[str, ...] = (),
     timeout: int = 900,
 ) -> ReviewResult:
     """Run one review of ``diff`` at ``head`` with the given model family."""
@@ -339,7 +412,10 @@ def review_with(
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
     prompt = build_prompt(kind=kind, head=head, task_text=task_text, diff=diff)
     adapter = _review_claude if family == "claude" else _review_codex
-    return adapter(prompt, cwd=cwd, head=head, kind=kind, timeout=timeout)
+    return adapter(
+        prompt, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
+        ro_paths=reviewer_ro_paths,
+    )
 
 
 # --------------------------------------------------------------------------- family

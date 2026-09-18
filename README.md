@@ -57,6 +57,7 @@ own [workflow.toml](workflow.toml) is a working example.
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
 | `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge` or `rebase`. |
 | `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`); when the author family is known, `review` only uses a different family. |
+| `delivery.reviewer_ro_paths` | Absolute reviewer CLI/runtime paths mounted read-only. Defaults to the resolved directory of the selected reviewer binary; list an npm or bun prefix for Claude when needed. |
 
 ## What it deliberately does not do
 
@@ -68,6 +69,8 @@ own [workflow.toml](workflow.toml) is a working example.
 - No retry framework. A failed command prints its tail and stops.
 - No waivers or override files. Fix the finding or resolve the thread with a
   reason.
+- Reviews run with network access because the model CLIs require it. The
+  sandbox limits what they can read, but cannot limit what allowed data they send.
 
 ## Layout
 

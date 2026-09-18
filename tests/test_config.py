@@ -24,6 +24,7 @@ limits = { memory_mb = 1024, processes = 64, file_mb = 512 }
 [delivery]
 merge = "rebase"
 reviewers = ["codex"]
+reviewer_ro_paths = ["/opt/claude", "/opt/codex"]
 """
 
 
@@ -41,6 +42,7 @@ def test_load_full_config(tmp_path):
         required_ci=("checks",),
         merge_strategy="rebase",
         reviewers=("codex",),
+        reviewer_ro_paths=("/opt/claude", "/opt/codex"),
         network=True,
         env_allowlist=("PATH", "HOME"),
         sandbox_ro=("/nonexistent/cache", "/tmp/whatever/../cache"),
@@ -64,6 +66,7 @@ def test_load_applies_defaults(tmp_path):
     assert loaded.network is False
     assert loaded.env_allowlist == ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     assert loaded.sandbox_ro == () and loaded.writable == ()
+    assert loaded.reviewer_ro_paths == ()
     assert loaded.scratch == (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
     assert loaded.limits == ResourceLimits(memory_mb=4096, processes=512, file_mb=2048)
 
@@ -94,6 +97,7 @@ def test_invalid_toml(tmp_path):
         ('repo = "o/n"\n', "\\[repo\\] must be a table"),
         ('[repo]\nname = "o/n"\nbase = ""\n', "repo.base must not be empty"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = []\n', "at least one reviewer"),
+        ('[repo]\nname = "o/n"\n[delivery]\nreviewer_ro_paths = ["relative"]\n', "must be absolute"),
         ('[repo]\nname = "o/n"\n[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
         ('[repo]\nname = "o/n"\n[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
         ('[repo]\nname = "o/n"\n[checks]\nscratch = ["../x"]\n', "scratch entries must be relative"),

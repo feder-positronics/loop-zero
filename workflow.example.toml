@@ -49,3 +49,7 @@ merge = "squash"
 # Reviewer preference, in order. `loopzero review` picks the first family
 # that is installed and differs from the author's family when that is known.
 reviewers = ["claude", "codex"]
+# Optional absolute paths for reviewer binaries and runtimes. When omitted,
+# loop-zero mounts the resolved directory of the selected reviewer binary.
+# Claude installations may need their npm or bun prefix listed here.
+# reviewer_ro_paths = ["/home/<you>/.local/share/npm", "/home/<you>/.bun"]

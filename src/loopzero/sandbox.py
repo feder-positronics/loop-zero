@@ -80,7 +80,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             # git-invisible) directory must exist in the worktree before we start.
             (worktree / entry).mkdir(parents=True, exist_ok=True)
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
-        _probe(config, worktree, prefix)
+        probe(config, worktree, prefix)
         for command in config.checks:
             result = _run_one(config, worktree, prefix, command, timeout)
             results.append(result)
@@ -159,7 +159,7 @@ def _run_one(
     )
 
 
-def _probe(config: Config, worktree: Path, prefix: list[str]) -> None:
+def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     """Raise `SandboxUnavailable` unless bwrap can build the exact sandbox we will use."""
     try:
         probe = _proc.run(
@@ -188,8 +188,14 @@ def bwrap_argv(
     common_dir: Path,
     git_dir: Path,
     scratch: dict[str, Path] | None = None,
+    *,
+    clearenv: bool = True,
 ) -> list[str]:
-    """Build the bwrap command line up to and including the `--` separator."""
+    """Build the bwrap command line up to and including the `--` separator.
+
+    With ``clearenv=False`` the caller's (already filtered) environment is inherited
+    instead of cleared, so secrets never appear as ``--setenv`` arguments.
+    """
     argv = [
         "bwrap",
         "--die-with-parent",
@@ -220,7 +226,7 @@ def bwrap_argv(
         argv += ["--ro-bind", str(path), str(path)]
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
-    argv += ["--chdir", str(worktree), "--clearenv"]
+    argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
     env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist), **dict(config.env)}
     for key, value in env.items():
         if key != "HOME":

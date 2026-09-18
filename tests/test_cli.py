@@ -635,6 +635,22 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
 
 
+def test_review_reports_missing_bwrap_like_check(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, monkeypatch
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    original = cli.runners.shutil.which
+    monkeypatch.setattr(
+        cli.runners.shutil, "which", lambda name: None if name == "bwrap" else original(name)
+    )
+    code, out, err = run(capsys, "review")
+    assert (code, out) == (2, "")
+    assert err == "sandbox unavailable: bwrap not found on PATH (install bubblewrap)\n"
+
+
 def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypatch) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
