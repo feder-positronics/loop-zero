@@ -65,13 +65,27 @@ def _repo_root(wt: Path) -> Path:
     return Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
 
 
-def _load_config(args: argparse.Namespace, root: Path) -> Config:
-    return config_mod.load(args.config or root / "workflow.toml")
+def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = False) -> Config:
+    path = args.config or root / "workflow.toml"
+    if not pin_checks:
+        return config_mod.load(path)
+    if args.config:
+        print("checks are unpinned because --config was provided")
+        return config_mod.load(path)
+    config = config_mod.load(path, checks={})
+    base_checks = config_mod.load_base(root, config.base_branch)
+    if base_checks is None:
+        return config_mod.load(path)
+    config = config_mod.load(path, checks=base_checks)
+    if args.command == "check":
+        revision = config_mod.base_revision(root, config.base_branch)
+        print(f"checks pinned to origin/{config.base_branch}@{revision}")
+    return config
 
 
-def _context(args: argparse.Namespace) -> tuple[Path, Config]:
+def _context(args: argparse.Namespace, *, pin_checks: bool = False) -> tuple[Path, Config]:
     wt = _toplevel()
-    return wt, _load_config(args, wt)
+    return wt, _load_config(args, wt, pin_checks=pin_checks)
 
 
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
@@ -83,11 +97,12 @@ def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
 
 
 def _primary_base(wt: Path, config: Config) -> str:
+    base = config_mod.base_revision(wt, config.base_branch)
     done = _proc.run(
-        ["git", "merge-base", f"origin/{config.base_branch}", "HEAD"],
+        ["git", "merge-base", base, "HEAD"],
         cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
     )
-    return done.stdout.strip() if done.exit_code == 0 else worktree.base_sha(wt)
+    return done.stdout.strip() if done.exit_code == 0 else base
 
 
 def _require_clean(wt: Path) -> None:
@@ -331,7 +346,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     try:
         report = sandbox.run_checks(config, wt)
     except sandbox.SandboxUnavailable as exc:
@@ -504,7 +519,7 @@ def _cleanup(wt: Path) -> None:
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     pr, readiness = _pr_readiness(wt, config)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
@@ -538,7 +553,7 @@ def _draft_checks_waiting(
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     branch = worktree.branch(wt)
     pr, readiness = _pr_readiness(wt, config, allow_merged=True)
     if readiness is None:
@@ -567,7 +582,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     if args.path:
         print(wt)
         return 0
-    config = _load_config(args, wt)
+    config = _load_config(args, wt, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     print(f"worktree: {wt}")
     print(f"branch:   {branch}")
