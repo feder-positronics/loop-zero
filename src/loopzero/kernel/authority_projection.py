@@ -520,7 +520,10 @@ def _authority_record_list(
 # a different object; appending to a history changes the key and therefore
 # self-invalidates. In-place mutation of an already-authenticated record is
 # outside the append-only authority contract.
-_AUTHENTICATION_CACHE_LIMIT = 8
+# Retained review recovery revisits more than eight exact history prefixes.
+# Keep that bounded working set warm; keys, pinned identities and transient
+# failure retry semantics remain unchanged.
+_AUTHENTICATION_CACHE_LIMIT = 64
 _authentication_cache: dict[tuple[object, ...], tuple[object, frozenset[int]]] = {}
 _REVIEW_STATE_CACHE_LIMIT = 16
 _generation_projection_cache: dict[
