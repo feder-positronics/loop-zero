@@ -18,6 +18,7 @@ hold all state. Nothing is recorded anywhere else.
    Findings are posted as one GitHub PR review with inline comments.
 5. `loopzero ready` — compute readiness (below). If ready, mark the PR ready
    for review.
+   If a draft is blocked only by missing or skipped required checks, mark it ready to trigger CI and exit 3 while waiting for those checks.
 6. `loopzero merge` — recompute readiness, merge with the configured strategy,
    verify the merge SHA, delete the branch and the worktree.
 

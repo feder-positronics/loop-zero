@@ -375,18 +375,28 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
 
 
 def check_runs(repo: str, head_sha: str) -> dict[str, str]:
-    """Map signal name to an aggregate state; every same-name signal must succeed."""
+    """Map signal name to state, using only the latest check run of each name."""
     signals: dict[str, list[str]] = {}
+    latest_runs: dict[str, dict] = {}
     for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
-        signals.setdefault(cr["name"], []).append(
-            cr.get("conclusion") or cr.get("status") or "unknown"
-        )
+        previous = latest_runs.get(cr["name"])
+        if previous is None or _check_run_order(cr) > _check_run_order(previous):
+            latest_runs[cr["name"]] = cr
+    for name, cr in latest_runs.items():
+        signals[name] = [cr.get("conclusion") or cr.get("status") or "unknown"]
     latest_status: dict[str, str] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status.get("state") or "unknown")
     for name, state in latest_status.items():
         signals.setdefault(name, []).append(state)
     return {name: _aggregate_signal(states) for name, states in signals.items()}
+
+
+def _check_run_order(run: dict) -> tuple[int, str]:
+    run_id = run.get("id")
+    started_at = run.get("started_at")
+    return (run_id if isinstance(run_id, int) else -1,
+            started_at if isinstance(started_at, str) else "")
 
 
 def _aggregate_signal(states: list[str]) -> str:

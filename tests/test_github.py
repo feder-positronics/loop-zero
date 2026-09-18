@@ -498,17 +498,46 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     assert pages == ["page=1", "page=2"]
 
 
-@pytest.mark.parametrize("reverse", [False, True])
-def test_check_runs_pending_wins_in_both_orders(gh: FakeGh, reverse: bool) -> None:
+def test_check_runs_stale_skipped_newer_success_is_success(gh: FakeGh) -> None:
     runs = [
-        {"name": "checks", "status": "completed", "conclusion": "success"},
-        {"name": "checks", "status": "in_progress", "conclusion": None},
+        {"id": 10, "name": "checks", "status": "completed", "conclusion": "skipped"},
+        {"id": 11, "name": "checks", "status": "completed", "conclusion": "success"},
     ]
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {
-        "check_runs": list(reversed(runs)) if reverse else runs,
-    })
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    assert github.check_runs(REPO, HEAD)["checks"] == "success"
+
+
+def test_check_runs_newer_pending_older_success_is_pending(gh: FakeGh) -> None:
+    runs = [
+        {"id": 20, "name": "checks", "status": "in_progress", "conclusion": None},
+        {"id": 19, "name": "checks", "status": "completed", "conclusion": "success"},
+    ]
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     assert github.check_runs(REPO, HEAD)["checks"] == "pending"
+
+
+def test_check_runs_two_names_one_failing_is_failure(gh: FakeGh) -> None:
+    runs = [
+        {"id": 30, "name": "checks", "status": "completed", "conclusion": "success"},
+        {"id": 31, "name": "lint", "status": "completed", "conclusion": "failure"},
+    ]
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    assert github.check_runs(REPO, HEAD) == {"checks": "success", "lint": "failure"}
+
+
+def test_check_runs_ties_ids_by_started_at(gh: FakeGh) -> None:
+    runs = [
+        {"id": 40, "name": "checks", "started_at": "2026-09-18T01:00:00Z",
+         "status": "completed", "conclusion": "failure"},
+        {"id": 40, "name": "checks", "started_at": "2026-09-18T02:00:00Z",
+         "status": "completed", "conclusion": "success"},
+    ]
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    assert github.check_runs(REPO, HEAD)["checks"] == "success"
 
 
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
