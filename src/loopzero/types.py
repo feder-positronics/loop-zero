@@ -70,3 +70,5 @@ class ReviewResult:
     verdict: str  # "approve" | "request_changes"
     findings: tuple[Finding, ...]
     raw: str  # untouched model output for the PR comment
+    model: str | None = None
+    duration_s: float | None = None

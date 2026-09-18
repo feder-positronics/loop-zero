@@ -232,10 +232,12 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in
               ("critical", "important", "suggestion")}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
+    duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
     lines = [prefix.rstrip("\n")] if prefix else []
     lines += [
         (
-            f"loopzero {result.kind} review by {result.family} on `{result.head}`: "
+            f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
+            f"model {result.model or 'unknown'}, {duration}: "
             f"**{result.verdict}** ({summary})"
         ),
     ]

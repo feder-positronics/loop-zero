@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 
 from loopzero import _proc
@@ -23,6 +24,7 @@ TAIL_CHARS = 2000
 
 # Extra environment each CLI needs to authenticate; forwarded only if present.
 CLAUDE_AUTH_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
+_CODEX_MODEL_RE = re.compile(r"^\s*model\s*:\s*(\S.*?)\s*$", re.IGNORECASE | re.MULTILINE)
 
 _AUTH_PATTERNS = (
     re.compile(r"not logged in", re.IGNORECASE),
@@ -263,7 +265,13 @@ def _review_claude(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int
             payload = _extract_json_object(str(envelope.get("result", "")))
         except (json.JSONDecodeError, ValueError) as exc:
             raise RunnerBadOutput("claude: result text is not JSON", _tail(raw)) from exc
-    return parse_review(payload, family="claude", head=head, kind=kind, raw=raw)
+    usage = envelope.get("modelUsage")
+    models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
+    model = ", ".join(models) or None
+    return replace(
+        parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
+        model=model, duration_s=done.duration_s,
+    )
 
 
 def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int) -> ReviewResult:
@@ -307,7 +315,11 @@ def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int)
         payload = _extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as exc:
         raise RunnerBadOutput("codex: final message is not JSON", _tail(raw)) from exc
-    return parse_review(payload, family="codex", head=head, kind=kind, raw=raw)
+    banner_model = _CODEX_MODEL_RE.search(done.stderr)
+    return replace(
+        parse_review(payload, family="codex", head=head, kind=kind, raw=raw),
+        model=banner_model.group(1) if banner_model else None, duration_s=done.duration_s,
+    )
 
 
 def review_with(
