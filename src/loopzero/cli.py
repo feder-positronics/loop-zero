@@ -238,7 +238,7 @@ def _load_report(wt: Path) -> CheckReport | None:
         return None
 
 
-def _checks_section(wt: Path, head: str) -> str:
+def _validation_section(wt: Path, head: str) -> str:
     loaded = _load_report(wt)
     if loaded is None:
         return "(no `loopzero check` run recorded)"
@@ -251,13 +251,40 @@ def _checks_section(wt: Path, head: str) -> str:
 
 
 def _pr_body(wt: Path, head: str) -> str:
-    """task.md with its `## Checks` section regenerated in place (appended when absent)."""
+    """task.md with Validation regenerated; legacy Checks headings migrate in place."""
     task = worktree.task_text(wt).rstrip()
-    section = f"## Checks\n{_checks_section(wt, head)}\n"
-    pattern = re.compile(r"^## Checks\n.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE)
+    section = f"## Validation\n{_validation_section(wt, head)}\n"
+    pattern = re.compile(r"^## (?:Validation|Checks)\n.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE)
     if pattern.search(task):
         return pattern.sub(lambda _: section + "\n", task, count=1).rstrip() + "\n"
     return f"{task}\n\n{section}"
+
+
+_REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
+
+
+def _require_pr_details(wt: Path) -> None:
+    """Refuse an unfilled Context/Problem/Goal line before the branch is pushed."""
+    task = worktree.task_text(wt)
+    for name in _REQUIRED_TASK_LINES:
+        match = re.search(rf"^- \*\*{name}:\*\*[ \t]*([^\r\n]*)$", task, re.MULTILINE)
+        value = match.group(1).strip() if match else ""
+        if not value or re.search(r"<[^>]+>", value):
+            raise CliError(f"fill '- **{name}:**' in {worktree.task_file(wt)}")
+
+
+def _append_review(body: str, result: ReviewResult) -> str:
+    """Append one compact review record under Review, replacing its placeholder."""
+    line = f"- {result.kind}, {result.family}, {result.head[:12]}, {result.verdict}"
+    pattern = re.compile(r"(^## Review\n)(.*?)(?=^## |\Z)", re.DOTALL | re.MULTILINE)
+    match = pattern.search(body)
+    if not match:
+        return f"{body.rstrip()}\n\n## Review\n{line}\n"
+    existing = match.group(2).rstrip()
+    if existing.startswith("(filled by `loopzero review`)"):
+        existing = ""
+    replacement = match.group(1) + (f"{existing}\n" if existing else "") + line + "\n\n"
+    return pattern.sub(lambda _: replacement, body, count=1).rstrip() + "\n"
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
@@ -275,7 +302,10 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
-_SECTIONS = {"objective", "acceptance", "base", "checks", "review", "notes"}
+_SECTIONS = {
+    "objective", "context and goal", "acceptance", "base", "checks", "validation",
+    "review", "notes",
+}
 
 
 def _pr_title(wt: Path, branch: str) -> str:
@@ -337,6 +367,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
+    _require_pr_details(wt)
     _git(wt, "push", "-u", "origin", branch)
     body = _pr_body(wt, head)
     pr = github.pr_for_branch(config.repo, branch)
@@ -374,6 +405,10 @@ def cmd_review(args: argparse.Namespace) -> int:
         raise CliError(
             f"{exc} | review saved at {path}; fix the cause and run `loopzero review --repost`"
         ) from exc
+    try:
+        github.update_body(config.repo, pr.number, _append_review(pr.body or _pr_body(wt, head), result))
+    except (github.GhError, OSError, ValueError) as exc:
+        print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")

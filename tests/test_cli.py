@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -63,6 +64,16 @@ def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
     path = Path(capsys.readouterr().out.strip())
     assert path == repo / ".worktrees" / "t1"
     (path / "feature.py").write_text("print('hi')\n")
+    task = path / ".loopzero" / "task.md"
+    task.write_text(
+        task.read_text()
+        .replace(
+            "<one or two sentences: where this sits, what exists today>",
+            "The feature module is part of the sample application.",
+        )
+        .replace("<what is wrong or missing, observable>", "The feature is missing.")
+        .replace("<what will be true when done>", "The feature prints its greeting.")
+    )
     git(path, "add", "feature.py")
     git(path, "commit", "-q", "-m", "add feature")
     monkeypatch.chdir(path)
@@ -155,7 +166,7 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert report["results"][0]["tail"] == "ok"
 
 
-def test_check_with_open_pr_patches_checks_section(
+def test_check_with_open_pr_patches_validation_section(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
@@ -170,7 +181,7 @@ def test_check_with_open_pr_patches_checks_section(
         ["pr", "list"], ["api", f"repos/{REPO}/pulls/7"],
     ]
     body = json.loads(gh.calls[1]["--input"])["body"]
-    assert body.count("## Checks") == 1
+    assert body.count("## Validation") == 1
     assert f"Recorded for `{head[:12]}`" in body
     assert "- `echo ok`: exit 0" in body
 
@@ -250,27 +261,50 @@ def test_pr_pushes_and_creates_draft(wt: Path, repo: Path, gh: FakeGh, capsys) -
     heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
     assert create["argv"][create["argv"].index("--title") + 1] == heading
     body = create["--body-file"]
-    assert "## Objective" in body and git(repo, "rev-parse", "origin/main").strip() in body
-    assert body.count("## Checks") == 1 and f"Recorded for `{head[:12]}`" in body
-    assert "(filled by `loopzero pr`" not in body, "placeholder replaced in place"
-    assert body.index("## Checks") < body.index("## Review") < body.index("## Notes")
+    assert "## Context and goal" in body and git(repo, "rev-parse", "origin/main").strip() in body
+    assert body.count("## Validation") == 1 and f"Recorded for `{head[:12]}`" in body
+    assert "(filled by `loopzero check`)" not in body, "placeholder replaced in place"
+    assert body.index("## Validation") < body.index("## Review") < body.index("## Notes")
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
 
 
 def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
     task = wt / ".loopzero" / "task.md"
-    task.write_text("## Objective\nx\n\n# Add the feature flag\n\nBase: "
-                    + git(wt, "rev-parse", "HEAD~1"))
-    gh.respond("pr list", [], [pr_json(headRefOid=head_of(wt))])
-    gh.respond("pr create", URL + "\n")
-    assert run(capsys, "pr")[0] == 0
-    argv = gh.calls[1]["argv"]
-    assert argv[argv.index("--title") + 1] == "Add the feature flag"
+    task.write_text("## Objective\nx\n\n# Add the feature flag\n")
+    assert cli._pr_title(wt, "lz/t1") == "Add the feature flag"
     task.write_text("## Objective\nonly sections\n")
-    gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
-    gh.respond(f"api repos/{REPO}/pulls/7", {})
-    assert run(capsys, "pr")[0] == 0
     assert cli._pr_title(wt, "lz/t1") == "lz/t1"
+
+
+@pytest.mark.parametrize("name,value", [
+    ("Context", ""),
+    ("Problem", "<what is wrong or missing, observable>"),
+    ("Goal", "<what will be true when done>"),
+])
+def test_pr_refuses_missing_context_problem_or_goal(
+    wt: Path, gh: FakeGh, capsys, name: str, value: str
+) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(re.sub(
+        rf"^- \*\*{name}:\*\*.*$", f"- **{name}:** {value}", task.read_text(),
+        flags=re.MULTILINE,
+    ))
+
+    code, out, err = run(capsys, "pr")
+
+    assert code == 1 and out == "" and f"- **{name}:**" in err
+    assert gh.calls == []
+
+
+def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(task.read_text().replace("## Validation", "## Checks"))
+
+    body = cli._pr_body(wt, head_of(wt))
+
+    assert "## Checks" not in body
+    assert body.count("## Validation") == 1
+    assert "(no `loopzero check` run recorded)" in body
 
 
 def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
@@ -295,7 +329,9 @@ def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
 
 
 def arm_pr(gh: FakeGh, head: str, **over) -> None:
-    gh.respond("pr list", [pr_json(headRefOid=head, **over)])
+    body = "# T1\n\n## Review\n(filled by `loopzero review`)\n\n## Notes\n"
+    gh.respond("pr list", [pr_json(headRefOid=head, body=body, **over)])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
 
 
 def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
@@ -315,7 +351,9 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert payload["commit_id"] == head and payload["event"] == "REQUEST_CHANGES"
     assert marker(head, "primary") in payload["body"]
     prompt = (fake_bin / "claude.stdin").read_text()
-    assert "+print('hi')" in prompt and "primary review" in prompt and "## Objective" in prompt
+    assert "+print('hi')" in prompt and "primary review" in prompt and "## Context and goal" in prompt
+    updated = json.loads(gh.calls[-1]["--input"])["body"]
+    assert f"- primary, claude, {head[:12]}, request_changes" in updated
 
 
 def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
@@ -337,7 +375,10 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     code, out, err = run(capsys, "review", "--repost")
     assert (code, err) == (0, "") and out.startswith("primary review by claude"), err
     assert not (fake_bin / "claude.stdin").exists(), "no model invoked"
-    payload = json.loads(gh.calls[-1]["--input"])
+    payload = json.loads(next(
+        c["--input"] for c in reversed(gh.calls)
+        if c["argv"][1] == post_key().split(" ")[1]
+    ))
     assert marker(head, "primary") in payload["body"] and "Nit" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 
@@ -371,8 +412,29 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     assert code == 0 and out.startswith(f"delta review by claude on {head[:12]}: approve")
     prompt = (fake_bin / "claude.stdin").read_text()
     assert "+x = 2" in prompt and "print('hi')" not in prompt and "delta review" in prompt
-    payload = json.loads(gh.calls[-1]["--input"])
+    payload = json.loads(next(
+        c["--input"] for c in reversed(gh.calls)
+        if c["argv"][1] == post_key().split(" ")[1]
+    ))
     assert marker(head, "delta") in payload["body"]
+
+
+def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys) -> None:
+    head = head_of(wt)
+    prior = "- primary, codex, 123456789abc, request_changes"
+    body = f"# T1\n\n## Review\n{prior}\n\n## Notes\n"
+    gh.respond("pr list", [pr_json(headRefOid=head, body=body)])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 3})
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+
+    assert run(capsys, "review")[0] == 0
+
+    updated = json.loads(gh.calls[-1]["--input"])["body"]
+    assert prior in updated
+    assert f"- primary, claude, {head[:12]}, approve" in updated
+    assert updated.index(prior) < updated.index(head[:12]) < updated.index("## Notes")
 
 
 def test_review_ignores_markers_outside_lineage(wt: Path, gh: FakeGh, fake_bin, capsys) -> None:

@@ -49,9 +49,9 @@ repository root and set `[repo] name`. Then:
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
-$EDITOR .loopzero/task.md             # fill Objective and Acceptance
+$EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
 # ...make a small change and add a test...
-loopzero check                        # exit 0, or FAIL with the failing tails; report in .loopzero/checks.json
+loopzero check                        # exit 0, or FAIL; renders the PR Validation section when open
 loopzero pr                           # draft PR opens; URL printed
 loopzero review                       # model review posted on the PR
 loopzero check && loopzero review     # after fixing blocking threads: delta review

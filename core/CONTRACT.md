@@ -7,7 +7,7 @@ hold all state. Nothing is recorded anywhere else.
 
 1. `loopzero start <task-slug>` — create a worktree and branch off the current
    base. Write `.loopzero/task.md` from the [handoff template](HANDOFF.md):
-   objective, acceptance, base SHA.
+   context, problem, goal, acceptance, base SHA.
 2. Implement, then `loopzero check` — run the commands declared in
    `workflow.toml` `[checks].commands` inside the sandbox described below.
    The exit code is the verdict. Nothing is signed or archived.
