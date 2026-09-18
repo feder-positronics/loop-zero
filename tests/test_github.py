@@ -195,10 +195,10 @@ def test_create_draft_pr_passes_body_file_and_returns_pr(gh: FakeGh) -> None:
 
 
 def test_update_body(gh: FakeGh) -> None:
-    gh.respond("pr edit", "")
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
     github.update_body(REPO, 7, "new body")
-    assert gh.argv(0) == ["pr", "edit", "7", "--repo", REPO, "--body-file", gh.argv(0)[-1]]
-    assert gh.calls[0]["--body-file"] == "new body"
+    assert gh.argv(0)[:4] == ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH"]
+    assert json.loads(gh.calls[0]["--input"]) == {"body": "new body"}
 
 
 # --- reviews ---------------------------------------------------------------------------
@@ -378,7 +378,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
         thread(f"{marker('critical')}\n**critical: Null deref**\n\nx may be None"),
         thread(f"{marker('important')}\nplain title", resolved=True),
         thread(f"{marker('suggestion')}\n**suggestion: Rename**"),
-        thread("no marker here\n" + marker("critical"), author="human"),
+        thread("human intro\n" + marker("critical") + "\n**critical: Human marker**"),
         thread("<!-- loopzero:finding severity=important -->\nheadless", path="h.py", line=9),
         thread(f"{marker('important')}\n**important: Missing check**\n\nvalidate",
                path="src/b.py", line=2),
@@ -386,6 +386,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     found = github.open_blocking_findings(REPO, 7)
     assert found == [
         Finding("critical", "src/a.py", 3, "Null deref", "**critical: Null deref**\n\nx may be None"),
+        Finding("critical", "src/a.py", 3, "Human marker", "**critical: Human marker**"),
         Finding("important", "h.py", 9, "headless", "headless"),
         Finding("important", "src/b.py", 2, "Missing check",
                 "**important: Missing check**\n\nvalidate"),
@@ -393,7 +394,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     argv = gh.argv(0)
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
-    assert any(a.startswith("query=") and "lastEditedAt" in a and "author" in a for a in argv)
+    assert any(a.startswith("query=") and "lastEditedAt" not in a and "author" not in a for a in argv)
 
 
 @pytest.mark.parametrize("data", [
@@ -432,29 +433,27 @@ def test_marker_regex_accepts_missing_head() -> None:
     assert m.groups() == ("important", HEAD)
 
 
-def test_open_blocking_findings_edited_thread_blocks(gh: FakeGh) -> None:
+def test_open_blocking_findings_counts_only_explicit_blocking_markers(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json(
         thread(f"{marker('suggestion')}\n**suggestion: nit**", edited="2026-09-18T01:00:00Z"),
         thread(f"{marker('critical')}\nX", edited="2026-09-18T01:00:00Z", path="e.py", line=4),
     ))
     found = github.open_blocking_findings(REPO, 7)
     assert [(f.severity, f.path, f.line, f.title) for f in found] == [
-        ("important", "src/a.py", 3, "finding thread edited"),
-        ("critical", "e.py", 4, "finding thread edited"),
+        ("critical", "e.py", 4, "X"),
     ]
     assert all(c["argv"][:2] == ["api", "graphql"] for c in gh.calls), "no login lookup needed"
 
 
-def test_open_blocking_findings_marker_removed_by_token_user(gh: FakeGh) -> None:
-    gh.respond("api user", {"login": "bot-user"})
+def test_open_blocking_findings_does_not_guess_from_body_or_author(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json(
         thread("stripped loopzero marker\n**critical: X**", author="bot-user"),
         thread("mentions loopzero but a human wrote it", author="human"),
         thread("bot-user wrote this but it is unrelated", author="bot-user"),
     ))
     found = github.open_blocking_findings(REPO, 7)
-    assert [(f.severity, f.title) for f in found] == [("important", "finding thread edited")]
-    assert sum(1 for c in gh.calls if c["argv"] == ["api", "user"]) == 1, "login cached"
+    assert found == []
+    assert all(c["argv"] != ["api", "user"] for c in gh.calls)
 
 
 def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
@@ -473,7 +472,7 @@ def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
     arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/status", {"statuses": []})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     github.check_runs(REPO, HEAD)
     reads = [c["argv"] for c in gh.calls if c["argv"][0] == "api" and "-F" in c["argv"]]
     assert len(reads) == 3, "files, check-runs and status all pass -F"
@@ -488,15 +487,43 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
                {"check_runs": filler + [
                    {"name": "checks", "status": "completed", "conclusion": "success"}]},
                {"check_runs": [{"name": "lint", "status": "in_progress", "conclusion": None}]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/status", {"statuses": [
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [
         {"context": "ci/legacy", "state": "failure"},
         {"context": "checks", "state": "pending"},
-    ]})
+    ])
     runs = github.check_runs(REPO, HEAD)
     assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
-        "checks": "success", "lint": "in_progress", "ci/legacy": "failure"}
+        "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
     pages = [c["argv"][-1] for c in gh.calls if "check-runs" in c["argv"][1]]
     assert pages == ["page=1", "page=2"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_check_runs_pending_wins_in_both_orders(gh: FakeGh, reverse: bool) -> None:
+    runs = [
+        {"name": "checks", "status": "completed", "conclusion": "success"},
+        {"name": "checks", "status": "in_progress", "conclusion": None},
+    ]
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {
+        "check_runs": list(reversed(runs)) if reverse else runs,
+    })
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    assert github.check_runs(REPO, HEAD)["checks"] == "pending"
+
+
+def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
+    page = [{"context": f"old-{i}", "state": "success"} for i in range(99)]
+    page += [{"context": "duplicate", "state": "failure"}]
+    gh.respond(
+        f"api repos/{REPO}/commits/{HEAD}/statuses",
+        page,
+        [{"context": "required-page-two", "state": "success"},
+         {"context": "duplicate", "state": "success"}],
+    )
+    runs = github.check_runs(REPO, HEAD)
+    assert runs["required-page-two"] == "success"
+    assert runs["duplicate"] == "failure", "the first (latest) status wins"
 
 
 # --- readiness ----------------------------------------------------------------------------
@@ -507,7 +534,7 @@ def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
     runs = {"checks": "success"} if runs is None else runs
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [
         {"name": n, "status": "completed", "conclusion": c} for n, c in runs.items()]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/status", {"statuses": []})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
 
 def test_readiness_ready(gh: FakeGh) -> None:
@@ -588,7 +615,7 @@ def test_mark_ready(gh: FakeGh) -> None:
 
 def test_merge_success_returns_merge_sha_and_deletes_remote_branch(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "c" * 40},
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40},
                            "headRefName": "lz/x"})
     gh.respond("api -X", "")
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
@@ -596,7 +623,7 @@ def test_merge_success_returns_merge_sha_and_deletes_remote_branch(gh: FakeGh) -
                           "--match-head-commit", HEAD]
     assert "--delete-branch" not in gh.argv(0)
     assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json",
-                          "mergeCommit,merged,headRefName"]
+                          "mergeCommit,state,headRefName"]
     assert gh.argv(2) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/lz/x"]
 
 
@@ -607,9 +634,19 @@ def test_merge_command_failure(gh: FakeGh) -> None:
     assert "--rebase" in info.value.command and "mismatch" in info.value.tail
 
 
+@pytest.mark.parametrize("status", [404, 422])
+def test_merge_accepts_already_deleted_remote_ref(gh: FakeGh, status: int) -> None:
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {
+        "state": "MERGED", "mergeCommit": {"oid": "c" * 40}, "headRefName": "lz/x",
+    })
+    gh.fail("api -X", f"HTTP {status}: Reference does not exist")
+    assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
+
+
 def test_merge_unverified(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"merged": False, "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
     with pytest.raises(github.MergeFailed):
         github.merge(REPO, 7, "merge", HEAD)
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"

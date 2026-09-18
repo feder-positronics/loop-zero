@@ -30,7 +30,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           isResolved isOutdated path line
-          comments(first: 1) { nodes { body createdAt lastEditedAt author { login } } }
+          comments(first: 1) { nodes { body } }
         }
       }
     }
@@ -200,11 +200,7 @@ def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) ->
 
 
 def update_body(repo: str, number: int, body: str) -> None:
-    path = _with_file(body)
-    try:
-        _gh("pr", "edit", str(number), "--repo", repo, "--body-file", str(path))
-    finally:
-        path.unlink(missing_ok=True)
+    _api(f"repos/{repo}/pulls/{number}", {"body": body}, method="PATCH")
 
 
 def finding_marker(severity: str, head_sha: str) -> str:
@@ -330,38 +326,17 @@ def _title_of(text: str) -> str:
     return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
 
 
-class _Login:
-    """Lazily resolved login of the `gh` token user."""
-
-    def __init__(self) -> None:
-        self.value: str | None = None
-
-    def get(self) -> str:
-        if self.value is None:
-            self.value = login()
-        return self.value
-
-
-def _parse_thread(node: dict, login: _Login) -> Finding | None:
+def _parse_thread(node: dict) -> Finding | None:
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
     first = comments[0]
     body = first.get("body") or ""
-    head_line, _, rest = body.partition("\n")
-    match = MARKER_RE.search(head_line)
-    ours = bool(match) or (
-        "loopzero" in body and (first.get("author") or {}).get("login") == login.get()
-    )
-    if not ours:
+    match = MARKER_RE.search(body)
+    if not match or match.group(1) not in BLOCKING:
         return None
-    severity = match.group(1) if match else "important"
-    if first.get("lastEditedAt") or not match:
-        return Finding(severity=severity if severity in BLOCKING else "important",
-                       path=node.get("path"), line=node.get("line"),
-                       title="finding thread edited", body=body)
-    if severity not in BLOCKING:
-        return None
+    severity = match.group(1)
+    rest = body[match.end():].lstrip()
     return Finding(severity=severity, path=node.get("path"), line=node.get("line"),
                    title=_title_of(rest), body=rest.strip())
 
@@ -369,13 +344,11 @@ def _parse_thread(node: dict, login: _Login) -> Finding | None:
 def open_blocking_findings(repo: str, number: int) -> list[Finding]:
     """Findings from unresolved review threads whose first comment carries a blocking marker.
 
-    Threads that were edited after creation, or that look like ours but lost the marker,
-    are reported as blocking with the title "finding thread edited".
+    Only explicit critical and important markers block.
     """
     owner, name = repo.split("/", 1)
     after: str | None = None
     found: list[Finding] = []
-    login = _Login()
     while True:
         args = [
             "api", "graphql", "-f", f"query={_THREADS_QUERY}", "-F", f"owner={owner}",
@@ -391,7 +364,7 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
             for node in nodes:
                 if node.get("isResolved"):
                     continue
-                finding = _parse_thread(node, login)
+                finding = _parse_thread(node)
                 if finding:
                     found.append(finding)
             if not page["hasNextPage"]:
@@ -402,15 +375,26 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
 
 
 def check_runs(repo: str, head_sha: str) -> dict[str, str]:
-    """Map check name -> conclusion for check runs and commit statuses on `head_sha`."""
-    out: dict[str, str] = {}
+    """Map signal name to an aggregate state; every same-name signal must succeed."""
+    signals: dict[str, list[str]] = {}
     for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
-        out[cr["name"]] = cr.get("conclusion") or cr.get("status") or "unknown"
-    status = _gh_json("api", f"repos/{repo}/commits/{head_sha}/status", "--method", "GET",
-                      "-F", "per_page=100")
-    for st in (status or {}).get("statuses") or []:
-        out.setdefault(st["context"], st.get("state") or "unknown")
-    return out
+        signals.setdefault(cr["name"], []).append(
+            cr.get("conclusion") or cr.get("status") or "unknown"
+        )
+    latest_status: dict[str, str] = {}
+    for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
+        latest_status.setdefault(status["context"], status.get("state") or "unknown")
+    for name, state in latest_status.items():
+        signals.setdefault(name, []).append(state)
+    return {name: _aggregate_signal(states) for name, states in signals.items()}
+
+
+def _aggregate_signal(states: list[str]) -> str:
+    if all(state == "success" for state in states):
+        return "success"
+    pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
+    failures = [state for state in states if state != "success" and state not in pending]
+    return failures[0] if failures else "pending"
 
 
 def readiness(
@@ -456,12 +440,19 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str:
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
     view = _gh_json(
-        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,merged,headRefName"
+        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,state,headRefName"
     ) or {}
     sha = (view.get("mergeCommit") or {}).get("oid")
-    if not view.get("merged") or not sha:
+    if view.get("state") != "MERGED" or not sha:
         raise MergeFailed(("gh", *argv), f"PR #{number} not verified merged: {view!r}")
     branch = view.get("headRefName")
     if branch:
-        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
+        try:
+            _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
+        except GhError as exc:
+            absent = re.search(r"\b(?:404|422)\b", exc.tail) and re.search(
+                r"reference does not exist", exc.tail, re.IGNORECASE
+            )
+            if not absent:
+                raise
     return sha

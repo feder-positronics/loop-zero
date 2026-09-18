@@ -102,7 +102,8 @@ def _build(data: dict[str, Any]) -> Config:
     if "scratch" in checks:
         kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
         for entry in kwargs["scratch"]:
-            if entry.startswith("/") or ".." in Path(entry).parts:
+            parts = Path(entry).parts
+            if entry in ("", ".") or entry.startswith("/") or ".." in parts or parts[0] == ".git":
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     return Config(
         repo=name,

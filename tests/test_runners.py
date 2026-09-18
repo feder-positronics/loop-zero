@@ -76,6 +76,9 @@ def _fake_codex(bin_dir: Path, last_message: str, *, exit_code: int = 0, stderr:
         "codex",
         f"""
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
+        printf '%s' "$CODEX_HOME" > "{bin_dir}/codex.home"
+        [ -e "$CODEX_HOME/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
+        [ ! -f "$CODEX_HOME/auth.json" ] || cat "$CODEX_HOME/auth.json" > "{bin_dir}/codex.auth"
         cat > "{bin_dir}/codex.stdin"
         [ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
         out=""; schema=""
@@ -137,6 +140,11 @@ def test_claude_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.Monk
     schema = json.loads(argv[argv.index("--json-schema") + 1])
     assert schema["properties"]["verdict"]["enum"] == ["approve", "request_changes"]
     assert "--no-session-persistence" in argv
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in argv
+    assert argv[argv.index("--disallowedTools") + 1] == (
+        "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch"
+    )
     assert "sk-secret" not in result.raw
 
 
@@ -229,14 +237,24 @@ def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
 # ----------------------------------------------------------------- codex
 
 
-def test_codex_approve(fake_bin: Path, tmp_path: Path) -> None:
+def test_codex_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    configured = tmp_path / "configured-codex"
+    configured.mkdir()
+    (configured / "auth.json").write_text('{"token":"secret"}')
+    (configured / "config.toml").write_text('[mcp_servers.danger]\ncommand="mutate"\n')
+    monkeypatch.setenv("CODEX_HOME", str(configured))
     _fake_codex(fake_bin, json.dumps(APPROVE))
     result = _review("codex", tmp_path)
     assert result.verdict == "approve" and result.family == "codex"
     argv = _argv(fake_bin, "codex")
     assert argv[:4] == ["exec", "--sandbox", "read-only", "--cd"]
     assert argv[4] == str(tmp_path) and "--ephemeral" in argv
+    assert argv[argv.index("-c") + 1] == "mcp_servers={}"
     assert argv[-1] == "-"
+    isolated = (fake_bin / "codex.home").read_text()
+    assert isolated != str(configured) and "loopzero-codex-" in isolated
+    assert (fake_bin / "codex.auth").read_text() == '{"token":"secret"}'
+    assert not (fake_bin / "codex.config").exists()
     assert "Do the thing" in (fake_bin / "codex.stdin").read_text()
 
 
@@ -273,6 +291,36 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
         review_with("claude", cwd=tmp_path, head="h", kind="full", diff="", task_text="")
 
 
+@pytest.mark.parametrize(
+    "finding",
+    [
+        {"severity": "critical"},
+        {"severity": "critical", "path": None, "line": None, "title": 4, "body": "x"},
+        {"severity": "critical", "path": None, "line": None, "title": "x", "body": []},
+        {
+            "severity": "critical", "path": None, "line": None,
+            "title": "x", "body": "y", "extra": 1,
+        },
+    ],
+)
+def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) -> None:
+    _fake_codex(fake_bin, json.dumps({"verdict": "request_changes", "findings": [finding]}))
+    with pytest.raises(RunnerBadOutput):
+        _review("codex", tmp_path)
+
+
+def test_timeout_becomes_bad_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from loopzero import _proc, runners
+
+    def timeout(*args, **kwargs):
+        raise _proc.ProcTimeout("timed out", "partial reviewer output")
+
+    monkeypatch.setattr(runners._proc, "run", timeout)
+    with pytest.raises(RunnerBadOutput, match="timed out") as info:
+        _review("claude", tmp_path)
+    assert "partial reviewer output" in info.value.tail
+
+
 # ----------------------------------------------------------------- family detection
 
 
@@ -307,6 +355,7 @@ def test_pick_reviewer() -> None:
     assert pick_reviewer(("claude", "codex"), "claude") == "codex"
     assert pick_reviewer(("claude", "codex"), "codex") == "claude"
     assert pick_reviewer(("claude", "codex"), None) == "claude"
-    assert pick_reviewer(("claude",), "claude") == "claude"
+    with pytest.raises(ValueError, match="no independent reviewer"):
+        pick_reviewer(("claude",), "claude")
     with pytest.raises(ValueError):
         pick_reviewer((), None)

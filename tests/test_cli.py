@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import cli
+from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
 from tests.test_github import FakeGh, pr_json, threads_json
 from tests.test_runners import APPROVE, CHANGES, _claude_envelope, _fake_claude
@@ -91,11 +92,17 @@ def post_key() -> str:
     return f"api repos/{REPO}/pulls/7/reviews"
 
 
-def arm_readiness(gh: FakeGh, head: str, *, threads=(), conclusion: str = "success") -> None:
+def arm_readiness(
+    gh: FakeGh, head: str, wt: Path, *, threads=(), conclusion: str = "success",
+    local_exit: int = 0, dirty: bool = False,
+) -> None:
     gh.respond("api graphql", threads_json(*threads))
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": [
         {"name": "checks", "status": "completed", "conclusion": conclusion}]})
-    gh.respond(f"api repos/{REPO}/commits/{head}/status", {"statuses": []})
+    gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
+    cli._save_report(
+        wt, CheckReport(head, dirty, (CheckResult("echo ok", local_exit, 0.1, ""),))
+    )
 
 
 def run(capsys, *argv: str) -> tuple[int, str, str]:
@@ -135,6 +142,7 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert lines[1].endswith("  test -f README.md")
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
+    assert report["dirty"] is False
     assert [(r["command"], r["exit_code"]) for r in report["results"]] == [
         ("echo ok", 0), ("test -f README.md", 0)]
     assert report["results"][0]["tail"] == "ok"
@@ -206,18 +214,20 @@ def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
     assert argv[argv.index("--title") + 1] == "Add the feature flag"
     task.write_text("## Objective\nonly sections\n")
     gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
-    gh.respond("pr edit", "")
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
     assert run(capsys, "pr")[0] == 0
     assert cli._pr_title(wt, "lz/t1") == "lz/t1"
 
 
 def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
-    gh.respond("pr edit", "")
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
     code, out, _ = run(capsys, "pr")
     assert code == 0 and out == URL + "\n"
-    assert [c["argv"][:2] for c in gh.calls] == [["pr", "list"], ["pr", "edit"]]
-    assert "(no `loopzero check` run recorded)" in gh.calls[1]["--body-file"]
+    assert [c["argv"][:2] for c in gh.calls] == [
+        ["pr", "list"], ["api", f"repos/{REPO}/pulls/7"]
+    ]
+    assert "(no `loopzero check` run recorded)" in gh.calls[1]["--input"]
 
 
 def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
@@ -368,9 +378,8 @@ def test_review_falls_through_when_preferred_family_fails(
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     fake_tool("codex", "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
-    assert code == 0 and out.startswith("primary review by claude")
-    assert "reviewer codex unavailable, trying next: codex: CLI is not authenticated" in err
-    assert "note: reviewer claude shares the author's model family" in err
+    assert code == 1 and out == ""
+    assert "codex: CLI is not authenticated" in err
 
 
 def test_review_fails_when_every_reviewer_fails(
@@ -387,6 +396,23 @@ def test_review_fails_when_every_reviewer_fails(
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
 
 
+def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypatch) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 4})
+
+    def review_with(family, **kwargs):
+        if family == "claude":
+            raise cli.runners.RunnerBadOutput("claude: timed out", "partial")
+        return ReviewResult("codex", head, "primary", "approve", (), "{}")
+
+    monkeypatch.setattr(cli.runners, "review_with", review_with)
+    code, out, err = run(capsys, "review")
+    assert code == 0 and out.startswith("primary review by codex")
+    assert "claude: timed out" in err
+
+
 # --- ready / merge / status ----------------------------------------------------------
 
 
@@ -394,7 +420,7 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
     gh.respond(reviews_key(), [rev(head, "primary", state="APPROVED")])
-    arm_readiness(gh, head)
+    arm_readiness(gh, head, wt)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
     assert (code, err) == (0, "") and out == f"ready: {URL}\n"
@@ -405,7 +431,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
-    arm_readiness(gh, head, conclusion="failure")
+    arm_readiness(gh, head, wt, conclusion="failure")
     code, out, _ = run(capsys, "ready")
     assert code == 1
     assert out.splitlines() == [
@@ -415,6 +441,29 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
+@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty"])
+def test_ready_requires_clean_successful_local_report_at_head(
+    wt: Path, gh: FakeGh, capsys, condition: str
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(
+        gh, head, wt, local_exit=1 if condition == "failed" else 0,
+        dirty=condition == "dirty",
+    )
+    report_path = wt / ".loopzero" / "checks.json"
+    if condition == "missing":
+        report_path.unlink()
+    elif condition == "wrong-head":
+        report = json.loads(report_path.read_text())
+        report["head"] = "0" * 40
+        report_path.write_text(json.dumps(report))
+    code, out, _ = run(capsys, "ready")
+    assert code == 1
+    assert out.endswith("not ready: run loopzero check at this head\n")
+
+
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
@@ -422,7 +471,7 @@ def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys) -> None:
         rev(head, "primary", login="stranger"),          # not the token's account
         rev(head, "primary", commit="1" * 40),           # commit_id does not match marker
     ])
-    arm_readiness(gh, head)
+    arm_readiness(gh, head, wt)
     code, out, _ = run(capsys, "ready")
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "user"]) == 1
@@ -440,27 +489,22 @@ def test_review_treats_forged_marker_as_fresh_lineage(wt: Path, gh: FakeGh, fake
     assert code == 0 and out.startswith("primary review by claude")
 
 
-def test_ready_refuses_request_changes_without_blocking_threads(wt: Path, gh: FakeGh,
-                                                                capsys) -> None:
+def test_ready_allows_resolved_request_changes_threads(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary", state="CHANGES_REQUESTED",
+    gh.respond(reviews_key(), [rev(head, "primary", state="COMMENTED",
                                    verdict="request_changes")])
-    arm_readiness(gh, head)
+    arm_readiness(gh, head, wt)
+    gh.respond("pr ready", "")
     code, out, _ = run(capsys, "ready")
-    assert code == 1
-    assert out == ("not ready: latest primary review requested changes but posted no "
-                   "blocking findings\n")
-    arm_pr(gh, head, isDraft=False)
-    code, _, err = run(capsys, "merge")
-    assert code == 1 and "requested changes but posted no blocking findings" in err
+    assert code == 0 and out == f"ready: {URL}\n"
 
 
 def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, threads=(
+    arm_readiness(gh, head, wt, threads=(
         {"isResolved": False, "isOutdated": False, "path": "feature.py", "line": 1,
          "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
                                          "\n**critical: Bad**"}]}},))
@@ -474,9 +518,9 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head)
+    arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "c" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}})
     code, out, err = run(capsys, "merge")
     assert (code, out, err) == (0, f"{'c' * 40}\ncd {repo}\n", "")
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
@@ -489,9 +533,9 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head)
+    arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "d" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "d" * 40}})
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("worktree is dirty")))
     code, out, err = run(capsys, "merge")
@@ -510,13 +554,14 @@ def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
     assert "pr:       none" in out
     arm_pr(gh, head)
     gh.respond(reviews_key(), [rev(head, "primary", state="APPROVED")])
-    arm_readiness(gh, head, conclusion="pending")
+    arm_readiness(gh, head, wt, conclusion="pending")
     (wt / "scratch").write_text("x")
     code, out, _ = run(capsys, "status")
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
+    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
 
 
 def test_gh_errors_are_one_line_on_stderr(wt: Path, gh: FakeGh, capsys) -> None:
@@ -576,10 +621,10 @@ def test_merge_of_externally_merged_pr_only_cleans_up(wt: Path, repo: Path, gh: 
 def test_pr_ignores_corrupt_checks_report(wt: Path, gh: FakeGh, capsys) -> None:
     (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
     gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
-    gh.respond("pr edit", "")
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
     code, _, err = run(capsys, "pr")
     assert code == 0 and "warning: ignoring unreadable" in err
-    assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--body-file"]
+    assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
 def test_unexpected_and_interrupt_exit_codes(wt: Path, capsys, monkeypatch) -> None:
@@ -607,7 +652,7 @@ def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys) -> None:
     arm_pr(gh, head)
     gh.respond(reviews_key(1), [rev("f" * 40, "primary", login="x")] * 100)
     gh.respond(reviews_key(2), [rev(head, "primary")])
-    arm_readiness(gh, head)
+    arm_readiness(gh, head, wt)
     gh.respond("pr ready", "")
     code, out, _ = run(capsys, "ready")
     assert code == 0 and out == f"ready: {URL}\n"

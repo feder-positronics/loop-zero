@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from contextlib import ExitStack
+from os.path import commonpath
 from pathlib import Path
 
 from . import _proc
@@ -53,19 +55,50 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
+    _validate_scratch(config.scratch, worktree, common_dir, git_dir)
     results = []
-    with tempfile.TemporaryDirectory(prefix="loopzero-home-") as home:
-        scratch = {entry: Path(home) / "scratch" / entry for entry in config.scratch}
+    with ExitStack() as stack:
+        home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))
+        scratch_root = Path(
+            stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-scratch-"))
+        )
+        private_parent = Path(commonpath((home, scratch_root)))
+        for exposed in (*config.sandbox_ro, *config.writable):
+            if private_parent.is_relative_to(Path(exposed).resolve()):
+                raise SandboxUnavailable(
+                    f"sandbox path {exposed!r} would expose private check directories"
+                )
+        scratch = {entry: scratch_root / entry for entry in config.scratch}
         for entry, source in scratch.items():
             source.mkdir(parents=True)
             # bwrap cannot create mount points inside a read-only bind, so the (empty,
             # git-invisible) directory must exist in the worktree before we start.
             (worktree / entry).mkdir(parents=True, exist_ok=True)
-        prefix = bwrap_argv(config, worktree, Path(home), common_dir, git_dir, scratch)
+        prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
         _probe(config, worktree, prefix)
         for command in config.checks:
             results.append(_run_one(config, worktree, prefix, command, timeout))
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
+
+
+def _validate_scratch(
+    entries: tuple[str, ...], worktree: Path, common_dir: Path, git_dir: Path
+) -> None:
+    """Reject scratch destinations that could escape or alter Git metadata."""
+    for entry in entries:
+        parts = Path(entry).parts
+        if not parts or entry in ("", ".") or Path(entry).is_absolute() or ".." in parts:
+            raise SandboxUnavailable(f"unsafe scratch destination {entry!r}")
+        destination = worktree.joinpath(*parts)
+        if parts[0] == ".git" or any(
+            destination == path or destination.is_relative_to(path) for path in (common_dir, git_dir)
+        ):
+            raise SandboxUnavailable(f"scratch destination touches Git metadata: {entry!r}")
+        current = worktree
+        for part in parts:
+            current /= part
+            if current.is_symlink():
+                raise SandboxUnavailable(f"scratch destination has symlink component: {entry!r}")
 
 
 def _run_one(
@@ -128,13 +161,13 @@ def bwrap_argv(
     for path in SYSTEM_RO:
         if Path(path).exists():
             argv += ["--ro-bind", path, path]
+    argv += ["--dev", "/dev", "--proc", "/proc"]
+    for path in ("/tmp", "/run", "/var/run"):
+        argv += ["--tmpfs", path]
     for path in config.sandbox_ro:
         argv += ["--ro-bind-try", path, path]
     for path in config.writable:
         argv += ["--bind-try", path, path]
-    argv += ["--dev", "/dev", "--proc", "/proc"]
-    for path in ("/tmp", "/run", "/var/run"):
-        argv += ["--tmpfs", path]
     argv += ["--bind", str(home), SANDBOX_HOME]
     # Bind the worktree and every Git directory read-only *after* the /tmp tmpfs so
     # they stay visible even when they live under /tmp, and are never writable.

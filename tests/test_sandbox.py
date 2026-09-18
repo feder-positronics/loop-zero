@@ -4,6 +4,7 @@ import itertools
 import os
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -90,10 +91,11 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     home_src, home_dst = binds[0]
     assert home_dst == sandbox.SANDBOX_HOME and Path(home_src).name.startswith("loopzero-home-")
     assert Path(home_src) != Path(os.environ.get("HOME", "/"))
-    # Scratch dirs: per-run tmp sources under the home dir, bound after the ro worktree bind.
+    # Scratch dirs use a separate, unexposed host root.
     scratch = {dst: src for src, dst in binds[1:]}
     assert list(scratch) == [str(git_repo / e) for e in make_config().scratch]
-    assert all(src.startswith(home_src + "/scratch/") for src in scratch.values())
+    assert all("loopzero-scratch-" in src for src in scratch.values())
+    assert all(not src.startswith(home_src + "/") for src in scratch.values())
     assert head.index(str(git_repo)) < head.index(str(git_repo / ".venv"))
     assert (git_repo / "node_modules/.cache").is_dir()
     assert sandbox.run_checks(make_config(), git_repo).dirty is False
@@ -124,6 +126,11 @@ def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch
     assert (setenv["UV_CACHE_DIR"], setenv["RUFF_CACHE_DIR"]) == (str(cache), "cfg")
 
 
+def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
+    with pytest.raises(sandbox.SandboxUnavailable, match="private check directories"):
+        sandbox.run_checks(make_config(writable=(tempfile.gettempdir(),)), git_repo)
+
+
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
     report = sandbox.run_checks(
         make_config(checks=("echo partial; sleep 5", "echo after")), git_repo, timeout=0.3
@@ -141,6 +148,21 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     binds = _pairs(argv_of(bwrap_log), "--ro-bind")
     common = (git_repo / ".git").resolve()
     assert binds[-2:] == [(str(linked.resolve()),) * 2, (str(common),) * 2]
+
+
+def test_scratch_rejects_symlink_parent_before_mkdir(git_repo, bwrap_log, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (git_repo / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(sandbox.SandboxUnavailable, match="symlink component"):
+        sandbox.run_checks(make_config(scratch=("linked/cache",)), git_repo)
+    assert not (outside / "cache").exists()
+
+
+@pytest.mark.parametrize("entry", [".", ".git", ".git/cache"])
+def test_scratch_rejects_worktree_and_git_metadata(git_repo, bwrap_log, entry):
+    with pytest.raises(sandbox.SandboxUnavailable, match="unsafe|Git metadata"):
+        sandbox.run_checks(make_config(scratch=(entry,)), git_repo)
 
 
 def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypatch):
@@ -201,6 +223,29 @@ def test_real_sandbox_hides_host_sockets_and_homes(git_repo):
     )
     report = sandbox.run_checks(make_config(checks=checks), git_repo)
     assert [r.exit_code for r in report.results] == [0] * len(checks), report
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+def test_real_sandbox_scratch_cannot_rebind_git_between_checks(git_repo):
+    sentinel = git_repo / ".git" / "external-sentinel"
+    sentinel.write_text("safe\n")
+    checks = (
+        'mkdir -p "$HOME/scratch"; ln -s "$PWD/.git" "$HOME/scratch/.venv"',
+        "echo escaped > .venv/external-sentinel",
+    )
+    report = sandbox.run_checks(make_config(checks=checks), git_repo)
+    assert [r.exit_code for r in report.results] == [0, 0]
+    assert sentinel.read_text() == "safe\n"
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+def test_real_sandbox_tmp_subpath_bind_stays_visible(git_repo, tmp_path):
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    (toolchain / "sentinel").write_text("visible\n")
+    cfg = make_config(checks=(f'test "$(cat {toolchain}/sentinel)" = visible',),
+                      sandbox_ro=(str(toolchain),))
+    assert sandbox.run_checks(cfg, git_repo).ok
 
 
 @pytest.mark.skipif(

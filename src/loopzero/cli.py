@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import functools
 import json
 import re
 import sys
@@ -124,12 +123,6 @@ def _pr_reviews(repo: str, number: int) -> list[dict]:
         page += 1
 
 
-@functools.cache
-def _token_login() -> str:
-    """Login of the account behind the `gh` token; cached for the duration of one command."""
-    return github.login()
-
-
 @dataclasses.dataclass(frozen=True)
 class Marker:
     head: str
@@ -145,12 +138,15 @@ def _lineage_markers(wt: Path, reviews: list[dict], head: str) -> list[Marker]:
     review author is the token login; anything else could be hand-posted.
     """
     found: list[Marker] = []
+    token_login: str | None = None
     for review in reviews:
         body = review.get("body") or ""
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
-        if (review.get("user") or {}).get("login") != _token_login():
+        if token_login is None:
+            token_login = github.login()
+        if (review.get("user") or {}).get("login") != token_login:
             continue
         if not _is_ancestor(wt, match.group(1), head):
             continue
@@ -184,16 +180,19 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
-def _readiness(wt: Path, config: Config, pr: github.PR, head: str) -> github.Readiness:
-    """`github.readiness` plus: a request_changes review with no blocking thread is not ready."""
-    markers = _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head)
+def _readiness(
+    wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None
+) -> github.Readiness:
+    markers = _lineage_markers(
+        wt, reviews if reviews is not None else _pr_reviews(config.repo, pr.number), head
+    )
     latest = markers[-1] if markers else None
     result = github.readiness(config.repo, pr, config.required_ci, latest.head if latest else None)
-    if latest and latest.verdict == "request_changes" and not any(
-        r.startswith("open ") for r in result.reasons
-    ):
-        reason = f"latest {latest.kind} review requested changes but posted no blocking findings"
-        result = github.Readiness(ready=False, reasons=(*result.reasons, reason))
+    report = _load_report(wt)
+    if report is None or report.head != head or report.dirty or not report.ok:
+        result = github.Readiness(
+            ready=False, reasons=(*result.reasons, "run loopzero check at this head")
+        )
     return result
 
 
@@ -205,19 +204,23 @@ def _save_report(wt: Path, report: CheckReport) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "head": report.head,
+        "dirty": report.dirty,
         "results": [dataclasses.asdict(result) for result in report.results],
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def _load_report(wt: Path) -> tuple[str, tuple[CheckResult, ...]] | None:
+def _load_report(wt: Path) -> CheckReport | None:
     path = wt / CHECKS_FILE
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text())
         results = tuple(CheckResult(**item) for item in data["results"])
-        return str(data["head"]), results
+        dirty = data["dirty"]
+        if not isinstance(dirty, bool):
+            raise TypeError("dirty must be a bool")
+        return CheckReport(head=str(data["head"]), dirty=dirty, results=results)
     except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
@@ -227,7 +230,7 @@ def _checks_section(wt: Path, head: str) -> str:
     loaded = _load_report(wt)
     if loaded is None:
         return "(no `loopzero check` run recorded)"
-    recorded, results = loaded
+    recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
     lines += [
         f"- `{r.command}`: exit {r.exit_code} ({r.duration_s:.1f}s)" for r in results
@@ -339,12 +342,12 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
     author = runners.author_family(wt, head)
-    first = runners.pick_reviewer(config.reviewers, author)
+    candidates = [family for family in config.reviewers if family != author]
     failures: list[str] = []
     result = None
-    for family in [first, *(f for f in config.reviewers if f != first)]:
-        if family == author:
-            print(f"note: reviewer {family} shares the author's model family", file=sys.stderr)
+    if not candidates:
+        failures.append(f"no independent reviewer configured for author family {author}")
+    for family in candidates:
         try:
             result = runners.review_with(
                 family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task
@@ -448,13 +451,14 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("pr:       none (run `loopzero pr`)")
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
-    markers = _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head)
+    reviews = _pr_reviews(config.repo, pr.number)
+    markers = _lineage_markers(wt, reviews, head)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none for this lineage")
-    readiness = _readiness(wt, config, pr, head)
+    readiness = _readiness(wt, config, pr, head, reviews)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")
@@ -498,7 +502,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    _token_login.cache_clear()
     try:
         return args.func(args)
     except HANDLED as exc:

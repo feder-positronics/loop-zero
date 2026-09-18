@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -22,7 +23,6 @@ TAIL_CHARS = 2000
 
 # Extra environment each CLI needs to authenticate; forwarded only if present.
 CLAUDE_AUTH_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CONFIG_DIR")
-CODEX_AUTH_ENV = ("OPENAI_API_KEY", "CODEX_HOME")
 
 _AUTH_PATTERNS = (
     re.compile(r"not logged in", re.IGNORECASE),
@@ -143,27 +143,36 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
     """Validate a decoded review object against the findings schema."""
     if not isinstance(payload, dict):
         raise RunnerBadOutput(f"{family}: review is not a JSON object", _tail(raw))
-    verdict = payload.get("verdict")
-    items = payload.get("findings")
-    if verdict not in ("approve", "request_changes") or not isinstance(items, list):
+    if set(payload) != {"verdict", "findings"}:
+        raise RunnerBadOutput(f"{family}: review has unexpected or missing keys", _tail(raw))
+    verdict, items = payload["verdict"], payload["findings"]
+    if (
+        not isinstance(verdict, str)
+        or verdict not in ("approve", "request_changes")
+        or not isinstance(items, list)
+    ):
         raise RunnerBadOutput(f"{family}: review lacks verdict/findings", _tail(raw))
     findings: list[Finding] = []
     for item in items:
-        if not isinstance(item, dict) or item.get("severity") not in SEVERITIES:
+        required = {"severity", "path", "line", "title", "body"}
+        if not isinstance(item, dict) or set(item) != required:
+            raise RunnerBadOutput(f"{family}: finding has unexpected or missing keys", _tail(raw))
+        if not isinstance(item["severity"], str) or item["severity"] not in SEVERITIES:
             raise RunnerBadOutput(f"{family}: finding has bad severity", _tail(raw))
-        path = item.get("path")
-        line = item.get("line")
+        path, line = item["path"], item["line"]
         if path is not None and not isinstance(path, str):
             raise RunnerBadOutput(f"{family}: finding path is not a string", _tail(raw))
         if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
             raise RunnerBadOutput(f"{family}: finding line is not an integer", _tail(raw))
+        if not isinstance(item["title"], str) or not isinstance(item["body"], str):
+            raise RunnerBadOutput(f"{family}: finding title/body must be strings", _tail(raw))
         findings.append(
             Finding(
                 severity=item["severity"],
                 path=path,
                 line=line,
-                title=str(item.get("title", "")).strip() or "(untitled)",
-                body=str(item.get("body", "")).strip(),
+                title=item["title"],
+                body=item["body"],
             )
         )
     if any(f.severity in BLOCKING for f in findings):
@@ -193,6 +202,8 @@ def _run(
         )
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
+    except _proc.ProcTimeout as exc:
+        raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", _tail(exc.output)) from exc
     if done.exit_code != 0:
         combined = f"{done.stdout}\n{done.stderr}"
         if _looks_like_auth_failure(combined):
@@ -227,6 +238,8 @@ def _review_claude(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int
         "--setting-sources",
         "",
         "--strict-mcp-config",
+        "--disallowedTools",
+        "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch",
     ]
     done = _run(
         argv, cwd=cwd, prompt=prompt, extra_env=_auth_env(CLAUDE_AUTH_ENV),
@@ -255,8 +268,15 @@ def _review_claude(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int
 
 def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int) -> ReviewResult:
     with tempfile.TemporaryDirectory(prefix="loopzero-codex-") as tmp:
-        schema_file = Path(tmp, "schema.json")
-        last_file = Path(tmp, "last.json")
+        root = Path(tmp)
+        codex_home = root / "home"
+        codex_home.mkdir()
+        configured_home = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+        auth = configured_home / "auth.json"
+        if auth.is_file():
+            shutil.copyfile(auth, codex_home / "auth.json")
+        schema_file = root / "schema.json"
+        last_file = root / "last.json"
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         argv = [
             "codex",
@@ -267,6 +287,8 @@ def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int)
             str(cwd),
             "--ephemeral",
             "--skip-git-repo-check",
+            "-c",
+            "mcp_servers={}",
             "--output-schema",
             str(schema_file),
             "--output-last-message",
@@ -274,7 +296,8 @@ def _review_codex(prompt: str, *, cwd: Path, head: str, kind: str, timeout: int)
             "-",
         ]
         done = _run(
-            argv, cwd=cwd, prompt=prompt, extra_env=_auth_env(CODEX_AUTH_ENV),
+            argv, cwd=cwd, prompt=prompt,
+            extra_env={**_auth_env(("OPENAI_API_KEY",)), "CODEX_HOME": str(codex_home)},
             timeout=timeout, family="codex",
         )
         raw = last_file.read_text(encoding="utf-8") if last_file.exists() else ""
@@ -344,4 +367,4 @@ def pick_reviewer(preferences: tuple[str, ...], author: str | None) -> str:
     for family in preferences:
         if family != author:
             return family
-    return preferences[0]
+    raise ValueError(f"no independent reviewer configured for author family {author}")
