@@ -50,7 +50,7 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
         raw="raw",
     )
     github.post_review(REPO, 7, HEAD, result)
-    github.open_blocking_findings(REPO, 7)
+    github.open_blocking_findings(REPO, 7, HEAD)
     github.check_runs(REPO, HEAD)
     github.mark_ready(REPO, 7)
     github.merge(REPO, 7, "squash", HEAD)

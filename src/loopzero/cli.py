@@ -16,7 +16,8 @@ from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroEr
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 REVIEW_MARKER_RE = re.compile(
-    r"<!--\s*loopzero:review\s+head=([0-9a-fA-F]{7,40})\s+kind=(primary|delta)\s*-->"
+    r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
+    r"kind=(primary|delta)\s*-->"
 )
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
@@ -40,7 +41,7 @@ class ReviewersUnavailable(CliError):
 
 
 def review_marker(head: str, kind: str) -> str:
-    return f"<!-- loopzero:review head={head} kind={kind} -->"
+    return f"<!-- loopzero:review v=1 head={head} kind={kind} -->"
 
 
 # --------------------------------------------------------------------------- git / context

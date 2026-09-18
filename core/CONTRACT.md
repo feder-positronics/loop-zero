@@ -44,7 +44,7 @@ or resolve threads; branch protection and CI remain the enforced gates.
 ## Findings
 
 - Findings live only in PR review threads. Each blocking finding is marked with
-  `<!-- loopzero:finding severity=critical head=<sha> -->` (or `important`).
+  `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->` (or `important`).
 - Severities: `critical` (wrong or unsafe; must fix), `important` (defect
   that ships a bug or breaks acceptance; must fix), `suggestion` (never
   counted, never blocks).

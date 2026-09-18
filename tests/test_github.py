@@ -179,8 +179,9 @@ def threads_json(*nodes: dict, has_next: bool = False, cursor: str | None = None
 
 
 def thread(body: str, resolved: bool = False, path: str = "src/a.py", line: int = 3,
-           author: str = "bot-user", edited: str | None = None) -> dict:
-    return {"isResolved": resolved, "isOutdated": False, "path": path, "line": line,
+           author: str = "bot-user", edited: str | None = None,
+           outdated: bool = False) -> dict:
+    return {"isResolved": resolved, "isOutdated": outdated, "path": path, "line": line,
             "comments": {"nodes": [{"body": body, "createdAt": "2026-09-18T00:00:00Z",
                                     "lastEditedAt": edited, "author": {"login": author}}]}}
 
@@ -317,8 +318,8 @@ def test_post_review_payload(gh: FakeGh) -> None:
     assert [(c["path"], c["line"], c["side"]) for c in comments] == [
         ("src/a.py", 10, "RIGHT"), ("src/b.py", 2, "RIGHT"), ("src/c.py", 5, "RIGHT"),
         ("src/a.py", 11, "RIGHT")]
-    assert comments[0]["body"].split("\n")[0] == marker("critical")
-    assert comments[1]["body"].split("\n")[0] == marker("important")
+    assert comments[0]["body"].split("\n")[0] == github.finding_marker("critical", HEAD, FINDINGS[0])
+    assert comments[1]["body"].split("\n")[0] == github.finding_marker("important", HEAD, FINDINGS[1])
     assert "loopzero:finding" not in comments[2]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
     body = payload["body"]
@@ -336,7 +337,7 @@ def test_post_review_anchors_unlocated_blocking_findings(gh: FakeGh) -> None:
     (comment,) = payload["comments"]
     assert comment == {**comment, "path": "src/a.py", "line": 11, "side": "RIGHT"}
     lines = comment["body"].split("\n")
-    assert lines[0] == marker("critical")
+    assert lines[0] == github.finding_marker("critical", HEAD, findings[0])
     assert lines[1] == "No file location given by the reviewer; anchored here."
     assert "Global" in comment["body"] and "no file" in comment["body"]
     assert "Nit" in payload["body"] and "Global" not in payload["body"]
@@ -459,9 +460,12 @@ def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
 
 
 def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
+    versioned = github.finding_marker(
+        "critical", HEAD, Finding("critical", "src/a.py", 3, "Null deref", "x may be None")
+    )
     gh.respond("api user", {"login": "bot-user"})
     gh.respond("api graphql", threads_json(
-        thread(f"{marker('critical')}\n**critical: Null deref**\n\nx may be None"),
+        thread(f"{versioned}\n**critical: Null deref**\n\nx may be None"),
         thread(f"{marker('important')}\nplain title", resolved=True),
         thread(f"{marker('suggestion')}\n**suggestion: Rename**"),
         thread("human intro\n" + marker("critical") + "\n**critical: Human marker**"),
@@ -469,7 +473,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
         thread(f"{marker('important')}\n**important: Missing check**\n\nvalidate",
                path="src/b.py", line=2),
     ))
-    found = github.open_blocking_findings(REPO, 7)
+    found = github.open_blocking_findings(REPO, 7, HEAD)
     assert found == [
         Finding("critical", "src/a.py", 3, "Null deref", "**critical: Null deref**\n\nx may be None"),
         Finding("critical", "src/a.py", 3, "Human marker", "**critical: Human marker**"),
@@ -492,7 +496,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
 def test_open_blocking_findings_missing_pr_is_gh_error(gh: FakeGh, data: dict) -> None:
     gh.respond("api graphql", data)
     with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
-        github.open_blocking_findings(REPO, 7)
+        github.open_blocking_findings(REPO, 7, HEAD)
 
 
 def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
@@ -512,11 +516,24 @@ def test_api_get_and_login_helpers(gh: FakeGh) -> None:
         github.login()
 
 
-def test_marker_regex_accepts_missing_head() -> None:
-    assert github.MARKER_RE.search("<!-- loopzero:finding severity=critical -->").group(1) == \
-        "critical"
-    m = github.MARKER_RE.search(github.finding_marker("important", HEAD))
-    assert m.groups() == ("important", HEAD)
+def test_marker_parser_accepts_old_and_v1_forms() -> None:
+    old = github.MARKER_RE.search("<!-- loopzero:finding severity=critical -->")
+    assert old and old.groupdict() == {
+        "version": None, "severity": "critical", "head": None, "id": None,
+    }
+    finding = Finding("important", "src/b.py", 2, "Missing check", "validate")
+    new = github.MARKER_RE.search(github.finding_marker("important", HEAD, finding))
+    assert new and new.groupdict() == {
+        "version": "1", "severity": "important", "head": HEAD,
+        "id": github.finding_id(HEAD, "src/b.py", 2, "Missing check"),
+    }
+
+
+def test_finding_id_is_deterministic_and_uses_location_and_title() -> None:
+    expected = "aa3b81ec"
+    assert github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected
+    assert github.finding_id(HEAD, "src/a.py", 10, "Null deref") == expected
+    assert github.finding_id(HEAD, "src/a.py", 11, "Null deref") != expected
 
 
 def test_open_blocking_findings_counts_only_explicit_blocking_markers(gh: FakeGh) -> None:
@@ -524,7 +541,7 @@ def test_open_blocking_findings_counts_only_explicit_blocking_markers(gh: FakeGh
         thread(f"{marker('suggestion')}\n**suggestion: nit**", edited="2026-09-18T01:00:00Z"),
         thread(f"{marker('critical')}\nX", edited="2026-09-18T01:00:00Z", path="e.py", line=4),
     ))
-    found = github.open_blocking_findings(REPO, 7)
+    found = github.open_blocking_findings(REPO, 7, HEAD)
     assert [(f.severity, f.path, f.line, f.title) for f in found] == [
         ("critical", "e.py", 4, "X"),
     ]
@@ -537,7 +554,7 @@ def test_open_blocking_findings_does_not_guess_from_body_or_author(gh: FakeGh) -
         thread("mentions loopzero but a human wrote it", author="human"),
         thread("bot-user wrote this but it is unrelated", author="bot-user"),
     ))
-    found = github.open_blocking_findings(REPO, 7)
+    found = github.open_blocking_findings(REPO, 7, HEAD)
     assert found == []
     assert all(c["argv"] != ["api", "user"] for c in gh.calls)
 
@@ -546,7 +563,7 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
     gh.respond("api graphql",
                threads_json(thread(f"{marker('critical')}\nA"), has_next=True, cursor="C1"),
                threads_json(thread(f"{marker('important')}\nB")))
-    found = github.open_blocking_findings(REPO, 7)
+    found = github.open_blocking_findings(REPO, 7, HEAD)
     assert [f.title for f in found] == ["A", "B"]
     assert "after=C1" not in gh.argv(0) and "after=C1" in gh.argv(1)
 
@@ -689,6 +706,23 @@ def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> No
     arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
                                thread(f"{marker('suggestion')}\nY")))
     assert github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD).ready
+
+
+def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
+    gh: FakeGh,
+) -> None:
+    stale = "b" * 40
+    arm_readiness(gh, threads=(
+        thread(f"{marker('important', stale)}\n**important: Still applies**"),
+        thread(f"{marker('critical', stale)}\n**critical: Obsolete**", outdated=True),
+        thread(f"{marker('critical')}\n**critical: Current**", outdated=True),
+        thread(f"{marker('critical')}\n**critical: Resolved**", resolved=True),
+    ))
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), ("checks",), HEAD)
+    assert result.reasons == (
+        "open important finding at src/a.py:3: Still applies",
+        "open critical finding at src/a.py:3: Current",
+    )
 
 
 def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:

@@ -77,6 +77,13 @@ def marker(head: str, kind: str) -> str:
     return cli.review_marker(head, kind)
 
 
+def test_review_marker_parser_accepts_old_and_v1_forms() -> None:
+    old = f"<!-- loopzero:review head={'a' * 40} kind=primary -->"
+    new = cli.review_marker("b" * 40, "delta")
+    assert cli.REVIEW_MARKER_RE.search(old).groups() == ("a" * 40, "primary")
+    assert cli.REVIEW_MARKER_RE.search(new).groups() == ("b" * 40, "delta")
+
+
 def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
         login: str = LOGIN, verdict: str = "approve") -> dict:
     """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""

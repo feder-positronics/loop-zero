@@ -10,6 +10,13 @@ class LoopZeroError(Exception):
 
 
 @dataclass(frozen=True)
+class ResourceLimits:
+    memory_mb: int = 4096
+    processes: int = 512
+    file_mb: int = 2048
+
+
+@dataclass(frozen=True)
 class Config:
     repo: str  # "owner/name"
     base_branch: str  # "main"
@@ -23,6 +30,7 @@ class Config:
     writable: tuple[str, ...] = ()  # host paths bound read-write (shared tool caches)
     scratch: tuple[str, ...] = (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
     env: tuple[tuple[str, str], ...] = ()  # fixed variables set inside the sandbox; win over host
+    limits: ResourceLimits = ResourceLimits()  # best-effort per-check shell resource limits
 
 
 @dataclass(frozen=True)

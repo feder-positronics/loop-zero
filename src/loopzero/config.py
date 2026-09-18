@@ -7,7 +7,7 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from .types import Config, LoopZeroError
+from .types import Config, LoopZeroError, ResourceLimits
 
 MERGE_STRATEGIES = ("squash", "merge", "rebase")
 REVIEWER_FAMILIES = ("claude", "codex")
@@ -29,6 +29,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "writable": list,
         "scratch": list,
         "env": dict,
+        "limits": dict,
     },
     "delivery": {"merge": str, "reviewers": list},
 }
@@ -105,6 +106,8 @@ def _build(data: dict[str, Any]) -> Config:
             parts = Path(entry).parts
             if entry in ("", ".") or entry.startswith("/") or ".." in parts or parts[0] == ".git":
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
+    if "limits" in checks:
+        kwargs["limits"] = _limits(checks["limits"])
     return Config(
         repo=name,
         base_branch=base,
@@ -151,3 +154,14 @@ def _env_table(table: dict[str, Any]) -> tuple[tuple[str, str], ...]:
         if not isinstance(value, str):
             raise ConfigError(f"checks.env.{name} must be a str")
     return tuple(table.items())
+
+
+def _limits(table: dict[str, Any]) -> ResourceLimits:
+    defaults = ResourceLimits()
+    allowed = tuple(defaults.__dict__)
+    _reject_unknown("checks.limits", table, allowed)
+    values = defaults.__dict__ | table
+    for name, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ConfigError(f"checks.limits.{name} must be a positive int")
+    return ResourceLimits(**values)

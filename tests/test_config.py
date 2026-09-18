@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from loopzero import config
-from loopzero.types import Config
+from loopzero.types import Config, ResourceLimits
 
 FULL = """
 [repo]
@@ -19,6 +19,7 @@ ro_paths = ["/nonexistent/cache", "/tmp/whatever/../cache"]
 writable = ["/home/me/.cache/uv"]
 scratch = [".venv"]
 env = { UV_CACHE_DIR = "/home/me/.cache/uv", UV_PYTHON_DOWNLOADS = "never" }
+limits = { memory_mb = 1024, processes = 64, file_mb = 512 }
 
 [delivery]
 merge = "rebase"
@@ -46,6 +47,7 @@ def test_load_full_config(tmp_path):
         writable=("/home/me/.cache/uv",),
         scratch=(".venv",),
         env=(("UV_CACHE_DIR", "/home/me/.cache/uv"), ("UV_PYTHON_DOWNLOADS", "never")),
+        limits=ResourceLimits(memory_mb=1024, processes=64, file_mb=512),
     )
 
 
@@ -63,6 +65,7 @@ def test_load_applies_defaults(tmp_path):
     assert loaded.env_allowlist == ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     assert loaded.sandbox_ro == () and loaded.writable == ()
     assert loaded.scratch == (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
+    assert loaded.limits == ResourceLimits(memory_mb=4096, processes=512, file_mb=2048)
 
 
 def test_missing_file(tmp_path):
@@ -100,6 +103,13 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\n[checks.env]\nHOME = "/x"\n', "must not override HOME"),
         ('[repo]\nname = "o/n"\n[checks.env]\nX = 1\n', "checks.env.X must be a str"),
         ('[repo]\nname = "o/n"\n[checks]\nenv = ["X=1"]\n', "checks.env must be a dict"),
+        ('[repo]\nname = "o/n"\n[checks]\nlimits = 1\n', "checks.limits must be a dict"),
+        ('[repo]\nname = "o/n"\n[checks]\nlimits = { memory_mb = 0 }\n',
+         "checks.limits.memory_mb must be a positive int"),
+        ('[repo]\nname = "o/n"\n[checks]\nlimits = { processes = true }\n',
+         "checks.limits.processes must be a positive int"),
+        ('[repo]\nname = "o/n"\n[checks]\nlimits = { cpu = 1 }\n',
+         "unknown key\\(s\\) in checks.limits: cpu"),
     ],
 )
 def test_invalid_content(tmp_path, text, message):
