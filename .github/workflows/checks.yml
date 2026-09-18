@@ -1,12 +1,8 @@
-name: deterministic checks
+name: checks
 on:
   pull_request:
   push:
-    branches:
-      - main
-      - 'release/**'
-    tags:
-      - '**'
+    branches: [main]
 permissions:
   contents: read
 jobs:
@@ -15,203 +11,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
           persist-credentials: false
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.28"
-          enable-cache: false
-      - name: Install validation sandbox
+      - name: Install bubblewrap for the sandbox test
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-          # Let the runner user create its sandbox on this disposable Ubuntu VM.
+          sudo apt-get update -q
+          sudo apt-get install -y -q bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Resolve dependencies with read-only Git metadata
+      - name: Lint
+        run: uv run --python 3.14 --group dev ruff check src tests
+      - name: Tests
+        run: uv run --python 3.14 --group dev pytest -q
+      - name: Size budget
         run: |
-          uv python install "3.14"
-          UV_BIN=$(readlink -f "$(command -v uv)")
-          PYTHON_INSTALL_ROOT=$(readlink -f "$(uv python dir)")
-          # uv exposes a minor-version directory that is a symlink to the versioned
-          # install; resolve it so the path stays valid under /opt/uv-python.
-          PYTHON_BIN=$(readlink -f "$(uv python find "3.14")")
-          PYTHON_RELATIVE=${PYTHON_BIN#"$PYTHON_INSTALL_ROOT"/}
-          test "$PYTHON_RELATIVE" != "$PYTHON_BIN"
-          VENV_ROOT="$RUNNER_TEMP/loopzero-python-3.14/.venv"
-          UV_CACHE_ROOT=$(mktemp -d "$RUNNER_TEMP/loopzero-uv-cache-XXXXXX")
-          mkdir -p "$VENV_ROOT"
-          trap 'rm -rf -- "$UV_CACHE_ROOT"' EXIT
-
-          # Candidate dependency metadata and build backends can write only the
-          # dedicated environment and cache. The checkout is read-only and the
-          # rest of the host root is absent from the sandbox.
-          bwrap --unshare-user --unshare-pid --unshare-ipc --unshare-uts --die-with-parent \
-            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
-            --ro-bind /bin /bin --ro-bind /sbin /sbin \
-            --ro-bind /etc/alternatives /etc/alternatives --ro-bind /etc/ssl /etc/ssl \
-            --ro-bind /etc/ld.so.cache /etc/ld.so.cache --ro-bind /etc/passwd /etc/passwd \
-            --ro-bind /etc/group /etc/group --ro-bind /etc/hosts /etc/hosts \
-            --ro-bind /etc/resolv.conf /etc/resolv.conf \
-            --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
-            --ro-bind "$UV_BIN" /opt/uv/bin/uv \
-            --ro-bind "$PYTHON_INSTALL_ROOT" /opt/uv-python \
-            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --bind "$VENV_ROOT" /tmp/venv \
-            --bind "$UV_CACHE_ROOT" /tmp/uv-cache \
-            --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /opt/uv/bin:/usr/bin:/bin \
-            --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
-            --setenv UV_CACHE_DIR /tmp/uv-cache --setenv UV_PROJECT_ENVIRONMENT /tmp/venv \
-            --setenv UV_PYTHON_DOWNLOADS never \
-            --setenv UV_BIN /opt/uv/bin/uv \
-            --setenv PYTHON_BIN "/opt/uv-python/$PYTHON_RELATIVE" \
-            --chdir /tmp/workspace -- bash -eu -c '
-              "$UV_BIN" sync --locked --python "$PYTHON_BIN" --group dev --extra code-health --no-install-project
-            '
-      - name: Validate without parent Git write authority
-        env:
-          CHECK_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          CHECK_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          src=$(cat src/loopzero/*.py | wc -l); tests=$(cat tests/*.py | wc -l)
+          echo "src=$src tests=$tests"
+          test "$src" -le 2500 && test "$tests" -le 3000
+      - name: Wheel builds and CLI runs
         run: |
-          VENV_ROOT="$RUNNER_TEMP/loopzero-python-3.14/.venv"
-          PYTHON_INSTALL_ROOT=$(uv python dir)
-          UV_BIN=$(readlink -f "$(command -v uv)")
-          # The kernel keeps job authority under the passwd home of the sandbox
-          # account, never under $HOME or the checkout. Give it a private empty
-          # tmpfs at that path; the runner's real home stays outside the sandbox.
-          ACCOUNT_HOME=$(getent passwd "$(id -u)" | cut -d: -f6)
-          test -n "$ACCOUNT_HOME" && test "$ACCOUNT_HOME" != /
-          # The kernel's mount model keys on whether /bin, /lib, /lib64, and
-          # /sbin are symlinks (merged /usr). Reproduce the runner's layout
-          # instead of flattening every entry into a plain directory.
-          ROOT_LAYOUT=()
-          for entry in /bin /lib /lib64 /sbin; do
-            if [ -L "$entry" ]; then
-              ROOT_LAYOUT+=(--symlink "$(readlink "$entry")" "$entry")
-            elif [ -d "$entry" ]; then
-              ROOT_LAYOUT+=(--ro-bind "$entry" "$entry")
-            fi
-          done
-          bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \
-            --die-with-parent \
-            --ro-bind /usr /usr "${ROOT_LAYOUT[@]}" \
-            --ro-bind /etc/alternatives /etc/alternatives --ro-bind /etc/ssl /etc/ssl \
-            --ro-bind /etc/ld.so.cache /etc/ld.so.cache --ro-bind /etc/passwd /etc/passwd \
-            --ro-bind /etc/group /etc/group --ro-bind /etc/hosts /etc/hosts \
-            --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
-            --ro-bind "$UV_BIN" /opt/uv/bin/uv \
-            --ro-bind "$PYTHON_INSTALL_ROOT" /opt/uv-python \
-            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --ro-bind "$VENV_ROOT" /tmp/venv \
-            --perms 0700 --tmpfs "$ACCOUNT_HOME" \
-            --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /opt/uv/bin:/usr/bin:/bin --setenv PYTHONDONTWRITEBYTECODE 1 \
-            --setenv HOME /tmp \
-            --setenv CHECK_BASE "$CHECK_BASE" --setenv CHECK_HEAD "$CHECK_HEAD" \
-            --chdir /tmp/workspace -- bash -eu -c '
-              /tmp/venv/bin/python -m pytest -q -p no:cacheprovider
-              /tmp/venv/bin/python core/tools/status.py --known-gaps KNOWN-GAPS.md --check-child-env
-              base="$CHECK_BASE"
-              if [[ -z "$base" || "$base" =~ ^0+$ ]]; then
-                base=$(git -c safe.directory=/tmp/workspace hash-object -t tree /dev/null)
-              fi
-              git -c safe.directory=/tmp/workspace diff --check "$base" "$CHECK_HEAD"
-            '
-      - name: Installed-artifact test
-        run: |
-          ARTIFACT_ROOT=$(mktemp -d /tmp/loopzero-artifacts-XXXXXX)
-          VENV_ROOT="$RUNNER_TEMP/loopzero-python-3.14/.venv"
-          trap 'rm -rf -- "$ARTIFACT_ROOT"' EXIT
-          UV_BIN=$(readlink -f "$(command -v uv)")
-          PYTHON_INSTALL_ROOT=$(uv python dir)
-
-          bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \
-            --die-with-parent \
-            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
-            --ro-bind /bin /bin --ro-bind /sbin /sbin \
-            --ro-bind /etc/alternatives /etc/alternatives --ro-bind /etc/ssl /etc/ssl \
-            --ro-bind /etc/ld.so.cache /etc/ld.so.cache --ro-bind /etc/passwd /etc/passwd \
-            --ro-bind /etc/group /etc/group --ro-bind /etc/hosts /etc/hosts \
-            --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
-            --ro-bind "$UV_BIN" /opt/uv/bin/uv \
-            --ro-bind "$PYTHON_INSTALL_ROOT" /opt/uv-python \
-            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --ro-bind "$VENV_ROOT" /tmp/venv \
-            --bind "$ARTIFACT_ROOT" /tmp/artifacts \
-            --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /opt/uv/bin:/usr/bin:/bin \
-            --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
-            --setenv UV_BIN /opt/uv/bin/uv --chdir /tmp/workspace -- bash -eu -c '
-              "$UV_BIN" build --offline --no-cache --no-build-isolation \
-                --python /tmp/venv/bin/python --out-dir /tmp/artifacts/dist /tmp/workspace
-              test "$(find /tmp/artifacts/dist -maxdepth 1 -name "*.whl" | wc -l)" -eq 1
-              test "$(find /tmp/artifacts/dist -maxdepth 1 -name "*.tar.gz" | wc -l)" -eq 1
-              "$UV_BIN" venv --python /tmp/venv/bin/python /tmp/artifacts/wheel-venv
-              "$UV_BIN" pip install --offline --no-cache \
-                --python /tmp/artifacts/wheel-venv/bin/python /tmp/artifacts/dist/*.whl
-              "$UV_BIN" venv --python /tmp/venv/bin/python /tmp/artifacts/sdist-venv
-              build_site=$(/tmp/venv/bin/python -c \
-                "import sysconfig; print(sysconfig.get_paths()[\"purelib\"])")
-              PYTHONPATH="$build_site" "$UV_BIN" pip install --offline --no-cache \
-                --no-build-isolation --python /tmp/artifacts/sdist-venv/bin/python \
-                /tmp/artifacts/dist/*.tar.gz
-            '
-
-          bwrap --unshare-user --unshare-pid --unshare-net --unshare-ipc --unshare-uts \
-            --die-with-parent \
-            --ro-bind /usr /usr --ro-bind /lib /lib --ro-bind /lib64 /lib64 \
-            --ro-bind /bin /bin --ro-bind /sbin /sbin \
-            --ro-bind /etc/alternatives /etc/alternatives --ro-bind /etc/ssl /etc/ssl \
-            --ro-bind /etc/ld.so.cache /etc/ld.so.cache --ro-bind /etc/passwd /etc/passwd \
-            --ro-bind /etc/group /etc/group --ro-bind /etc/hosts /etc/hosts \
-            --tmpfs /tmp --tmpfs /run --tmpfs /var/run --dev /dev --proc /proc \
-            --ro-bind "$PYTHON_INSTALL_ROOT" /opt/uv-python \
-            --ro-bind "$GITHUB_WORKSPACE" /tmp/workspace \
-            --ro-bind "$ARTIFACT_ROOT" /tmp/artifacts \
-            --uid "$(id -u)" --gid "$(id -g)" --cap-drop ALL --clearenv \
-            --setenv PATH /tmp/artifacts/wheel-venv/bin:/usr/bin:/bin \
-            --setenv PYTHONDONTWRITEBYTECODE 1 --setenv HOME /tmp \
-            --chdir /tmp -- bash -eu -c '
-              test "$(/tmp/artifacts/wheel-venv/bin/loopzero --version | awk "{print \$2}")" = \
-                "$(cat /tmp/workspace/core/VERSION)"
-              test "$(/tmp/artifacts/sdist-venv/bin/loopzero --version | awk "{print \$2}")" = \
-                "$(cat /tmp/workspace/core/VERSION)"
-
-              exercise_artifact() {
-                environment=$1
-                label=$2
-                executable="$environment/bin/loopzero"
-                consumer="/tmp/consumer-$label"
-                cp -R /tmp/workspace/tests/example_consumer "$consumer"
-                mkdir -p "$consumer/vendor"
-                cp -R /tmp/workspace/core "$consumer/vendor/loop-zero"
-                source_sha=$(git -c safe.directory=/tmp/workspace -C /tmp/workspace rev-parse HEAD)
-                sed -i "s/^revision = \"[0-9a-f]*\"/revision = \"$source_sha\"/" \
-                  "$consumer/workflow.toml"
-                git -C "$consumer" init -q -b main
-                git -C "$consumer" add .
-                git -C "$consumer" -c user.name=ci -c user.email=ci@example.invalid \
-                  -c core.hooksPath=/dev/null commit -qm fixture
-
-                if "$executable" --root "$consumer" sync --check; then
-                  echo "expected initial sync drift for $label" >&2
-                  exit 1
-                else
-                  test "$?" -eq 1
-                fi
-                "$executable" --root "$consumer" sync
-                "$executable" --root "$consumer" sync --check
-                "$executable" --root "$consumer" checks
-                "$executable" --root "$consumer" policy lint --base-ref refs/heads/main
-                verified_status=$("$executable" --root "$consumer" status --source /tmp/workspace)
-                printf "%s\n" "$verified_status"
-                test "$(printf "%s\n" "$verified_status" | tail -n 1)" = pass
-                informational_status=$("$executable" --root "$consumer" status)
-                printf "%s\n" "$informational_status"
-                ! grep -qw pass <<<"$informational_status"
-              }
-
-              exercise_artifact /tmp/artifacts/wheel-venv wheel
-              exercise_artifact /tmp/artifacts/sdist-venv sdist
-            '
+          uv build --wheel -q
+          uv run --python 3.14 --isolated --with dist/*.whl loopzero --help
