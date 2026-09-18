@@ -1,31 +1,40 @@
 ---
 name: implement
-description: Deliver a bounded change with the tests that prove it, run the repository's checks, and open a draft PR.
+description: Deliver an understood bounded change with its owning behavior proof and repository-required checks, stopping at readiness unless merge is separately requested.
 ---
 
-# implement
+# Implement
 
-Read [the contract](../../CONTRACT.md) and `.loopzero/task.md`. Make the
-smallest complete change that satisfies every acceptance line.
+Deliver one bounded change with its behavior proof. Read [the contract](../../CONTRACT.md),
+`.loopzero/task.md`, repository guidance, and the affected public interfaces.
 
 ## Do
 
-1. Work only in the worktree created by `loopzero start`. Confirm with
-   `loopzero status` before the first edit.
-2. Write or extend the test that proves the behavior before or alongside the
-   code. A change without a proof is not complete.
-3. Run `loopzero check` before pushing. Fix nonzero exits; do not edit the
+1. Work only in the task worktree created by `loopzero start`. Confirm its
+   branch and `.loopzero/task.md` before the first edit.
+2. Write or extend a test that proves the behavior before or alongside the code.
+   Exercise the narrowest stable public seam available to a real caller. If only
+   private reach-ins or a test-only extraction make the test possible, report
+   the missing seam instead of disguising it as coverage.
+3. Make the test oracle independent of the implementation: assert observable
+   outputs, state, or boundary effects, not the same calculation, mock calls, or
+   internal steps used by the code. Demonstrate that the test can fail for the
+   intended regression before relying on its green result.
+4. Run focused checks while iterating, then `loopzero check` before pushing.
+   Fix nonzero exits; do not edit the
    check list to make them pass. Running the test command directly is for
    iteration only: the sandbox hides host tools that CI also lacks, so only
    the `loopzero check` report counts as proof.
-4. Commit in small steps with messages that state what changed. Keep the
+5. Commit in small steps with messages that state what changed. Keep the
    diff free of unrelated formatting churn.
-5. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped
+6. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped
    work, then run `loopzero pr`.
-6. After `loopzero review`, fix every `critical` and `important` finding in
-   its thread, push, rerun `loopzero check`, and request the delta review.
-   Reply in the thread with what changed; do not resolve a thread silently.
-7. Stop at `loopzero ready`. Merge only when the task says so.
+7. After `loopzero review`, fix every `critical` and `important` finding in
+   its thread, push, and rerun `loopzero check`. Mechanical format, lint, or
+   rename repairs with unchanged behavior need no delta review; substantive
+   repairs get the one delta review. Reply with what changed; do not resolve a
+   thread silently.
+8. Stop at `loopzero ready`. Merge only when the task says so.
 
 ## Stop when
 
@@ -33,6 +42,10 @@ smallest complete change that satisfies every acceptance line.
   task file and say so in the PR before continuing.
 - A check fails on the base branch without your change. Report it as a base
   failure; do not work around it in this PR.
+- The public seam needed for faithful proof would expand acceptance or ownership.
+  Record the boundary and ask for that scope decision.
+- Time expires before readiness. Preserve an adoptable diff and report its exact
+  state, remaining checks, and unresolved findings.
 
 ## Do not
 
