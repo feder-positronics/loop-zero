@@ -846,6 +846,14 @@ def test_merged_sha_only_for_merged_state(gh: FakeGh) -> None:
     assert github.merged_sha(REPO, 7) is None
 
 
+def test_merge_queue_strategy_omits_method_flag(gh: FakeGh) -> None:
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("api graphql", _queue_json(True))
+    assert github.merge(REPO, 7, "queue", HEAD) is None
+    assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--match-head-commit", HEAD]
+
+
 def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     with pytest.raises(github.MergeFailed):
         github.merge(REPO, 7, "fast-forward", HEAD)

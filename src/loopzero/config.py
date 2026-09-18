@@ -11,7 +11,7 @@ from . import _proc
 from . import worktree as worktree_mod
 from .types import Config, LoopZeroError, ResourceLimits
 
-MERGE_STRATEGIES = ("squash", "merge", "rebase")
+MERGE_STRATEGIES = ("squash", "merge", "rebase", "queue")
 REVIEWER_FAMILIES = ("claude", "codex")
 # Host locations that must never be exposed to the sandbox, even read-only, because they
 # hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home

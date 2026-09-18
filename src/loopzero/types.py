@@ -22,7 +22,7 @@ class Config:
     base_branch: str  # "main"
     checks: tuple[str, ...]  # shell commands run in sandbox, in order
     required_ci: tuple[str, ...]  # exact GitHub check names that must be green
-    merge_strategy: str  # "squash" | "merge" | "rebase"
+    merge_strategy: str  # "squash" | "merge" | "rebase" | "queue" (base owns the method)
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
     review_chunk_bytes: int = 200_000
