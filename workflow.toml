@@ -14,5 +14,5 @@ env = { UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/
 network = false
 
 [delivery]
-merge = "squash"
+merge = "queue"
 reviewers = ["claude", "codex"]

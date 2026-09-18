@@ -510,11 +510,12 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     Returns None when the base branch uses a merge queue and GitHub accepted the PR
     into it: the merge will land later, and the caller must verify on a later run.
     """
-    if strategy not in ("squash", "merge", "rebase"):
+    if strategy not in ("squash", "merge", "rebase", "queue"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
+    # A merge queue owns the method; gh rejects an explicit --squash/--merge/--rebase.
+    method = () if strategy == "queue" else (f"--{strategy}",)
     argv = (
-        "pr", "merge", str(number), "--repo", repo, f"--{strategy}",
-        "--match-head-commit", head_sha,
+        "pr", "merge", str(number), "--repo", repo, *method, "--match-head-commit", head_sha,
     )
     try:
         _gh(*argv, timeout=300)

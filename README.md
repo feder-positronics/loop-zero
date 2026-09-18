@@ -55,7 +55,7 @@ own [workflow.toml](workflow.toml) is a working example.
 | `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |
 | `checks.network` | Allow network inside the sandbox; default `false`. |
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
-| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge` or `rebase`. |
+| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; `merge` then enqueues and must be rerun to verify. |
 | `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`); when the author family is known, `review` only uses a different family. |
 | `delivery.reviewer_ro_paths` | Absolute reviewer CLI/runtime paths mounted read-only. Defaults to the resolved directory of the selected reviewer binary; list an npm or bun prefix for Claude when needed. |
 
