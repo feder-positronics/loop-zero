@@ -192,6 +192,23 @@ def test_claude_approve(
     assert _pairs(options, "--bind")[0][1] == SANDBOX_HOME
 
 
+def test_reviewer_sandbox_binds_resolv_conf(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path
+) -> None:
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _review("claude", tmp_path)
+    argv = _bwrap_argv(fake_bwrap)
+    resolv_conf = Path("/etc/resolv.conf")
+    resolved = resolv_conf.resolve()
+    expected = (
+        (str(resolved.parent), str(resolved.parent))
+        if resolv_conf.is_symlink()
+        and any(resolved.is_relative_to(root) for root in (Path("/tmp"), Path("/run")))
+        else (str(resolved), str(resolv_conf))
+    )
+    assert expected in _pairs(argv, "--ro-bind")
+
+
 def test_claude_copies_only_credentials_into_private_home(
     fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -211,6 +211,18 @@ def bwrap_argv(
     argv += ["--dev", "/dev", "--proc", "/proc"]
     for path in ("/tmp", "/run", "/var/run"):
         argv += ["--tmpfs", path]
+    # /etc/resolv.conf commonly points into /run, which the tmpfs above masks.
+    # A bind onto the dangling symlink fails, so restore its resolved parent in
+    # that case. Otherwise overlay /etc/resolv.conf with the resolved host file.
+    if config.network:
+        resolv_conf = Path("/etc/resolv.conf")
+        resolved = resolv_conf.resolve()
+        masked_roots = (Path("/tmp"), Path("/run"))
+        if resolv_conf.is_symlink() and any(resolved.is_relative_to(root) for root in masked_roots):
+            source = destination = resolved.parent
+        else:
+            source, destination = resolved, resolv_conf
+        argv += ["--ro-bind", str(source), str(destination)]
     for path in config.sandbox_ro:
         argv += ["--ro-bind-try", path, path]
     for path in config.writable:
