@@ -341,7 +341,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
     gh.fail(post_key(), "HTTP 500 server error")
-    _fake_claude(fake_bin, _claude_envelope(CHANGES))
+    _fake_claude(fake_bin, _claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}}))
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
     code, out, err = run(capsys, "review")
     assert code == 1 and out == "" and saved.exists()
@@ -349,12 +349,16 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     data = json.loads(saved.read_text())
     assert data["head"] == head and data["kind"] == "primary" and data["family"] == "claude"
     assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
+    assert data["model"] == "claude-sonnet-4-6" and data["duration_s"] >= 0
+    first_body = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "model claude-sonnet-4-6" in first_body
     (fake_bin / "claude.stdin").unlink()
     gh.respond(post_key(), {"id": 5})
     code, out, err = run(capsys, "review", "--repost")
     assert (code, err) == (0, "") and out.startswith("primary review by claude"), err
     assert not (fake_bin / "claude.stdin").exists(), "no model invoked"
     payload = json.loads(gh.calls[-1]["--input"])
+    assert payload["body"] == first_body
     assert marker(head, "primary") in payload["body"] and "Nit" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 
