@@ -16,7 +16,13 @@ commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
 
 # Worktree-relative paths that get a fresh writable scratch mount per run.
 # This is the default list; checks cannot write anywhere else in the tree.
+# Entries are pre-created as empty directories in the worktree (git-invisible).
+# uv projects need a committed uv.lock, since uv cannot write one in there.
 scratch = [".venv", ".ruff_cache", ".pytest_cache"]
+
+# Environment variables set inside the sandbox. Entries win over sandbox
+# defaults and host variables; PATH and HOME cannot be overridden.
+env = { UV_CACHE_DIR = "/home/<you>/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/<you>/.local/share/uv/python" }
 
 # Host paths mounted writable. A shared tool cache must be listed here or the
 # first check in a fresh worktree fails without network. This is a trust
