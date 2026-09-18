@@ -423,12 +423,15 @@ def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) 
         _review("codex", tmp_path)
 
 
-def test_timeout_becomes_bad_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_timeout_becomes_bad_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: Path, fake_bwrap: Path
+) -> None:
     from loopzero import _proc, runners
 
     def timeout(*args, **kwargs):
         raise _proc.ProcTimeout("timed out", "partial reviewer output")
 
+    _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dir", lambda cwd, flag, env: cwd)
     monkeypatch.setattr(runners.sandbox, "probe", lambda config, cwd, prefix: None)
     monkeypatch.setattr(runners._proc, "run", timeout)
