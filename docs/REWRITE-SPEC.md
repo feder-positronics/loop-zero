@@ -63,6 +63,7 @@ class Config:
     required_ci: tuple[str, ...]   # exact GitHub check names that must be green
     merge_strategy: str            # "squash" | "merge" | "rebase"
     reviewers: tuple[str, ...]     # ordered preference: ("claude", "codex")
+    reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI/runtime paths
     network: bool = False          # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 
@@ -114,6 +115,8 @@ network = false
 [delivery]
 merge = "squash"
 reviewers = ["claude", "codex"]
+# Optional; defaults to the selected reviewer's resolved binary directory.
+reviewer_ro_paths = ["/absolute/reviewer/runtime/path"]
 ```
 
 ## Rules for every module

@@ -14,13 +14,39 @@ from loopzero.types import Config, ResourceLimits
 
 from .conftest import git
 
-FAKE_BWRAP = """#!/bin/sh
-: > {log}
-for a in "$@"; do printf '%s\\n' "$a" >> {log}; done
-while [ "$1" != -- ]; do shift; done
-shift
-exec "$@"
-"""
+FAKE_BWRAP = '''#!/usr/bin/python3
+import os
+import sys
+
+args = sys.argv[1:]
+with open("{log}", "w", encoding="utf-8") as stream:
+    stream.writelines(f"{{arg}}\\n" for arg in args)
+separator = args.index("--")
+options, command = args[:separator], args[separator + 1:]
+env = {{}}
+home_source = None
+i = 0
+while i < len(options):
+    if options[i] == "--setenv":
+        env[options[i + 1]] = options[i + 2]
+        i += 3
+    elif options[i] == "--bind" and options[i + 2] == "/tmp/home":
+        home_source = options[i + 1]
+        i += 3
+    else:
+        i += 1
+if home_source:
+    command = [
+        home_source + arg.removeprefix("/tmp/home") if arg.startswith("/tmp/home/") else arg
+        for arg in command
+    ]
+    if env.get("CODEX_HOME") == "/tmp/home":
+        env["CODEX_HOME"] = home_source
+    if env.get("HOME") == "/tmp/home":
+        env["HOME"] = home_source
+os.chdir(options[options.index("--chdir") + 1])
+os.execvpe(command[0], command, env)
+'''
 
 
 def make_config(**overrides) -> Config:

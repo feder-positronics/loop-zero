@@ -80,7 +80,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             # git-invisible) directory must exist in the worktree before we start.
             (worktree / entry).mkdir(parents=True, exist_ok=True)
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
-        _probe(config, worktree, prefix)
+        probe(config, worktree, prefix)
         for command in config.checks:
             result = _run_one(config, worktree, prefix, command, timeout)
             results.append(result)
@@ -159,7 +159,7 @@ def _run_one(
     )
 
 
-def _probe(config: Config, worktree: Path, prefix: list[str]) -> None:
+def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     """Raise `SandboxUnavailable` unless bwrap can build the exact sandbox we will use."""
     try:
         probe = _proc.run(

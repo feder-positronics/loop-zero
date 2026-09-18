@@ -17,8 +17,10 @@ from loopzero.runners import (
     pick_reviewer,
     review_with,
 )
+from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
 from .conftest import git
+from .test_sandbox import FAKE_BWRAP
 
 APPROVE = {"verdict": "approve", "findings": []}
 CHANGES = {
@@ -31,6 +33,21 @@ CHANGES = {
 
 def _argv(bin_dir: Path, name: str) -> list[str]:
     return (bin_dir / f"{name}.argv").read_text().split("\0")[:-1]
+
+
+def _bwrap_argv(log: Path) -> list[str]:
+    return log.read_text().splitlines()
+
+
+def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
+    return [(argv[i + 1], argv[i + 2]) for i, arg in enumerate(argv) if arg == flag]
+
+
+@pytest.fixture(autouse=True)
+def fake_bwrap(fake_tool, tmp_path: Path) -> Path:
+    log = tmp_path / "review-bwrap.argv"
+    fake_tool("bwrap", FAKE_BWRAP.format(log=log))
+    return log
 
 
 def _script(bin_dir: Path, name: str, body: str) -> Path:
@@ -75,10 +92,12 @@ def _fake_codex(bin_dir: Path, last_message: str, *, exit_code: int = 0, stderr:
         bin_dir,
         "codex",
         f"""
+        codex_home="${{CODEX_HOME:-$HOME/.codex}}"
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
-        printf '%s' "$CODEX_HOME" > "{bin_dir}/codex.home"
-        [ -e "$CODEX_HOME/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
-        [ ! -f "$CODEX_HOME/auth.json" ] || cat "$CODEX_HOME/auth.json" > "{bin_dir}/codex.auth"
+        printf '%s' "$codex_home" > "{bin_dir}/codex.home"
+        [ -e "$codex_home/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
+        [ ! -f "$codex_home/auth.json" ] || cat "$codex_home/auth.json" > "{bin_dir}/codex.auth"
+        [ ! -f "$codex_home/auth.json" ] || printf refreshed > "$codex_home/auth.json"
         cat > "{bin_dir}/codex.stdin"
         [ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
         out=""; schema=""
@@ -107,6 +126,8 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
 
 
 def _review(family: str, cwd: Path, diff: str = "--- a\n+++ b\n+x\n"):
+    if not (cwd / ".git").exists():
+        git(cwd, "init", "-q")
     return review_with(family, cwd=cwd, head="abc123", kind="primary",
                        diff=diff, task_text="Do the thing")
 
@@ -125,7 +146,9 @@ def test_prompt_contains_task_diff_and_json_contract() -> None:
 # ----------------------------------------------------------------- claude
 
 
-def test_claude_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_claude_approve(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"claude-sonnet-4-6": {}}))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
     result = _review("claude", tmp_path)
@@ -147,6 +170,44 @@ def test_claude_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.Monk
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch"
     )
     assert "sk-secret" not in result.raw
+    sandbox_argv = _bwrap_argv(fake_bwrap)
+    options = sandbox_argv[: sandbox_argv.index("--")]
+    assert "--share-net" in options
+    assert (str(tmp_path.resolve()), str(tmp_path.resolve())) in _pairs(options, "--ro-bind")
+    assert _pairs(options, "--ro-bind-try") == [(str(fake_bin.resolve()),) * 2]
+    assert _pairs(options, "--bind")[0][1] == SANDBOX_HOME
+
+
+def test_claude_copies_only_credentials_into_private_home(
+    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configured = tmp_path / "configured-claude"
+    configured.mkdir()
+    (configured / ".credentials.json").write_text('{"token":"secret"}')
+    (configured / "settings.json").write_text('{"danger":true}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
+    _script(
+        fake_bin,
+        "claude",
+        f'''cat "$HOME/.claude/.credentials.json" > "{fake_bin}/claude.auth"
+        [ ! -e "$HOME/.claude/settings.json" ] || exit 65
+        echo '{json.dumps(_claude_envelope(APPROVE))}'
+        ''',
+    )
+    assert _review("claude", tmp_path).verdict == "approve"
+    assert (fake_bin / "claude.auth").read_text() == '{"token":"secret"}'
+
+
+def test_linked_worktree_and_git_directory_are_read_only(
+    git_repo: Path, tmp_path: Path, fake_bin: Path, fake_bwrap: Path
+) -> None:
+    linked = tmp_path / "linked"
+    git(git_repo, "worktree", "add", "-q", str(linked), "-b", "review")
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    assert _review("claude", linked).verdict == "approve"
+    binds = _pairs(_bwrap_argv(fake_bwrap), "--ro-bind")
+    assert (str(linked.resolve()),) * 2 in binds
+    assert (str((git_repo / ".git").resolve()),) * 2 in binds
 
 
 def test_claude_request_changes_escalates_verdict(fake_bin: Path, tmp_path: Path) -> None:
@@ -217,10 +278,12 @@ def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> No
         _review("claude", tmp_path)
 
 
-def test_claude_missing_binary(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_claude_missing_binary(
+    fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("PATH", str(fake_bin))  # nothing else on PATH
     with pytest.raises(RunnerMissing):
-        _review("claude", tmp_path)
+        _review("claude", git_repo)
 
 
 def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
@@ -235,10 +298,50 @@ def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
     assert "OPENAI_API_KEY" not in env and "SOME_RANDOM_SECRET" not in env
 
 
+def test_reviewer_ro_paths_replace_binary_default(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path
+) -> None:
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    allowed = tmp_path / "runtime"
+    allowed.mkdir()
+    if not (tmp_path / ".git").exists():
+        git(tmp_path, "init", "-q")
+    review_with(
+        "claude", cwd=tmp_path, head="abc123", kind="primary", diff="", task_text="x",
+        reviewer_ro_paths=(str(allowed),),
+    )
+    argv = _bwrap_argv(fake_bwrap)
+    assert _pairs(argv, "--ro-bind-try") == [(str(allowed), str(allowed))]
+    assert str(fake_bin) not in [path for pair in _pairs(argv, "--ro-bind-try") for path in pair]
+
+
+def test_missing_bwrap_fails_closed(
+    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    (fake_bin / "bwrap").unlink()
+    monkeypatch.setattr(
+        "loopzero.runners.shutil.which",
+        lambda name: None if name == "bwrap" else str(fake_bin / name),
+    )
+    with pytest.raises(SandboxUnavailable, match="bwrap not found"):
+        _review("claude", tmp_path)
+
+
+def test_bwrap_probe_failure_fails_closed(fake_bin: Path, tmp_path: Path, fake_tool) -> None:
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    fake_tool("bwrap", "echo 'namespace denied' >&2\nexit 1\n")
+    with pytest.raises(SandboxUnavailable, match="namespace denied"):
+        _review("claude", tmp_path)
+    assert not (fake_bin / "claude.stdin").exists()
+
+
 # ----------------------------------------------------------------- codex
 
 
-def test_codex_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_approve(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     configured = tmp_path / "configured-codex"
     configured.mkdir()
     (configured / "auth.json").write_text('{"token":"secret"}')
@@ -250,14 +353,21 @@ def test_codex_approve(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.Monke
     assert result.model is None and result.duration_s is not None
     argv = _argv(fake_bin, "codex")
     assert argv[:4] == ["exec", "--sandbox", "read-only", "--cd"]
-    assert argv[4] == str(tmp_path) and "--ephemeral" in argv
+    assert argv[4] == str(tmp_path.resolve()) and "--ephemeral" in argv
     assert argv[argv.index("-c") + 1] == "mcp_servers={}"
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
-    assert isolated != str(configured) and "loopzero-codex-" in isolated
+    assert isolated != str(configured) and "loopzero-review-home-" in isolated
     assert (fake_bin / "codex.auth").read_text() == '{"token":"secret"}'
+    assert (configured / "auth.json").read_text() == '{"token":"secret"}'
     assert not (fake_bin / "codex.config").exists()
     assert "Do the thing" in (fake_bin / "codex.stdin").read_text()
+    assert argv[argv.index("--output-schema") + 1].endswith("/schema.json")
+    assert argv[argv.index("--output-last-message") + 1].endswith("/last.json")
+    sandbox_argv = _bwrap_argv(fake_bwrap)
+    command = sandbox_argv[sandbox_argv.index("--") + 1 :]
+    assert command[command.index("--output-schema") + 1] == f"{SANDBOX_HOME}/schema.json"
+    assert command[command.index("--output-last-message") + 1] == f"{SANDBOX_HOME}/last.json"
 
 
 def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
@@ -280,10 +390,12 @@ def test_codex_auth_failure_text(fake_bin: Path, tmp_path: Path) -> None:
         _review("codex", tmp_path)
 
 
-def test_codex_missing_binary(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_codex_missing_binary(
+    fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("PATH", str(fake_bin))
     with pytest.raises(RunnerMissing):
-        _review("codex", tmp_path)
+        _review("codex", git_repo)
 
 
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
@@ -317,6 +429,8 @@ def test_timeout_becomes_bad_output(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     def timeout(*args, **kwargs):
         raise _proc.ProcTimeout("timed out", "partial reviewer output")
 
+    monkeypatch.setattr(runners, "_git_dir", lambda cwd, flag, env: cwd)
+    monkeypatch.setattr(runners.sandbox, "probe", lambda config, cwd, prefix: None)
     monkeypatch.setattr(runners._proc, "run", timeout)
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)

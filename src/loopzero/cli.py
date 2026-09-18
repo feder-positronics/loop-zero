@@ -413,7 +413,11 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         result = _load_review(wt, head, kind)
     else:
-        result = _run_review(wt, config, head, kind, reviewed)
+        try:
+            result = _run_review(wt, config, head, kind, reviewed)
+        except sandbox.SandboxUnavailable as exc:
+            print(f"sandbox unavailable: {exc}", file=sys.stderr)
+            return 2
         final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)
         if final_head != head or final_dirty:
             raise CliError(
@@ -453,7 +457,8 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
     for family in candidates:
         try:
             result = runners.review_with(
-                family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task
+                family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task,
+                reviewer_ro_paths=config.reviewer_ro_paths,
             )
             break
         except RUNNER_FAILURES as exc:

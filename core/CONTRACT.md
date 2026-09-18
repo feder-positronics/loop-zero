@@ -75,6 +75,12 @@ Every command in `[checks].commands` runs with:
 If `bwrap` cannot run, `loopzero check` fails with `SandboxUnavailable`; it
 never runs checks unsandboxed.
 
+Reviews also require `bwrap` and never fall back to the host. They receive a
+read-only worktree and Git directories, a private HOME containing only the
+selected reviewer's copied credential file, explicitly configured reviewer
+runtime paths, and network access. The sandbox bounds readable data; it cannot
+prevent the reviewer from sending readable data over the required network.
+
 ## Failure
 
 Every command fails closed and loud: a missing tool or a nonzero exit prints

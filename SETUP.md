@@ -40,6 +40,9 @@ repository root and set `[repo] name`. Then:
   check can then write to it (trust). uv projects must commit `uv.lock`.
 - `[checks] env` — e.g. `{ UV_CACHE_DIR = "/home/<you>/.cache/uv" }`; wins over
   sandbox defaults and host variables. `PATH` and `HOME` cannot be overridden.
+- `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime
+  paths. The default is the selected binary's resolved directory; Claude may
+  need its npm or bun prefix listed.
 - The first `check` in a fresh worktree needs `network = true` or a warm uv
   cache in `writable`: warm it once by running your check commands on the
   host (for uv, `uv sync --group dev`), which also fetches build backends. `PYTHONDONTWRITEBYTECODE`, `RUFF_CACHE_DIR`,
