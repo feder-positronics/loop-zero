@@ -266,19 +266,78 @@ def _validation_section(wt: Path, head: str) -> str:
     recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
     lines += [
-        f"- `{r.command}`: exit {r.exit_code} ({r.duration_s:.1f}s)" for r in results
+        f"- `{r.command}`: exit {r.exit_code}" for r in results
     ] or ["- (no check commands configured)"]
     return "\n".join(lines)
 
 
-def _pr_body(wt: Path, head: str) -> str:
-    """task.md with Validation regenerated; legacy Checks headings migrate in place."""
-    task = worktree.task_text(wt).rstrip()
-    section = f"## Validation\n{_validation_section(wt, head)}\n"
-    pattern = re.compile(r"^## (?:Validation|Checks)\n.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE)
-    if pattern.search(task):
-        return pattern.sub(lambda _: section + "\n", task, count=1).rstrip() + "\n"
-    return f"{task}\n\n{section}"
+_CHECKS_START = "<!-- loopzero:checks:start -->"
+_CHECKS_END = "<!-- loopzero:checks:end -->"
+_LEGACY_CHECKS = re.compile(
+    r"^Recorded for `[0-9a-f]+`(?: \(not current head\))?\n"
+    r"(?:- `[^\n]+`: exit -?\d+ \(\d+\.\d+s\)\n|"
+    r"- \(no check commands configured\)\n)*",
+    re.MULTILINE,
+)
+
+
+def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
+    """Refresh only generated checks; the live body owns existing PR prose."""
+    body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
+    block = f"{_CHECKS_START}\n{_validation_section(wt, head)}\n{_CHECKS_END}"
+    pattern = re.compile(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)",
+                         re.DOTALL | re.MULTILINE)
+    match = pattern.search(body)
+    if match is None:
+        return f"{body.rstrip()}\n\n## Validation\n{block}\n"
+    content = match.group(1)
+    if _CHECKS_START in content or _CHECKS_END in content:
+        if (content.count(_CHECKS_START) != 1 or content.count(_CHECKS_END) != 1
+                or content.index(_CHECKS_START) > content.index(_CHECKS_END)):
+            raise CliError("malformed loopzero checks block in PR Validation; repair its markers")
+        start = content.index(_CHECKS_START)
+        end = content.index(_CHECKS_END) + len(_CHECKS_END)
+        content = content[:start] + block + content[end:]
+    else:
+        # Migrate our old report/placeholder only, retaining behavioral evidence.
+        content = _LEGACY_CHECKS.sub("", content)
+        content = re.sub(
+            r"^\((?:filled by `loopzero check`|no `loopzero check` run recorded)\)\n?",
+            "", content, flags=re.MULTILINE,
+        )
+        content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
+    return body[:match.start()] + "## Validation\n" + content + body[match.end():]
+
+
+def _sync_task_narrative(wt: Path, existing: str) -> str:
+    """Explicit pr updates task-owned sections; live evidence/reviews stay authoritative."""
+    pattern = re.compile(r"^## ([^\n]+)\n.*?(?=^## |\Z)", re.MULTILINE | re.DOTALL)
+    task = worktree.task_text(wt).replace("\r\n", "\n")
+    existing = existing.replace("\r\n", "\n")
+    owned = {m.group(1): m.group() for m in pattern.finditer(task)
+             if m.group(1) not in {"Validation", "Checks", "Review"}}
+    first = pattern.search(existing)
+    task_first = pattern.search(task)
+    prefix = task[:task_first.start()] if task_first else task
+    content = existing[first.start():] if first else ""
+
+    def replace(match: re.Match[str]) -> str:
+        replacement = owned.pop(match.group(1), None)
+        if replacement is None:
+            return match.group()
+        trailing = match.group()[len(match.group().rstrip()):]
+        return replacement.rstrip() + trailing
+
+    content = pattern.sub(replace, content)
+    for section in owned.values():
+        content = content.rstrip() + "\n\n" + section
+    return prefix + content.lstrip("\n")
+
+
+def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
+    body = _pr_body(wt, head, pr.body)
+    if body != (pr.body or "").replace("\r\n", "\n"):
+        github.update_body(config.repo, pr.number, body)
 
 
 _REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
@@ -318,8 +377,8 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         branch, head = worktree.branch(wt), worktree.head(wt)
         pr = github.pr_for_branch(config.repo, branch)
         if pr is not None and pr.state == "OPEN":
-            github.update_body(config.repo, pr.number, _pr_body(wt, head))
-    except (github.GhError, OSError, ValueError) as exc:
+            _update_pr_checks(wt, head, config, pr)
+    except (github.GhError, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
@@ -390,13 +449,14 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_clean(wt)
     _require_pr_details(wt)
     _git(wt, "push", "-u", "origin", branch)
-    body = _pr_body(wt, head)
     pr = github.pr_for_branch(config.repo, branch)
     if pr is not None and pr.state == "OPEN":
-        github.update_body(config.repo, pr.number, body)
+        body = _pr_body(wt, head, _sync_task_narrative(wt, pr.body or ""))
+        if body != (pr.body or "").replace("\r\n", "\n"):
+            github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
-            config.repo, branch, config.base_branch, _pr_title(wt, branch), body
+            config.repo, branch, config.base_branch, _pr_title(wt, branch), _pr_body(wt, head)
         )
     print(pr.url)
     return 0

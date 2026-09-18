@@ -26,6 +26,16 @@ finding is open and required CI is green. The full rules fit in
 
 `loopzero status` prints where the current branch is in that sequence.
 
+After creation, `check` updates only the generated checks block in the live PR's
+Validation section. Human validation notes and review summaries survive refreshes.
+Check timings remain in terminal output, so duration changes alone do not rewrite
+the PR and retrigger policy CI. Keep human evidence outside the checks markers.
+
+Running `pr` again explicitly publishes task.md's title and narrative sections.
+The live PR owns Validation and Review, and sections absent from task.md are kept.
+Edit validation evidence on GitHub after creation; keep acceptance changes in
+both task.md (the reviewer's task context) and the PR by rerunning `pr`.
+
 ## Adopt it in five steps
 
 1. Install from a pinned SHA: `uv tool install git+https://github.com/feder-positronics/loop-zero@<sha>`.
