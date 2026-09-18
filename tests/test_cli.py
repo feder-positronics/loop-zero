@@ -15,6 +15,7 @@ from tests.test_sandbox import FAKE_BWRAP
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
+LOGIN = "lz-bot"
 WORKFLOW = f"""
 [repo]
 name = "{REPO}"
@@ -46,7 +47,11 @@ def repo(git_repo: Path, tmp_path: Path, fake_tool, fake_bin: Path) -> Path:
 
 @pytest.fixture
 def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
-    return FakeGh(fake_bin, tmp_path)
+    fake = FakeGh(fake_bin, tmp_path)
+    fake.respond("api user", {"login": LOGIN})
+    fake.respond(f"api repos/{REPO}/pulls/7/files",
+                 [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
+    return fake
 
 
 @pytest.fixture
@@ -69,6 +74,13 @@ def head_of(path: Path) -> str:
 
 def marker(head: str, kind: str) -> str:
     return cli.review_marker(head, kind)
+
+
+def rev(head: str, kind: str, *, state: str = "APPROVED", commit: str | None = None,
+        login: str = LOGIN, verdict: str = "approve") -> dict:
+    """A review object as `gh api .../reviews` returns it, carrying a loopzero marker."""
+    return {"body": f"{marker(head, kind)}\nreview: **{verdict}**", "state": state,
+            "commit_id": commit or head, "user": {"login": login}}
 
 
 def reviews_key() -> str:
@@ -220,7 +232,7 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     git(wt, "commit", "-q", "-m", "second")
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [{"body": marker(first, "primary"), "state": "CHANGES_REQUESTED"}])
+    gh.respond(reviews_key(), [rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
     gh.respond(post_key(), {"id": 2})
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     code, out, _ = run(capsys, "review")
@@ -234,8 +246,8 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
 def test_review_ignores_markers_outside_lineage(wt: Path, gh: FakeGh, fake_bin, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [{"body": marker("f" * 40, "primary")},
-                               {"body": marker("e" * 40, "delta")}])
+    gh.respond(reviews_key(), [rev("f" * 40, "primary"),
+                               rev("e" * 40, "delta")])
     gh.respond(post_key(), {"id": 3})
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     code, out, _ = run(capsys, "review")
@@ -246,7 +258,7 @@ def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, ca
     base = git(wt, "rev-parse", "HEAD~1").strip()
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [{"body": marker(base, "primary")}, {"body": marker(head, "delta")}])
+    gh.respond(reviews_key(), [rev(base, "primary"), rev(head, "delta")])
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     code, out, err = run(capsys, "review")
     assert code == 1 and out == "" and "review budget exhausted" in err
@@ -256,7 +268,7 @@ def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, ca
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [{"body": marker(head, "primary")}])
+    gh.respond(reviews_key(), [rev(head, "primary")])
     code, _, err = run(capsys, "review")
     assert code == 1 and "already has a primary review" in err
 
@@ -312,7 +324,7 @@ def test_review_fails_when_every_reviewer_fails(
 def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [{"body": marker(head, "primary"), "state": "APPROVED"}])
+    gh.respond(reviews_key(), [rev(head, "primary", state="APPROVED")])
     arm_readiness(gh, head)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
@@ -334,10 +346,51 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
+def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [
+        rev(head, "primary", login="stranger"),          # not the token's account
+        rev(head, "primary", commit="1" * 40),           # commit_id does not match marker
+    ])
+    arm_readiness(gh, head)
+    code, out, _ = run(capsys, "ready")
+    assert code == 1 and out == "not ready: no review recorded for the current head\n"
+    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "user"]) == 1
+
+
+def test_review_treats_forged_marker_as_fresh_lineage(wt: Path, gh: FakeGh, fake_bin,
+                                                      capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(head, "primary", login="stranger"),
+                               rev(head, "delta", commit="2" * 40)])
+    gh.respond(post_key(), {"id": 9})
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    code, out, _ = run(capsys, "review")
+    assert code == 0 and out.startswith("primary review by claude")
+
+
+def test_ready_refuses_request_changes_without_blocking_threads(wt: Path, gh: FakeGh,
+                                                                capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(head, "primary", state="CHANGES_REQUESTED",
+                                   verdict="request_changes")])
+    arm_readiness(gh, head)
+    code, out, _ = run(capsys, "ready")
+    assert code == 1
+    assert out == ("not ready: latest primary review requested changes but posted no "
+                   "blocking findings\n")
+    arm_pr(gh, head, isDraft=False)
+    code, _, err = run(capsys, "merge")
+    assert code == 1 and "requested changes but posted no blocking findings" in err
+
+
 def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [{"body": marker(head, "primary")}])
+    gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, threads=(
         {"isResolved": False, "isOutdated": False, "path": "feature.py", "line": 1,
          "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
@@ -351,7 +404,7 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys) -> None:
 def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [{"body": marker(head, "primary")}])
+    gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "c" * 40}})
@@ -366,7 +419,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
 def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatch) -> None:
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [{"body": marker(head, "primary")}])
+    gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "d" * 40}})
@@ -387,7 +440,7 @@ def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
     assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
     assert "pr:       none" in out
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [{"body": marker(head, "primary"), "state": "APPROVED"}])
+    gh.respond(reviews_key(), [rev(head, "primary", state="APPROVED")])
     arm_readiness(gh, head, conclusion="pending")
     (wt / "scratch").write_text("x")
     code, out, _ = run(capsys, "status")

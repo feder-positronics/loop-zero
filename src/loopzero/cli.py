@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import re
 import sys
@@ -91,9 +92,9 @@ def _require_pr(config: Config, branch: str) -> github.PR:
 # --------------------------------------------------------------------------- review markers
 
 
-def _pr_reviews(repo: str, number: int) -> list[dict]:
-    """All reviews on the PR, oldest first, via `gh api`."""
-    argv = ["gh", "api", f"repos/{repo}/pulls/{number}/reviews?per_page=100"]
+def _gh_api(endpoint: str) -> object:
+    """GET `endpoint` through `gh api` and decode the JSON response."""
+    argv = ["gh", "api", endpoint]
     try:
         done = _proc.run(argv, cwd=Path.cwd(), env_allowlist=github.GH_ENV, timeout=120)
     except _proc.ToolMissing as exc:
@@ -101,26 +102,63 @@ def _pr_reviews(repo: str, number: int) -> list[dict]:
     if done.exit_code != 0:
         raise github.GhError(tuple(argv), done.stderr or done.stdout)
     try:
-        data = json.loads(done.stdout) if done.stdout.strip() else []
+        return json.loads(done.stdout) if done.stdout.strip() else None
     except json.JSONDecodeError as exc:
         raise github.GhError(tuple(argv), f"invalid JSON from gh: {done.stdout[-600:]}") from exc
-    return list(data or [])
 
 
-def _lineage_markers(wt: Path, reviews: list[dict], head: str) -> list[tuple[str, str, str]]:
-    """(head, kind, state) for every review marker whose head is an ancestor of `head`."""
-    found: list[tuple[str, str, str]] = []
+def _pr_reviews(repo: str, number: int) -> list[dict]:
+    """All reviews on the PR, oldest first."""
+    return list(_gh_api(f"repos/{repo}/pulls/{number}/reviews?per_page=100") or [])
+
+
+@functools.cache
+def _token_login() -> str:
+    """Login of the account behind the `gh` token; cached for the duration of one command."""
+    login = (_gh_api("user") or {}).get("login")
+    if not login:
+        raise CliError("could not determine the gh token's login (`gh api user`)")
+    return str(login)
+
+
+@dataclasses.dataclass(frozen=True)
+class Marker:
+    head: str
+    kind: str
+    state: str
+    verdict: str  # "approve" | "request_changes" | ""
+
+
+def _lineage_markers(wt: Path, reviews: list[dict], head: str) -> list[Marker]:
+    """Markers posted by this token, on the commit they name, whose head is an ancestor of `head`.
+
+    A marker is only trusted when the review's `commit_id` equals the marker head and the
+    review author is the token login; anything else could be hand-posted.
+    """
+    found: list[Marker] = []
     for review in reviews:
-        match = REVIEW_MARKER_RE.search(review.get("body") or "")
-        if match and _is_ancestor(wt, match.group(1), head):
-            found.append((match.group(1), match.group(2), review.get("state") or ""))
+        body = review.get("body") or ""
+        match = REVIEW_MARKER_RE.search(body)
+        if not match or review.get("commit_id") != match.group(1):
+            continue
+        if (review.get("user") or {}).get("login") != _token_login():
+            continue
+        if not _is_ancestor(wt, match.group(1), head):
+            continue
+        state = review.get("state") or ""
+        verdict = ""
+        if state == "CHANGES_REQUESTED" or "**request_changes**" in body:
+            verdict = "request_changes"
+        elif state == "APPROVED" or "**approve**" in body:
+            verdict = "approve"
+        found.append(Marker(match.group(1), match.group(2), state, verdict))
     return found
 
 
-def _decide_kind(markers: list[tuple[str, str, str]], head: str) -> tuple[str, str | None]:
+def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the lineage's review budget is spent."""
-    primaries = [m for m in markers if m[1] == "primary"]
-    deltas = [m for m in markers if m[1] == "delta"]
+    primaries = [m for m in markers if m.kind == "primary"]
+    deltas = [m for m in markers if m.kind == "delta"]
     if not primaries:
         return "primary", None
     if deltas:
@@ -130,15 +168,23 @@ def _decide_kind(markers: list[tuple[str, str, str]], head: str) -> tuple[str, s
         )
     if len(primaries) > 1:
         raise CliError("more than one primary review marker found for this lineage; refusing")
-    reviewed = primaries[0][0]
+    reviewed = primaries[0].head
     if head.startswith(reviewed) or reviewed.startswith(head):
         raise CliError(f"head {head[:12]} already has a primary review; push new commits first")
     return "delta", reviewed
 
 
-def _latest_reviewed_head(wt: Path, config: Config, pr: github.PR, head: str) -> str | None:
+def _readiness(wt: Path, config: Config, pr: github.PR, head: str) -> github.Readiness:
+    """`github.readiness` plus: a request_changes review with no blocking thread is not ready."""
     markers = _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head)
-    return markers[-1][0] if markers else None
+    latest = markers[-1] if markers else None
+    result = github.readiness(config.repo, pr, config.required_ci, latest.head if latest else None)
+    if latest and latest.verdict == "request_changes" and not any(
+        r.startswith("open ") for r in result.reasons
+    ):
+        reason = f"latest {latest.kind} review requested changes but posted no blocking findings"
+        result = github.Readiness(ready=False, reasons=(*result.reasons, reason))
+    return result
 
 
 # --------------------------------------------------------------------------- checks report
@@ -264,16 +310,15 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _readiness(wt: Path, config: Config) -> tuple[github.PR, github.Readiness]:
+def _pr_readiness(wt: Path, config: Config) -> tuple[github.PR, github.Readiness]:
     branch, head = worktree.branch(wt), worktree.head(wt)
     pr = _require_pr(config, branch)
-    reviewed = _latest_reviewed_head(wt, config, pr, head)
-    return pr, github.readiness(config.repo, pr, config.required_ci, reviewed)
+    return pr, _readiness(wt, config, pr, head)
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args)
-    pr, readiness = _readiness(wt, config)
+    pr, readiness = _pr_readiness(wt, config)
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
@@ -286,7 +331,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
 
 def cmd_merge(args: argparse.Namespace) -> int:
     wt, config = _context(args)
-    pr, readiness = _readiness(wt, config)
+    pr, readiness = _pr_readiness(wt, config)
     if not readiness.ready:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
@@ -315,16 +360,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("pr:       none (run `loopzero pr`)")
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
-    reviews = _pr_reviews(config.repo, pr.number)
-    markers = _lineage_markers(wt, reviews, head)
+    markers = _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head)
     if markers:
-        reviewed, kind, state = markers[-1]
-        print(f"review:   {kind} on {reviewed[:12]} ({state.lower() or 'posted'})")
+        latest = markers[-1]
+        print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none for this lineage")
-    readiness = github.readiness(
-        config.repo, pr, config.required_ci, markers[-1][0] if markers else None
-    )
+    readiness = _readiness(wt, config, pr, head)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")
@@ -366,6 +408,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    _token_login.cache_clear()
     try:
         return args.func(args)
     except HANDLED as exc:
