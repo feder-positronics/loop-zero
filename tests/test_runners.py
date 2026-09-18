@@ -102,6 +102,10 @@ def _fake_codex(
         bin_dir,
         "codex",
         f"""
+        if [ "$1" = exec ] && [ "$2" = --help ]; then
+          echo '      --ignore-user-config'
+          exit 0
+        fi
         codex_home="${{CODEX_HOME:-$HOME/.codex}}"
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
         printf '%s' "$codex_home" > "{bin_dir}/codex.home"
@@ -209,24 +213,52 @@ def test_reviewer_sandbox_binds_resolv_conf(
     assert expected in _pairs(argv, "--ro-bind")
 
 
-def test_claude_copies_only_credentials_into_private_home(
-    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_claude_binds_config_and_state_read_write_without_copying(
+    fake_bin: Path,
+    tmp_path: Path,
+    fake_bwrap: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
     configured = tmp_path / "configured-claude"
     configured.mkdir()
     (configured / ".credentials.json").write_text('{"token":"secret"}')
     (configured / "settings.json").write_text('{"danger":true}')
+    state = host_home / ".claude.json"
+    state.write_text('{"oauth":"live"}')
+    monkeypatch.setenv("HOME", str(host_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
-    _script(
-        fake_bin,
-        "claude",
-        f'''cat "$HOME/.claude/.credentials.json" > "{fake_bin}/claude.auth"
-        [ ! -e "$HOME/.claude/settings.json" ] || exit 65
-        echo '{json.dumps(_claude_envelope(APPROVE))}'
-        ''',
-    )
+    monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
     assert _review("claude", tmp_path).verdict == "approve"
-    assert (fake_bin / "claude.auth").read_text() == '{"token":"secret"}'
+    binds = _pairs(_bwrap_argv(fake_bwrap), "--bind")
+    assert (str(configured.resolve()), f"{SANDBOX_HOME}/.claude") in binds
+    assert (str(state.resolve()), f"{SANDBOX_HOME}/.claude.json") in binds
+
+
+def test_reviewer_does_not_bind_missing_auth_paths(
+    fake_bin: Path,
+    tmp_path: Path,
+    fake_bwrap: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host_home = tmp_path / "empty-home"
+    host_home.mkdir()
+    monkeypatch.setenv("HOME", str(host_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host_home / "missing-claude"))
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _review("claude", tmp_path)
+    assert all(destination == SANDBOX_HOME for _, destination in _pairs(
+        _bwrap_argv(fake_bwrap), "--bind"
+    ))
+
+    monkeypatch.setenv("CODEX_HOME", str(host_home / "missing-codex"))
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+    _review("codex", tmp_path)
+    assert all(destination == SANDBOX_HOME for _, destination in _pairs(
+        _bwrap_argv(fake_bwrap), "--bind"
+    ))
 
 
 def test_linked_worktree_and_git_directory_are_read_only(
@@ -476,24 +508,28 @@ def test_codex_approve(
     (configured / "auth.json").write_text('{"token":"secret"}')
     (configured / "config.toml").write_text('[mcp_servers.danger]\ncommand="mutate"\n')
     monkeypatch.setenv("CODEX_HOME", str(configured))
+    monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
     _fake_codex(fake_bin, json.dumps(APPROVE))
     result = _review("codex", tmp_path)
     assert result.verdict == "approve" and result.family == "codex"
     assert result.model is None and result.duration_s is not None
     argv = _argv(fake_bin, "codex")
-    assert argv[:5] == ["exec", "--json", "--sandbox", "read-only", "--cd"]
-    assert argv[5] == str(tmp_path.resolve()) and "--ephemeral" in argv
+    assert argv[0] == "exec"
+    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    assert "--ignore-user-config" in argv
+    assert argv[argv.index("--cd") + 1] == str(tmp_path.resolve()) and "--ephemeral" in argv
     assert argv[argv.index("-c") + 1] == "mcp_servers={}"
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
     assert isolated != str(configured) and "loopzero-review-home-" in isolated
-    assert (fake_bin / "codex.auth").read_text() == '{"token":"secret"}'
-    assert (configured / "auth.json").read_text() == '{"token":"secret"}'
     assert not (fake_bin / "codex.config").exists()
     assert "Do the thing" in (fake_bin / "codex.stdin").read_text()
     assert argv[argv.index("--output-schema") + 1].endswith("/schema.json")
     assert argv[argv.index("--output-last-message") + 1].endswith("/last.json")
     sandbox_argv = _bwrap_argv(fake_bwrap)
+    assert (str(configured.resolve()), f"{SANDBOX_HOME}/.codex") in _pairs(
+        sandbox_argv, "--bind"
+    )
     command = sandbox_argv[sandbox_argv.index("--") + 1 :]
     assert command[command.index("--output-schema") + 1] == f"{SANDBOX_HOME}/schema.json"
     assert command[command.index("--output-last-message") + 1] == f"{SANDBOX_HOME}/last.json"
