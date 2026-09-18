@@ -188,8 +188,14 @@ def bwrap_argv(
     common_dir: Path,
     git_dir: Path,
     scratch: dict[str, Path] | None = None,
+    *,
+    clearenv: bool = True,
 ) -> list[str]:
-    """Build the bwrap command line up to and including the `--` separator."""
+    """Build the bwrap command line up to and including the `--` separator.
+
+    With ``clearenv=False`` the caller's (already filtered) environment is inherited
+    instead of cleared, so secrets never appear as ``--setenv`` arguments.
+    """
     argv = [
         "bwrap",
         "--die-with-parent",
@@ -220,7 +226,7 @@ def bwrap_argv(
         argv += ["--ro-bind", str(path), str(path)]
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
-    argv += ["--chdir", str(worktree), "--clearenv"]
+    argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
     env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist), **dict(config.env)}
     for key, value in env.items():
         if key != "HOME":

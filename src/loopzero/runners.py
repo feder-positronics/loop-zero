@@ -222,7 +222,6 @@ _ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 
 def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
     """Build a networked, read-only sandbox config independent of check settings."""
-    auth = CLAUDE_AUTH_ENV if family == "claude" else CODEX_AUTH_ENV
     return Config(
         repo="review/sandbox",
         base_branch="main",
@@ -231,7 +230,7 @@ def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Conf
         merge_strategy="squash",
         reviewers=(family,),
         network=True,
-        env_allowlist=(*BASE_ENV, *auth),
+        env_allowlist=BASE_ENV,
         sandbox_ro=ro_paths or (str(binary.resolve().parent),),
         writable=(),
         scratch=(),
@@ -266,7 +265,7 @@ def _sandbox_prefix(
             )
     common_dir = _git_dir(cwd, "--git-common-dir", config.env_allowlist)
     git_dir = _git_dir(cwd, "--git-dir", config.env_allowlist)
-    prefix = sandbox.bwrap_argv(config, cwd, home, common_dir, git_dir)
+    prefix = sandbox.bwrap_argv(config, cwd, home, common_dir, git_dir, clearenv=False)
     sandbox.probe(config, cwd, prefix)
     return prefix, config, binary
 
@@ -317,7 +316,8 @@ def _review_claude(
         argv[0] = str(binary)
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt, extra_env={},
-            env_allowlist=config.env_allowlist, timeout=timeout, family="claude",
+            env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV), timeout=timeout,
+            family="claude",
         )
     raw = done.stdout
     try:
@@ -377,7 +377,8 @@ def _review_codex(
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt,
             extra_env={},
-            env_allowlist=config.env_allowlist, timeout=timeout, family="codex",
+            env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
+            family="codex",
         )
         raw = last_file.read_text(encoding="utf-8") if last_file.exists() else ""
     if not raw.strip():

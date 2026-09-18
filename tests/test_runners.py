@@ -298,6 +298,17 @@ def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
     assert "OPENAI_API_KEY" not in env and "SOME_RANDOM_SECRET" not in env
 
 
+def test_secrets_never_appear_in_bwrap_argv(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    _review("claude", tmp_path)
+    argv = fake_bwrap.read_text().splitlines()
+    assert "sk-secret" not in argv and "ANTHROPIC_API_KEY" not in argv
+    assert "--clearenv" not in argv
+
+
 def test_reviewer_ro_paths_replace_binary_default(
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path
 ) -> None:

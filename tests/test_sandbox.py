@@ -23,7 +23,7 @@ with open("{log}", "w", encoding="utf-8") as stream:
     stream.writelines(f"{{arg}}\\n" for arg in args)
 separator = args.index("--")
 options, command = args[:separator], args[separator + 1:]
-env = {{}}
+env = {{}} if "--clearenv" in options else dict(os.environ)
 home_source = None
 i = 0
 while i < len(options):
