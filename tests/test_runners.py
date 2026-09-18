@@ -184,6 +184,24 @@ def test_claude_auth_failure_in_error_envelope(fake_bin: Path, tmp_path: Path) -
         _review("claude", tmp_path)
 
 
+AUTH_WORDS = {
+    "verdict": "approve",
+    "findings": [{"severity": "suggestion", "path": "auth.py", "line": 7,
+                  "title": "Handle 401 Unauthorized", "body": "Log 'Not logged in' clearly."}],
+}
+
+
+def test_claude_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path) -> None:
+    _fake_claude(fake_bin, _claude_envelope(AUTH_WORDS))
+    result = _review("claude", tmp_path)
+    assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
+
+
+def test_codex_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path) -> None:
+    _fake_codex(fake_bin, json.dumps(AUTH_WORDS), stderr="warning: not authenticated to telemetry")
+    assert _review("codex", tmp_path).verdict == "approve"
+
+
 def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> None:
     _fake_claude(fake_bin, "boom", exit_code=2)
     with pytest.raises(RunnerBadOutput, match="exited 2"):

@@ -193,10 +193,10 @@ def _run(
         )
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
-    combined = f"{done.stdout}\n{done.stderr}"
-    if _looks_like_auth_failure(combined):
-        raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
     if done.exit_code != 0:
+        combined = f"{done.stdout}\n{done.stderr}"
+        if _looks_like_auth_failure(combined):
+            raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
         raise RunnerBadOutput(f"{family}: exited {done.exit_code}", _tail(combined))
     return done
 
