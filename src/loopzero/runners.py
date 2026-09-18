@@ -34,6 +34,7 @@ _AUTH_PATTERNS = (
     re.compile(r"please (?:run )?`?codex login`?", re.IGNORECASE),
     re.compile(r"invalid api key", re.IGNORECASE),
     re.compile(r"authentication[_ ]error", re.IGNORECASE),
+    re.compile(r"OAuth access token has expired|Failed to authenticate|token expired", re.IGNORECASE),
     re.compile(r"\b401\b.*unauthori[sz]ed|unauthori[sz]ed.*\b401\b", re.IGNORECASE),
     re.compile(r"login required|not authenticated|missing credentials", re.IGNORECASE),
 )
@@ -129,6 +130,16 @@ def _looks_like_auth_failure(text: str) -> bool:
     return any(p.search(text) for p in _AUTH_PATTERNS)
 
 
+def _claude_envelope_auth_failure(envelope: object) -> bool:
+    if not isinstance(envelope, dict):
+        return False
+    return envelope.get("api_error_status") in (401, 403) or (
+        envelope.get("terminal_reason") == "api_error"
+        and re.search(r"authenticate|OAuth|expired|401", str(envelope.get("result", "")),
+                      re.IGNORECASE) is not None
+    )
+
+
 def _extract_json_object(text: str) -> object:
     """Parse ``text`` as JSON, tolerating code fences or surrounding prose."""
     stripped = text.strip()
@@ -211,7 +222,13 @@ def _run(
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", _tail(exc.output)) from exc
     if done.exit_code != 0:
         combined = f"{done.stdout}\n{done.stderr}"
-        if _looks_like_auth_failure(combined):
+        envelope = None
+        if family == "claude":
+            try:
+                envelope = _extract_json_object(done.stdout)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
             raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
         raise RunnerBadOutput(f"{family}: exited {done.exit_code}", _tail(combined))
     return done
@@ -326,6 +343,8 @@ def _review_claude(
         raise RunnerBadOutput("claude: stdout is not JSON", _tail(raw)) from exc
     if not isinstance(envelope, dict):
         raise RunnerBadOutput("claude: result envelope is not an object", _tail(raw))
+    if _claude_envelope_auth_failure(envelope):
+        raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(raw)}")
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
         if _looks_like_auth_failure(text):
