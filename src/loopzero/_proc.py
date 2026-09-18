@@ -53,10 +53,12 @@ def run(
     extra_env: Mapping[str, str] | None = None,
     timeout: float,
     merge_output: bool = False,
+    input: str | None = None,
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
     `merge_output=True` sends stderr into stdout so interleaving is preserved.
+    `input` is written to the child's stdin; without it stdin is /dev/null.
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
     argv = [str(part) for part in argv]
@@ -66,7 +68,7 @@ def run(
             argv,
             cwd=str(cwd),
             env=build_env(env_allowlist, extra_env),
-            stdin=subprocess.DEVNULL,
+            **({"input": input} if input is not None else {"stdin": subprocess.DEVNULL}),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
             text=True,
