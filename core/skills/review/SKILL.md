@@ -1,52 +1,43 @@
 ---
 name: review
-description: Independently review a frozen diff against its acceptance criteria and report defects as structured findings with severity.
+description: Assess an artifact, system, architecture, workflow, agent configuration, or idea and return ranked concerns without implementing changes; for code diffs use code-review.
 ---
 
-# review
+# Review
 
-Read [the contract](../../CONTRACT.md). You review the exact head you are
-given; you do not edit it. Read the PR body (objective, acceptance, checks),
-the full diff, and enough surrounding code to judge the diff. For a delta
-review, read only the diff since the reviewed commit plus the open threads.
+Assess one non-diff target at the requested altitude and return a ranked,
+evidence-backed judgment. Do not implement changes.
 
-## Judge
+## Route And Ground
 
-- Does the change meet each acceptance line? Missing proof is a finding.
-- Would it break a caller, a data shape, a permission boundary or a build?
-- Is any test asserting less than the objective claims?
+Route a code diff or PR to [code-review](../code-review/SKILL.md), adding
+[security-review](../security-review/SKILL.md) when a trust boundary changes.
+For other targets, read enough source material and surrounding context to
+understand purpose, constraints, callers or consumers, and acceptance.
 
-Report demonstrated failures with a failure condition and impact. Separate
-"I could not verify" from "this is wrong". Generic advice is not a finding.
+Use an opinion pass for directional requests: a concise assessment, the few
+highest-value concerns, and a recommended direction. Use a findings review only
+when the requester asks for an audit, exhaustive assessment, or gate input.
 
-## Severity
+Select only relevant lenses:
 
-- `critical`: wrong, unsafe or data-losing; must be fixed.
-- `important`: ships a bug or misses acceptance; must be fixed.
-- `suggestion`: better but optional. Never blocks, never counted.
+- architecture: boundaries, coupling, contracts, and divergent paths;
+- strategy: problem, users, evidence, leverage, and timing;
+- workflow: outcome coverage, friction, enforcement, and feedback;
+- agent configuration: source-of-truth consistency, trigger overlap,
+  deterministic versus prompt enforcement, and stale scaffolding.
 
-## Output
+For agent configuration, keep an instruction only when it adds non-inferable
+value. Exact choreography needs a safety reason or observed failure.
 
-Return exactly one JSON object and nothing else:
+## Output And Exit
 
-```json
-{
-  "verdict": "approve" | "request_changes",
-  "findings": [
-    {
-      "severity": "critical" | "important" | "suggestion",
-      "path": "src/file.py" | null,
-      "line": 42 | null,
-      "title": "one line",
-      "body": "what fails, when, and the smallest fix"
-    }
-  ]
-}
-```
+For an opinion pass, return the assessment, ranked concerns, recommended
+direction, and material uncertainty. For a findings review, return only the
+highest-value evidence-backed findings as `critical`, `important`, or
+`suggestion`, plus one synthesis and the review limits.
 
-Every `critical` or `important` finding must carry `path` and `line`; a
-finding without them is anchored to the first changed file.
-`verdict` is `request_changes` when any finding is `critical` or
-`important`, otherwise `approve`. An empty `findings` list with `approve` is
-a valid, complete result. If you cannot see the diff, return one `critical`
-finding saying so; never approve blind.
+Leave the target unchanged. Exit when scope and altitude are explicit, each
+concern is supported by inspected evidence, and uncertainty is stated. If the
+review belongs to a live task, keep actionable discussion in its issue or PR
+threads; do not create a separate findings store.

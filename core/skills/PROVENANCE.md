@@ -1,27 +1,31 @@
 # Skill provenance
 
-The skills currently in this directory share general workflow ideas with
-Matt Pocock's collection; `same-idea-only` does not claim copied or adapted
-text. The collection reference is pinned below.
+The batch-2 skills were adapted from the pinned loop-zero v1 sources below,
+except for the broad `review`, which was adapted from intelflo. `code-review`
+continues the diff-review role named `review` in v1.
 
-| skill | upstream URL | upstream commit | relation |
-| --- | --- | --- | --- |
-| `plan` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | same-idea-only |
-| `implement` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | same-idea-only |
-| `review` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | same-idea-only |
-| `security-review` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | same-idea-only |
-| `diagnose` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | same-idea-only |
+| skill | upstream URL | upstream commit | source path | relation |
+| --- | --- | --- | --- | --- |
+| `plan` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/plan/SKILL.md` | adapted |
+| `implement` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/implement/SKILL.md` | adapted |
+| `code-review` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/review/SKILL.md` | adapted |
+| `security-review` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/security-review/SKILL.md` | adapted |
+| `diagnose` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/diagnose/SKILL.md` | adapted |
+| `debug` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/debug/SKILL.md` | adapted |
+| `write-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/write-tests/SKILL.md` | adapted |
+| `fix-failing-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/fix-failing-tests/SKILL.md` | adapted |
+| `refine-code` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/refine-code/SKILL.md` | adapted |
+| `review` | https://github.com/feder-positronics/intelflo | `7188cb3f582dd2c1a349fccd06097d89d42d67eb` | `.cursor/skills/review/SKILL.md` | adapted |
 
-The following adaptation is recorded for consumers that carry it; `grill-me`
-is not present in this checkout and derives from Pocock's `grill-me`/`grilling`.
+Pocock provenance is retained only where text was adapted; `grill-me` derives
+from Pocock's `grill-me`/`grilling`.
 
-| skill | upstream URL | upstream commit | relation |
-| --- | --- | --- | --- |
-| `grill-me` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | adapted |
+| skill | upstream URL | upstream commit | source path | relation |
+| --- | --- | --- | --- | --- |
+| `grill-me` | https://github.com/mattpocock/skills | `3cca18b368ae95cdbdebbff572ccafa662551015` | `skills/grill-me/SKILL.md` / `skills/grilling/SKILL.md` | adapted |
 
 Consumers record their own copies using the same table columns, with the
-loop-zero source URL and exact loop-zero commit as upstream, and the relation
-set to `verbatim`, `adapted`, or `same-idea-only` as appropriate.
+loop-zero source URL, exact commit, source path, and relation.
 
 For upstream licence text, including notices for consumers carrying verbatim
 copies of Pocock's `grill-with-docs` or `tdd`, see
