@@ -61,16 +61,16 @@ def load(path: Path | str, *, checks: dict[str, Any] | None = None) -> Config:
 
 def _base_source(worktree: Path, base_branch: str) -> tuple[str, str]:
     done = _proc.run(
-        ["git", "show-ref", "--verify", f"refs/remotes/origin/{base_branch}"],
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if done.exit_code == 0:
-        return f"origin/{base_branch}", done.stdout.split()[0]
+        return f"origin/{base_branch}", done.stdout.strip()
     if done.exit_code == 1:
         revision = worktree_mod.base_sha(worktree)
         return revision, revision
     message = _proc.tail(done.stderr or done.stdout, 1)
-    raise ConfigError(f"git show-ref origin/{base_branch} failed: {message}")
+    raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
 
 
 def base_revision(worktree: Path, base_branch: str) -> str:

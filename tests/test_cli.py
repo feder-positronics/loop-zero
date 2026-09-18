@@ -281,6 +281,35 @@ def test_check_uses_worktree_checks_when_base_has_no_workflow(
     assert not out.startswith("checks pinned")
 
 
+def test_check_uses_task_base_when_remote_ref_is_missing(wt: Path, capsys) -> None:
+    git(wt, "update-ref", "-d", "refs/remotes/origin/main")
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 0 and err == ""
+    assert "  echo ok" in out and out.startswith("checks pinned to origin/main@")
+
+
+def test_primary_review_diffs_from_merge_base_not_base_tip(
+    wt: Path, repo: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    (repo / "upstream.py").write_text("upstream = 1\n")
+    git(repo, "add", "upstream.py")
+    git(repo, "commit", "-q", "-m", "upstream change")
+    git(repo, "push", "-q", "origin", "main")
+    git(wt, "fetch", "-q", "origin")
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 4})
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+
+    code, _, _ = run(capsys, "review")
+
+    prompt = (fake_bin / "claude.stdin").read_text()
+    assert code == 0 and "upstream = 1" not in prompt
+
+
 def test_check_fails_when_base_workflow_is_malformed(
     wt: Path, repo: Path, capsys
 ) -> None:
