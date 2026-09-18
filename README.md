@@ -81,3 +81,5 @@ own [workflow.toml](workflow.toml) is a working example.
 ## License
 
 MIT.
+
+Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
