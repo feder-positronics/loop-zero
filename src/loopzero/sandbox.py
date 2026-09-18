@@ -38,14 +38,15 @@ class SandboxUnavailable(LoopZeroError):
 
 
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT) -> CheckReport:
-    """Run every `config.checks` command in order inside the sandbox and report results.
+    """Run `config.checks` in order until one fails, inside the sandbox, and report results.
 
     The sandbox sees only `SYSTEM_RO`, `config.sandbox_ro`, the worktree and its Git
     directories (all read-only), `config.writable` read-write, per-run scratch dirs over
     `config.scratch`, fresh tmpfs at /tmp, /run and /var/run, a private HOME at /tmp/home,
     no network unless `config.network`, and `SANDBOX_ENV` overlaid by `config.env_allowlist`
     host values and then `config.env`. Each command's exit code is recorded; a timeout is
-    recorded as exit `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check.
+    recorded as exit `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check,
+    and commands after the first failure are not run or recorded.
     """
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
@@ -77,7 +78,10 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
         _probe(config, worktree, prefix)
         for command in config.checks:
-            results.append(_run_one(config, worktree, prefix, command, timeout))
+            result = _run_one(config, worktree, prefix, command, timeout)
+            results.append(result)
+            if result.exit_code != 0:
+                break
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
 
 

@@ -42,7 +42,9 @@ def argv_of(log: Path) -> list[str]:
 
 
 def test_report_head_dirty_and_results(git_repo, bwrap_log):
-    report = sandbox.run_checks(make_config(checks=("echo one", "echo two; exit 4")), git_repo)
+    report = sandbox.run_checks(
+        make_config(checks=("echo one", "echo two; exit 4", "echo never")), git_repo
+    )
     assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
     assert report.dirty is False
     (git_repo / "README.md").write_text("changed\n")
@@ -135,10 +137,9 @@ def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
     report = sandbox.run_checks(
         make_config(checks=("echo partial; sleep 5", "echo after")), git_repo, timeout=0.3
     )
-    first, second = report.results
+    (first,) = report.results
     assert (first.exit_code, first.tail.splitlines()[0]) == (sandbox.TIMEOUT_EXIT, "partial")
     assert "timed out" in first.tail and not report.ok
-    assert (second.exit_code, second.tail) == (0, "after")
 
 
 def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
@@ -195,18 +196,20 @@ def _real_bwrap_works() -> bool:
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 def test_real_sandbox_denies_writes(git_repo):
+    denied = (
+        ("touch escaped.txt", git_repo / "escaped.txt"),
+        ("touch .git/escaped", git_repo / ".git" / "escaped"),
+    )
+    for command, escaped in denied:
+        report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
+        assert report.results[0].exit_code != 0, report
+        assert not escaped.exists()
     checks = (
-        "touch escaped.txt",
-        "touch .git/escaped",
         "echo x > \"$HOME/ok\" && cat \"$HOME/ok\" && test ! -e /tmp/repo",
         "test \"$(pwd)\" = \"$PWD\" && env | grep -c '^LZ_' ; true",
     )
     report = sandbox.run_checks(make_config(checks=checks), git_repo)
-    codes = [r.exit_code for r in report.results]
-    assert codes[0] != 0 and codes[1] != 0, report
-    assert codes[2] == 0, report
-    assert not (git_repo / "escaped.txt").exists()
-    assert not (git_repo / ".git" / "escaped").exists()
+    assert [r.exit_code for r in report.results] == [0, 0], report
     assert report.head
 
 

@@ -217,7 +217,7 @@ def _load_report(wt: Path) -> CheckReport | None:
     try:
         data = json.loads(path.read_text())
         results = tuple(CheckResult(**item) for item in data["results"])
-        dirty = data["dirty"]
+        dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
         return CheckReport(head=str(data["head"]), dirty=dirty, results=results)

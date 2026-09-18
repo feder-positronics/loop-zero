@@ -153,7 +153,10 @@ def test_check_fail_exits_one(wt: Path, capsys) -> None:
     code, out, err = run(capsys, "check")
     assert code == 1 and out.splitlines()[-1] == "FAIL"
     assert out.splitlines()[0].startswith("exit 3")
+    assert "README.md" not in out
     assert err == "--- echo no; exit 3 (exit 3) ---\nno\n", "failing tail goes to stderr"
+    report = json.loads((wt / ".loopzero" / "checks.json").read_text())
+    assert [result["command"] for result in report["results"]] == ["echo no; exit 3"]
 
 
 def test_check_failure_tail_is_capped_at_40_lines(wt: Path, capsys) -> None:
@@ -562,6 +565,25 @@ def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
     assert f"review:   primary on {head[:12]} (approved)" in out
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
+
+
+def test_status_silently_ignores_legacy_report_without_dirty(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    report_path = wt / ".loopzero" / "checks.json"
+    report = json.loads(report_path.read_text())
+    del report["dirty"]
+    report_path.write_text(json.dumps(report))
+
+    code, out, err = run(capsys, "status")
+
+    assert code == 0 and err == ""
+    assert "ready:    no" in out
+    assert "  - run loopzero check at this head" in out
 
 
 def test_gh_errors_are_one_line_on_stderr(wt: Path, gh: FakeGh, capsys) -> None:
