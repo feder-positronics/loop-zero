@@ -1,0 +1,18 @@
+# loop-zero's own delivery configuration. See workflow.example.toml for key docs.
+
+[repo]
+name = "feder-positronics/loop-zero"
+base = "main"
+
+[checks]
+# Omit scratch to use the built-in default directories.
+commands = ["uv run --group dev ruff check src tests", "uv run --group dev pytest -q"]
+required_ci = ["checks"]
+ro_paths = ["/home/marcin/.local/bin", "/home/marcin/.local/share/uv"]
+writable = ["/home/marcin/.cache/uv"]
+env = { UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/marcin/.local/share/uv/python" }
+network = false
+
+[delivery]
+merge = "squash"
+reviewers = ["claude", "codex"]

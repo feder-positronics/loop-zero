@@ -1,0 +1,51 @@
+# loop-zero configuration. Copy to workflow.toml at the repository root.
+# Every key below is read by `loopzero`; there are no other config files.
+
+[repo]
+# GitHub repository in owner/name form. Used for every `gh` call.
+name = "owner/name"
+# Branch that `loopzero start` branches from and `loopzero merge` merges into.
+base = "main"
+
+[checks]
+# Shell commands run in order by `loopzero check`, each inside the sandbox
+# (read-only worktree, no Git write, isolated HOME). The first nonzero exit
+# fails the run and prints the failing tails; the full report is written to
+# .loopzero/checks.json. These work out of the box for a uv project.
+commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
+
+# Worktree-relative paths that get a fresh writable scratch mount per run.
+# This is the default list; checks cannot write anywhere else in the tree.
+# Entries are pre-created as empty directories in the worktree (git-invisible).
+# uv projects need a committed uv.lock, since uv cannot write one in there.
+scratch = [".venv", ".ruff_cache", ".pytest_cache"]
+
+# Environment variables set inside the sandbox. Entries win over sandbox
+# defaults and host variables; PATH and HOME cannot be overridden.
+env = { UV_CACHE_DIR = "/home/<you>/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/<you>/.local/share/uv/python" }
+
+# Host paths mounted writable. A shared tool cache must be listed here or the
+# first check in a fresh worktree fails without network. This is a trust
+# decision: a check can write to these paths.
+writable = ["/home/<you>/.cache/uv"]
+
+# Exact names of GitHub check runs that must be green on the PR head before
+# `loopzero ready` and `loopzero merge` proceed. Match your branch protection.
+required_ci = ["checks"]
+
+# Host paths mounted read-only into the sandbox. The sandbox does not expose
+# /home, so any toolchain under your home directory (uv, cargo, nvm, ...) must
+# be listed. /, /run, /var/run, /proc, /dev, /sys and /root are refused.
+ro_paths = ["/home/<you>/.local/bin", "/home/<you>/.local/share/uv"]
+
+# Allow network inside the sandbox. Needed for the first check in a fresh
+# worktree unless a warm uv cache is in `writable`. PYTHONDONTWRITEBYTECODE,
+# RUFF_CACHE_DIR, UV_CACHE_DIR and PYTEST_ADDOPTS are preset for you.
+network = false
+
+[delivery]
+# Merge strategy passed to `gh pr merge`: "squash", "merge" or "rebase".
+merge = "squash"
+# Reviewer preference, in order. `loopzero review` picks the first family
+# that is installed and differs from the author's family when that is known.
+reviewers = ["claude", "codex"]

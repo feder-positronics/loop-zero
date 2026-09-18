@@ -1,20 +1,37 @@
 ---
 name: diagnose
-description: Establish the cause of broken behavior when it remains unclear, using reproduction and evidence before choosing a repair.
+description: Establish the cause of broken behavior by reproduction and evidence before choosing a repair.
 ---
 
-Read [the shared contract]({{package.core_contract}}). Reproduce the failure with the
-smallest useful case, distinguish environment failures from behavior failures,
-and test competing explanations when the evidence supports more than one.
-Deliver the demonstrated cause, reproduction evidence and smallest repair route.
+# diagnose
 
-Do not treat correlation or a plausible explanation as proof. When prerequisites
-prevent reproduction, report what is missing and what remains uncertain. Stop
-before speculative repairs or changes beyond authorized scope; route an understood
-repair to implementation. Diagnosis is not a compulsory delivery phase.
+Read [the contract](../../CONTRACT.md). Use this when something fails and
+the cause is not obvious. The output is a demonstrated cause and the
+smallest repair route, not a fix.
 
-Run reproductions as validation children without lease/nonce authority or write
-access to parent Git metadata. Preserve the failing diff and untracked work on
-harness timeout so a new owner can adopt it. Put pass/fail checks and uncertainty
-in the one current-head PR evidence block; diagnosis does not create durable
-findings. Route a repair back to implementation without a phase lock.
+## Do
+
+1. Reproduce with the smallest case you can: one test, one command, one
+   input. Record the exact command and output.
+2. Decide whether the failure is environmental (missing tool, network,
+   sandbox, stale dependency) or behavioral (the code does the wrong thing).
+   Run the reproduction through `loopzero check` to rule out the first.
+3. When more than one explanation fits, design a step that separates them
+   and run it. Do not pick the most familiar story.
+4. Deliver: the cause, the reproduction, the evidence that rules out the
+   alternatives, and the smallest repair. Hand the repair to
+   [implement](../implement/SKILL.md).
+
+## Stop when
+
+- You cannot reproduce. Report what you tried, what is missing (data,
+  credentials, hardware) and what remains uncertain.
+- The repair would change behavior outside the task. Write it up; do not
+  start it.
+
+## Do not
+
+- Treat correlation or a plausible explanation as proof.
+- Apply speculative patches to see if the symptom goes away.
+- Commit, tag or push from a reproduction script; reproductions are
+  read-only against Git.

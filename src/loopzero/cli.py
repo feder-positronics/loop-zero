@@ -1,494 +1,523 @@
-"""``loopzero`` command line.
-
-Subcommands present in this release: ``init``, ``sync``, ``status``,
-``policy lint``, ``doctor``, ``checks``, ``review-stats``, ``accounts renew``. Later releases add ``worktree``,
-``job``, ``ledger``, ``dispatch``, ``review``, ``delivery`` and ``evidence``
-as their modules land. Exit code 0 means the command produced its result; a
-report command's exit code never asserts that a policy passed unless the
-command's help says so.
-"""
+"""Command line: composes the modules into start, check, pr, review, ready, merge, status."""
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
-import os
 import re
-import shlex
-import shutil
-import stat
-import subprocess
 import sys
 from pathlib import Path
 
-from . import __version__, gates
-from . import sync as sync_module
-from .config import (
-    CONTRACT_ID,
-    WORKFLOW_FILE,
-    ConfigError,
-    Profile,
-    effective_hooks,
-    load_profile,
-    resolve_base,
+from loopzero import _proc, github, runners, sandbox, worktree
+from loopzero import config as config_mod
+from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
+
+CHECKS_FILE = Path(".loopzero") / "checks.json"
+GIT_TIMEOUT = 60.0
+REVIEW_MARKER_RE = re.compile(
+    r"<!--\s*loopzero:review\s+head=([0-9a-fA-F]{7,40})\s+kind=(primary|delta)\s*-->"
 )
-from .trust import allowed_path, resolve_executable
-
-TOOLS = ("git", "bwrap", "openssl", "gh")
-
-INIT_TEMPLATE = """# Commands run from the repository root; narrow checks to the affected area.
-profiles = []
-
-[core]
-repository = "https://github.com/feder-positronics/loop-zero"
-revision = "{revision}"
-path = "vendor/loop-zero"
-
-[package]
-env_prefix = "LOOPZERO"
-audit_root = ".audit"
-state_root = "~/.local/state/loopzero"
-contract = "{contract}"
-epoch = 1
-sandbox = "bwrap"
-skills_dir = ".cursor/skills"
-skill_mirrors = [".agents/skills", ".agent/skills", ".claude/skills"]
-
-[checks]
-required = []
-advisory = []
-scheduled = []
-
-[paths]
-constraints = "AGENTS.md"
-
-[commands]
-setup = []
-check_fast = []
-check_integration = "not-applicable: fill in or state why there is no integration surface"
-
-[hooks]
-"""
+RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
+HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
+UNEXPECTED = (KeyError, TypeError)
+PAGE = 100
 
 
-SHELL_METACHARACTERS = re.compile(r"&&|\|\||[;&|<>`\r\n]|\$\(")
+class CliError(LoopZeroError):
+    """A refused command; the message says what to do instead."""
 
 
-def _lint_hook_commands(
-    profile: Profile, hooks: dict[str, tuple[str, ...]], allowed: tuple[Path, ...]
-) -> list[str]:
-    problems: list[str] = []
-    for name, commands in hooks.items():
-        for command in commands:
-            where = f"[hooks].{name}"
-            if SHELL_METACHARACTERS.search(command):
-                problems.append(
-                    f"{where}: shell metacharacters are not allowed: {command!r}"
-                )
-                continue
-            try:
-                argv = shlex.split(command, posix=True)
-            except ValueError as exc:
-                problems.append(f"{where}: invalid command quoting: {exc}")
-                continue
-            if not argv:
-                problems.append(f"{where}: command has no executable")
-            elif resolve_executable(profile.root, argv[0], allowed) is None:
-                problems.append(
-                    f"{where}: executable {argv[0]!r} is not a regular executable in the allowed PATH"
-                )
-    return problems
+def review_marker(head: str, kind: str) -> str:
+    return f"<!-- loopzero:review head={head} kind={kind} -->"
 
 
-def _run_source_status(
-    profile: Profile, source_arg: str
-) -> subprocess.CompletedProcess[str]:
-    try:
-        source = Path(source_arg).resolve(strict=True)
-        tool = source / "core" / "tools" / "status.py"
-        if stat.S_ISLNK(os.lstat(tool).st_mode) or not stat.S_ISREG(
-            os.lstat(tool).st_mode
-        ):
-            raise OSError("verifier is not a regular file")
-    except OSError as exc:
-        raise ConfigError([f"trusted source verifier unavailable: {exc}"]) from None
-    environment = {
-        "PATH": "/usr/bin:/bin",
-        "HOME": "/tmp",
-        "TMPDIR": "/tmp",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_NO_REPLACE_OBJECTS": "1",
-        "GIT_TERMINAL_PROMPT": "0",
+# --------------------------------------------------------------------------- git / context
+
+
+def _git(cwd: Path, *args: str) -> str:
+    done = _proc.run(
+        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT
+    )
+    if done.exit_code != 0:
+        raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
+    return done.stdout.strip()
+
+
+def _toplevel() -> Path:
+    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
+
+
+def _repo_root(wt: Path) -> Path:
+    """The main checkout that owns this worktree (parent of the common .git directory)."""
+    return Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
+
+
+def _load_config(args: argparse.Namespace, root: Path) -> Config:
+    return config_mod.load(args.config or root / "workflow.toml")
+
+
+def _context(args: argparse.Namespace) -> tuple[Path, Config]:
+    wt = _toplevel()
+    return wt, _load_config(args, wt)
+
+
+def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
+    done = _proc.run(
+        ["git", "merge-base", "--is-ancestor", sha, head],
+        cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
+    )
+    return done.exit_code == 0
+
+
+def _primary_base(wt: Path, config: Config) -> str:
+    done = _proc.run(
+        ["git", "merge-base", f"origin/{config.base_branch}", "HEAD"],
+        cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
+    )
+    return done.stdout.strip() if done.exit_code == 0 else worktree.base_sha(wt)
+
+
+def _require_clean(wt: Path) -> None:
+    if worktree.is_dirty(wt):
+        raise CliError("worktree has uncommitted or untracked changes; commit or remove them first")
+
+
+def _require_task_branch(config: Config, branch: str) -> None:
+    if branch == config.base_branch or not branch.startswith("lz/"):
+        raise CliError(
+            f"branch {branch!r} is not a loopzero task branch (lz/<slug>); run from a worktree "
+            "created by `loopzero start`"
+        )
+
+
+def _require_pr(config: Config, branch: str, *, allow_merged: bool = False) -> github.PR:
+    pr = github.pr_for_branch(config.repo, branch)
+    if pr is None:
+        raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
+    if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
+        raise CliError(f"PR #{pr.number} is {pr.state}, not open: {pr.url}")
+    return pr
+
+
+def _require_pushed(pr: github.PR, head: str) -> None:
+    if pr.head_sha != head:
+        raise CliError(
+            f"PR head {pr.head_sha[:12]} differs from local {head[:12]}; push or pull first"
+        )
+
+
+# --------------------------------------------------------------------------- review markers
+
+
+def _pr_reviews(repo: str, number: int) -> list[dict]:
+    """All reviews on the PR, oldest first, following pages until a short one."""
+    reviews: list[dict] = []
+    page = 1
+    while True:
+        endpoint = f"repos/{repo}/pulls/{number}/reviews?per_page={PAGE}&page={page}"
+        batch = list(github.api_get(endpoint) or [])
+        reviews += batch
+        if len(batch) < PAGE:
+            return reviews
+        page += 1
+
+
+@dataclasses.dataclass(frozen=True)
+class Marker:
+    head: str
+    kind: str
+    state: str
+    verdict: str  # "approve" | "request_changes" | ""
+
+
+def _lineage_markers(wt: Path, reviews: list[dict], head: str) -> list[Marker]:
+    """Markers posted by this token, on the commit they name, whose head is an ancestor of `head`.
+
+    A marker is only trusted when the review's `commit_id` equals the marker head and the
+    review author is the token login; anything else could be hand-posted.
+    """
+    found: list[Marker] = []
+    token_login: str | None = None
+    for review in reviews:
+        body = review.get("body") or ""
+        match = REVIEW_MARKER_RE.search(body)
+        if not match or review.get("commit_id") != match.group(1):
+            continue
+        if token_login is None:
+            token_login = github.login()
+        if (review.get("user") or {}).get("login") != token_login:
+            continue
+        if not _is_ancestor(wt, match.group(1), head):
+            continue
+        state = review.get("state") or ""
+        verdict = ""
+        if state == "CHANGES_REQUESTED" or "**request_changes**" in body:
+            verdict = "request_changes"
+        elif state == "APPROVED" or "**approve**" in body:
+            verdict = "approve"
+        found.append(Marker(match.group(1), match.group(2), state, verdict))
+    return found
+
+
+def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
+    """Return (kind, reviewed_head) or raise when the lineage's review budget is spent."""
+    primaries = [m for m in markers if m.kind == "primary"]
+    deltas = [m for m in markers if m.kind == "delta"]
+    if not primaries:
+        return "primary", None
+    if deltas:
+        raise CliError(
+            "review budget exhausted for this lineage (primary and delta already posted); "
+            "rewrite the reviewed commits (squash/amend) so they are no longer ancestors of "
+            "HEAD, then run review again"
+        )
+    if len(primaries) > 1:
+        raise CliError("more than one primary review marker found for this lineage; refusing")
+    reviewed = primaries[0].head
+    if head.startswith(reviewed) or reviewed.startswith(head):
+        raise CliError(f"head {head[:12]} already has a primary review; push new commits first")
+    return "delta", reviewed
+
+
+def _readiness(
+    wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None
+) -> github.Readiness:
+    markers = _lineage_markers(
+        wt, reviews if reviews is not None else _pr_reviews(config.repo, pr.number), head
+    )
+    latest = markers[-1] if markers else None
+    result = github.readiness(config.repo, pr, config.required_ci, latest.head if latest else None)
+    report = _load_report(wt)
+    if report is None or report.head != head or report.dirty or not report.ok:
+        result = github.Readiness(
+            ready=False, reasons=(*result.reasons, "run loopzero check at this head")
+        )
+    return result
+
+
+# --------------------------------------------------------------------------- checks report
+
+
+def _save_report(wt: Path, report: CheckReport) -> None:
+    path = wt / CHECKS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "head": report.head,
+        "dirty": report.dirty,
+        "results": [dataclasses.asdict(result) for result in report.results],
     }
-    return subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(tool),
-            "--consumer",
-            str(profile.root),
-            "--source",
-            str(source),
-        ],
-        capture_output=True,
-        text=True,
-        env=environment,
-    )
+    path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def cmd_init(args: argparse.Namespace) -> int:
-    root = Path(args.root).resolve()
-    target = root / WORKFLOW_FILE
-    if target.exists() and not args.force:
-        print(f"{target} exists; use --force to overwrite", file=sys.stderr)
-        return 1
-    revision = args.revision or "0" * 40
-    target.write_text(
-        INIT_TEMPLATE.format(revision=revision, contract=CONTRACT_ID), encoding="utf-8"
-    )
-    print(
-        f"wrote {target}; set [core].revision to the inspected full SHA and fill [checks]"
-    )
+def _load_report(wt: Path) -> CheckReport | None:
+    path = wt / CHECKS_FILE
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        results = tuple(CheckResult(**item) for item in data["results"])
+        dirty = data.get("dirty", True)
+        if not isinstance(dirty, bool):
+            raise TypeError("dirty must be a bool")
+        return CheckReport(head=str(data["head"]), dirty=dirty, results=results)
+    except (TypeError, KeyError, ValueError) as exc:
+        print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
+        return None
+
+
+def _checks_section(wt: Path, head: str) -> str:
+    loaded = _load_report(wt)
+    if loaded is None:
+        return "(no `loopzero check` run recorded)"
+    recorded, results = loaded.head, loaded.results
+    lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
+    lines += [
+        f"- `{r.command}`: exit {r.exit_code} ({r.duration_s:.1f}s)" for r in results
+    ] or ["- (no check commands configured)"]
+    return "\n".join(lines)
+
+
+def _pr_body(wt: Path, head: str) -> str:
+    """task.md with its `## Checks` section regenerated in place (appended when absent)."""
+    task = worktree.task_text(wt).rstrip()
+    section = f"## Checks\n{_checks_section(wt, head)}\n"
+    pattern = re.compile(r"^## Checks\n.*?(?=^## |\Z)", re.DOTALL | re.MULTILINE)
+    if pattern.search(task):
+        return pattern.sub(lambda _: section + "\n", task, count=1).rstrip() + "\n"
+    return f"{task}\n\n{section}"
+
+
+_SECTIONS = {"objective", "acceptance", "base", "checks", "review", "notes"}
+
+
+def _pr_title(wt: Path, branch: str) -> str:
+    """First heading of task.md that is not a template section name; else the branch."""
+    headings = [ln.lstrip("#").strip() for ln in worktree.task_text(wt).splitlines() if ln[:1] == "#"]
+    return next((t for t in headings if t and t.lower() not in _SECTIONS), branch)
+
+
+# --------------------------------------------------------------------------- commands
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    root = _toplevel()
+    argv = ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
+    current = _proc.run(argv, cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
+    if current.stdout.strip().startswith("lz/"):
+        raise CliError(f"already inside task worktree {root}; run start from the main checkout")
+    config = _load_config(args, root)
+    print(worktree.start(root, args.slug, config.base_branch))
     return 0
 
 
-def cmd_sync(args: argparse.Namespace) -> int:
-    profile = load_profile(Path(args.root))
-    if args.check or args.dry_run:
-        drift = sync_module.check(profile)
-        if drift:
-            stream = sys.stderr if args.check else sys.stdout
-            print("drift:" if args.check else "would update:", file=stream)
-            for path in drift:
-                print(f"  {path}", file=stream)
-            if args.check:
-                print("run `loopzero sync` and commit the result", file=sys.stderr)
-                return 1
-            return 0
-        print("wiring matches workflow.toml" if args.check else "no changes")
+def cmd_check(args: argparse.Namespace) -> int:
+    wt, config = _context(args)
+    try:
+        report = sandbox.run_checks(config, wt)
+    except sandbox.SandboxUnavailable as exc:
+        print(f"sandbox unavailable: {exc}", file=sys.stderr)
+        return 2
+    for result in report.results:
+        print(f"exit {result.exit_code:<3} {result.duration_s:7.1f}s  {result.command}")
+    for result in report.results:
+        if result.exit_code != 0:
+            print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
+            print(_proc.tail(result.tail), file=sys.stderr)
+    _save_report(wt, report)
+    print("PASS" if report.ok else "FAIL")
+    return 0 if report.ok else 1
+
+
+def cmd_pr(args: argparse.Namespace) -> int:
+    wt, config = _context(args)
+    branch, head = worktree.branch(wt), worktree.head(wt)
+    _require_task_branch(config, branch)
+    _require_clean(wt)
+    _git(wt, "push", "-u", "origin", branch)
+    body = _pr_body(wt, head)
+    pr = github.pr_for_branch(config.repo, branch)
+    if pr is not None and pr.state == "OPEN":
+        github.update_body(config.repo, pr.number, body)
+    else:
+        pr = github.create_draft_pr(
+            config.repo, branch, config.base_branch, _pr_title(wt, branch), body
+        )
+    print(pr.url)
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    wt, config = _context(args)
+    branch, head = worktree.branch(wt), worktree.head(wt)
+    _require_task_branch(config, branch)
+    _require_clean(wt)
+    pr = _require_pr(config, branch)
+    _require_pushed(pr, head)
+    kind, reviewed = _decide_kind(
+        _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
+    )
+    if args.repost:
+        result = _load_review(wt, head, kind)
+    else:
+        result = _run_review(wt, config, head, kind, reviewed)
+        _save_review(wt, result)
+    try:
+        github.post_review(
+            config.repo, pr.number, head, result, body_prefix=review_marker(head, kind), pr=pr
+        )
+    except github.GhError as exc:
+        path = _review_file(wt, head, kind)
+        raise CliError(
+            f"{exc} | review saved at {path}; fix the cause and run `loopzero review --repost`"
+        ) from exc
+    counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items())
+    print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")
+    return 0
+
+
+def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | None) -> ReviewResult:
+    since = reviewed if kind == "delta" else _primary_base(wt, config)
+    diff = worktree.diff_since(wt, since)
+    task = worktree.task_text(wt)
+    author = runners.author_family(wt, head)
+    candidates = [family for family in config.reviewers if family != author]
+    failures: list[str] = []
+    result = None
+    if not candidates:
+        failures.append(f"no independent reviewer configured for author family {author}")
+    for family in candidates:
+        try:
+            result = runners.review_with(
+                family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task
+            )
+            break
+        except RUNNER_FAILURES as exc:
+            reason = str(exc).splitlines()[0]
+            failures.append(reason)
+            print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
+    if result is None:
+        raise CliError("every configured reviewer failed: " + "; ".join(failures))
+    return result
+
+
+def _review_file(wt: Path, head: str, kind: str) -> Path:
+    return wt / ".loopzero" / f"review-{head[:12]}-{kind}.json"
+
+
+def _save_review(wt: Path, result: ReviewResult) -> None:
+    path = _review_file(wt, result.head, result.kind)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dataclasses.asdict(result), indent=2) + "\n")
+
+
+def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
+    path = _review_file(wt, head, kind)
+    if not path.exists():
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost")
+    data = json.loads(path.read_text())
+    if data.get("head") != head:
+        raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
+    findings = tuple(Finding(**f) for f in data["findings"])
+    return ReviewResult(**{**data, "findings": findings})
+
+
+def _pr_readiness(
+    wt: Path, config: Config, *, allow_merged: bool = False
+) -> tuple[github.PR, github.Readiness | None]:
+    """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
+    branch, head = worktree.branch(wt), worktree.head(wt)
+    _require_task_branch(config, branch)
+    pr = _require_pr(config, branch, allow_merged=allow_merged)
+    _require_pushed(pr, head)
+    if pr.state == "MERGED":
+        return pr, None
+    return pr, _readiness(wt, config, pr, head)
+
+
+def _cleanup(wt: Path) -> None:
+    root = _repo_root(wt)
+    try:
+        worktree.cleanup(root, wt)
+    except (worktree.WorktreeError, OSError) as exc:
+        print(f"warning: merged but worktree cleanup failed: {exc}", file=sys.stderr)
+    print(f"cd {root}")
+
+
+def cmd_ready(args: argparse.Namespace) -> int:
+    wt, config = _context(args)
+    pr, readiness = _pr_readiness(wt, config)
+    assert readiness is not None
+    for reason in readiness.reasons:
+        print(f"not ready: {reason}")
+    if not readiness.ready:
+        return 1
+    if pr.is_draft:
+        github.mark_ready(config.repo, pr.number)
+    print(f"ready: {pr.url}")
+    return 0
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    wt, config = _context(args)
+    pr, readiness = _pr_readiness(wt, config, allow_merged=True)
+    if readiness is None:
+        print(f"PR #{pr.number} was already merged externally at {pr.head_sha[:12]}; cleaning up")
+        _cleanup(wt)
         return 0
-    changed = sync_module.write(profile)
-    for path in changed:
-        print(f"updated {path}")
-    if not changed:
-        print("no changes")
+    if not readiness.ready:
+        raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
+    sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
+    print(sha)
+    _cleanup(wt)
     return 0
 
 
 def cmd_status(args: argparse.Namespace) -> int:
-    profile = load_profile(Path(args.root))
-    snapshot = profile.snapshot_version()
-    if snapshot is None:
-        print(
-            f"version equality: unavailable; snapshot VERSION missing at {profile.snapshot_dir}"
-        )
-    elif snapshot != __version__:
-        print(
-            f"version equality: different; package {__version__}, snapshot {snapshot}"
-        )
-    else:
-        print(f"version equality: equal; package and snapshot are {snapshot}")
-    if not args.source:
-        print("informational only; use --source for byte-level pin verification")
+    wt = _toplevel()
+    if args.path:
+        print(wt)
         return 0
-    verifier = _run_source_status(profile, args.source)
-    if verifier.returncode != 0:
-        if verifier.stderr:
-            print(verifier.stderr.rstrip(), file=sys.stderr)
-        print("fail")
-        return 1
-    if snapshot is None or snapshot != __version__:
-        print("fail")
-        return 1
-    print("pass")
-    return 0
-
-
-def cmd_policy_lint(args: argparse.Namespace) -> int:
-    root = Path(args.root)
-    try:
-        profile = load_profile(root)
-    except ConfigError as exc:
-        for problem in exc.problems:
-            print(problem, file=sys.stderr)
-        print("fail")
-        return 1
-    if not args.no_hooks and not (args.base or args.base_ref):
-        print(
-            "UNVERIFIED: hook-aware policy lint requires --base or --base-ref",
-            file=sys.stderr,
-        )
-        return 1
-
-    allowed = allowed_path(args.path_entry)
-    problems: list[str] = []
-    base_sha: str | None = None
-    if not args.no_hooks:
-        try:
-            base_sha = resolve_base(
-                profile.root, base=args.base, base_ref=args.base_ref
-            )
-            if args.base_ref:
-                print(f"base: {base_sha}")
-            hooks = effective_hooks(profile, base_sha)
-        except ConfigError as exc:
-            problems.extend(exc.problems)
-            hooks = {}
-        problems.extend(_lint_hook_commands(profile, hooks, allowed))
-    routing_table = profile.raw.get("routing", {})
-    explicitly_configured_aliases = (
-        routing_table.get("aliases", {}) if isinstance(routing_table, dict) else {}
-    )
-    for name, alias in profile.aliases.items():
-        if name not in explicitly_configured_aliases:
-            continue
-        if alias.runner in ("claude", "codex", "cursor"):
-            binary = {"claude": "claude", "codex": "codex", "cursor": "cursor-agent"}[
-                alias.runner
-            ]
-            if resolve_executable(profile.root, binary, allowed) is None:
-                problems.append(
-                    f"[routing.aliases].{name}: runtime {binary!r} not in the allowed PATH"
-                )
-    if problems:
-        for problem in problems:
-            print(problem, file=sys.stderr)
-        print("fail")
-        return 1
-    if args.no_hooks:
-        print("policy is valid; hooks were not checked (--no-hooks)")
-    else:
-        print("pass")
-    return 0
-
-
-def cmd_doctor(args: argparse.Namespace) -> int:
-    ok = True
-    for tool in TOOLS:
-        path = shutil.which(tool)
-        print(f"{tool}: {path or 'missing'}")
-        ok = ok and path is not None
-    if sys.platform != "linux":
-        print("platform: unsupported (Linux only)")
-        ok = False
-    print(f"python: {sys.version.split()[0]}")
-    print("pass" if ok else "fail")
-    return 0 if ok else 1
-
-
-def cmd_accounts_renew(args: argparse.Namespace) -> int:
-    """Re-seal a Codex host login for the next three days of nightly runs."""
-    from .credential_seal import seal_credential
-
-    try:
-        seal_credential(
-            "codex", source=args.source, output=args.out,
-            requested_runtime_s=3 * 86400,
-        )
-    except Exception as exc:
-        print(f"account renewal failed: {type(exc).__name__}", file=sys.stderr)
-        return 1
-    print("account snapshot renewed")
-    return 0
-
-
-def cmd_checks(args: argparse.Namespace) -> int:
-    profile = load_profile(Path(args.root))
-    try:
-        results = (
-            json.loads(Path(args.results).read_text(encoding="utf-8"))
-            if args.results
-            else {}
-        )
-        rows = gates.classify(profile.raw["checks"], results)
-    except (OSError, ValueError, TypeError, RecursionError, KeyError) as exc:
-        raise ConfigError([f"checks report: {exc}"]) from None
-    print(json.dumps(rows, indent=2))
-    return 0
-
-
-def cmd_review_stats(args: argparse.Namespace) -> int:
-    """Print an archive-aware, read-only review ledger measurement."""
-    from .kernel.authority_store import load_records
-    from .review.stats import review_stats
-
-    root = Path(args.root).resolve()
-    try:
-        result = review_stats(
-            load_records(root, days=36_500),
-            last_merged=args.last_merged,
-            since=args.since,
-        )
-    except (OSError, RuntimeError, ValueError) as exc:
-        print(f"review-stats: {exc}", file=sys.stderr)
-        return 1
-    payload = result.to_dict()
-    if args.json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
+    config = _load_config(args, wt)
+    branch, head = worktree.branch(wt), worktree.head(wt)
+    print(f"worktree: {wt}")
+    print(f"branch:   {branch}")
+    print(f"head:     {head}")
+    print(f"base:     {config.base_branch}")
+    print(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
+    pr = github.pr_for_branch(config.repo, branch)
+    if pr is None:
+        print("pr:       none (run `loopzero pr`)")
         return 0
-
-    totals = payload["totals"]
-    assert isinstance(totals, dict)
-    print("review stats")
-    print(
-        "starts={starts} terminals={terminals} verdicts={verdicts} "
-        "failures={failures}".format(**totals)
-    )
-    minutes = totals["minutes"] if totals["minutes"] is not None else "unknown"
-    cost = (
-        totals["api_equivalent_usd"]
-        if totals["api_equivalent_usd"] is not None
-        else "unknown"
-    )
-    print(f"minutes={minutes} API-equivalent USD={cost}")
-    for title, key in (
-        ("per PR", "per_pr"),
-        ("per intent", "per_intent"),
-        ("per reason", "per_reason"),
-        ("per engine", "per_engine"),
-    ):
-        print(f"\n{title}")
-        table = payload[key]
-        assert isinstance(table, dict)
-        for name, row in table.items():
-            assert isinstance(row, dict)
-            row_cost = (
-                row["api_equivalent_usd"]
-                if row["api_equivalent_usd"] is not None
-                else "unknown"
-            )
-            safe_name = _bounded_human_label(name)
-            print(
-                f"{safe_name}: starts={row['starts']} terminals={row['terminals']} "
-                f"verdicts={row['verdicts']} failures={row['failures']} "
-                f"minutes={row['minutes'] if row['minutes'] is not None else 'unknown'} "
-                f"API-equivalent USD={row_cost}"
-            )
-    print("\nmedian / p95 per PR")
-    percentiles = payload["percentiles"]
-    assert isinstance(percentiles, dict)
-    for metric, row in percentiles.items():
-        assert isinstance(row, dict)
-        print(
-            f"{metric}: median={row['median']} p95={row['p95']} "
-            f"unknown={row['unknown']}"
-        )
+    print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
+    reviews = _pr_reviews(config.repo, pr.number)
+    markers = _lineage_markers(wt, reviews, head)
+    if markers:
+        latest = markers[-1]
+        print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
+    else:
+        print("review:   none for this lineage")
+    readiness = _readiness(wt, config, pr, head, reviews)
+    print(f"ready:    {'yes' if readiness.ready else 'no'}")
+    for reason in readiness.reasons:
+        print(f"  - {reason}")
     return 0
 
 
-def _bounded_human_label(value: object, *, limit: int = 120) -> str:
-    """Escape and bound a ledger-supplied label before writing a terminal."""
-    encoded = json.dumps(str(value), ensure_ascii=True)[1:-1]
-    return encoded if len(encoded) <= limit else encoded[: limit - 3] + "..."
+# --------------------------------------------------------------------------- entry point
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="loopzero", description=__doc__.split("\n\n")[0]
+        prog="loopzero", description="One task, one branch, one draft PR, one review, one merge."
     )
     parser.add_argument(
-        "--version", action="version", version=f"loopzero {__version__}"
-    )
-    parser.add_argument(
-        "--root", default=".", help="consumer repository root (default: .)"
+        "--config", type=Path, default=None, help="path to workflow.toml (default: repo root)"
     )
     sub = parser.add_subparsers(dest="command", required=True)
-
-    p = sub.add_parser("init", help="write a starter workflow.toml")
-    p.add_argument("--revision", help="full commit SHA of the inspected core")
-    p.add_argument("--force", action="store_true")
-    p.set_defaults(func=cmd_init)
-
-    p = sub.add_parser("sync", help="render consumer wiring from workflow.toml")
-    p.add_argument(
-        "--check",
-        action="store_true",
-        help="report drift without changing generated targets; exit 1 on drift",
+    start = sub.add_parser("start", help="create an owned worktree and branch for <slug>")
+    start.add_argument("slug")
+    start.set_defaults(func=cmd_start)
+    sub.add_parser("check", help="run the configured checks in the sandbox").set_defaults(
+        func=cmd_check
     )
-    p.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="show generated drift without writing; always exit 0 when rendering succeeds",
+    sub.add_parser("pr", help="push and open or refresh the draft PR").set_defaults(func=cmd_pr)
+    review = sub.add_parser("review", help="run one model review and post it on the PR")
+    review.add_argument(
+        "--repost", action="store_true", help="post the saved review for HEAD without a model"
     )
-    p.set_defaults(func=cmd_sync)
-
-    p = sub.add_parser(
-        "status", help="report version equality; --source performs a trusted pin check"
+    review.set_defaults(func=cmd_review)
+    sub.add_parser("ready", help="compute readiness and mark the PR ready").set_defaults(
+        func=cmd_ready
     )
-    p.add_argument(
-        "--source", help="local source checkout for the byte-level pin check"
+    sub.add_parser("merge", help="recheck readiness, merge, remove the worktree").set_defaults(
+        func=cmd_merge
     )
-    p.set_defaults(func=cmd_status)
-
-    policy = sub.add_parser("policy", help="policy commands").add_subparsers(
-        dest="policy_command", required=True
-    )
-    p = policy.add_parser(
-        "lint", help="validate workflow.toml and its base-governed hooks"
-    )
-    base = p.add_mutually_exclusive_group()
-    base.add_argument("--base", help="trusted full 40-character base commit SHA")
-    base.add_argument(
-        "--base-ref",
-        help="full refs/heads/... or refs/remotes/... base ref to resolve and print",
-    )
-    base.add_argument(
-        "--no-hooks", action="store_true", help="explicitly skip all hook checks"
-    )
-    p.add_argument(
-        "--path-entry",
-        action="append",
-        default=[],
-        help="additional absolute executable directory in the lint allowlist",
-    )
-    p.set_defaults(func=cmd_policy_lint)
-
-    p = sub.add_parser("doctor", help="report required host tools")
-    p.set_defaults(func=cmd_doctor)
-
-    accounts = sub.add_parser("accounts", help="host credential commands").add_subparsers(
-        dest="accounts_command", required=True,
-    )
-    p = accounts.add_parser("renew", help="seal a Codex access-only snapshot valid for 72 hours")
-    p.add_argument("label", help="operator label (not a signed account alias)")
-    p.add_argument("--source", type=Path, required=True, help="absolute path to the host's mode-0600 Codex login")
-    p.add_argument("--out", type=Path, required=True, help="new snapshot in a mode-0700 directory outside repositories")
-    p.set_defaults(func=cmd_accounts_renew)
-
-    p = sub.add_parser("checks", help="read-only in-package check-policy report")
-    p.add_argument("--results", help="JSON results file keyed by exact check name")
-    p.set_defaults(func=cmd_checks)
-
-    p = sub.add_parser("review-stats", help="summarize review ledger telemetry")
-    p.add_argument("--json", action="store_true", help="emit the stable JSON shape")
-    p.add_argument(
-        "--last-merged", type=int, metavar="N", help="select the latest N merged PRs"
-    )
-    p.add_argument(
-        "--since",
-        metavar="ISO",
-        help="select observations at or after an ISO timestamp",
-    )
-    p.set_defaults(func=cmd_review_stats)
-    from .code_health.cli import register
-
-    register(sub)
+    status = sub.add_parser("status", help="show where this branch is in the sequence")
+    status.add_argument("--path", action="store_true", help="print only the worktree path")
+    status.set_defaults(func=cmd_status)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    args = build_parser().parse_args(argv)
     try:
-        return int(args.func(args))
-    except ConfigError as exc:
-        for problem in exc.problems:
-            print(problem, file=sys.stderr)
-        print("UNVERIFIED", file=sys.stderr)
+        return args.func(args)
+    except HANDLED as exc:
+        print(f"loopzero {args.command}: {_one_line(exc)}", file=sys.stderr)
         return 1
+    except UNEXPECTED as exc:
+        print(f"loopzero {args.command}: unexpected response: {_one_line(exc)}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print(f"loopzero {args.command}: interrupted", file=sys.stderr)
+        return 130
 
 
-if __name__ == "__main__":  # pragma: no cover
+def _one_line(exc: BaseException) -> str:
+    return " | ".join(ln.strip() for ln in (str(exc) or type(exc).__name__).splitlines() if ln.strip())
+
+
+if __name__ == "__main__":
     sys.exit(main())

@@ -1,40 +1,39 @@
 ---
 name: implement
-description: Deliver an understood bounded change with its owning behavior proof and repository-required checks.
+description: Deliver a bounded change with the tests that prove it, run the repository's checks, and open a draft PR.
 ---
 
-Read [the shared contract]({{package.core_contract}}), local acceptance and relevant
-selected profiles. Make the smallest complete change under the repository's
-testing contract. Run the owning checks and record actual commands/results;
-broaden validation when the changed behavior or local policy warrants it.
+# implement
 
-Stop on scope or ownership conflict. Run all applicable deterministic gates
-before freezing the tree for one independent PR review. Validation children,
-including commit hooks, must meet the contract's environment and Git-metadata
-containment rules; only the parent commits adopted changes.
+Read [the contract](../../CONTRACT.md) and `.loopzero/task.md`. Make the
+smallest complete change that satisfies every acceptance line.
 
-Resolve critical/important findings or obtain an explicit PR waiver from merge
-authority. Rerun gates after repairs; mechanical lint/format/ratchet repairs with
-unchanged behavior need no re-review. Substantive repairs use at most one bounded
-delta review. Return to editing without a phase lock and preserve an adoptable
-diff on timeout. Update the one PR evidence block for the exact publication head.
-Consciously curate known gaps at closeout without copying suggestions or a
-finding backlog. Finish with the [handoff]({{package.core_handoff}}), then stop at READY
-unless separately authorized to merge.
+## Do
 
-Apply the contract's CHECK CLASSES: only required diff-scoped deterministic
-class-1 checks block on a code verdict (lint, types, tests, ratchets, schema/
-contract checks, changed-file links). Class-2 repository health (full external
-links, dependency audits, cost/usage alerts, whole-tree docs governance) runs on
-main's schedule and updates one tracking issue, never a PR gate. Class-3 runner
-loss, cancelled concurrency or network timeout gets one automatic retry; report
-a second failure as infrastructure, not code. Missing required evidence is not
-a pass. Check `[checks]` and branch protection for alignment.
+1. Work only in the worktree created by `loopzero start`. Confirm with
+   `loopzero status` before the first edit.
+2. Write or extend the test that proves the behavior before or alongside the
+   code. A change without a proof is not complete.
+3. Run `loopzero check` before pushing. Fix nonzero exits; do not edit the
+   check list to make them pass.
+4. Commit in small steps with messages that state what changed. Keep the
+   diff free of unrelated formatting churn.
+5. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped
+   work, then run `loopzero pr`.
+6. After `loopzero review`, fix every `critical` and `important` finding in
+   its thread, push, rerun `loopzero check`, and request the delta review.
+   Reply in the thread with what changed; do not resolve a thread silently.
+7. Stop at `loopzero ready`. Merge only when the task says so.
 
-For an unrelated class-1 failure, enforce every OVERRIDE condition in the shared
-contract: identical failure on the exact current base with matched inputs and
-linked logs, exact candidate, tracking issue, non-risk prose path cap and risk
-exclusions, independent review and merge-authority approval, append-only
-`CHECK-OVERRIDES.md` entry, matching merge commit trailer, and weekly maintainer
-review. Only the prescribed audit append may follow the evidenced candidate;
-other changes invalidate evidence. The read-only checks report grants no waiver.
+## Stop when
+
+- Acceptance turns out to need a change outside the listed paths. Update the
+  task file and say so in the PR before continuing.
+- A check fails on the base branch without your change. Report it as a base
+  failure; do not work around it in this PR.
+
+## Do not
+
+- Skip the sandbox or run checks with network to make them pass.
+- Address suggestions by expanding scope; note them and move on.
+- Commit from inside a check, hook or script. Only you commit.

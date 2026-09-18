@@ -1,19 +1,36 @@
 ---
 name: plan
-description: Bound a requested change with acceptance, ownership and validation before implementation when those decisions are not yet clear.
+description: Bound a requested change with objective, acceptance criteria and affected paths before implementation, when those are not yet clear.
 ---
 
-Read [the shared contract]({{package.core_contract}}) and the repository's local contract.
-Produce a bounded real change: acceptance, affected paths, local constraints,
-selected checks and current owner. Use the existing task/PR; a separate plan
-file is optional. Resolve routine implementation choices from available evidence.
+# plan
 
-Stop dependent work when missing authority, conflicting ownership or a material
-unresolved requirement would change the result. State the exact decision needed
-and continue independent authorized preparation. Planning alone does not authorize
-publication or merge beyond the original task and local policy.
+Read [the contract](../../CONTRACT.md). Turn a request into a change small
+enough for one PR.
 
-Select all applicable deterministic gates before review, the validation child's
-environment and Git-metadata isolation boundary, and one independent review
-route with at most one bounded delta. Name the single PR evidence location and
-consumer-owned `KNOWN-GAPS.md`; do not plan a finding ledger or mandatory phases.
+## Do
+
+1. State the objective in one paragraph. If the request contains two
+   independent outcomes, split it into two tasks.
+2. Write acceptance as observable conditions: a test that passes, a command
+   whose output changes, a page that renders. No adjectives.
+3. List the paths you expect to touch and the checks from `workflow.toml`
+   that exercise them. Add a new check only if no existing one covers the
+   behavior.
+4. Decide routine implementation choices yourself from the code you can read.
+   Ask only when a decision would change the acceptance criteria or touch a
+   surface someone else owns.
+5. Write the result into `.loopzero/task.md` under Objective and Acceptance
+   (see [HANDOFF](../../HANDOFF.md)). No separate plan file.
+
+## Stop when
+
+- The objective needs a decision from the requester. Name the exact decision
+  and the options; continue with any preparation that does not depend on it.
+- The change cannot fit one PR. Propose the split and the order.
+
+## Do not
+
+- Plan extra review rounds or tracking documents. The contract already
+  fixes one primary review plus one delta.
+- Plan work outside the requested change to "clean up while here".
