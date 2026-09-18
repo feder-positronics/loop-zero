@@ -248,6 +248,21 @@ def _pr_body(wt: Path, head: str) -> str:
     return f"{task}\n\n{section}"
 
 
+def _refresh_pr_checks(wt: Path, config: Config) -> None:
+    """Best-effort refresh of an existing PR, without querying GitHub before first push."""
+    argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
+    upstream = _proc.run(argv, cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
+    if upstream.exit_code != 0:
+        return
+    try:
+        branch, head = worktree.branch(wt), worktree.head(wt)
+        pr = github.pr_for_branch(config.repo, branch)
+        if pr is not None and pr.state == "OPEN":
+            github.update_body(config.repo, pr.number, _pr_body(wt, head))
+    except (github.GhError, OSError, ValueError) as exc:
+        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+
+
 _SECTIONS = {"objective", "acceptance", "base", "checks", "review", "notes"}
 
 
@@ -285,6 +300,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             print(_proc.tail(result.tail), file=sys.stderr)
     _save_report(wt, report)
+    _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
 
@@ -409,6 +425,11 @@ def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args)
     pr, readiness = _pr_readiness(wt, config)
     assert readiness is not None
+    waiting = _draft_checks_waiting(config, pr, readiness)
+    if waiting:
+        github.mark_ready(config.repo, pr.number)
+        print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
+        return 3
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
@@ -417,6 +438,21 @@ def cmd_ready(args: argparse.Namespace) -> int:
         github.mark_ready(config.repo, pr.number)
     print(f"ready: {pr.url}")
     return 0
+
+
+def _draft_checks_waiting(
+    config: Config, pr: github.PR, readiness: github.Readiness
+) -> tuple[str, ...]:
+    if not pr.is_draft or not readiness.reasons:
+        return ()
+    expected: dict[str, str] = {}
+    for name in config.required_ci:
+        expected[f"required check '{name}' missing on {pr.head_sha[:12]}"] = name
+        expected[f"required check '{name}' is skipped"] = name
+    if not all(reason in expected for reason in readiness.reasons):
+        return ()
+    blocked = {expected[reason] for reason in readiness.reasons}
+    return tuple(name for name in config.required_ci if name in blocked)
 
 
 def cmd_merge(args: argparse.Namespace) -> int:

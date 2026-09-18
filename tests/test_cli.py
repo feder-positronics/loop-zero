@@ -148,6 +148,31 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert report["results"][0]["tail"] == "ok"
 
 
+def test_check_with_open_pr_patches_checks_section(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 0 and out.endswith("PASS\n") and err == ""
+    assert [call["argv"][:2] for call in gh.calls] == [
+        ["pr", "list"], ["api", f"repos/{REPO}/pulls/7"],
+    ]
+    body = json.loads(gh.calls[1]["--input"])["body"]
+    assert body.count("## Checks") == 1
+    assert f"Recorded for `{head[:12]}`" in body
+    assert "- `echo ok`: exit 0" in body
+
+
+def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None:
+    assert run(capsys, "check")[0] == 0
+    assert gh.calls == []
+
+
 def test_check_fail_exits_one(wt: Path, capsys) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok"', '"echo no; exit 3"'))
     code, out, err = run(capsys, "check")
@@ -441,6 +466,59 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
         "not ready: no review recorded for the current head",
         "not ready: required check 'checks' is failure",
     ]
+    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+def test_ready_marks_draft_with_skipped_required_check_then_waits(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt, conclusion="skipped")
+    gh.respond("pr ready", "")
+
+    code, out, err = run(capsys, "ready")
+
+    assert (code, out, err) == (
+        3, "marked ready; waiting for required checks: checks\n", "",
+    )
+    assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
+
+
+def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    finding = {
+        "isResolved": False, "path": "feature.py", "line": 1,
+        "comments": {"nodes": [{"body":
+            f"<!-- loopzero:finding severity=important head={head} -->\n"
+            "**important: Fix this**"}]},
+    }
+    arm_readiness(gh, head, wt, threads=(finding,), conclusion="skipped")
+
+    code, out, err = run(capsys, "ready")
+
+    assert code == 1 and err == ""
+    assert "not ready: open important finding at feature.py:1: Fix this" in out
+    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+def test_ready_non_draft_with_skipped_required_check_refuses(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt, conclusion="skipped")
+
+    code, out, err = run(capsys, "ready")
+
+    assert (code, err) == (1, "")
+    assert out == "not ready: required check 'checks' is skipped\n"
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
