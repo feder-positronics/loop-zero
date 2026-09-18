@@ -157,6 +157,28 @@ def test_probe_uses_real_flags(git_repo, bwrap_log):
     assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
 
 
+def test_network_binds_resolv_conf_after_run_tmpfs(git_repo, bwrap_log):
+    sandbox.run_checks(make_config(network=True), git_repo)
+    argv = argv_of(bwrap_log)
+    resolv_conf = Path("/etc/resolv.conf")
+    resolved = resolv_conf.resolve()
+    if resolv_conf.is_symlink() and any(
+        resolved.is_relative_to(root) for root in (Path("/tmp"), Path("/run"))
+    ):
+        source = destination = str(resolved.parent)
+    else:
+        source, destination = str(resolved), str(resolv_conf)
+    bind_at = next(
+        i
+        for i in range(len(argv) - 2)
+        if argv[i : i + 3] == ["--ro-bind", source, destination]
+    )
+    run_tmpfs_at = next(
+        i for i in range(len(argv) - 1) if argv[i : i + 2] == ["--tmpfs", "/run"]
+    )
+    assert bind_at > run_tmpfs_at
+
+
 def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch):
     extra, cache = tmp_path / "ro", tmp_path / "rw"
     monkeypatch.setenv("UV_CACHE_DIR", str(cache))
@@ -271,6 +293,13 @@ def test_real_sandbox_denies_writes(git_repo):
     report = sandbox.run_checks(make_config(checks=checks), git_repo)
     assert [r.exit_code for r in report.results] == [0, 0], report
     assert report.head
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+def test_real_network_sandbox_resolves_localhost(git_repo):
+    command = "sh -c 'test -r /etc/resolv.conf && getent hosts localhost'"
+    report = sandbox.run_checks(make_config(checks=(command,), network=True), git_repo)
+    assert [result.exit_code for result in report.results] == [0], report
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
