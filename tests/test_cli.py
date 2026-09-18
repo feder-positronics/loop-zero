@@ -318,6 +318,23 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert "+print('hi')" in prompt and "primary review" in prompt and "## Objective" in prompt
 
 
+def test_review_refuses_when_reviewer_dirties_worktree(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    reviewer = _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    reviewer.write_text(reviewer.read_text().replace("#!/bin/sh\n", "#!/bin/sh\ntouch drift.txt\n"))
+
+    code, out, err = run(capsys, "review")
+
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    assert code == 1 and out == "" and "worktree changed during review" in err
+    assert err.count(head) == 2 and not saved.exists()
+    assert all(call["argv"][:2] != ["api", post_key().split(" ")[1]] for call in gh.calls)
+
+
 def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
                                                     capsys) -> None:
     head = head_of(wt)

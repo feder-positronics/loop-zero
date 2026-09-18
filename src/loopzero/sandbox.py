@@ -86,6 +86,21 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             results.append(result)
             if result.exit_code != 0:
                 break
+    final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
+    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    if (final_head, final_dirty) != (head, dirty):
+        results.append(
+            CheckResult(
+                command="<worktree changed during run>",
+                exit_code=1,
+                duration_s=0.0,
+                tail=(
+                    f"HEAD before: {head}; HEAD after: {final_head}; "
+                    f"dirty before: {dirty}; dirty after: {final_dirty}"
+                ),
+            )
+        )
+        dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
 
 

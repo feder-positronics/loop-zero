@@ -364,6 +364,12 @@ def cmd_review(args: argparse.Namespace) -> int:
         result = _load_review(wt, head, kind)
     else:
         result = _run_review(wt, config, head, kind, reviewed)
+        final_head, final_dirty = worktree.head(wt), worktree.is_dirty(wt)
+        if final_head != head or final_dirty:
+            raise CliError(
+                f"worktree changed during review: HEAD before {head}, HEAD after {final_head}; "
+                f"dirty before False, dirty after {final_dirty}"
+            )
         _save_review(wt, result)
     try:
         github.post_review(
