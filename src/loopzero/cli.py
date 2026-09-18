@@ -12,7 +12,7 @@ from pathlib import Path
 
 from loopzero import _proc, github, runners, sandbox, worktree
 from loopzero import config as config_mod
-from loopzero.types import CheckReport, CheckResult, Config, LoopZeroError
+from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
@@ -111,27 +111,13 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _gh_api(endpoint: str) -> object:
-    """GET `endpoint` through `gh api` and decode the JSON response."""
-    argv = ["gh", "api", endpoint]
-    try:
-        done = _proc.run(argv, cwd=Path.cwd(), env_allowlist=github.GH_ENV, timeout=120)
-    except _proc.ToolMissing as exc:
-        raise github.GhMissing(tuple(argv), str(exc)) from exc
-    if done.exit_code != 0:
-        raise github.GhError(tuple(argv), done.stderr or done.stdout)
-    try:
-        return json.loads(done.stdout) if done.stdout.strip() else None
-    except json.JSONDecodeError as exc:
-        raise github.GhError(tuple(argv), f"invalid JSON from gh: {done.stdout[-600:]}") from exc
-
-
 def _pr_reviews(repo: str, number: int) -> list[dict]:
     """All reviews on the PR, oldest first, following pages until a short one."""
     reviews: list[dict] = []
     page = 1
     while True:
-        batch = list(_gh_api(f"repos/{repo}/pulls/{number}/reviews?per_page={PAGE}&page={page}") or [])
+        endpoint = f"repos/{repo}/pulls/{number}/reviews?per_page={PAGE}&page={page}"
+        batch = list(github.api_get(endpoint) or [])
         reviews += batch
         if len(batch) < PAGE:
             return reviews
@@ -141,10 +127,7 @@ def _pr_reviews(repo: str, number: int) -> list[dict]:
 @functools.cache
 def _token_login() -> str:
     """Login of the account behind the `gh` token; cached for the duration of one command."""
-    login = (_gh_api("user") or {}).get("login")
-    if not login:
-        raise CliError("could not determine the gh token's login (`gh api user`)")
-    return str(login)
+    return github.login()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,8 +250,7 @@ _SECTIONS = {"objective", "acceptance", "base", "checks", "review", "notes"}
 
 def _pr_title(wt: Path, branch: str) -> str:
     """First heading of task.md that is not a template section name; else the branch."""
-    lines = worktree.task_text(wt).splitlines()
-    headings = [line.lstrip("#").strip() for line in lines if line.startswith("#")]
+    headings = [ln.lstrip("#").strip() for ln in worktree.task_text(wt).splitlines() if ln[:1] == "#"]
     return next((t for t in headings if t and t.lower() not in _SECTIONS), branch)
 
 
@@ -332,6 +314,27 @@ def cmd_review(args: argparse.Namespace) -> int:
     kind, reviewed = _decide_kind(
         _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
     )
+    if args.repost:
+        result = _load_review(wt, head, kind)
+    else:
+        result = _run_review(wt, config, head, kind, reviewed)
+        _save_review(wt, result)
+    try:
+        github.post_review(
+            config.repo, pr.number, head, result, body_prefix=review_marker(head, kind), pr=pr
+        )
+    except github.GhError as exc:
+        path = _review_file(wt, head, kind)
+        raise CliError(
+            f"{exc} | review saved at {path}; fix the cause and run `loopzero review --repost`"
+        ) from exc
+    counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
+    summary = ", ".join(f"{n} {s}" for s, n in counts.items())
+    print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")
+    return 0
+
+
+def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | None) -> ReviewResult:
     since = reviewed if kind == "delta" else _primary_base(wt, config)
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
@@ -353,13 +356,28 @@ def cmd_review(args: argparse.Namespace) -> int:
             print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
     if result is None:
         raise CliError("every configured reviewer failed: " + "; ".join(failures))
-    github.post_review(
-        config.repo, pr.number, head, result, body_prefix=review_marker(head, kind)
-    )
-    counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
-    summary = ", ".join(f"{n} {s}" for s, n in counts.items())
-    print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")
-    return 0
+    return result
+
+
+def _review_file(wt: Path, head: str, kind: str) -> Path:
+    return wt / ".loopzero" / f"review-{head[:12]}-{kind}.json"
+
+
+def _save_review(wt: Path, result: ReviewResult) -> None:
+    path = _review_file(wt, result.head, result.kind)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dataclasses.asdict(result), indent=2) + "\n")
+
+
+def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
+    path = _review_file(wt, head, kind)
+    if not path.exists():
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost")
+    data = json.loads(path.read_text())
+    if data.get("head") != head:
+        raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
+    findings = tuple(Finding(**f) for f in data["findings"])
+    return ReviewResult(**{**data, "findings": findings})
 
 
 def _pr_readiness(
@@ -461,9 +479,11 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_check
     )
     sub.add_parser("pr", help="push and open or refresh the draft PR").set_defaults(func=cmd_pr)
-    sub.add_parser("review", help="run one model review and post it on the PR").set_defaults(
-        func=cmd_review
+    review = sub.add_parser("review", help="run one model review and post it on the PR")
+    review.add_argument(
+        "--repost", action="store_true", help="post the saved review for HEAD without a model"
     )
+    review.set_defaults(func=cmd_review)
     sub.add_parser("ready", help="compute readiness and mark the PR ready").set_defaults(
         func=cmd_ready
     )

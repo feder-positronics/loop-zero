@@ -254,6 +254,45 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert "+print('hi')" in prompt and "primary review" in prompt and "## Objective" in prompt
 
 
+def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
+                                                    capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    gh.fail(post_key(), "HTTP 500 server error")
+    _fake_claude(fake_bin, _claude_envelope(CHANGES))
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    code, out, err = run(capsys, "review")
+    assert code == 1 and out == "" and saved.exists()
+    assert f"review saved at {saved}" in err and "loopzero review --repost" in err
+    data = json.loads(saved.read_text())
+    assert data["head"] == head and data["kind"] == "primary" and data["family"] == "claude"
+    assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
+    (fake_bin / "claude.stdin").unlink()
+    gh.respond(post_key(), {"id": 5})
+    code, out, err = run(capsys, "review", "--repost")
+    assert (code, err) == (0, "") and out.startswith("primary review by claude"), err
+    assert not (fake_bin / "claude.stdin").exists(), "no model invoked"
+    payload = json.loads(gh.calls[-1]["--input"])
+    assert marker(head, "primary") in payload["body"] and "Nit" in payload["body"]
+    assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
+
+
+def test_repost_refuses_missing_or_stale_file(wt: Path, gh: FakeGh, fake_bin: Path,
+                                              capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    code, _, err = run(capsys, "review", "--repost")
+    assert code == 1 and "no saved primary review" in err
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    saved.write_text(json.dumps({"family": "claude", "head": "0" * 40, "kind": "primary",
+                                 "verdict": "approve", "findings": [], "raw": ""}))
+    code, _, err = run(capsys, "review", "--repost")
+    assert code == 1 and f"not HEAD {head[:12]}" in err
+    assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
+
+
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
     first = head_of(wt)
     (wt / "second.py").write_text("x = 2\n")
