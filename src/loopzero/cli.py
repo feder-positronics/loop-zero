@@ -612,13 +612,23 @@ def cmd_merge(args: argparse.Namespace) -> int:
     branch = worktree.branch(wt)
     pr, readiness = _pr_readiness(wt, config, allow_merged=True)
     if readiness is None:
-        print(f"PR #{pr.number} was already merged externally at {pr.head_sha[:12]}; cleaning up")
+        sha = github.merged_sha(config.repo, pr.number)
+        if sha is None:
+            raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
+        print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
+        print(sha)
         _delete_remote_branch(config, branch)
         _cleanup(wt)
         return 0
     if not readiness.ready:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
+    if sha is None:
+        print(
+            f"PR #{pr.number} is queued for merge into {config.base_branch}; "
+            "rerun `loopzero merge` once the queue lands it to verify and clean up"
+        )
+        return 0
     print(sha)
     _delete_remote_branch(config, branch)
     _cleanup(wt)

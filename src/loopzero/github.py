@@ -477,8 +477,39 @@ def mark_ready(repo: str, number: int) -> None:
     _gh("pr", "ready", str(number), "--repo", repo)
 
 
-def merge(repo: str, number: int, strategy: str, head_sha: str) -> str:
-    """Merge PR `number` at exactly `head_sha`, verify it, and return the merge SHA."""
+_QUEUE_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)"
+    "{pullRequest(number:$number){isInMergeQueue}}}"
+)
+
+
+def merged_sha(repo: str, number: int) -> str | None:
+    """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
+    view = _gh_json(
+        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,state,headRefName"
+    ) or {}
+    sha = (view.get("mergeCommit") or {}).get("oid")
+    return sha if view.get("state") == "MERGED" and sha else None
+
+
+def in_merge_queue(repo: str, number: int) -> bool:
+    owner, name = repo.split("/", 1)
+    data = _gh_json(
+        "api", "graphql", "-f", f"query={_QUEUE_QUERY}", "-F", f"owner={owner}",
+        "-F", f"name={name}", "-F", f"number={number}",
+    )
+    try:
+        return bool(data["data"]["repository"]["pullRequest"]["isInMergeQueue"])
+    except (KeyError, TypeError):
+        return False
+
+
+def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
+    """Merge PR `number` at exactly `head_sha` and return the verified merge SHA.
+
+    Returns None when the base branch uses a merge queue and GitHub accepted the PR
+    into it: the merge will land later, and the caller must verify on a later run.
+    """
     if strategy not in ("squash", "merge", "rebase"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     argv = (
@@ -489,13 +520,16 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str:
         _gh(*argv, timeout=300)
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
-    view = _gh_json(
-        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,state,headRefName"
-    ) or {}
-    sha = (view.get("mergeCommit") or {}).get("oid")
-    if view.get("state") != "MERGED" or not sha:
-        raise MergeFailed(("gh", *argv), f"PR #{number} not verified merged: {view!r}")
-    return sha
+    sha = merged_sha(repo, number)
+    if sha:
+        return sha
+    if in_merge_queue(repo, number):
+        return None
+    # The queue may have landed the PR between the two reads; look once more.
+    sha = merged_sha(repo, number)
+    if sha:
+        return sha
+    raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
 def delete_remote_branch(repo: str, branch: str) -> None:

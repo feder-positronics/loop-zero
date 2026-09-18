@@ -1099,15 +1099,34 @@ def test_review_and_ready_refuse_closed_pr(wt: Path, gh: FakeGh, capsys) -> None
         assert code == 1 and "PR #7 is CLOSED, not open" in err, command
 
 
-def test_merge_of_externally_merged_pr_only_cleans_up(wt: Path, repo: Path, gh: FakeGh,
-                                                       capsys) -> None:
+def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
+    wt: Path, repo: Path, gh: FakeGh, capsys
+) -> None:
     arm_pr(gh, head_of(wt), state="MERGED", isDraft=False)
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}})
     gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
     assert (code, err) == (0, "")
     assert out.splitlines()[-1] == f"cd {repo}"
-    assert "PR #7 was already merged externally" in out and not wt.exists()
+    assert f"PR #7 was already merged as {'e' * 12}" in out and "e" * 40 in out
+    assert not wt.exists()
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+
+
+def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"})
+    gh.respond("api graphql", threads_json(),
+               {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
+    code, out, err = run(capsys, "merge")
+    assert (code, err) == (0, "")
+    assert "queued for merge into main" in out and "rerun `loopzero merge`" in out
+    assert wt.exists()
+    assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
 
 
 def test_pr_ignores_corrupt_checks_report(wt: Path, gh: FakeGh, capsys) -> None:
