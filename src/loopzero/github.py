@@ -434,12 +434,18 @@ def _aggregate_signal(states: list[str]) -> str:
 
 
 def readiness(
-    repo: str, pr: PR, required_ci: tuple[str, ...], reviewed_head: str | None
+    repo: str,
+    pr: PR,
+    base_branch: str,
+    required_ci: tuple[str, ...],
+    reviewed_head: str | None,
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
     if pr.state != "OPEN":
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
+    if pr.base_ref != base_branch:
+        reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
     if pr.mergeable == "CONFLICTING":
         reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
     if not reviewed_head:
@@ -464,7 +470,7 @@ def mark_ready(repo: str, number: int) -> None:
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str:
-    """Merge PR `number` at exactly `head_sha`, delete the remote branch, return the merge SHA."""
+    """Merge PR `number` at exactly `head_sha`, verify it, and return the merge SHA."""
     if strategy not in ("squash", "merge", "rebase"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     argv = (
@@ -481,14 +487,16 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str:
     sha = (view.get("mergeCommit") or {}).get("oid")
     if view.get("state") != "MERGED" or not sha:
         raise MergeFailed(("gh", *argv), f"PR #{number} not verified merged: {view!r}")
-    branch = view.get("headRefName")
-    if branch:
-        try:
-            _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
-        except GhError as exc:
-            absent = re.search(r"\b(?:404|422)\b", exc.tail) and re.search(
-                r"reference does not exist", exc.tail, re.IGNORECASE
-            )
-            if not absent:
-                raise
     return sha
+
+
+def delete_remote_branch(repo: str, branch: str) -> None:
+    """Delete `branch` from GitHub, accepting a ref that is already absent."""
+    try:
+        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
+    except GhError as exc:
+        absent = re.search(r"\b(?:404|422)\b", exc.tail) and re.search(
+            r"reference does not exist", exc.tail, re.IGNORECASE
+        )
+        if not absent:
+            raise
