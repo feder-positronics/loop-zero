@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "api",
+    "repos/<REPO>/commits/<SHA_2>/statuses",
+    "--method",
+    "GET",
+    "-F",
+    "per_page=100",
+    "-F",
+    "page=1"
+  ],
+  "exit_code": 0,
+  "stdout": "[]",
+  "stderr": "",
+  "input_files": {},
+  "gh_version": "gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)",
+  "recorded_at": "2026-09-18T12:07:16.649268+00:00",
+  "scenario": "statuses"
+}

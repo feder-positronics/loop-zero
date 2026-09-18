@@ -1,0 +1,19 @@
+{
+  "argv": [
+    "api",
+    "repos/<REPO>/pulls/<PR>/files",
+    "--method",
+    "GET",
+    "-F",
+    "per_page=100",
+    "-F",
+    "page=1"
+  ],
+  "exit_code": 0,
+  "stdout": "[{\"sha\":\"<SHA_3>\",\"filename\":\"README.md\",\"status\":\"modified\",\"additions\":21,\"deletions\":0,\"changes\":21,\"blob_url\":\"<URL_14>\",\"raw_url\":\"<URL_15>\",\"contents_url\":\"<URL_16>\",\"patch\":\"@@ -37,6 +37,27 @@ finding is open and required CI is green. The full rules fit in\\n    `implement`, `review`, `security-review`, `diagnose`.\\n 5. Run `loopzero start first-task`, make a change, and walk the six commands.\\n \\n+## Configuration\\n+\\n+All configuration lives in one file, `workflow.toml`, at the repository root\\n+(start from [workflow.example.toml](workflow.example.toml)). This repository's\\n+own [workflow.toml](workflow.toml) is a working example.\\n+\\n+| Key | Meaning |\\n+| --- | --- |\\n+| `repo.name` | GitHub repository as `owner/name`; used for every `gh` call. |\\n+| `repo.base` | Branch that `start` branches from and `merge` merges into. |\\n+| `checks.commands` | Shell commands `check` runs in order inside the sandbox; the first nonzero exit fails the run. |\\n+| `checks.required_ci` | Exact GitHub check-run or commit-status names required on the head before `ready` and `merge`; every signal with a required name must succeed. |\\n+| `checks.ro_paths` | Absolute host paths mounted read-only into the sandbox. `/home` is hidden, so list every toolchain path under it (for example `~/.local/bin` and `~/.local/share/uv`, spelled out); put writable caches in `checks.writable`. |\\n+| `checks.writable` | Absolute host paths mounted read-write into the sandbox, such as a shared `~/.cache/uv`; this is a trust decision and the forbidden-path rules from `checks.ro_paths` apply. |\\n+| `checks.scratch` | Worktree-relative directories given a fresh writable mount per run; defaults to `.venv`, `.ruff_cache`, `.pytest_cache` and `node_modules/.cache`. |\\n+| `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |\\n+| `checks.network` | Allow network inside the sandbox; default `false`. |\\n+| `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |\\n+| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge` or `rebase`. |\\n+| `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`); when the author family is known, `review` only uses a different family. |\\n+\\n ## What it deliberately does not do\\n \\n - No ledger, evidence store or run log. The PR is the record.\"}]",
+  "stderr": "",
+  "input_files": {},
+  "gh_version": "gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)",
+  "recorded_at": "2026-09-18T12:07:16.649268+00:00",
+  "scenario": "files"
+}

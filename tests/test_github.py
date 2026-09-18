@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,30 +15,56 @@ from loopzero.types import Finding, ReviewResult
 REPO = "acme/widgets"
 HEAD = "a" * 40
 
-# The fake dispatches on a key: "<cmd> <sub>" for `gh pr X`, "api <endpoint>" for `gh api`.
-# Each key maps to a list of responses consumed in order (the last one repeats).
+# `respond` preserves the original key-based fake. New tests use `expect`, which
+# consumes complete argv interactions in order and never repeats a response.
 FAKE_GH = """#!{python}
-import json, sys
+import json, os, sys
 argv = sys.argv[1:]
 calls, scenario = {calls!r}, {scenario!r}
 key = " ".join(argv[:2])
 record = {{"argv": argv}}
+input_files = {{}}
 for flag in ("--input", "--body-file"):
     if flag in argv:
-        record[flag] = open(argv[argv.index(flag) + 1]).read()
-log = json.loads(open(calls).read()) if __import__("os").path.exists(calls) else []
+        content = open(argv[argv.index(flag) + 1]).read()
+        record[flag] = content
+        input_files[flag] = content
+record["input_files"] = input_files
+log = json.loads(open(calls).read()) if os.path.exists(calls) else []
 log.append(record)
 open(calls, "w").write(json.dumps(log))
 plan = json.load(open(scenario))
-responses = plan.get(key)
-if responses is None:
-    sys.stderr.write("fake gh: no response for " + key + "\\n")
-    sys.exit(97)
-idx = sum(1 for c in log[:-1] if " ".join(c["argv"][:2]) == key)
-resp = responses[min(idx, len(responses) - 1)]
+strict = plan.get("strict")
+if strict is not None:
+    index = len(log) - 1
+    if index >= len(strict):
+        sys.stderr.write("fake gh: exhausted after %d interactions; got %r\\n" %
+                         (len(strict), argv))
+        sys.exit(97)
+    expected = strict[index]
+    normalized = list(argv)
+    for flag in ("--input", "--body-file"):
+        if flag in normalized:
+            normalized[normalized.index(flag) + 1] = "<temp-file>"
+    if normalized != expected["argv"]:
+        sys.stderr.write("fake gh: unexpected argv\\nexpected: %r\\nactual:   %r\\n" %
+                         (expected["argv"], normalized))
+        sys.exit(97)
+    if expected.get("input_files", {{}}) != input_files:
+        sys.stderr.write("fake gh: unexpected input files\\nexpected: %r\\nactual:   %r\\n" %
+                         (expected.get("input_files", {{}}), input_files))
+        sys.exit(97)
+    resp = expected
+else:
+    responses = plan.get("compat", {{}}).get(key)
+    if responses is None:
+        sys.stderr.write("fake gh: no response for " + key + "\\n")
+        sys.exit(97)
+    idx = sum(1 for c in log[:-1] if " ".join(c["argv"][:2]) == key)
+    resp = responses[min(idx, len(responses) - 1)]
 sys.stdout.write(resp.get("stdout", ""))
 sys.stderr.write(resp.get("stderr", ""))
-sys.exit(resp.get("exit", 0))
+sys.exit(resp.get("exit_code", resp.get("exit", 0)))
 """
 
 
@@ -45,7 +72,7 @@ class FakeGh:
     def __init__(self, fake_bin: Path, tmp_path: Path) -> None:
         self.calls_file = tmp_path / "gh-calls.json"
         self.scenario_file = tmp_path / "gh-scenario.json"
-        self.scenario_file.write_text("{}")
+        self.scenario_file.write_text(json.dumps({"compat": {}}))
         script = fake_bin / "gh"
         script.write_text(FAKE_GH.format(
             python=sys.executable, calls=str(self.calls_file), scenario=str(self.scenario_file)
@@ -54,13 +81,69 @@ class FakeGh:
 
     def respond(self, key: str, *responses: object, exit: int = 0, stderr: str = "") -> None:
         plan = json.loads(self.scenario_file.read_text())
-        plan[key] = [
+        if "strict" in plan:
+            raise AssertionError("cannot mix respond() compatibility rules with strict expect() rules")
+        plan.setdefault("compat", {})[key] = [
             r if isinstance(r, dict) and "stdout" in r
             else {"stdout": r if isinstance(r, str) else json.dumps(r), "exit": exit,
                   "stderr": stderr}
             for r in responses
         ]
         self.scenario_file.write_text(json.dumps(plan))
+
+    @staticmethod
+    def _response(response: object, *, exit: int = 0, stderr: str = "") -> dict[str, Any]:
+        if isinstance(response, dict) and "stdout" in response:
+            return dict(response)
+        return {
+            "stdout": response if isinstance(response, str) else json.dumps(response),
+            "stderr": stderr,
+            "exit_code": exit,
+        }
+
+    def expect(
+        self,
+        argv: list[str],
+        response: object = "",
+        *,
+        exit: int = 0,
+        stderr: str = "",
+        input_files: dict[str, str] | None = None,
+    ) -> None:
+        """Queue one exact interaction; temp path arguments are ``<temp-file>``."""
+        plan = json.loads(self.scenario_file.read_text())
+        if plan.get("compat"):
+            raise AssertionError("cannot mix strict expect() rules with respond() compatibility rules")
+        item = self._response(response, exit=exit, stderr=stderr)
+        item["argv"] = argv
+        item["input_files"] = input_files or {}
+        plan.setdefault("strict", []).append(item)
+        plan.pop("compat", None)
+        self.scenario_file.write_text(json.dumps(plan))
+
+    def load_scenario(
+        self, scenario: str, replacements: dict[str, str] | None = None
+    ) -> None:
+        """Load one redacted recorder fixture as the next strict interaction."""
+        fixture = Path(__file__).parent / "fixtures" / "gh" / f"{scenario}.json"
+        text = fixture.read_text()
+        for old, new in (replacements or {}).items():
+            text = text.replace(old, new)
+        data = json.loads(text)
+        argv = ["<temp-file>" if arg.startswith("<TEMP_FILE") else arg
+                for arg in data["argv"]]
+        self.expect(
+            argv,
+            {"stdout": data["stdout"], "stderr": data["stderr"],
+             "exit_code": data["exit_code"]},
+            input_files=data.get("input_files", {}),
+        )
+
+    def assert_complete(self) -> None:
+        plan = json.loads(self.scenario_file.read_text())
+        expected = len(plan.get("strict", []))
+        if "strict" in plan and len(self.calls) != expected:
+            raise AssertionError(f"fake gh: {expected - len(self.calls)} expected interactions remain")
 
     def fail(self, key: str, stderr: str, exit: int = 1) -> None:
         self.respond(key, {"stdout": "", "stderr": stderr, "exit": exit})
@@ -321,7 +404,7 @@ def test_post_review_approve_event(gh: FakeGh) -> None:
     ("request_changes", "Can not request changes on your own pull request"),
 ])
 def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, msg: str) -> None:
-    """Author lookup says someone else, but GitHub still rejects: stdout JSON, short stderr."""
+    """Hand fake: recording the 422 would require a forbidden write to the reference PR."""
     arm_review(gh)
     body = {"message": "Unprocessable Entity", "errors": [{"message": msg}],
             "documentation_url": "https://docs.github.com/rest"}
@@ -642,18 +725,25 @@ def test_mark_ready(gh: FakeGh) -> None:
     assert gh.argv(0) == ["pr", "ready", "7", "--repo", REPO]
 
 
-def test_merge_success_returns_merge_sha_and_deletes_remote_branch(gh: FakeGh) -> None:
-    gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40},
-                           "headRefName": "lz/x"})
-    gh.respond("api -X", "")
+def test_merge_success_replays_recorded_verification_and_deletes_remote_branch(
+    gh: FakeGh,
+) -> None:
+    branch = "lz/add-workflow-config-note"
+    gh.expect(
+        ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
+    )
+    gh.load_scenario("pr_view_merged", {
+        "<REPO>": REPO, "<PR>": "7", "<SHA_1>": "c" * 40,
+    })
+    gh.expect(["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/{branch}"])
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
                           "--match-head-commit", HEAD]
     assert "--delete-branch" not in gh.argv(0)
     assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json",
                           "mergeCommit,state,headRefName"]
-    assert gh.argv(2) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/lz/x"]
+    assert gh.argv(2) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/{branch}"]
+    gh.assert_complete()
 
 
 def test_merge_command_failure(gh: FakeGh) -> None:
