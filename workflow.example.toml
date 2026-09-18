@@ -31,6 +31,8 @@ writable = ["/home/<you>/.cache/uv"]
 
 # Exact names of GitHub check runs that must be green on the PR head before
 # `loopzero ready` and `loopzero merge` proceed. Match your branch protection.
+# Require always-run aggregate gates when test jobs are path-conditional.
+# A skipped required check does not satisfy readiness.
 required_ci = ["checks"]
 
 # Host paths mounted read-only into the sandbox. The sandbox does not expose

@@ -187,6 +187,107 @@ def test_check_with_open_pr_patches_validation_section(
     assert "- `echo ok`: exit 0" in body
 
 
+@pytest.mark.parametrize("command", ["check", "pr"])
+def test_refresh_preserves_live_pr_evidence(wt: Path, gh: FakeGh, capsys, command: str) -> None:
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    live = (
+        "# Owner-edited title\n\n## Acceptance\n- Updated acceptance on GitHub.\n\n"
+        "## Validation\nRecorded for `aaaaaaaaaaaa`\n"
+        "- `old check`: exit 0 (1.0s)\n\n"
+        "Browser: original failure reproduced; corrected image returns 200.\n\n"
+        "## Review\n- primary, claude, aaaaaaaaaaaa, request_changes\n"
+        "- delta, claude, bbbbbbbbbbbb, approve\n\n"
+        "## Evidence\nProduction probe returned 100 records.\n"
+    )
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=live)])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+    assert run(capsys, command)[0] == 0
+    body = json.loads(gh.calls[-1]["--input"])["body"]
+    if command == "check":
+        assert body.startswith("# Owner-edited title\n\n## Acceptance\n")
+        assert "- Updated acceptance on GitHub." in body
+    else:
+        assert "The feature prints its greeting." in body
+        assert "Updated acceptance on GitHub" not in body
+    assert "Browser: original failure reproduced; corrected image returns 200." in body
+    assert "- primary, claude, aaaaaaaaaaaa, request_changes" in body
+    assert "- delta, claude, bbbbbbbbbbbb, approve" in body
+    assert "## Evidence\nProduction probe returned 100 records." in body
+    assert "old check" not in body and "Recorded for `aaaaaaaaaaaa`" not in body
+
+
+def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(task.read_text().replace(
+        "(filled by `loopzero check`)", "- Regression failed before the fix.\n- Browser verified."
+    ))
+    gh.respond("pr list", [], [pr_json(headRefOid=head_of(wt))])
+    gh.respond("pr create", URL + "\n")
+    assert run(capsys, "pr")[0] == 0
+    body = next(c["--body-file"] for c in gh.calls if "--body-file" in c)
+    assert "- Regression failed before the fix." in body
+    assert "- Browser verified." in body
+    assert "(no `loopzero check` run recorded)" in body
+
+
+def test_repeated_pr_does_not_rewrite_unchanged_body(wt: Path, gh: FakeGh, capsys) -> None:
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+    assert run(capsys, "pr")[0] == 0
+    body = json.loads(gh.calls[-1]["--input"])["body"]
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=body)])
+    before = len(gh.calls)
+    assert run(capsys, "pr")[0] == 0
+    if len(gh.calls) > before + 1:
+        assert json.loads(gh.calls[-1]["--input"])["body"] == body
+    assert [c["argv"][:2] for c in gh.calls[before:]] == [["pr", "list"]]
+
+
+def test_check_does_not_rewrite_when_only_duration_changes(wt: Path, gh: FakeGh, capsys) -> None:
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    report = CheckReport(head_of(wt), False, (
+        CheckResult("echo ok", 0, 999.0, "ok"),
+        CheckResult("test -f README.md", 0, 999.0, ""),
+    ))
+    cli._save_report(wt, report)
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+    assert run(capsys, "pr")[0] == 0
+    body = json.loads(gh.calls[-1]["--input"])["body"]
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=body)])
+    before = len(gh.calls)
+    assert run(capsys, "check")[0] == 0
+    assert [c["argv"][:2] for c in gh.calls[before:]] == [["pr", "list"]]
+
+
+@pytest.mark.parametrize("body", [
+    "# PR\n\n## Evidence\nRetained browser proof.\n",
+    "# PR\n\n## Validation\nHuman evidence.\n\n## Review\nApproved.\n",
+    ("# PR\n\n## Checks\nRecorded for `aaaaaaaaaaaa`\n"
+     "- `old check`: exit 1 (1.0s)\n\nHuman evidence.\n\n## Review\nApproved.\n"),
+])
+def test_check_refresh_replaces_previous_head_without_losing_evidence(
+    wt: Path, gh: FakeGh, capsys, body: str,
+) -> None:
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=body)])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+    assert run(capsys, "check")[0] == 0
+    first = json.loads(gh.calls[-1]["--input"])["body"]
+    old_head = head_of(wt)
+    (wt / "feature.py").write_text("print('new')\n")
+    git(wt, "add", "feature.py")
+    git(wt, "commit", "-q", "-m", "new behavior")
+    gh.respond("pr list", [pr_json(headRefOid=head_of(wt), body=first)])
+    assert run(capsys, "check")[0] == 0
+    updated = json.loads(gh.calls[-1]["--input"])["body"]
+    assert old_head[:12] not in updated and head_of(wt)[:12] in updated
+    assert updated.count("Recorded for") == 1
+    for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
+        if text in body:
+            assert text in updated
+
+
 def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None:
     assert run(capsys, "check")[0] == 0
     assert gh.calls == []

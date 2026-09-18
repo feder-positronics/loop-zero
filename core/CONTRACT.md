@@ -12,8 +12,9 @@ hold all state. Nothing is recorded anywhere else.
    `workflow.toml` `[checks].commands` inside the sandbox described below.
    The exit code is the verdict. Nothing is signed or archived.
 3. `loopzero pr` — push and open a **draft** PR. The body is
-   `.loopzero/task.md` plus the check summary. A draft never needs a clean
-   review.
+   `.loopzero/task.md` plus a generated checks block within Validation. Later
+   `pr` calls sync task narrative but preserve live Validation, Review and extra
+   sections; `check` refreshes only the checks block. A draft never needs a clean review.
 4. `loopzero review` — run one independent model review on the exact head.
    Findings are posted as one GitHub PR review with inline comments.
 5. `loopzero ready` — compute readiness (below). If ready, mark the PR ready
