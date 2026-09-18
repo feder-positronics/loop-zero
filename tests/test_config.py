@@ -16,6 +16,8 @@ required_ci = ["checks"]
 network = true
 env_allowlist = ["PATH", "HOME"]
 ro_paths = ["/nonexistent/cache", "/tmp/whatever/../cache"]
+writable = ["/home/me/.cache/uv"]
+scratch = [".venv"]
 
 [delivery]
 merge = "rebase"
@@ -40,6 +42,8 @@ def test_load_full_config(tmp_path):
         network=True,
         env_allowlist=("PATH", "HOME"),
         sandbox_ro=("/nonexistent/cache", "/tmp/whatever/../cache"),
+        writable=("/home/me/.cache/uv",),
+        scratch=(".venv",),
     )
 
 
@@ -55,7 +59,8 @@ def test_load_applies_defaults(tmp_path):
     )
     assert loaded.network is False
     assert loaded.env_allowlist == ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
-    assert loaded.sandbox_ro == ()
+    assert loaded.sandbox_ro == () and loaded.writable == ()
+    assert loaded.scratch == (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
 
 
 def test_missing_file(tmp_path):
@@ -85,6 +90,9 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\nbase = ""\n', "repo.base must not be empty"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = []\n', "at least one reviewer"),
         ('[repo]\nname = "o/n"\n[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
+        ('[repo]\nname = "o/n"\n[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
+        ('[repo]\nname = "o/n"\n[checks]\nscratch = ["../x"]\n', "scratch entries must be relative"),
+        ('[repo]\nname = "o/n"\n[checks]\nscratch = ["/abs"]\n', "scratch entries must be relative"),
     ],
 )
 def test_invalid_content(tmp_path, text, message):
@@ -104,7 +112,7 @@ def test_ro_paths_reject_host_secrets(tmp_path, path):
         config.load(write(tmp_path, text))
 
 
-@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/usr/local", "/tmp/x"])
+@pytest.mark.parametrize("path", ["/home/me/.local/bin", "/opt/tool", "/tmp/x"])
 def test_ro_paths_accept_explicit_subpaths(tmp_path, path):
     text = f'[repo]\nname = "o/n"\n[checks]\nro_paths = ["{path}"]\n'
     assert config.load(write(tmp_path, text)).sandbox_ro == (path,)

@@ -24,6 +24,8 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "network": bool,
         "env_allowlist": list,
         "ro_paths": list,
+        "writable": list,
+        "scratch": list,
     },
     "delivery": {"merge": str, "reviewers": list},
 }
@@ -89,7 +91,14 @@ def _build(data: dict[str, Any]) -> Config:
     if "env_allowlist" in checks:
         kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
     if "ro_paths" in checks:
-        kwargs["sandbox_ro"] = _ro_paths(_strings("checks.ro_paths", checks["ro_paths"]))
+        kwargs["sandbox_ro"] = _host_paths("checks.ro_paths", checks["ro_paths"])
+    if "writable" in checks:
+        kwargs["writable"] = _host_paths("checks.writable", checks["writable"])
+    if "scratch" in checks:
+        kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
+        for entry in kwargs["scratch"]:
+            if entry.startswith("/") or ".." in Path(entry).parts:
+                raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     return Config(
         repo=name,
         base_branch=base,
@@ -114,13 +123,14 @@ def _strings(label: str, value: list[Any]) -> tuple[str, ...]:
     return tuple(value)
 
 
-def _ro_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+def _host_paths(label: str, value: list[Any]) -> tuple[str, ...]:
+    paths = _strings(label, value)
     for raw in paths:
         if not raw.startswith("/"):
-            raise ConfigError(f"checks.ro_paths entries must be absolute, got {raw!r}")
+            raise ConfigError(f"{label} entries must be absolute, got {raw!r}")
         path = Path(raw).resolve()
         if str(path) in FORBIDDEN_RO or any(
             path.is_relative_to(tree) for tree in FORBIDDEN_RO_TREES
         ):
-            raise ConfigError(f"checks.ro_paths must not expose {raw!r} (host sockets or secrets)")
+            raise ConfigError(f"{label} must not expose {raw!r} (host sockets or secrets)")
     return paths

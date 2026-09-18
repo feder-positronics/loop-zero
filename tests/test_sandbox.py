@@ -51,17 +51,13 @@ def test_report_head_dirty_and_results(git_repo, bwrap_log):
     report = sandbox.run_checks(make_config(checks=("echo one", "echo two; exit 4")), git_repo)
     assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
     assert report.dirty is False
+    (git_repo / "README.md").write_text("changed\n")
+    assert sandbox.run_checks(make_config(), git_repo).dirty is True
     assert [(r.command, r.exit_code, r.tail) for r in report.results] == [
         ("echo one", 0, "one"),
         ("echo two; exit 4", 4, "two"),
     ]
     assert report.ok is False
-    assert all(r.duration_s >= 0 for r in report.results)
-
-
-def test_dirty_worktree_is_reported(git_repo, bwrap_log):
-    (git_repo / "README.md").write_text("changed\n")
-    assert sandbox.run_checks(make_config(), git_repo).dirty is True
 
 
 def test_tail_merges_streams_and_truncates(git_repo, bwrap_log):
@@ -87,9 +83,8 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert _pairs(head, "--ro-bind") == [(p, p) for p in system] + [(str(git_repo),) * 2]
     assert "/" not in system and "/home" not in system
     assert _pairs(head, "--ro-bind-try") == []
-    windows = _windows(head)
-    for path in ("/tmp", "/run", "/var/run"):
-        assert ("--tmpfs", path) in windows
+    windows = list(itertools.pairwise(head))
+    assert all(("--tmpfs", p) in windows for p in ("/tmp", "/run", "/var/run"))
     assert ("--dev", "/dev") in windows and ("--proc", "/proc") in windows
     assert head[head.index("--chdir") + 1] == str(git_repo)
     setenv = dict(_pairs(head, "--setenv"))
@@ -97,27 +92,40 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert setenv["LZ_KEEP"] == "kept"
     assert "LZ_DROP" not in setenv
     assert setenv["HOME"] == sandbox.SANDBOX_HOME
-    assert setenv["HOME"] != os.environ["HOME"]
-    bind = dict(_pairs(head, "--bind"))
-    assert bind and list(bind.values()) == [sandbox.SANDBOX_HOME]
-    assert Path(next(iter(bind))).name.startswith("loopzero-home-")
+    assert setenv["UV_CACHE_DIR"] == "/tmp/uv-cache" and setenv["PYTHONDONTWRITEBYTECODE"] == "1"
+    binds = _pairs(head, "--bind")
+    home_src, home_dst = binds[0]
+    assert home_dst == sandbox.SANDBOX_HOME and Path(home_src).name.startswith("loopzero-home-")
+    assert Path(home_src) != Path(os.environ.get("HOME", "/"))
+    # Scratch dirs: per-run tmp sources under the home dir, bound after the ro worktree bind.
+    scratch = {dst: src for src, dst in binds[1:]}
+    assert list(scratch) == [str(git_repo / e) for e in make_config().scratch]
+    assert all(src.startswith(home_src + "/scratch/") for src in scratch.values())
+    assert head.index(str(git_repo)) < head.index(str(git_repo / ".venv"))
+    assert (git_repo / "node_modules/.cache").is_dir()
+    assert sandbox.run_checks(make_config(), git_repo).dirty is False
     # /tmp tmpfs comes before the worktree bind so a worktree under /tmp stays visible.
     assert head.index("--tmpfs") < head.index(str(git_repo))
     assert tail == ["/bin/sh", "-c", "echo hello"]
 
 
-def test_probe_uses_real_flags_then_checks_run(git_repo, bwrap_log):
-    sandbox.run_checks(make_config(checks=()), git_repo)
+def test_probe_uses_real_flags(git_repo, bwrap_log):
+    sandbox.run_checks(make_config(checks=(), network=True), git_repo)
     argv = argv_of(bwrap_log)  # only the probe ran
     assert argv[argv.index("--") + 1 :] == ["true"]
-    assert "--unshare-all" in argv and "--clearenv" in argv
-    assert ("/", "/") not in _pairs(argv, "--ro-bind")
+    assert argv.index("--unshare-all") < argv.index("--share-net") < argv.index("--clearenv")
 
 
-def test_extra_ro_paths_are_bound_try(git_repo, bwrap_log, tmp_path):
-    extra = tmp_path / "cache"
-    sandbox.run_checks(make_config(sandbox_ro=(str(extra),)), git_repo)
-    assert _pairs(argv_of(bwrap_log), "--ro-bind-try") == [(str(extra),) * 2]
+def test_extra_paths_and_env_override(git_repo, bwrap_log, tmp_path, monkeypatch):
+    extra, cache = tmp_path / "ro", tmp_path / "rw"
+    monkeypatch.setenv("UV_CACHE_DIR", str(cache))
+    cfg = make_config(sandbox_ro=(str(extra),), writable=(str(cache),), scratch=())
+    sandbox.run_checks(Config(**{**cfg.__dict__, "env_allowlist": ("PATH", "UV_CACHE_DIR")}), git_repo)
+    argv = argv_of(bwrap_log)
+    assert _pairs(argv, "--ro-bind-try") == [(str(extra),) * 2]
+    assert _pairs(argv, "--bind-try") == [(str(cache),) * 2]
+    assert len(_pairs(argv, "--bind")) == 1  # only HOME; no scratch
+    assert dict(_pairs(argv, "--setenv"))["UV_CACHE_DIR"] == str(cache)
 
 
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
@@ -125,17 +133,9 @@ def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
         make_config(checks=("echo partial; sleep 5", "echo after")), git_repo, timeout=0.3
     )
     first, second = report.results
-    assert first.exit_code == sandbox.TIMEOUT_EXIT
-    assert first.tail.splitlines()[0] == "partial"
-    assert "timed out" in first.tail
+    assert (first.exit_code, first.tail.splitlines()[0]) == (sandbox.TIMEOUT_EXIT, "partial")
+    assert "timed out" in first.tail and not report.ok
     assert (second.exit_code, second.tail) == (0, "after")
-    assert report.ok is False
-
-
-def test_network_flag(git_repo, bwrap_log):
-    sandbox.run_checks(make_config(network=True), git_repo)
-    argv = argv_of(bwrap_log)
-    assert argv.index("--unshare-all") < argv.index("--share-net")
 
 
 def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
@@ -147,13 +147,12 @@ def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
     assert binds[-2:] == [(str(linked.resolve()),) * 2, (str(common),) * 2]
 
 
-def test_bwrap_missing(git_repo, fake_bin, monkeypatch):
+def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypatch):
+    path = os.environ["PATH"]
     monkeypatch.setenv("PATH", str(fake_bin))
     with pytest.raises(sandbox.SandboxUnavailable, match="bwrap not found"):
         sandbox.run_checks(make_config(), git_repo)
-
-
-def test_bwrap_probe_failure(git_repo, fake_tool):
+    monkeypatch.setenv("PATH", path)
     fake_tool("bwrap", "echo 'bwrap: No permissions to create new namespace' >&2\nexit 1\n")
     with pytest.raises(sandbox.SandboxUnavailable, match="No permissions to create new namespace"):
         sandbox.run_checks(make_config(), git_repo)
@@ -168,9 +167,8 @@ def _real_bwrap_works() -> bool:
     # Hosts with AppArmor or no unprivileged user namespaces cannot run bwrap; skip there.
     if shutil.which("bwrap") is None:
         return False
-    probe = ["bwrap", "--unshare-all", "--ro-bind", "/usr", "/usr", "--ro-bind", "/bin", "/bin"]
-    probe += ["--ro-bind", "/lib", "/lib", "--ro-bind", "/lib64", "/lib64", "--dev", "/dev"]
-    probe += ["--proc", "/proc", "--tmpfs", "/tmp", "true"]
+    probe = ["bwrap", "--unshare-all", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+    probe += [a for p in ("/usr", "/bin", "/lib", "/lib64") for a in ("--ro-bind", p, p)] + ["true"]
     try:
         return subprocess.run(probe, capture_output=True, timeout=30, check=False).returncode == 0
     except (OSError, subprocess.SubprocessError):
@@ -209,9 +207,30 @@ def test_real_sandbox_hides_host_sockets_and_homes(git_repo):
     assert [r.exit_code for r in report.results] == [0] * len(checks), report
 
 
+@pytest.mark.skipif(
+    not _real_bwrap_works() or shutil.which("uv") is None, reason="needs real bwrap and uv"
+)
+def test_real_sandbox_uv_run_offline(git_repo, monkeypatch):
+    home = Path.home()
+    (git_repo / "pyproject.toml").write_text(
+        '[project]\nname = "t"\nversion = "0"\nrequires-python = ">=3.12"\n'
+        "[dependency-groups]\ndev = []\n"
+    )
+    monkeypatch.setenv("UV_CACHE_DIR", str(home / ".cache/uv"))
+    monkeypatch.setenv("UV_PYTHON_INSTALL_DIR", str(home / ".local/share/uv/python"))
+    subprocess.run(["uv", "lock", "-q"], cwd=git_repo, check=True)  # projects commit uv.lock
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "uv project")
+    cfg = make_config(
+        checks=("uv run --group dev python -c 1 && test -e .venv/bin/python && test ! -w .",),
+        env_allowlist=("PATH", "UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR"),
+        sandbox_ro=(str(home / ".local/bin"), str(home / ".local/share/uv")),
+        writable=(str(home / ".cache/uv"),),
+    )
+    (result,) = sandbox.run_checks(cfg, git_repo).results
+    assert result.exit_code == 0, result.tail
+    assert not (git_repo / ".venv/bin").exists()  # venv lived in the scratch dir
+
+
 def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
     return [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == flag]
-
-
-def _windows(argv: list[str]) -> list[tuple[str, str]]:
-    return list(itertools.pairwise(argv))

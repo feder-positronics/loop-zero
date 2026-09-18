@@ -18,6 +18,17 @@ SANDBOX_HOME = "/tmp/home"
 # under the user's home (~/.local/bin, ~/.local/share/uv, ~/.cache/uv, ...) must be listed
 # explicitly in `[checks] ro_paths` (Config.sandbox_ro).
 SYSTEM_RO = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt")
+# `Config.writable` paths are bound read-write. That is a deliberate trust decision by the
+# consumer (e.g. a shared ~/.cache/uv so checks work offline); a check can poison that cache.
+# `Config.scratch` entries are per-run empty tmp dirs bound over <worktree>/<entry> so tools
+# can create venvs and caches without the tree itself being writable.
+# Defaults below are set before allowlisted host variables, so the host can override them.
+SANDBOX_ENV = {
+    "PYTHONDONTWRITEBYTECODE": "1",
+    "RUFF_CACHE_DIR": "/tmp/ruff-cache",
+    "UV_CACHE_DIR": "/tmp/uv-cache",
+    "PYTEST_ADDOPTS": "-p no:cacheprovider",
+}
 
 
 class SandboxUnavailable(LoopZeroError):
@@ -28,9 +39,9 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     """Run every `config.checks` command in order inside the sandbox and report results.
 
     The sandbox sees only `SYSTEM_RO`, `config.sandbox_ro`, the worktree and its Git
-    directories (all read-only), fresh tmpfs at /tmp, /run and /var/run, a private HOME
-    at /tmp/home, no network unless `config.network`, and only `config.env_allowlist`
-    variables. Each command's exit code is recorded; a timeout is recorded as exit
+    directories (all read-only), `config.writable` read-write, per-run scratch dirs over
+    `config.scratch`, fresh tmpfs at /tmp, /run and /var/run, a private HOME at /tmp/home,
+    no network unless `config.network`, and `SANDBOX_ENV` plus `config.env_allowlist`. Each command's exit code is recorded; a timeout is recorded as exit
     `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check.
     """
     worktree = worktree.resolve()
@@ -43,7 +54,13 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 
     results = []
     with tempfile.TemporaryDirectory(prefix="loopzero-home-") as home:
-        prefix = bwrap_argv(config, worktree, Path(home), common_dir, git_dir)
+        scratch = {entry: Path(home) / "scratch" / entry for entry in config.scratch}
+        for entry, source in scratch.items():
+            source.mkdir(parents=True)
+            # bwrap cannot create mount points inside a read-only bind, so the (empty,
+            # git-invisible) directory must exist in the worktree before we start.
+            (worktree / entry).mkdir(parents=True, exist_ok=True)
+        prefix = bwrap_argv(config, worktree, Path(home), common_dir, git_dir, scratch)
         _probe(config, worktree, prefix)
         for command in config.checks:
             results.append(_run_one(config, worktree, prefix, command, timeout))
@@ -90,7 +107,12 @@ def _probe(config: Config, worktree: Path, prefix: list[str]) -> None:
 
 
 def bwrap_argv(
-    config: Config, worktree: Path, home: Path, common_dir: Path, git_dir: Path
+    config: Config,
+    worktree: Path,
+    home: Path,
+    common_dir: Path,
+    git_dir: Path,
+    scratch: dict[str, Path] | None = None,
 ) -> list[str]:
     """Build the bwrap command line up to and including the `--` separator."""
     argv = [
@@ -107,6 +129,8 @@ def bwrap_argv(
             argv += ["--ro-bind", path, path]
     for path in config.sandbox_ro:
         argv += ["--ro-bind-try", path, path]
+    for path in config.writable:
+        argv += ["--bind-try", path, path]
     argv += ["--dev", "/dev", "--proc", "/proc"]
     for path in ("/tmp", "/run", "/var/run"):
         argv += ["--tmpfs", path]
@@ -119,8 +143,11 @@ def bwrap_argv(
             binds.append(path)
     for path in binds:
         argv += ["--ro-bind", str(path), str(path)]
+    for entry, source in (scratch or {}).items():
+        argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), "--clearenv"]
-    for key, value in _proc.build_env(config.env_allowlist).items():
+    env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist)}
+    for key, value in env.items():
         if key != "HOME":
             argv += ["--setenv", key, value]
     argv += ["--setenv", "HOME", SANDBOX_HOME, "--"]

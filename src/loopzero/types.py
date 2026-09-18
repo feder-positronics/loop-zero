@@ -20,6 +20,8 @@ class Config:
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox
+    writable: tuple[str, ...] = ()  # host paths bound read-write (shared tool caches)
+    scratch: tuple[str, ...] = (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
 
 
 @dataclass(frozen=True)
