@@ -84,6 +84,17 @@ class RunnerBadOutput(RunnerError):
         self.tail = tail
 
 
+class RunnerPromptTooLong(RunnerBadOutput):
+    """The provider rejected the prompt for exceeding its context window."""
+
+
+_TOO_LONG_PATTERNS = (
+    re.compile(r"prompt is too long", re.IGNORECASE),
+    re.compile(r"context_length_exceeded", re.IGNORECASE),
+    re.compile(r"maximum context length", re.IGNORECASE),
+)
+
+
 # --------------------------------------------------------------------------- prompt
 
 
@@ -138,6 +149,10 @@ def _claude_envelope_auth_failure(envelope: object) -> bool:
         and re.search(r"authenticate|OAuth|expired|401", str(envelope.get("result", "")),
                       re.IGNORECASE) is not None
     )
+
+
+def _looks_too_long(text: str) -> bool:
+    return any(p.search(text) for p in _TOO_LONG_PATTERNS)
 
 
 def _extract_json_object(text: str) -> object:
@@ -230,6 +245,8 @@ def _run(
                 pass
         if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
             raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
+        if _looks_too_long(combined):
+            raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(combined))
         raise RunnerBadOutput(f"{family}: exited {done.exit_code}", _tail(combined))
     return done
 
@@ -301,6 +318,95 @@ def _copy_auth(family: str, home: Path) -> None:
         shutil.copyfile(source, destination)
 
 
+def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
+    required = ("session_id", "usage", "total_cost_usd", "duration_api_ms")
+    if any(name not in envelope for name in required):
+        raise RunnerBadOutput("claude: result envelope lacks provenance", _tail(raw))
+    session_id = envelope["session_id"]
+    usage = envelope["usage"]
+    cost = envelope["total_cost_usd"]
+    duration = envelope["duration_api_ms"]
+    if (
+        not isinstance(session_id, str)
+        or not session_id
+        or not isinstance(usage, dict)
+        or isinstance(cost, bool)
+        or not isinstance(cost, (int, float))
+        or isinstance(duration, bool)
+        or not isinstance(duration, (int, float))
+    ):
+        raise RunnerBadOutput("claude: result envelope has invalid provenance", _tail(raw))
+    return {
+        "family": "claude",
+        "session_id": session_id,
+        "session_ids": [session_id],
+        "usage": usage,
+        "total_cost_usd": cost,
+        "duration_api_ms": duration,
+    }
+
+
+def _json_lines(text: str) -> list[dict]:
+    events: list[dict] = []
+    for line in text.splitlines():
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            events.append(value)
+    return events
+
+
+def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str, object], str]:
+    events = _json_lines(stdout)
+    session_id = next(
+        (
+            str(event[key])
+            for event in events
+            for key in ("thread_id", "session_id")
+            if isinstance(event.get(key), str) and event[key]
+        ),
+        None,
+    )
+    usage = next(
+        (event["usage"] for event in reversed(events) if isinstance(event.get("usage"), dict)),
+        None,
+    )
+    session_match = re.search(
+        r"(?:session|thread)(?:\s+id)?\s*[:=]\s*([A-Za-z0-9_-]{6,})", stderr,
+        re.IGNORECASE,
+    )
+    tokens_match = re.search(
+        r"tokens used\s*(?:[:=]|\r?\n)\s*([0-9][0-9,]*)", stderr,
+        re.IGNORECASE,
+    )
+    session_id = session_id or (session_match.group(1) if session_match else None)
+    usage = usage or (
+        {"total_tokens": int(tokens_match.group(1).replace(",", ""))}
+        if tokens_match
+        else None
+    )
+    if not session_id or not isinstance(usage, dict):
+        raise RunnerBadOutput(
+            "codex: execution output lacks session/token provenance", _tail(stdout + stderr)
+        )
+    envelope = {
+        "type": "codex_exec_result",
+        "session_id": session_id,
+        "token_usage": usage,
+        "final_message": message,
+        "events": events,
+    }
+    provenance = {
+        "family": "codex",
+        "session_id": session_id,
+        "session_ids": [session_id],
+        "token_usage": usage,
+    }
+    return provenance, json.dumps(envelope, separators=(",", ":"))
+
+
 # --------------------------------------------------------------------------- adapters
 
 
@@ -349,6 +455,8 @@ def _review_claude(
         text = str(envelope.get("result", ""))
         if _looks_like_auth_failure(text):
             raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(text)}")
+        if _looks_too_long(text) or _looks_too_long(raw):
+            raise RunnerPromptTooLong("claude: prompt is too long", _tail(raw))
         raise RunnerBadOutput(f"claude: {envelope.get('subtype', 'error')}", _tail(raw))
     payload = envelope.get("structured_output")
     if payload is None:
@@ -359,9 +467,10 @@ def _review_claude(
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     model = ", ".join(models) or None
+    provenance = _claude_provenance(envelope, raw)
     return replace(
         parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
-        model=model, duration_s=done.duration_s,
+        model=model, duration_s=done.duration_s, provenance=provenance,
     )
 
 
@@ -379,6 +488,7 @@ def _review_codex(
         argv = [
             str(binary),
             "exec",
+            "--json",
             "--sandbox",
             "read-only",
             "--cd",
@@ -399,17 +509,20 @@ def _review_codex(
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
             family="codex",
         )
-        raw = last_file.read_text(encoding="utf-8") if last_file.exists() else ""
-    if not raw.strip():
+        message = last_file.read_text(encoding="utf-8") if last_file.exists() else ""
+    if not message.strip():
         raise RunnerBadOutput("codex: no final message written", _tail(done.stdout + done.stderr))
     try:
-        payload = _extract_json_object(raw)
+        payload = _extract_json_object(message)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerBadOutput("codex: final message is not JSON", _tail(raw)) from exc
+        raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
+    provenance, raw = _codex_provenance(done.stdout, done.stderr, message)
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     return replace(
         parse_review(payload, family="codex", head=head, kind=kind, raw=raw),
-        model=banner_model.group(1) if banner_model else None, duration_s=done.duration_s,
+        model=banner_model.group(1) if banner_model else None,
+        duration_s=done.duration_s,
+        provenance=provenance,
     )
 
 
@@ -435,6 +548,194 @@ def review_with(
         prompt, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
         ro_paths=reviewer_ro_paths,
     )
+
+
+def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
+    """Merge same-family chunk reviews while retaining every provider envelope/session."""
+    if not results:
+        raise ValueError("cannot merge no reviews")
+    first = results[0]
+    if any((r.family, r.head, r.kind) != (first.family, first.head, first.kind) for r in results):
+        raise ValueError("chunk reviews do not describe the same review")
+    findings = tuple(finding for result in results for finding in result.findings)
+    verdict = "request_changes" if any(r.verdict == "request_changes" for r in results) else "approve"
+    envelopes = [json.loads(result.raw) for result in results]
+    sessions = [str(result.provenance["session_id"]) for result in results]
+    provenance: dict[str, object] = {
+        "family": first.family,
+        "session_id": sessions[0],
+        "session_ids": sessions,
+    }
+    if first.family == "claude":
+        provenance.update(
+            usage=[result.provenance["usage"] for result in results],
+            total_cost_usd=sum(float(result.provenance["total_cost_usd"]) for result in results),
+            duration_api_ms=sum(float(result.provenance["duration_api_ms"]) for result in results),
+        )
+    else:
+        provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
+    return ReviewResult(
+        family=first.family,
+        head=first.head,
+        kind=first.kind,
+        verdict=verdict,
+        findings=findings,
+        raw=json.dumps(envelopes, separators=(",", ":")),
+        model=", ".join(dict.fromkeys(r.model for r in results if r.model)) or None,
+        duration_s=sum(r.duration_s for r in results if r.duration_s is not None),
+        provenance=provenance,
+        chunk_count=len(results),
+    )
+
+
+def split_diff(diff: str, budget: int) -> list[str]:
+    """Group unified-diff file blocks below ``budget`` bytes."""
+    starts = [match.start() for match in re.finditer(r"(?m)^diff --git ", diff)]
+    blocks = [
+        diff[starts[i] : starts[i + 1] if i + 1 < len(starts) else len(diff)]
+        for i in range(len(starts))
+    ] if starts else [diff]
+    if len(diff.encode()) > budget:
+        blocks = [_summarize_deleted(block) for block in blocks]
+    pieces = [piece for block in blocks for piece in _split_bytes(block, budget)]
+    chunks: list[str] = []
+    current = ""
+    for piece in pieces:
+        candidate = current + piece
+        if current and len(candidate.encode()) > budget:
+            chunks.append(current)
+            current = piece
+        else:
+            current = candidate
+    if current or not chunks:
+        chunks.append(current)
+    return chunks
+
+
+def _summarize_deleted(block: str) -> str:
+    if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
+        return block
+    match = re.match(r"diff --git a/(.+?) b/(.+?)\n", block)
+    path = match.group(2) if match else "(unknown file)"
+    deleted = sum(
+        1 for line in block.splitlines()
+        if line.startswith("-") and not line.startswith("---")
+    )
+    return f"diff --git a/{path} b/{path}\n{path}: deleted, {deleted} lines\n"
+
+
+def _split_bytes(text: str, budget: int) -> list[str]:
+    if len(text.encode()) <= budget:
+        return [text]
+    pieces: list[str] = []
+    current = ""
+    for line in text.splitlines(keepends=True):
+        if len(line.encode()) > budget:
+            if current:
+                pieces.append(current)
+                current = ""
+            while line:
+                cut = min(len(line), budget)
+                while len(line[:cut].encode()) > budget:
+                    cut -= 1
+                pieces.append(line[:cut])
+                line = line[cut:]
+        elif current and len((current + line).encode()) > budget:
+            pieces.append(current)
+            current = line
+        else:
+            current += line
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def validate_runner_result(result: ReviewResult) -> bool:
+    """Return whether saved provenance agrees with the provider envelope(s)."""
+    provenance = result.provenance
+    if (
+        not isinstance(provenance, dict)
+        or provenance.get("family") != result.family
+        or isinstance(result.chunk_count, bool)
+        or not isinstance(result.chunk_count, int)
+        or result.chunk_count <= 0
+    ):
+        return False
+    sessions = provenance.get("session_ids")
+    if (
+        not isinstance(sessions, list)
+        or len(sessions) != result.chunk_count
+        or not all(isinstance(item, str) and item for item in sessions)
+        or provenance.get("session_id") != sessions[0]
+    ):
+        return False
+    try:
+        decoded = json.loads(result.raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    envelopes = decoded if isinstance(decoded, list) else [decoded]
+    if len(envelopes) != result.chunk_count or not all(isinstance(item, dict) for item in envelopes):
+        return False
+    if result.family == "claude":
+        envelope_sessions = [item.get("session_id") for item in envelopes]
+        usages = [item.get("usage") for item in envelopes]
+        costs = [item.get("total_cost_usd") for item in envelopes]
+        durations = [item.get("duration_api_ms") for item in envelopes]
+        expected_usage: object = usages[0] if len(usages) == 1 else usages
+        provenance_ok = (
+            envelope_sessions == sessions
+            and all(item.get("type") == "result" for item in envelopes)
+            and all(item.get("subtype", "success") == "success" for item in envelopes)
+            and all(not item.get("is_error") for item in envelopes)
+            and all(isinstance(item, dict) for item in usages)
+            and all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in costs)
+            and all(
+                isinstance(item, (int, float)) and not isinstance(item, bool)
+                for item in durations
+            )
+            and provenance.get("usage") == expected_usage
+            and provenance.get("total_cost_usd") == sum(costs)
+            and provenance.get("duration_api_ms") == sum(durations)
+        )
+        payloads = [item.get("structured_output") for item in envelopes]
+        for index, payload in enumerate(payloads):
+            if payload is None:
+                try:
+                    payloads[index] = _extract_json_object(str(envelopes[index].get("result", "")))
+                except (json.JSONDecodeError, ValueError):
+                    return False
+    elif result.family == "codex":
+        envelope_sessions = [item.get("session_id") for item in envelopes]
+        usages = [item.get("token_usage") for item in envelopes]
+        expected_usage = usages[0] if len(usages) == 1 else usages
+        provenance_ok = (
+            envelope_sessions == sessions
+            and all(item.get("type") == "codex_exec_result" for item in envelopes)
+            and all(isinstance(item, dict) for item in usages)
+            and provenance.get("token_usage") == expected_usage
+        )
+        try:
+            payloads = [_extract_json_object(str(item["final_message"])) for item in envelopes]
+        except (KeyError, json.JSONDecodeError, ValueError):
+            return False
+    else:
+        return False
+    if not provenance_ok:
+        return False
+    try:
+        parsed = [
+            parse_review(
+                payload, family=result.family, head=result.head, kind=result.kind, raw=result.raw
+            )
+            for payload in payloads
+        ]
+    except RunnerBadOutput:
+        return False
+    findings = tuple(finding for item in parsed for finding in item.findings)
+    verdict = "request_changes" if any(
+        item.verdict == "request_changes" for item in parsed
+    ) else "approve"
+    return result.findings == findings and result.verdict == verdict
 
 
 # --------------------------------------------------------------------------- family

@@ -33,7 +33,12 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "env": dict,
         "limits": dict,
     },
-    "delivery": {"merge": str, "reviewers": list, "reviewer_ro_paths": list},
+    "delivery": {
+        "merge": str,
+        "reviewers": list,
+        "reviewer_ro_paths": list,
+        "review_chunk_bytes": int,
+    },
 }
 
 
@@ -139,6 +144,9 @@ def _build(data: dict[str, Any]) -> Config:
             raise ConfigError(
                 f"delivery.reviewers entries must be in {REVIEWER_FAMILIES}, got {reviewer!r}"
             )
+    review_chunk_bytes = delivery.get("review_chunk_bytes", 200_000)
+    if isinstance(review_chunk_bytes, bool) or review_chunk_bytes <= 0:
+        raise ConfigError("delivery.review_chunk_bytes must be a positive int")
 
     kwargs: dict[str, Any] = {}
     if "env_allowlist" in checks:
@@ -168,6 +176,7 @@ def _build(data: dict[str, Any]) -> Config:
         merge_strategy=merge,
         reviewers=reviewers,
         reviewer_ro_paths=reviewer_ro_paths,
+        review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),
         **kwargs,
     )

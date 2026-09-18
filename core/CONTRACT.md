@@ -62,6 +62,7 @@ or resolve threads; branch protection and CI remain the enforced gates.
 - A reviewer run that yields no verdict (missing tool, authentication failure,
   unparseable output) does not consume the budget; `loopzero review` moves to
   the next configured family and exits nonzero with each reason if all fail.
+A review file not produced by a runner is never a review; if no independent reviewer can run, the delivery waits for the owner.
 
 ## Sandbox rules for checks
 

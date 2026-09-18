@@ -12,10 +12,12 @@ from loopzero.runners import (
     RunnerAuthFailed,
     RunnerBadOutput,
     RunnerMissing,
+    RunnerPromptTooLong,
     author_family,
     build_prompt,
     pick_reviewer,
     review_with,
+    split_diff,
 )
 from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
@@ -86,7 +88,15 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0) -> Path:
     )
 
 
-def _fake_codex(bin_dir: Path, last_message: str, *, exit_code: int = 0, stderr: str = "") -> Path:
+def _fake_codex(
+    bin_dir: Path,
+    last_message: str,
+    *,
+    exit_code: int = 0,
+    stderr: str = "",
+    session_id: str = "codex-session-123",
+    tokens: int = 123,
+) -> Path:
     """Fake ``codex`` that checks argv shape and writes ``last_message`` to -o file."""
     return _script(
         bin_dir,
@@ -115,6 +125,8 @@ def _fake_codex(bin_dir: Path, last_message: str, *, exit_code: int = 0, stderr:
         cat > "$out" <<'MSG'
         {last_message}
         MSG
+        echo '{{"type":"thread.started","thread_id":"{session_id}"}}'
+        echo '{{"type":"turn.completed","usage":{{"input_tokens":{tokens},"output_tokens":2}}}}'
         exit {exit_code}
         """,
     )
@@ -122,7 +134,9 @@ def _fake_codex(bin_dir: Path, last_message: str, *, exit_code: int = 0, stderr:
 
 def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
     return {"type": "result", "subtype": "success", "is_error": False,
-            "result": json.dumps(payload), "structured_output": payload, **extra}
+            "result": json.dumps(payload), "structured_output": payload,
+            "session_id": "claude-session-123", "usage": {"input_tokens": 10},
+            "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
 
 
 def _review(family: str, cwd: Path, diff: str = "--- a\n+++ b\n+x\n"):
@@ -220,7 +234,9 @@ def test_claude_request_changes_escalates_verdict(fake_bin: Path, tmp_path: Path
 
 
 def test_claude_falls_back_to_result_text(fake_bin: Path, tmp_path: Path) -> None:
-    env = {"type": "result", "subtype": "success", "result": "```json\n" + json.dumps(APPROVE) + "\n```"}
+    env = _claude_envelope(APPROVE)
+    env.pop("structured_output")
+    env["result"] = "```json\n" + json.dumps(APPROVE) + "\n```"
     _fake_claude(fake_bin, env)
     assert _review("claude", tmp_path).verdict == "approve"
 
@@ -343,6 +359,26 @@ def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> No
         _review("claude", tmp_path)
 
 
+@pytest.mark.parametrize(
+    "family,phrase",
+    [
+        ("claude", "Prompt is too long"),
+        ("claude", "prompt is too long"),
+        ("codex", "context_length_exceeded"),
+        ("codex", "maximum context length exceeded"),
+    ],
+)
+def test_context_length_errors_are_typed(
+    fake_bin: Path, tmp_path: Path, family: str, phrase: str
+) -> None:
+    if family == "claude":
+        _fake_claude(fake_bin, phrase, exit_code=1)
+    else:
+        _fake_codex(fake_bin, "", exit_code=1, stderr=phrase)
+    with pytest.raises(RunnerPromptTooLong):
+        _review(family, tmp_path)
+
+
 def test_claude_missing_binary(
     fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -428,8 +464,8 @@ def test_codex_approve(
     assert result.verdict == "approve" and result.family == "codex"
     assert result.model is None and result.duration_s is not None
     argv = _argv(fake_bin, "codex")
-    assert argv[:4] == ["exec", "--sandbox", "read-only", "--cd"]
-    assert argv[4] == str(tmp_path.resolve()) and "--ephemeral" in argv
+    assert argv[:5] == ["exec", "--json", "--sandbox", "read-only", "--cd"]
+    assert argv[5] == str(tmp_path.resolve()) and "--ephemeral" in argv
     assert argv[argv.index("-c") + 1] == "mcp_servers={}"
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
@@ -450,7 +486,8 @@ def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
     _fake_codex(fake_bin, json.dumps(CHANGES))
     result = _review("codex", tmp_path)
     assert result.verdict == "request_changes" and len(result.findings) == 2
-    assert json.loads(result.raw) == CHANGES
+    assert json.loads(result.raw)["session_id"] == "codex-session-123"
+    assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
 def test_codex_malformed_json(fake_bin: Path, tmp_path: Path) -> None:
@@ -514,6 +551,18 @@ def test_timeout_becomes_bad_output(
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)
     assert "partial reviewer output" in info.value.tail
+
+
+def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
+    deleted = (
+        "diff --git a/gone.py b/gone.py\n"
+        "deleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n"
+        "@@ -1,3 +0,0 @@\n-one\n-two\n-three\n"
+    )
+    added = "diff --git a/new.py b/new.py\n" + "+x\n" * 60
+    chunks = split_diff(deleted + added, 100)
+    assert all(len(chunk.encode()) <= 100 for chunk in chunks)
+    assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
 
 
 # ----------------------------------------------------------------- family detection

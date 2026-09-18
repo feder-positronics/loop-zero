@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class LoopZeroError(Exception):
@@ -25,6 +25,7 @@ class Config:
     merge_strategy: str  # "squash" | "merge" | "rebase"
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
+    review_chunk_bytes: int = 200_000
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox
@@ -73,3 +74,5 @@ class ReviewResult:
     raw: str  # untouched model output for the PR comment
     model: str | None = None
     duration_s: float | None = None
+    provenance: dict[str, object] = field(default_factory=dict)
+    chunk_count: int = 1

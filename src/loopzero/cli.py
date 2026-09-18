@@ -17,7 +17,7 @@ CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 REVIEW_MARKER_RE = re.compile(
     r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
-    r"kind=(primary|delta)\s*-->"
+    r"kind=(primary|delta)(?:\s+source=(?:model|repost))?\s*-->"
 )
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
@@ -40,8 +40,12 @@ class ReviewersUnavailable(CliError):
     """All reviewer failures, retained as separate diagnostic lines."""
 
 
-def review_marker(head: str, kind: str) -> str:
-    return f"<!-- loopzero:review v=1 head={head} kind={kind} -->"
+class IndependentReviewerUnavailable(ReviewersUnavailable):
+    """No independent configured model family can provide the review."""
+
+
+def review_marker(head: str, kind: str, source: str = "model") -> str:
+    return f"<!-- loopzero:review v=1 head={head} kind={kind} source={source} -->"
 
 
 # --------------------------------------------------------------------------- git / context
@@ -411,7 +415,16 @@ def cmd_review(args: argparse.Namespace) -> int:
         _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
     )
     if args.repost:
+        author = runners.author_family(wt, head)
+        excluded = [family for family in config.reviewers if family == author]
+        if not any(family != author for family in config.reviewers):
+            raise IndependentReviewerUnavailable(_independence_message(author, excluded, []))
         result = _load_review(wt, head, kind)
+        sessions = result.provenance["session_ids"]
+        prefix = review_marker(head, kind, "repost") + "\n" + (
+            "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
+            + ": " + ", ".join(f"`{session}`" for session in sessions)
+        )
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed)
@@ -425,9 +438,10 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"dirty before False, dirty after {final_dirty}"
             )
         _save_review(wt, result)
+        prefix = review_marker(head, kind, "model")
     try:
         github.post_review(
-            config.repo, pr.number, head, result, body_prefix=review_marker(head, kind), pr=pr
+            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr
         )
     except github.GhError as exc:
         path = _review_file(wt, head, kind)
@@ -452,14 +466,30 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
     candidates = [family for family in config.reviewers if family != author]
     failures: list[str] = []
     result = None
+    excluded = [family for family in config.reviewers if family == author]
     if not candidates:
-        failures.append(f"no independent reviewer configured for author family {author}")
+        raise IndependentReviewerUnavailable(_independence_message(author, excluded, failures))
     for family in candidates:
         try:
             result = runners.review_with(
                 family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task,
                 reviewer_ro_paths=config.reviewer_ro_paths,
             )
+            break
+        except runners.RunnerPromptTooLong:
+            chunks = runners.split_diff(diff, config.review_chunk_bytes)
+            print(
+                f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
+                file=sys.stderr,
+            )
+            chunk_results = [
+                runners.review_with(
+                    family, cwd=wt, head=head, kind=kind, diff=chunk, task_text=task,
+                    reviewer_ro_paths=config.reviewer_ro_paths,
+                )
+                for chunk in chunks
+            ]
+            result = runners.merge_reviews(chunk_results)
             break
         except RUNNER_FAILURES as exc:
             reason = str(exc).splitlines()[0]
@@ -473,11 +503,20 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
             failures.append(detail)
             print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
     if result is None:
-        raise ReviewersUnavailable(
-            "every configured reviewer failed; no review budget was consumed:\n"
-            + "\n\n".join(failures)
-        )
+        raise IndependentReviewerUnavailable(_independence_message(author, excluded, failures))
     return result
+
+
+def _independence_message(author: str | None, excluded: list[str], failures: list[str]) -> str:
+    identity = author or "unknown"
+    excluded_text = ", ".join(excluded) if excluded else "none"
+    detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
+    return (
+        f"no independent reviewer can run (author family: {identity}; excluded families: "
+        f"{excluded_text}). Owner options: configure another family, log in, or record an "
+        "explicit owner-approved exception in the PR by a human. Delivery remains blocked; "
+        f"--repost does not apply.{detail}"
+    )
 
 
 def _review_file(wt: Path, head: str, kind: str) -> Path:
@@ -494,11 +533,22 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
     path = _review_file(wt, head, kind)
     if not path.exists():
         raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost")
-    data = json.loads(path.read_text())
+    try:
+        data = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
+    if not isinstance(data, dict):
+        raise CliError(f"{path} is not runner-produced: invalid saved review")
     if data.get("head") != head:
         raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
-    findings = tuple(Finding(**f) for f in data["findings"])
-    return ReviewResult(**{**data, "findings": findings})
+    try:
+        findings = tuple(Finding(**f) for f in data["findings"])
+        result = ReviewResult(**{**data, "findings": findings})
+    except (KeyError, TypeError, ValueError) as exc:
+        raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
+    if not runners.validate_runner_result(result):
+        raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch")
+    return result
 
 
 def _pr_readiness(
@@ -652,6 +702,9 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except IndependentReviewerUnavailable as exc:
+        print(f"loopzero {args.command}: {exc}", file=sys.stderr)
+        return 4
     except HANDLED as exc:
         message = str(exc) if isinstance(exc, ReviewersUnavailable) else _one_line(exc)
         print(f"loopzero {args.command}: {message}", file=sys.stderr)

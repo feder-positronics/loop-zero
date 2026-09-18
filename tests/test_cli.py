@@ -84,8 +84,8 @@ def head_of(path: Path) -> str:
     return git(path, "rev-parse", "HEAD").strip()
 
 
-def marker(head: str, kind: str) -> str:
-    return cli.review_marker(head, kind)
+def marker(head: str, kind: str, source: str = "model") -> str:
+    return cli.review_marker(head, kind, source)
 
 
 def test_review_marker_parser_accepts_old_and_v1_forms() -> None:
@@ -479,8 +479,9 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
         c["--input"] for c in reversed(gh.calls)
         if c["argv"][1] == post_key().split(" ")[1]
     ))
-    assert payload["body"] == first_body
-    assert marker(head, "primary") in payload["body"] and "Nit" in payload["body"]
+    assert marker(head, "primary", "repost") in payload["body"] and "Nit" in payload["body"]
+    assert "claude-session-123" in payload["body"]
+    assert "model claude-sonnet-4-6" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 
 
@@ -497,6 +498,92 @@ def test_repost_refuses_missing_or_stale_file(wt: Path, gh: FakeGh, fake_bin: Pa
     code, _, err = run(capsys, "review", "--repost")
     assert code == 1 and f"not HEAD {head[:12]}" in err
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
+
+
+def test_repost_refuses_hand_written_review(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    saved.write_text(json.dumps({
+        "family": "claude", "head": head, "kind": "primary", "verdict": "approve",
+        "findings": [], "raw": json.dumps(_claude_envelope(APPROVE)),
+    }))
+
+    code, out, err = run(capsys, "review", "--repost")
+
+    assert code == 1 and out == ""
+    assert "not runner-produced" in err
+    assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
+
+
+def test_review_chunks_oversized_diff_with_same_family(
+    wt: Path, gh: FakeGh, fake_tool, capsys
+) -> None:
+    workflow = (wt / "workflow.toml").read_text().replace(
+        'reviewers = ["claude", "codex"]',
+        'reviewers = ["claude", "codex"]\nreview_chunk_bytes = 160',
+    )
+    (wt / "workflow.toml").write_text(workflow)
+    for name in ("large_a.py", "large_b.py"):
+        (wt / name).write_text("x = 1\n" * 30)
+    git(wt, "add", "workflow.toml", "large_a.py", "large_b.py")
+    git(wt, "commit", "-q", "-m", "large review")
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 8})
+    envelope = json.dumps(_claude_envelope(APPROVE))
+    fake_tool("claude", f"""
+        input=$(mktemp)
+        cat > "$input"
+        if [ "$(grep -c '^diff --git ' "$input")" -gt 1 ]; then
+            echo 'Prompt is too long' >&2
+            exit 1
+        fi
+        echo '{envelope}'
+    """)
+
+    code, out, err = run(capsys, "review")
+
+    assert code == 0 and "review by claude" in out
+    assert "reviewing" in err and "chunks" in err
+    payload = json.loads(next(
+        c["--input"] for c in reversed(gh.calls)
+        if c["argv"][1] == post_key().split(" ")[1]
+    ))
+    assert "Reviewed in " in payload["body"] and " chunks" in payload["body"]
+    saved = json.loads(
+        (wt / ".loopzero" / f"review-{head[:12]}-primary.json").read_text()
+    )
+    assert saved["chunk_count"] > 1
+    assert len(saved["provenance"]["session_ids"]) == saved["chunk_count"]
+
+
+def test_review_without_independent_family_exits_four_and_repost_cannot_bypass(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    workflow = (wt / "workflow.toml").read_text().replace(
+        'reviewers = ["claude", "codex"]', 'reviewers = ["claude"]'
+    )
+    (wt / "workflow.toml").write_text(workflow)
+    git(wt, "add", "workflow.toml")
+    git(
+        wt, "commit", "-q", "-m",
+        "claude-authored\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
+    )
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+
+    code, out, err = run(capsys, "review")
+
+    assert code == 4 and out == ""
+    assert "author family: claude" in err and "excluded families: claude" in err
+    assert "configure another family, log in" in err
+
+    code, out, err = run(capsys, "review", "--repost")
+    assert code == 4 and out == "" and "--repost does not apply" in err
 
 
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
@@ -605,7 +692,7 @@ def test_review_falls_through_when_preferred_family_fails(
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     fake_tool("codex", "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
-    assert code == 1 and out == ""
+    assert code == 4 and out == ""
     assert "codex: CLI is not authenticated" in err
 
 
@@ -625,8 +712,10 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
 
     monkeypatch.setattr(cli.runners, "review_with", fail)
     code, out, err = run(capsys, "review")
-    assert code == 1 and out == ""
-    assert "every configured reviewer failed; no review budget was consumed" in err
+    assert code == 4 and out == ""
+    assert "no independent reviewer can run" in err
+    assert "author family: unknown" in err and "excluded families: none" in err
+    assert "configure another family, log in" in err
     assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
     assert "not printed" not in err
     assert "Fix: run `claude auth login`." in err
