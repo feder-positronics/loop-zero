@@ -1,0 +1,29 @@
+# loop-zero configuration. Copy to workflow.toml at the repository root.
+# Every key below is read by `loopzero`; there are no other config files.
+
+[repo]
+# GitHub repository in owner/name form. Used for every `gh` call.
+name = "owner/name"
+# Branch that `loopzero start` branches from and `loopzero merge` merges into.
+base = "main"
+
+[checks]
+# Shell commands run in order by `loopzero check`, each inside the sandbox
+# (read-only source, no Git write, isolated HOME). The first nonzero exit
+# fails the run. Keep these fast; they run before every PR and delta review.
+commands = ["uv run pytest -q", "uv run ruff check ."]
+
+# Exact names of GitHub check runs that must be green on the PR head before
+# `loopzero ready` and `loopzero merge` proceed. Match your branch protection.
+required_ci = ["checks"]
+
+# Allow network inside the sandbox. Leave false unless a check truly needs it
+# (for example an integration test against a local service you start yourself).
+network = false
+
+[delivery]
+# Merge strategy passed to `gh pr merge`: "squash", "merge" or "rebase".
+merge = "squash"
+# Reviewer preference, in order. `loopzero review` picks the first family
+# that is installed and differs from the author's family when that is known.
+reviewers = ["claude", "codex"]
