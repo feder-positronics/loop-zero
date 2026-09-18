@@ -740,6 +740,13 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
     )
 
 
+def test_readiness_behind_base(gh: FakeGh) -> None:
+    arm_readiness(gh)
+    pr = github._pr_from_json(pr_json(mergeStateStatus="BEHIND"))
+    r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
+    assert r.reasons == ("PR #7 is behind main; rebase and rerun checks",)
+
+
 def test_readiness_conflicting(gh: FakeGh) -> None:
     arm_readiness(gh)
     pr = github._pr_from_json(pr_json(mergeable="CONFLICTING"))

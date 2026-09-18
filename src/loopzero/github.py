@@ -19,7 +19,7 @@ MARKER_RE = re.compile(
     r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
-PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author,body"
+PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,mergeStateStatus,author,body"
 PAGE = 100
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -72,6 +72,7 @@ class PR:
     state: str  # "OPEN" | "CLOSED" | "MERGED"
     mergeable: str  # "MERGEABLE" | "CONFLICTING" | "UNKNOWN"
     author: str = ""  # login of the PR author
+    merge_state: str = "UNKNOWN"  # GitHub mergeStateStatus, e.g. "BEHIND" | "CLEAN"
     body: str = ""
 
 
@@ -163,6 +164,7 @@ def _pr_from_json(data: dict) -> PR:
             is_draft=bool(data["isDraft"]),
             state=data["state"],
             mergeable=data.get("mergeable") or "UNKNOWN",
+            merge_state=data.get("mergeStateStatus") or "UNKNOWN",
             author=str((data.get("author") or {}).get("login") or ""),
             body=str(data.get("body") or ""),
         )
@@ -452,6 +454,8 @@ def readiness(
         reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
     if pr.mergeable == "CONFLICTING":
         reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
+    if pr.merge_state == "BEHIND":
+        reasons.append(f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks")
     if not reviewed_head:
         reasons.append("no review recorded for the current head")
     elif pr.head_sha != reviewed_head:

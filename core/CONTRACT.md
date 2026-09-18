@@ -33,6 +33,8 @@ A PR is ready when none of these hold:
 - An open review thread on the PR carries an unresolved `critical` or
   `important` finding.
 - The head moved after the last review.
+- The branch is behind the base as reported by GitHub; branch protection
+  requires an up-to-date branch so CI ran on what will actually land.
 - A CI check named in `[checks].required_ci` is missing or not green on the
   exact head.
 
