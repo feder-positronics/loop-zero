@@ -13,3 +13,5 @@ Start with the top-level files; this directory only holds the contributor spec.
   rules for anyone changing `src/`.
 - [design/2026-09-18-feature-plan.md](design/2026-09-18-feature-plan.md) —
   post-rewrite feature plan with one design note per selected change.
+- [DELEGATION.md](DELEGATION.md) — briefing and reviewing coding-agent
+  delegates that work through the six commands.
