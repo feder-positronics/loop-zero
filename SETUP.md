@@ -41,7 +41,8 @@ repository root and set `[repo] name`. Then:
 - `[checks] env` — e.g. `{ UV_CACHE_DIR = "/home/<you>/.cache/uv" }`; wins over
   sandbox defaults and host variables. `PATH` and `HOME` cannot be overridden.
 - The first `check` in a fresh worktree needs `network = true` or a warm uv
-  cache in `writable`. `PYTHONDONTWRITEBYTECODE`, `RUFF_CACHE_DIR`,
+  cache in `writable`: warm it once by running your check commands on the
+  host (for uv, `uv sync --group dev`), which also fetches build backends. `PYTHONDONTWRITEBYTECODE`, `RUFF_CACHE_DIR`,
   `UV_CACHE_DIR`, `PYTEST_ADDOPTS` are preset in the sandbox.
 
 ## First run
