@@ -141,8 +141,10 @@ def comments_posted(gh: FakeGh, index: int = -1) -> list[dict]:
 
 def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PATH", str(fake_bin))  # empty dir: no gh, no git
-    with pytest.raises(github.GhMissing):
+    with pytest.raises(github.GhMissing) as info:
         github.pr_for_branch(REPO, "lz/x")
+    assert "gh auth login --scopes repo" in str(info.value)
+    assert "required token scope: repo" in str(info.value)
 
 
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
@@ -151,6 +153,7 @@ def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
         github.pr_for_branch(REPO, "lz/x")
     assert info.value.command[:3] == ("gh", "pr", "list")
     assert "gh auth login" in info.value.tail
+    assert "required token scope: repo" in info.value.tail
 
 
 def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:

@@ -18,6 +18,7 @@ MARKER_RE = re.compile(
 )
 PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author"
 PAGE = 100
+GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
 _MOVED_NOTE = "Reviewer location {where} is not in the diff; anchored here.\n\n"
@@ -81,11 +82,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
     try:
         done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV, timeout=timeout)
     except ToolMissing as exc:
-        raise GhMissing(argv, str(exc)) from exc
+        raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
     if done.exit_code != 0:
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if "gh auth login" in tail or "not logged in" in tail.lower():
-            raise GhAuth(argv, tail)
+            raise GhAuth(argv, f"{tail.rstrip()}\n{GH_AUTH_REMEDY}")
         raise GhError(argv, tail)
     return done.stdout
 

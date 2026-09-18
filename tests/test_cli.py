@@ -193,6 +193,25 @@ def test_check_failure_tail_is_capped_at_40_lines(wt: Path, capsys) -> None:
     assert lines[1:] == [str(i) for i in range(11, 51)]
 
 
+def test_check_offline_fetch_failure_explains_cache_remedy(wt: Path, capsys) -> None:
+    workflow = WORKFLOW.replace(
+        'commands = ["echo ok", "test -f README.md"]',
+        'commands = ["echo uv: Failed to fetch package; exit 1"]',
+    ).replace("[delivery]", '[checks.env]\nUV_CACHE_DIR = "/host/cache/uv"\n\n[delivery]')
+    (wt / "workflow.toml").write_text(workflow)
+
+    code, _, err = run(capsys, "check")
+
+    assert code == 1
+    tail, hint = err.split("\n\n", 1)
+    assert tail.endswith("uv: Failed to fetch package")
+    assert "`[checks] network = false`" in hint
+    assert "effective UV_CACHE_DIR inside the sandbox is /host/cache/uv" in hint
+    assert "`[checks] writable` is warm" in hint
+    assert "set `[checks] env` UV_CACHE_DIR" in hint
+    assert "network = true" not in hint
+
+
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
     fake_tool("bwrap", "echo 'bwrap: No permissions' >&2\nexit 1\n")
     code, out, err = run(capsys, "check")
@@ -410,17 +429,29 @@ def test_review_falls_through_when_preferred_family_fails(
     assert "codex: CLI is not authenticated" in err
 
 
-def test_review_fails_when_every_reviewer_fails(
-    wt: Path, gh: FakeGh, fake_bin: Path, fake_tool, capsys
+def test_review_fails_with_three_line_errors_and_remedies_without_spending_budget(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
-    _fake_claude(fake_bin, "Not logged in. Please run /login", exit_code=1)
-    fake_tool("codex", "echo boom >&2\nexit 2\n")  # RunnerBadOutput
+
+    def fail(family, **kwargs):
+        if family == "claude":
+            raise cli.runners.RunnerAuthFailed(
+                "claude: CLI is not authenticated\nfirst detail\nsecond detail\nnot printed"
+            )
+        raise cli.runners.RunnerMissing("codex: 'codex' not found on PATH")
+
+    monkeypatch.setattr(cli.runners, "review_with", fail)
     code, out, err = run(capsys, "review")
     assert code == 1 and out == ""
-    assert "every configured reviewer failed: claude: CLI is not authenticated; codex: exited 2" in err
+    assert "every configured reviewer failed; no review budget was consumed" in err
+    assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
+    assert "not printed" not in err
+    assert "Fix: run `claude auth login`." in err
+    assert "codex: 'codex' not found on PATH" in err
+    assert "npm install -g @openai/codex" in err
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
 
 

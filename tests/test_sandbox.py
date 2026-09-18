@@ -169,12 +169,19 @@ def test_scratch_rejects_worktree_and_git_metadata(git_repo, bwrap_log, entry):
 def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypatch):
     path = os.environ["PATH"]
     monkeypatch.setenv("PATH", str(fake_bin))
-    with pytest.raises(sandbox.SandboxUnavailable, match="bwrap not found"):
+    with pytest.raises(sandbox.SandboxUnavailable) as missing:
         sandbox.run_checks(make_config(), git_repo)
+    assert "bwrap binary missing" in str(missing.value)
+    assert "sudo apt install bubblewrap" in str(missing.value)
     monkeypatch.setenv("PATH", path)
     fake_tool("bwrap", "echo 'bwrap: No permissions to create new namespace' >&2\nexit 1\n")
-    with pytest.raises(sandbox.SandboxUnavailable, match="No permissions to create new namespace"):
+    with pytest.raises(sandbox.SandboxUnavailable) as denied:
         sandbox.run_checks(make_config(), git_repo)
+    assert "namespace creation failed" in str(denied.value)
+    assert "No permissions to create new namespace" in str(denied.value)
+    assert (
+        "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in str(denied.value)
+    )
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):

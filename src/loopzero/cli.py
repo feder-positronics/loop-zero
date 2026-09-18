@@ -22,10 +22,21 @@ RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.Runn
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
 PAGE = 100
+OFFLINE_FAILURE_RE = re.compile(
+    r"failed to fetch|dns error|network is unreachable|temporary failure in name resolution|"
+    r"name or service not known|could not fetch url|newconnectionerror|err_pnpm_.*fetch|"
+    r"network request failed|max retries exceeded with url|readtimeouterror|enetunreach|"
+    r"econnrefused|getaddrinfo (?:enotfound|eai_again)|could not resolve host",
+    re.IGNORECASE,
+)
 
 
 class CliError(LoopZeroError):
     """A refused command; the message says what to do instead."""
+
+
+class ReviewersUnavailable(CliError):
+    """All reviewer failures, retained as separate diagnostic lines."""
 
 
 def review_marker(head: str, kind: str) -> str:
@@ -298,7 +309,22 @@ def cmd_check(args: argparse.Namespace) -> int:
     for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
-            print(_proc.tail(result.tail), file=sys.stderr)
+            tail = _proc.tail(result.tail)
+            print(tail, file=sys.stderr)
+            if not config.network and OFFLINE_FAILURE_RE.search(tail):
+                env = {
+                    **sandbox.SANDBOX_ENV,
+                    **_proc.build_env(config.env_allowlist),
+                    **dict(config.env),
+                }
+                print(
+                    "\nThe sandbox has no network because `[checks] network = false`; "
+                    f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
+                    "To prepare offline, run the same commands once on the host so the cache "
+                    "under `[checks] writable` is warm, or set `[checks] env` UV_CACHE_DIR to "
+                    "that cache.",
+                    file=sys.stderr,
+                )
     _save_report(wt, report)
     _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
@@ -371,10 +397,20 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
             break
         except RUNNER_FAILURES as exc:
             reason = str(exc).splitlines()[0]
-            failures.append(reason)
+            detail = "\n".join(str(exc).splitlines()[:3])
+            if isinstance(exc, runners.RunnerAuthFailed):
+                login = "claude auth login" if family == "claude" else "codex login"
+                detail += f"\nFix: run `{login}`."
+            elif isinstance(exc, runners.RunnerMissing):
+                package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
+                detail += f"\nFix: install it with `npm install -g {package}`."
+            failures.append(detail)
             print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
     if result is None:
-        raise CliError("every configured reviewer failed: " + "; ".join(failures))
+        raise ReviewersUnavailable(
+            "every configured reviewer failed; no review budget was consumed:\n"
+            + "\n\n".join(failures)
+        )
     return result
 
 
@@ -541,7 +577,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except HANDLED as exc:
-        print(f"loopzero {args.command}: {_one_line(exc)}", file=sys.stderr)
+        message = str(exc) if isinstance(exc, ReviewersUnavailable) else _one_line(exc)
+        print(f"loopzero {args.command}: {message}", file=sys.stderr)
         return 1
     except UNEXPECTED as exc:
         print(f"loopzero {args.command}: unexpected response: {_one_line(exc)}", file=sys.stderr)
