@@ -50,7 +50,10 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     """
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
-        raise SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+        raise SandboxUnavailable(
+            "bwrap binary missing: bwrap not found on PATH\n"
+            "sudo apt install bubblewrap"
+        )
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     common_dir = _git_dir(config, worktree, "--git-common-dir")
@@ -137,11 +140,20 @@ def _probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         probe = _proc.run(
             [*prefix, "true"], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
         )
-    except (_proc.ToolMissing, _proc.ProcTimeout) as exc:
-        raise SandboxUnavailable(f"bwrap probe failed: {exc}") from exc
+    except _proc.ToolMissing as exc:
+        raise SandboxUnavailable(
+            f"bwrap binary missing while starting the namespace probe: {exc}\n"
+            "sudo apt install bubblewrap"
+        ) from exc
+    except _proc.ProcTimeout as exc:
+        raise SandboxUnavailable(f"bwrap namespace creation timed out: {exc}") from exc
     if probe.exit_code != 0:
         reason = _proc.tail(probe.stderr, 1) or f"exit {probe.exit_code}"
-        raise SandboxUnavailable(f"bwrap probe failed: {reason}")
+        remedy = ""
+        probe_error = probe.stderr.lower()
+        if any(word in probe_error for word in ("permission", "user namespace", "userns")):
+            remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+        raise SandboxUnavailable(f"bwrap namespace creation failed: {reason}{remedy}")
 
 
 def bwrap_argv(
