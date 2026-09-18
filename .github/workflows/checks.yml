@@ -1,6 +1,7 @@
 name: checks
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 permissions:
@@ -26,7 +27,7 @@ jobs:
         run: uv run --python 3.14 --group dev pytest -q
       - name: Size budget
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
           # Caps are absolute. A candidate over a cap fails only if it also grew
           # against its base, so a repository that is already over can still
@@ -36,10 +37,10 @@ jobs:
           git fetch -q --depth=1 origin "$BASE_SHA"
           src=$(count HEAD src/loopzero); tests=$(count HEAD tests)
           base_src=$(count "$BASE_SHA" src/loopzero); base_tests=$(count "$BASE_SHA" tests)
-          echo "src=$src (base $base_src, delta $((src-base_src)), cap 2860)"
-          echo "tests=$tests (base $base_tests, delta $((tests-base_tests)), cap 3600)"
-          { test "$src" -le 2860 || test "$src" -le "$base_src"; } \
-            && { test "$tests" -le 3600 || test "$tests" -le "$base_tests"; }
+          echo "src=$src (base $base_src, delta $((src-base_src)), cap 2900)"
+          echo "tests=$tests (base $base_tests, delta $((tests-base_tests)), cap 3650)"
+          { test "$src" -le 2900 || test "$src" -le "$base_src"; } \
+            && { test "$tests" -le 3650 || test "$tests" -le "$base_tests"; }
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q

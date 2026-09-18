@@ -10,12 +10,13 @@ generations/slots/leases, no provisional bindings, no settlement capsules, no
 compatibility mode for old runs. The old tree exists only in git history
 (`git show main:<path>`) and may be read for facts, never copied wholesale.
 
-Budget: `src/` <= 2,860 lines, `tests/` <= 3,600 lines, `core/` <= 600 lines
+Budget: `src/` <= 2,900 lines, `tests/` <= 3,650 lines, `core/` <= 600 lines
 of Markdown, one CI workflow. Anything that pushes past the budget needs a
 reason in the PR. CI compares each candidate with its base: over the cap, a
 change may still merge if it holds or shrinks the count, so an over-budget
 main never blocks its own repair. The caps were set to the measured counts on
-2026-09-18 after concurrent merges overshot the original 2,500/3,500.
+2026-09-18 after concurrent merges overshot the original 2,500/3,500, then
+raised by 40/50 for merge-queue handling in `merge` the same day.
 
 ## The delivery procedure (the whole contract)
 

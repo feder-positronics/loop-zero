@@ -808,12 +808,33 @@ def test_delete_remote_branch_accepts_already_deleted_ref(gh: FakeGh, status: in
     github.delete_remote_branch(REPO, "lz/x")
 
 
+def _queue_json(queued: bool) -> dict:
+    return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
+
+
 def test_merge_unverified(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
-    with pytest.raises(github.MergeFailed):
+    gh.respond("api graphql", _queue_json(False))
+    with pytest.raises(github.MergeFailed, match="neither merged nor queued"):
         github.merge(REPO, 7, "merge", HEAD)
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
+
+
+def test_merge_queued_returns_none(gh: FakeGh) -> None:
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("api graphql", _queue_json(True))
+    assert github.merge(REPO, 7, "squash", HEAD) is None
+    query = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"])
+    assert "isInMergeQueue" in query[3] and "number=7" in query
+
+
+def test_merged_sha_only_for_merged_state(gh: FakeGh) -> None:
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}},
+               {"state": "OPEN", "mergeCommit": None})
+    assert github.merged_sha(REPO, 7) == "c" * 40
+    assert github.merged_sha(REPO, 7) is None
 
 
 def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
