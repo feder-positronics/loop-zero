@@ -56,6 +56,20 @@ def test_report_head_dirty_and_results(git_repo, bwrap_log):
     assert report.ok is False
 
 
+def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
+    before = git(git_repo, "rev-parse", "HEAD").strip()
+    command = "git -c user.name=test -c user.email=test@example.com commit --allow-empty -m drift"
+
+    report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
+
+    after = git(git_repo, "rev-parse", "HEAD").strip()
+    assert after != before
+    assert report.head == before and report.dirty is True and report.ok is False
+    drift = report.results[-1]
+    assert (drift.command, drift.exit_code) == ("<worktree changed during run>", 1)
+    assert before in drift.tail and after in drift.tail
+
+
 def test_tail_merges_streams_and_truncates(git_repo, bwrap_log):
     cmd = "for i in $(seq 1 50); do echo $i; done; echo err >&2"
     (result,) = sandbox.run_checks(make_config(checks=(cmd,)), git_repo).results
