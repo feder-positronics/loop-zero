@@ -13,10 +13,14 @@ from loopzero.types import Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
 BLOCKING = frozenset({"critical", "important"})
-MARKER_RE = re.compile(r"<!--\s*loopzero:finding\s+severity=(\w+)\s+head=([0-9a-fA-F]+)\s*-->")
+MARKER_RE = re.compile(
+    r"<!--\s*loopzero:finding\s+severity=(\w+)(?:\s+head=([0-9a-fA-F]+))?\s*-->"
+)
 PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable"
-_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)", re.MULTILINE)
+PAGE = 100
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
+_MOVED_NOTE = "Reviewer location {where} is not in the diff; anchored here.\n\n"
 _SELF_REVIEW = re.compile(r"(approve|request changes on) your own pull request", re.IGNORECASE)
 _THREADS_QUERY = """
 query($owner: String!, $name: String!, $number: Int!, $after: String) {
@@ -26,7 +30,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           isResolved isOutdated path line
-          comments(first: 1) { nodes { body } }
+          comments(first: 1) { nodes { body createdAt lastEditedAt author { login } } }
         }
       }
     }
@@ -91,6 +95,20 @@ def _gh_json(*args: str) -> object:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
         raise GhError(("gh", *args), f"invalid JSON from gh: {out[-600:]}") from exc
+
+
+def _paged(endpoint: str) -> list:
+    """Collect a list endpoint page by page until a short page."""
+    items: list = []
+    page = 1
+    while True:
+        chunk = _gh_json("api", endpoint, "-F", f"per_page={PAGE}", "-F", f"page={page}") or []
+        if isinstance(chunk, dict):  # check-runs wraps the list
+            chunk = chunk.get("check_runs") or []
+        items += chunk
+        if len(chunk) < PAGE:
+            return items
+        page += 1
 
 
 def _with_file(content: str) -> Path:
@@ -187,37 +205,61 @@ def _review_body(result: ReviewResult, unplaced: list[Finding]) -> str:
     return "\n".join(lines)
 
 
-def _anchor(repo: str, number: int) -> dict:
-    """Pick the first changed file of the PR and its first added line as a comment anchor."""
-    files = _gh_json("api", f"repos/{repo}/pulls/{number}/files", "-F", "per_page=1") or []
-    if not files:
-        raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"), "PR has no files")
-    first = files[0]
-    match = _HUNK_RE.search(first.get("patch") or "")
-    if match:
-        return {"path": first["filename"], "line": int(match.group(1)), "side": "RIGHT"}
-    return {"path": first["filename"], "subject_type": "file"}
+def _right_lines(patch: str) -> tuple[set[int], int | None]:
+    """Right-side (new file) line numbers present in `patch`, and the first added line."""
+    lines: set[int] = set()
+    first_added: int | None = None
+    current = None
+    for raw in patch.splitlines():
+        hunk = _HUNK_RE.match(raw)
+        if hunk:
+            current = int(hunk.group(1))
+            continue
+        if current is None or raw.startswith(("-", "\\")):
+            continue
+        lines.add(current)
+        if raw.startswith("+") and first_added is None:
+            first_added = current
+        current += 1
+    return lines, first_added
+
+
+def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]:
+    """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
+    commentable: dict[str, set[int]] = {}
+    anchor: dict | None = None
+    for entry in _paged(f"repos/{repo}/pulls/{number}/files"):
+        lines, first_added = _right_lines(entry.get("patch") or "")
+        if not lines:
+            continue
+        commentable[entry["filename"]] = lines
+        if anchor is None:
+            line = first_added if first_added is not None else min(lines)
+            anchor = {"path": entry["filename"], "line": line, "side": "RIGHT"}
+    return commentable, anchor
 
 
 def post_review(repo: str, number: int, head_sha: str, result: ReviewResult) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
-    Blocking findings without a location are anchored on the first changed file so
-    they still create a review thread that `open_blocking_findings` can see.
+    Findings whose location is missing or outside the diff are anchored on the first
+    changed file with a hunk, so every blocking finding creates a review thread.
     """
-    located = [f for f in result.findings if f.path and f.line]
-    unlocated = [f for f in result.findings if not (f.path and f.line)]
-    anchored = [f for f in unlocated if f.severity in BLOCKING]
-    loose = [f for f in unlocated if f.severity not in BLOCKING]
-    comments = [
-        {"path": f.path, "line": f.line, "side": "RIGHT", "body": _comment_body(f, head_sha)}
-        for f in located
-    ]
-    if anchored:
-        anchor = _anchor(repo, number)
-        comments += [
-            {**anchor, "body": _comment_body(f, head_sha, prefix=_ANCHOR_NOTE)} for f in anchored
-        ]
+    commentable, anchor = _diff_map(repo, number)
+    comments: list[dict] = []
+    loose: list[Finding] = []
+    for f in result.findings:
+        if f.path and f.line and f.line in commentable.get(f.path, ()):
+            comments.append({"path": f.path, "line": f.line, "side": "RIGHT",
+                             "body": _comment_body(f, head_sha)})
+        elif f.severity not in BLOCKING:
+            loose.append(f)
+        elif anchor is None:
+            raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
+                          f"cannot anchor '{f.title}': PR has no diff hunks")
+        else:
+            note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
+            comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
     event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
     payload = {
         "commit_id": head_sha,
@@ -234,29 +276,58 @@ def post_review(repo: str, number: int, head_sha: str, result: ReviewResult) -> 
         _api(endpoint, {**payload, "event": "COMMENT"})
 
 
-def _parse_thread(node: dict) -> Finding | None:
+def _title_of(text: str) -> str:
+    lines = [ln for ln in text.strip().splitlines() if ln.strip()]
+    title_line = next((ln for ln in lines if ln.startswith("**")), lines[0] if lines else "")
+    return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
+
+
+class _Login:
+    """Lazily resolved login of the `gh` token user."""
+
+    def __init__(self) -> None:
+        self.value: str | None = None
+
+    def get(self) -> str:
+        if self.value is None:
+            self.value = str((_gh_json("api", "user") or {}).get("login") or "")
+        return self.value
+
+
+def _parse_thread(node: dict, login: _Login) -> Finding | None:
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
-    body = comments[0].get("body") or ""
-    first, _, rest = body.partition("\n")
-    match = MARKER_RE.search(first)
-    if not match or match.group(1) not in BLOCKING:
-        return None
-    lines = [ln for ln in rest.strip().splitlines() if ln.strip()]
-    title_line = next((ln for ln in lines if ln.startswith("**")), lines[0] if lines else "")
-    title = re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
-    return Finding(
-        severity=match.group(1), path=node.get("path"), line=node.get("line"),
-        title=title, body=rest.strip(),
+    first = comments[0]
+    body = first.get("body") or ""
+    head_line, _, rest = body.partition("\n")
+    match = MARKER_RE.search(head_line)
+    ours = bool(match) or (
+        "loopzero" in body and (first.get("author") or {}).get("login") == login.get()
     )
+    if not ours:
+        return None
+    severity = match.group(1) if match else "important"
+    if first.get("lastEditedAt") or not match:
+        return Finding(severity=severity if severity in BLOCKING else "important",
+                       path=node.get("path"), line=node.get("line"),
+                       title="finding thread edited", body=body)
+    if severity not in BLOCKING:
+        return None
+    return Finding(severity=severity, path=node.get("path"), line=node.get("line"),
+                   title=_title_of(rest), body=rest.strip())
 
 
 def open_blocking_findings(repo: str, number: int) -> list[Finding]:
-    """Findings from unresolved review threads whose first comment carries a blocking marker."""
+    """Findings from unresolved review threads whose first comment carries a blocking marker.
+
+    Threads that were edited after creation, or that look like ours but lost the marker,
+    are reported as blocking with the title "finding thread edited".
+    """
     owner, name = repo.split("/", 1)
     after: str | None = None
     found: list[Finding] = []
+    login = _Login()
     while True:
         args = [
             "api", "graphql", "-f", f"query={_THREADS_QUERY}", "-F", f"owner={owner}",
@@ -269,7 +340,7 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
         for node in threads.get("nodes") or []:
             if node.get("isResolved"):
                 continue
-            finding = _parse_thread(node)
+            finding = _parse_thread(node, login)
             if finding:
                 found.append(finding)
         page = threads.get("pageInfo") or {}
@@ -281,8 +352,7 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
 def check_runs(repo: str, head_sha: str) -> dict[str, str]:
     """Map check name -> conclusion for check runs and commit statuses on `head_sha`."""
     out: dict[str, str] = {}
-    runs = _gh_json("api", f"repos/{repo}/commits/{head_sha}/check-runs", "-F", "per_page=100")
-    for cr in (runs or {}).get("check_runs") or []:
+    for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
         out[cr["name"]] = cr.get("conclusion") or cr.get("status") or "unknown"
     status = _gh_json("api", f"repos/{repo}/commits/{head_sha}/status", "-F", "per_page=100")
     for st in (status or {}).get("statuses") or []:
@@ -297,12 +367,13 @@ def readiness(
     reasons: list[str] = []
     if pr.state != "OPEN":
         reasons.append(f"PR #{pr.number} is {pr.state}, not open")
+    if pr.mergeable == "CONFLICTING":
+        reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
     if not reviewed_head:
         reasons.append("no review recorded for the current head")
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    blocking = open_blocking_findings(repo, pr.number)
-    for f in blocking:
+    for f in open_blocking_findings(repo, pr.number):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks = check_runs(repo, pr.head_sha) if required_ci else {}
@@ -320,20 +391,24 @@ def mark_ready(repo: str, number: int) -> None:
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str:
-    """Merge PR `number` at exactly `head_sha` and return the merge commit SHA."""
+    """Merge PR `number` at exactly `head_sha`, delete the remote branch, return the merge SHA."""
     if strategy not in ("squash", "merge", "rebase"):
         raise MergeFailed(("gh", "pr", "merge"), f"unknown merge strategy: {strategy}")
     argv = (
         "pr", "merge", str(number), "--repo", repo, f"--{strategy}",
-        "--match-head-commit", head_sha, "--delete-branch",
+        "--match-head-commit", head_sha,
     )
     try:
         _gh(*argv, timeout=300)
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
-    view = _gh_json("pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,merged")
-    merged = (view or {}).get("merged")
-    sha = ((view or {}).get("mergeCommit") or {}).get("oid")
-    if not merged or not sha:
+    view = _gh_json(
+        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,merged,headRefName"
+    ) or {}
+    sha = (view.get("mergeCommit") or {}).get("oid")
+    if not view.get("merged") or not sha:
         raise MergeFailed(("gh", *argv), f"PR #{number} not verified merged: {view!r}")
+    branch = view.get("headRefName")
+    if branch:
+        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
     return sha

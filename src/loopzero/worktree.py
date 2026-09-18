@@ -43,10 +43,16 @@ def _git(cwd: Path, *args: str, timeout: float = 120) -> str:
     return done.stdout.strip()
 
 
-def branch_name(slug: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", slug):
+def branch_name(repo_root: Path, slug: str) -> str:
+    """Return `lz/<slug>` after git itself confirms it is a well-formed branch name."""
+    if not slug or "/" in slug or slug.startswith("."):
         raise WorktreeError(f"invalid slug: {slug!r}")
-    return f"lz/{slug}"
+    name = f"lz/{slug}"
+    done = run(["git", "check-ref-format", "--branch", name], cwd=repo_root,
+               env_allowlist=GIT_ENV, timeout=30)
+    if done.exit_code != 0:
+        raise WorktreeError(f"invalid slug: {slug!r} ({done.stderr.strip()})")
+    return name
 
 
 def worktree_dir(repo_root: Path, slug: str) -> Path:
@@ -82,7 +88,7 @@ def _ensure_excludes(repo_root: Path) -> None:
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     """Create branch `lz/<slug>` from `origin/<base_branch>` in a new worktree."""
     repo_root = Path(repo_root)
-    branch = branch_name(slug)
+    branch = branch_name(repo_root, slug)
     wt = worktree_dir(repo_root, slug)
     if wt.exists():
         raise WorktreeError(f"worktree directory already exists: {wt}")

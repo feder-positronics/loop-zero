@@ -71,9 +71,17 @@ def test_start_refuses_existing_directory(repo: Path) -> None:
         worktree.start(repo, "dup", "main")
 
 
-def test_start_rejects_bad_slug(repo: Path) -> None:
+@pytest.mark.parametrize("slug", ["../escape", "a/b", "bad..name", "trail.lock", "sp ace", ""])
+def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     with pytest.raises(worktree.WorktreeError, match="invalid slug"):
-        worktree.start(repo, "../escape", "main")
+        worktree.start(repo, slug, "main")
+    assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
+
+
+def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
+    assert worktree.branch_name(repo, "ok-1.2_x") == "lz/ok-1.2_x"
+    with pytest.raises(worktree.WorktreeError):
+        worktree.branch_name(repo, "has~tilde")
 
 
 def test_start_reports_git_failure_with_command(repo: Path) -> None:

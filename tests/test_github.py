@@ -94,13 +94,35 @@ def threads_json(*nodes: dict, has_next: bool = False, cursor: str | None = None
     }}}}}
 
 
-def thread(body: str, resolved: bool = False, path: str = "src/a.py", line: int = 3) -> dict:
+def thread(body: str, resolved: bool = False, path: str = "src/a.py", line: int = 3,
+           author: str = "bot-user", edited: str | None = None) -> dict:
     return {"isResolved": resolved, "isOutdated": False, "path": path, "line": line,
-            "comments": {"nodes": [{"body": body}]}}
+            "comments": {"nodes": [{"body": body, "createdAt": "2026-09-18T00:00:00Z",
+                                    "lastEditedAt": edited, "author": {"login": author}}]}}
 
 
 def marker(sev: str, head: str = HEAD) -> str:
     return f"<!-- loopzero:finding severity={sev} head={head} -->"
+
+
+FILES_KEY = f"api repos/{REPO}/pulls/7/files"
+REVIEWS_KEY = f"api repos/{REPO}/pulls/7/reviews"
+# src/a.py: right lines 10..12 ; src/b.py: right lines 1..3 ; src/c.py: right lines 5..6
+PR_FILES = [
+    {"filename": "src/a.py", "patch": "@@ -10,2 +10,3 @@\n ctx\n+new\n ctx2"},
+    {"filename": "src/b.py", "patch": "@@ -1,3 +1,3 @@\n-old\n+new\n ctx\n ctx"},
+    {"filename": "src/c.py", "patch": "@@ -5,2 +5,2 @@\n+x\n+y\n-z\n-w"},
+    {"filename": "img.png"},
+]
+
+
+def arm_review(gh: FakeGh, files: list | None = None) -> None:
+    gh.respond(REVIEWS_KEY, {"id": 1})
+    gh.respond(FILES_KEY, PR_FILES if files is None else files)
+
+
+def comments_posted(gh: FakeGh, index: int = -1) -> list[dict]:
+    return json.loads(gh.calls[index]["--input"])["comments"]
 
 
 # --- errors ------------------------------------------------------------------------
@@ -185,10 +207,9 @@ FINDINGS = (
 
 
 def test_post_review_payload(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
-    gh.respond(f"api repos/{REPO}/pulls/7/files", [{"filename": "src/first.py",
-                                                    "patch": "@@ -1,3 +12,4 @@\n+y"}])
+    arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS))
+    assert gh.argv(0) == ["api", FILES_KEY.split(" ", 1)[1], "-F", "per_page=100", "-F", "page=1"]
     call = gh.calls[1]
     assert call["argv"][:5] == ["api", f"repos/{REPO}/pulls/7/reviews", "--method", "POST",
                                 "--input"]
@@ -197,7 +218,7 @@ def test_post_review_payload(gh: FakeGh) -> None:
     comments = payload["comments"]
     assert [(c["path"], c["line"], c["side"]) for c in comments] == [
         ("src/a.py", 10, "RIGHT"), ("src/b.py", 2, "RIGHT"), ("src/c.py", 5, "RIGHT"),
-        ("src/first.py", 12, "RIGHT")]
+        ("src/a.py", 11, "RIGHT")]
     assert comments[0]["body"].split("\n")[0] == marker("critical")
     assert comments[1]["body"].split("\n")[0] == marker("important")
     assert "loopzero:finding" not in comments[2]["body"]
@@ -205,24 +226,17 @@ def test_post_review_payload(gh: FakeGh) -> None:
     body = payload["body"]
     assert "<details>" in body and "RAW MODEL OUTPUT" in body and "</details>" in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
-    assert comments[3]["path"] == "src/first.py" and comments[3]["line"] == 12
-    assert "subject_type" not in comments[3]
+    assert all("subject_type" not in c for c in comments)
 
 
 def test_post_review_anchors_unlocated_blocking_findings(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
-    gh.respond(f"api repos/{REPO}/pulls/7/files", [
-        {"filename": "src/first.py", "patch": "@@ -1,3 +12,4 @@\n x\n+y"},
-        {"filename": "src/second.py", "patch": "@@ -1 +1 @@\n-a\n+b"},
-    ])
+    arm_review(gh)
     findings = (Finding("critical", None, None, "Global", "no file"),
                 Finding("suggestion", None, None, "Nit", "loose"))
     github.post_review(REPO, 7, HEAD, review(findings=findings))
-    assert gh.argv(0)[:2] == ["api", f"repos/{REPO}/pulls/7/files"]
     payload = json.loads(gh.calls[1]["--input"])
     (comment,) = payload["comments"]
-    assert comment["path"] == "src/first.py" and comment["line"] == 12
-    assert comment["side"] == "RIGHT" and "subject_type" not in comment
+    assert comment == {**comment, "path": "src/a.py", "line": 11, "side": "RIGHT"}
     lines = comment["body"].split("\n")
     assert lines[0] == marker("critical")
     assert lines[1] == "No file location given by the reviewer; anchored here."
@@ -230,25 +244,52 @@ def test_post_review_anchors_unlocated_blocking_findings(gh: FakeGh) -> None:
     assert "Nit" in payload["body"] and "Global" not in payload["body"]
 
 
-def test_post_review_anchor_falls_back_to_file_level(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
-    gh.respond(f"api repos/{REPO}/pulls/7/files", [{"filename": "img.png"}])
+def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
+    arm_review(gh)
+    findings = (
+        Finding("important", "src/a.py", 99, "Off diff", "line not in hunk"),
+        Finding("important", "src/zzz.py", 1, "Unknown file", "path not in PR"),
+        Finding("critical", "src/c.py", 7, "Deleted side", "line 7 was only on the left"),
+        Finding("suggestion", "src/a.py", 99, "Nit off diff", "stays loose"),
+    )
+    github.post_review(REPO, 7, HEAD, review(findings=findings))
+    payload = json.loads(gh.calls[1]["--input"])
+    comments = payload["comments"]
+    assert [(c["path"], c["line"]) for c in comments] == [("src/a.py", 11)] * 3
+    assert comments[0]["body"].split("\n")[1] == (
+        "Reviewer location src/a.py:99 is not in the diff; anchored here.")
+    assert "Nit off diff" in payload["body"]
+
+
+def test_post_review_anchor_skips_files_without_hunks(gh: FakeGh) -> None:
+    arm_review(gh, files=[{"filename": "img.png"},
+                          {"filename": "src/d.py", "patch": "@@ -3,0 +4,2 @@\n+p\n+q"}])
     github.post_review(REPO, 7, HEAD, review(findings=(Finding("important", None, None, "G", ""),)))
-    (comment,) = json.loads(gh.calls[1]["--input"])["comments"]
-    assert comment["path"] == "img.png" and "line" not in comment
-    assert comment["subject_type"] == "file"
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"]) == ("src/d.py", 4)
+    assert "subject_type" not in comment
 
 
-def test_post_review_no_files_lookup_without_unlocated_blockers(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
-    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:3]))
-    assert [c["argv"][:2] for c in gh.calls] == [["api", f"repos/{REPO}/pulls/7/reviews"]]
+def test_post_review_fails_loud_when_nothing_to_anchor(gh: FakeGh) -> None:
+    arm_review(gh, files=[{"filename": "img.png"}])
+    with pytest.raises(github.GhError, match="no diff hunks"):
+        github.post_review(REPO, 7, HEAD, review(findings=(Finding("critical", None, None, "G", ""),)))
+    assert len(gh.calls) == 1
+
+
+def test_post_review_paginates_files(gh: FakeGh) -> None:
+    page1 = [{"filename": f"f{i}.py", "patch": f"@@ -1 +1 @@\n+l{i}"} for i in range(100)]
+    gh.respond(FILES_KEY, page1, PR_FILES)
+    gh.respond(REVIEWS_KEY, {"id": 1})
+    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
+    assert [c["argv"][-1] for c in gh.calls[:2]] == ["page=1", "page=2"]
+    assert comments_posted(gh)[0]["path"] == "src/a.py"
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
+    arm_review(gh)
     github.post_review(REPO, 7, HEAD, review(verdict="approve"))
-    payload = json.loads(gh.calls[0]["--input"])
+    payload = json.loads(gh.calls[1]["--input"])
     assert payload["event"] == "APPROVE" and payload["comments"] == []
 
 
@@ -257,45 +298,81 @@ def test_post_review_approve_event(gh: FakeGh) -> None:
     ("request_changes", "Can not request changes on your own pull request"),
 ])
 def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, msg: str) -> None:
-    key = f"api repos/{REPO}/pulls/7/reviews"
-    gh.respond(key, {"stdout": "", "stderr": f'gh: Unprocessable Entity (HTTP 422)\n{msg}\n',
-                     "exit": 1}, {"stdout": '{"id": 2}', "exit": 0})
+    gh.respond(FILES_KEY, PR_FILES)
+    gh.respond(REVIEWS_KEY, {"stdout": "", "stderr": f'gh: Unprocessable Entity (HTTP 422)\n{msg}\n',
+                             "exit": 1}, {"stdout": '{"id": 2}', "exit": 0})
     github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
-    events = [json.loads(c["--input"])["event"] for c in gh.calls]
+    events = [json.loads(c["--input"])["event"] for c in gh.calls[1:]]
     assert events == [verdict.upper(), "COMMENT"]
-    first, second = (json.loads(c["--input"]) for c in gh.calls)
+    first, second = (json.loads(c["--input"]) for c in gh.calls[1:])
     assert first["comments"] == second["comments"] and first["body"] == second["body"]
 
 
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
-    gh.fail(f"api repos/{REPO}/pulls/7/reviews", "HTTP 500 server error")
+    gh.respond(FILES_KEY, PR_FILES)
+    gh.fail(REVIEWS_KEY, "HTTP 500 server error")
     with pytest.raises(github.GhError):
         github.post_review(REPO, 7, HEAD, review())
-    assert len(gh.calls) == 1
+    assert len(gh.calls) == 2
 
 
 # --- blocking findings ------------------------------------------------------------
 
 
 def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
+    gh.respond("api user", {"login": "bot-user"})
     gh.respond("api graphql", threads_json(
         thread(f"{marker('critical')}\n**critical: Null deref**\n\nx may be None"),
         thread(f"{marker('important')}\nplain title", resolved=True),
         thread(f"{marker('suggestion')}\n**suggestion: Rename**"),
-        thread("no marker here\n" + marker("critical")),
+        thread("no marker here\n" + marker("critical"), author="human"),
+        thread("<!-- loopzero:finding severity=important -->\nheadless", path="h.py", line=9),
         thread(f"{marker('important')}\n**important: Missing check**\n\nvalidate",
                path="src/b.py", line=2),
     ))
     found = github.open_blocking_findings(REPO, 7)
     assert found == [
         Finding("critical", "src/a.py", 3, "Null deref", "**critical: Null deref**\n\nx may be None"),
+        Finding("important", "h.py", 9, "headless", "headless"),
         Finding("important", "src/b.py", 2, "Missing check",
                 "**important: Missing check**\n\nvalidate"),
     ]
     argv = gh.argv(0)
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
-    assert any(a.startswith("query=") and "reviewThreads" in a for a in argv)
+    assert any(a.startswith("query=") and "lastEditedAt" in a and "author" in a for a in argv)
+
+
+def test_marker_regex_accepts_missing_head() -> None:
+    assert github.MARKER_RE.search("<!-- loopzero:finding severity=critical -->").group(1) == \
+        "critical"
+    m = github.MARKER_RE.search(github.finding_marker("important", HEAD))
+    assert m.groups() == ("important", HEAD)
+
+
+def test_open_blocking_findings_edited_thread_blocks(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json(
+        thread(f"{marker('suggestion')}\n**suggestion: nit**", edited="2026-09-18T01:00:00Z"),
+        thread(f"{marker('critical')}\nX", edited="2026-09-18T01:00:00Z", path="e.py", line=4),
+    ))
+    found = github.open_blocking_findings(REPO, 7)
+    assert [(f.severity, f.path, f.line, f.title) for f in found] == [
+        ("important", "src/a.py", 3, "finding thread edited"),
+        ("critical", "e.py", 4, "finding thread edited"),
+    ]
+    assert all(c["argv"][:2] == ["api", "graphql"] for c in gh.calls), "no login lookup needed"
+
+
+def test_open_blocking_findings_marker_removed_by_token_user(gh: FakeGh) -> None:
+    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api graphql", threads_json(
+        thread("stripped loopzero marker\n**critical: X**", author="bot-user"),
+        thread("mentions loopzero but a human wrote it", author="human"),
+        thread("bot-user wrote this but it is unrelated", author="bot-user"),
+    ))
+    found = github.open_blocking_findings(REPO, 7)
+    assert [(f.severity, f.title) for f in found] == [("important", "finding thread edited")]
+    assert sum(1 for c in gh.calls if c["argv"] == ["api", "user"]) == 1, "login cached"
 
 
 def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
@@ -311,16 +388,21 @@ def test_open_blocking_findings_paginates(gh: FakeGh) -> None:
 
 
 def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [
-        {"name": "checks", "status": "completed", "conclusion": "success"},
-        {"name": "lint", "status": "in_progress", "conclusion": None},
-    ]})
+    filler = [{"name": f"job{i}", "status": "completed", "conclusion": "success"}
+              for i in range(99)]
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
+               {"check_runs": filler + [
+                   {"name": "checks", "status": "completed", "conclusion": "success"}]},
+               {"check_runs": [{"name": "lint", "status": "in_progress", "conclusion": None}]})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/status", {"statuses": [
         {"context": "ci/legacy", "state": "failure"},
         {"context": "checks", "state": "pending"},
     ]})
-    assert github.check_runs(REPO, HEAD) == {
+    runs = github.check_runs(REPO, HEAD)
+    assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
         "checks": "success", "lint": "in_progress", "ci/legacy": "failure"}
+    pages = [c["argv"][-1] for c in gh.calls if "check-runs" in c["argv"][1]]
+    assert pages == ["page=1", "page=2"]
 
 
 # --- readiness ----------------------------------------------------------------------------
@@ -382,6 +464,13 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
     )
 
 
+def test_readiness_conflicting(gh: FakeGh) -> None:
+    arm_readiness(gh)
+    pr = github._pr_from_json(pr_json(mergeable="CONFLICTING"))
+    r = github.readiness(REPO, pr, ("checks",), HEAD)
+    assert r.reasons == ("PR #7 has merge conflicts with main",)
+
+
 def test_readiness_pr_not_open(gh: FakeGh) -> None:
     arm_readiness(gh)
     r = github.readiness(REPO, github._pr_from_json(pr_json(state="MERGED")), ("checks",), HEAD)
@@ -403,13 +492,18 @@ def test_mark_ready(gh: FakeGh) -> None:
     assert gh.argv(0) == ["pr", "ready", "7", "--repo", REPO]
 
 
-def test_merge_success_returns_merge_sha(gh: FakeGh) -> None:
+def test_merge_success_returns_merge_sha_and_deletes_remote_branch(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "c" * 40}})
+    gh.respond("pr view", {"merged": True, "mergeCommit": {"oid": "c" * 40},
+                           "headRefName": "lz/x"})
+    gh.respond("api -X", "")
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
-                          "--match-head-commit", HEAD, "--delete-branch"]
-    assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json", "mergeCommit,merged"]
+                          "--match-head-commit", HEAD]
+    assert "--delete-branch" not in gh.argv(0)
+    assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json",
+                          "mergeCommit,merged,headRefName"]
+    assert gh.argv(2) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/lz/x"]
 
 
 def test_merge_command_failure(gh: FakeGh) -> None:
@@ -421,9 +515,10 @@ def test_merge_command_failure(gh: FakeGh) -> None:
 
 def test_merge_unverified(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"merged": False, "mergeCommit": None})
+    gh.respond("pr view", {"merged": False, "mergeCommit": None, "headRefName": "lz/x"})
     with pytest.raises(github.MergeFailed):
         github.merge(REPO, 7, "merge", HEAD)
+    assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
 
 
 def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
