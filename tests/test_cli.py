@@ -686,6 +686,23 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     assert err.startswith("warning: merged but worktree cleanup failed")
 
 
+def test_merge_warns_when_remote_cleanup_times_out(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "f" * 40}})
+    monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
+        cli._proc.ProcTimeout("gh api timed out", "")))
+    monkeypatch.setattr(cli, "_cleanup", lambda _: None)
+    code, out, err = run(capsys, "merge")
+    assert code == 0 and out.splitlines()[0] == "f" * 40
+    assert "remote branch cleanup failed for lz/t1" in err and "timed out" in err
+
+
 def test_second_merge_retries_remote_branch_cleanup(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:

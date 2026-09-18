@@ -517,7 +517,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
 def _delete_remote_branch(config: Config, branch: str) -> None:
     try:
         github.delete_remote_branch(config.repo, branch)
-    except github.GhError as exc:
+    except (github.GhError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}", file=sys.stderr)
 
 
