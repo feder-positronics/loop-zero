@@ -1,7 +1,8 @@
-"""Run the consumer's check commands inside a bubblewrap sandbox."""
+"""Run checks in bwrap, which gives no CPU/memory quotas; ulimit is best-effort."""
 
 from __future__ import annotations
 
+import shlex
 import shutil
 import tempfile
 from contextlib import ExitStack
@@ -112,8 +113,17 @@ def _run_one(
     config: Config, worktree: Path, prefix: list[str], command: str, timeout: float
 ) -> CheckResult:
     try:
+        limits = config.limits
+        limited = "; ".join(
+            (
+                f"ulimit -v {limits.memory_mb * 1024}",
+                f"ulimit -u {limits.processes} 2>/dev/null",
+                f"ulimit -f {limits.file_mb * 1024}",
+                f"exec /bin/sh -c {shlex.quote(command)}",
+            )
+        )
         done = _proc.run(
-            [*prefix, "/bin/sh", "-c", command],
+            [*prefix, "/bin/sh", "-c", limited],
             cwd=worktree,
             env_allowlist=config.env_allowlist,
             timeout=timeout,

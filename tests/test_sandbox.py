@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import sandbox
-from loopzero.types import Config
+from loopzero.types import Config, ResourceLimits
 
 from .conftest import git
 
@@ -103,7 +103,11 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert sandbox.run_checks(make_config(), git_repo).dirty is False
     # /tmp tmpfs comes before the worktree bind so a worktree under /tmp stays visible.
     assert head.index("--tmpfs") < head.index(str(git_repo))
-    assert tail == ["/bin/sh", "-c", "echo hello"]
+    assert tail[:2] == ["/bin/sh", "-c"]
+    assert tail[2] == (
+        "ulimit -v 4194304; ulimit -u 512 2>/dev/null; ulimit -f 2097152; "
+        "exec /bin/sh -c 'echo hello'"
+    )
 
 
 def test_probe_uses_real_flags(git_repo, bwrap_log):
@@ -140,6 +144,15 @@ def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
     (first,) = report.results
     assert (first.exit_code, first.tail.splitlines()[0]) == (sandbox.TIMEOUT_EXIT, "partial")
     assert "timed out" in first.tail and not report.ok
+
+
+def test_configured_resource_limits_are_converted_to_shell_units(git_repo, bwrap_log):
+    limits = ResourceLimits(memory_mb=64, processes=7, file_mb=3)
+    sandbox.run_checks(make_config(limits=limits), git_repo)
+    command = argv_of(bwrap_log)[-1]
+    assert "ulimit -v 65536" in command
+    assert "ulimit -u 7" in command
+    assert "ulimit -f 3072" in command
 
 
 def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):
@@ -218,6 +231,20 @@ def test_real_sandbox_denies_writes(git_repo):
     report = sandbox.run_checks(make_config(checks=checks), git_repo)
     assert [r.exit_code for r in report.results] == [0, 0], report
     assert report.head
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+def test_real_sandbox_memory_limit_fails_check_and_preserves_report(git_repo):
+    command = "/usr/bin/perl -e '$x = \"x\" x (64 * 1024 * 1024); print length($x)'"
+    report = sandbox.run_checks(
+        make_config(checks=(command,), limits=ResourceLimits(memory_mb=32)), git_repo
+    )
+    assert report.head == git(git_repo, "rev-parse", "HEAD").strip()
+    assert report.dirty is False
+    assert len(report.results) == 1
+    assert report.results[0].command == command
+    assert report.results[0].exit_code != 0
+    assert report.ok is False
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")

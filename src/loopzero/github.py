@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tempfile
@@ -14,7 +15,9 @@ from loopzero.types import Finding, ReviewResult
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
 BLOCKING = frozenset({"critical", "important"})
 MARKER_RE = re.compile(
-    r"<!--\s*loopzero:finding\s+severity=(\w+)(?:\s+head=([0-9a-fA-F]+))?\s*-->"
+    r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
+    r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
+    r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
 PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,author"
 PAGE = 100
@@ -204,14 +207,22 @@ def update_body(repo: str, number: int, body: str) -> None:
     _api(f"repos/{repo}/pulls/{number}", {"body": body}, method="PATCH")
 
 
-def finding_marker(severity: str, head_sha: str) -> str:
-    return f"<!-- loopzero:finding severity={severity} head={head_sha} -->"
+def finding_id(head_sha: str, path: str | None, line: int | None, title: str) -> str:
+    raw = f"{head_sha}{path or ''}{line if line is not None else ''}{title}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:8]
+
+
+def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
+    stable_id = finding_id(head_sha, finding.path, finding.line, finding.title)
+    return (
+        f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
+    )
 
 
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
     text = f"{prefix}**{f.severity}: {f.title}**\n\n{f.body}".rstrip()
     if f.severity in BLOCKING:
-        return f"{finding_marker(f.severity, head_sha)}\n{text}"
+        return f"{finding_marker(f.severity, head_sha, f)}\n{text}"
     return text
 
 
@@ -327,25 +338,37 @@ def _title_of(text: str) -> str:
     return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
 
 
-def _parse_thread(node: dict) -> Finding | None:
+def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
     first = comments[0]
     body = first.get("body") or ""
     match = MARKER_RE.search(body)
-    if not match or match.group(1) not in BLOCKING:
+    if not match or match.group("severity") not in BLOCKING:
         return None
-    severity = match.group(1)
+    version = match.group("version")
+    marker_head = match.group("head")
+    marker_id = match.group("id")
+    if version and (not marker_head or not marker_id):
+        return None
+    if not version and marker_id:
+        return None
+    if current_head is not None and marker_head != current_head and node.get("isOutdated"):
+        return None
+    severity = match.group("severity")
     rest = body[match.end():].lstrip()
     return Finding(severity=severity, path=node.get("path"), line=node.get("line"),
                    title=_title_of(rest), body=rest.strip())
 
 
-def open_blocking_findings(repo: str, number: int) -> list[Finding]:
+def open_blocking_findings(
+    repo: str, number: int, current_head: str | None = None
+) -> list[Finding]:
     """Findings from unresolved review threads whose first comment carries a blocking marker.
 
-    Only explicit critical and important markers block.
+    Only explicit critical and important markers block. When `current_head` is supplied, an
+    outdated thread is ignored unless its marker names that head.
     """
     owner, name = repo.split("/", 1)
     after: str | None = None
@@ -365,7 +388,7 @@ def open_blocking_findings(repo: str, number: int) -> list[Finding]:
             for node in nodes:
                 if node.get("isResolved"):
                     continue
-                finding = _parse_thread(node)
+                finding = _parse_thread(node, current_head)
                 if finding:
                     found.append(finding)
             if not page["hasNextPage"]:
@@ -421,7 +444,7 @@ def readiness(
         reasons.append("no review recorded for the current head")
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number):
+    for f in open_blocking_findings(repo, pr.number, pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks = check_runs(repo, pr.head_sha) if required_ci else {}
