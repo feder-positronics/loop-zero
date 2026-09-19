@@ -248,10 +248,17 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
-    lines.append(
-        f"\n<details><summary>Raw reviewer output</summary>\n\n```\n{result.raw}\n```\n</details>"
+    raw = result.raw
+    encoded = raw.encode("utf-8")
+    if len(encoded) > 30_000:
+        raw = encoded[-30_000:].decode("utf-8", errors="ignore")
+        raw = (
+            "[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
+            "Full output remains in the saved local review artifact.]\n" + raw
+        )
+    return "\n".join(lines) + (
+        f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
     )
-    return "\n".join(lines)
 
 
 def _right_lines(patch: str) -> tuple[set[int], int | None]:

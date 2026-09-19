@@ -41,6 +41,12 @@ The live PR owns Validation and Review, and sections absent from task.md are kep
 Edit validation evidence on GitHub after creation; keep acceptance changes in
 both task.md (the reviewer's task context) and the PR by rerunning `pr`.
 
+GitHub reviews include at most the last 30,000 UTF-8 bytes of raw reviewer output,
+with a truncation notice for longer transcripts. Verdicts and findings remain
+complete. The full transcript stays in the saved local
+`.loopzero/review-<head>-<kind>.json` artifact; `loopzero review --repost` uses that
+artifact without rerunning the model.
+
 ## Adopt it in six steps
 
 1. Install from a pinned SHA: `uv tool install git+https://github.com/feder-positronics/loop-zero@<sha>`.

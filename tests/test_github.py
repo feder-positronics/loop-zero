@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -305,9 +306,15 @@ FINDINGS = (
 )
 
 
-def test_post_review_payload(gh: FakeGh) -> None:
+@pytest.mark.parametrize("raw", ["", "x" * 30_000, "é" * 15_000, "x" * 574_264,
+                                 "🙂" * 150_000 + "END"],
+                         ids=["empty", "ascii-boundary", "unicode-boundary", "long", "unicode"])
+@pytest.mark.parametrize("prefix", ["", "<!-- loopzero:review head=abc kind=primary -->"])
+def test_post_review_payload(gh: FakeGh, raw: str, prefix: str) -> None:
     arm_review(gh)
-    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS))
+    loose = Finding("suggestion", None, None, "Loose suggestion", "Preserve this finding.")
+    result = replace(review(findings=(*FINDINGS, loose)), raw=raw)
+    github.post_review(REPO, 7, HEAD, result, body_prefix=prefix)
     assert calls_for(gh, FILES_KEY)[0]["argv"] == [
         "api", FILES_KEY.split(" ", 1)[1], "--method", "GET", "-F", "per_page=100", "-F", "page=1"]
     (call,) = calls_for(gh, REVIEWS_KEY)
@@ -322,27 +329,21 @@ def test_post_review_payload(gh: FakeGh) -> None:
     assert comments[0]["body"].split("\n")[0] == github.finding_marker("critical", HEAD, FINDINGS[0])
     assert comments[1]["body"].split("\n")[0] == github.finding_marker("important", HEAD, FINDINGS[1])
     assert "loopzero:finding" not in comments[2]["body"]
+    assert comments[3]["body"].split("\n")[0] == github.finding_marker("important", HEAD, FINDINGS[3])
+    assert "No file location given by the reviewer; anchored here." in comments[3]["body"]
+    assert "Global concern" in comments[3]["body"] and "no file" in comments[3]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
     body = payload["body"]
     assert "model gpt-5.3-codex, 12.3s" in body
-    assert "<details>" in body and "RAW MODEL OUTPUT" in body and "</details>" in body
+    assert body.startswith(prefix + "\n" if prefix else "loopzero primary review")
+    assert "**request_changes** (1 critical, 2 important, 2 suggestion)" in body
+    assert loose.title in body and loose.body in body
+    assert len(body.encode("utf-8")) < 65_536 and result.raw == raw
+    assert ("Transcript truncated" in body) == (len(raw.encode("utf-8")) > 30_000)
+    tail = raw.encode("utf-8")[-30_000:].decode("utf-8", errors="ignore")
+    assert tail + "\n```\n</details>" in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
-
-
-def test_post_review_anchors_unlocated_blocking_findings(gh: FakeGh) -> None:
-    arm_review(gh)
-    findings = (Finding("critical", None, None, "Global", "no file"),
-                Finding("suggestion", None, None, "Nit", "loose"))
-    github.post_review(REPO, 7, HEAD, review(findings=findings))
-    payload = review_payloads(gh)[0]
-    (comment,) = payload["comments"]
-    assert comment == {**comment, "path": "src/a.py", "line": 11, "side": "RIGHT"}
-    lines = comment["body"].split("\n")
-    assert lines[0] == github.finding_marker("critical", HEAD, findings[0])
-    assert lines[1] == "No file location given by the reviewer; anchored here."
-    assert "Global" in comment["body"] and "no file" in comment["body"]
-    assert "Nit" in payload["body"] and "Global" not in payload["body"]
 
 
 def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
@@ -385,17 +386,6 @@ def test_post_review_paginates_files(gh: FakeGh) -> None:
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
     assert [c["argv"][-1] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
     assert comments_posted(gh)[0]["path"] == "src/a.py"
-
-
-def test_post_review_body_prefix_is_first_line(gh: FakeGh) -> None:
-    arm_review(gh)
-    github.post_review(REPO, 7, HEAD, review(), body_prefix="<!-- loopzero:review head=abc -->")
-    body = review_payloads(gh)[0]["body"]
-    assert body.split("\n")[0] == "<!-- loopzero:review head=abc -->"
-    assert body.split("\n")[1].startswith("loopzero primary review")
-    arm_review(gh)
-    github.post_review(REPO, 7, HEAD, review())
-    assert review_payloads(gh)[1]["body"].startswith("loopzero primary review")
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
