@@ -1,0 +1,45 @@
+# Selected model profiles and suggested task routes.
+# Owner-selected defaults (2026-09-19). Profile names describe task shape;
+# they do not claim a measured ranking of model prices or speeds.
+# Agents read this file before delegation, check runtime support, and explicitly
+# pass the selected model and effort. This file does not launch models by itself.
+version = 1
+
+[profiles.fast]
+provider = "openai"
+model = "gpt-5.6-luna"
+effort = "xhigh"
+
+[profiles.standard]
+provider = "openai"
+model = "gpt-5.6-sol"
+effort = "medium"
+
+# Model IDs and efforts pass through unchanged; runtime aliases (such as opus)
+# are resolved by the runtime. Validate support before launch. Alternatives are choices,
+# not automatic retries or replacements for an explicitly requested model.
+[[profiles.standard.alternatives]]
+provider = "anthropic"
+model = "opus"
+effort = "medium"
+
+[profiles.deep]
+provider = "openai"
+model = "gpt-6-astra"
+effort = "medium"
+
+[[profiles.deep.alternatives]]
+provider = "anthropic"
+model = "claude-fable-5-1"
+effort = "low"
+
+# Categories suggest a starting profile; task requirements may justify another.
+# The review profile does not replace independent-review requirements.
+[categories]
+mechanical = "fast"
+bounded_implementation = "fast" # One settled behavior with direct acceptance.
+implementation = "standard" # Cohesive work with several connected decisions.
+investigation = "standard"
+planning = "deep"
+architecture = "deep"
+review = "deep"

@@ -26,6 +26,11 @@ finding is open and required CI is green. The full rules fit in
 
 `loopzero status` prints where the current branch is in that sequence.
 
+For agent-directed delegation, [models.toml](models.toml) holds the current
+provider, model, effort, and category defaults. Agents read it through the
+shared [model selection and delegation guidance](docs/DELEGATION.md), check
+runtime support, and explicitly select the delegate's model and effort.
+
 After creation, `check` updates only the generated checks block in the live PR's
 Validation section. Human validation notes and review summaries survive refreshes.
 Check timings remain in terminal output, so duration changes alone do not rewrite
