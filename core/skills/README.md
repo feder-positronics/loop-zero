@@ -1,5 +1,9 @@
 # Skill routing
 
+For subagent model selection, use the shared [delegation guidance](../../docs/DELEGATION.md)
+and the task repository's `models.toml`. `plan`, `implement`, and `work-issue`
+are linked under `.agents/skills` for discovery in this checkout.
+
 For API-key integrations, all skills use the shared
 [credential convention](../CREDENTIALS.md): the documented provider environment
 variable first, then a private `~/.config/<service>/api-key` file for local work.

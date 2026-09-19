@@ -9,6 +9,11 @@ Take one live GitHub issue through the six loop-zero commands to a verified merg
 and either closure or an explicit partial-delivery boundary. Preserve the issue
 as intake context and the PR as delivery record.
 
+Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
+when splitting work or choosing an executor. Read the task repository's
+`models.toml` for model and effort; delegate useful bounded units through the
+available runtime.
+
 ## Intake
 
 1. Read the issue body, comments, labels, linked PRs, screenshots, logs, and

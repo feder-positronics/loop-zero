@@ -40,8 +40,18 @@ Point your agent's repository instructions at that checkout's
 the catalog for each task. Keep the source directory structure intact so
 relative links resolve; copying an individual `SKILL.md` loses its references.
 For TypeSafe work, explicitly request `typesafe-ai` from that catalog. In this
-repository, `.agents/skills/typesafe-ai` already links to the canonical skill
-for Codex discovery; other consumers must connect their own agent.
+repository, `.agents/skills` links `plan`, `implement`, `work-issue`, and
+`typesafe-ai` to their canonical skills for discovery. Other consumers must
+connect their own agent.
+
+For model routing, copy [models.toml](models.toml) into the consuming repository
+and adjust its model IDs and effort values to the available runtimes. Point
+repository instructions at the shared [delegation guidance](docs/DELEGATION.md).
+The agent reads the category/profile mapping directly, checks availability,
+and passes the selected model and effort to its delegation tool. There is no
+additional CLI, scheduler, or model catalog to upgrade. Formal `loopzero review`
+continues to use reviewer families from `workflow.toml`; `models.toml` does not
+change it.
 
 Configure application API keys using the shared convention below. This requires
 no changes to `workflow.toml` and no Bitwarden CLI installation if you paste
