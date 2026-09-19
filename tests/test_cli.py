@@ -570,23 +570,30 @@ def test_review_refuses_when_reviewer_dirties_worktree(
     assert all(call["argv"][:2] != ["api", post_key().split(" ")[1]] for call in gh.calls)
 
 
+@pytest.mark.parametrize("padding", ["", "x" * 574_264], ids=["short", "long"])
 def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
-                                                    capsys) -> None:
+                                                    capsys, padding: str) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
     gh.fail(post_key(), "HTTP 500 server error")
-    _fake_claude(fake_bin, _claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}}))
+    envelope = {"padding": padding,
+                **_claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}})}
+    _fake_claude(fake_bin, envelope)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
     code, out, err = run(capsys, "review")
     assert code == 1 and out == "" and saved.exists()
     assert f"review saved at {saved}" in err and "loopzero review --repost" in err
-    data = json.loads(saved.read_text())
+    saved_bytes = saved.read_bytes()
+    data = json.loads(saved_bytes)
+    assert json.loads(data["raw"]) == envelope
     assert data["head"] == head and data["kind"] == "primary" and data["family"] == "claude"
     assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
     assert data["model"] == "claude-sonnet-4-6" and data["duration_s"] >= 0
     first_body = json.loads(gh.calls[-1]["--input"])["body"]
     assert "model claude-sonnet-4-6" in first_body
+    assert len(first_body.encode("utf-8")) < 65_536
+    assert ("Transcript truncated" in first_body) == bool(padding)
     (fake_bin / "claude.stdin").unlink()
     gh.respond(post_key(), {"id": 5})
     code, out, err = run(capsys, "review", "--repost")
@@ -598,6 +605,9 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     ))
     assert marker(head, "primary", "repost") in payload["body"] and "Nit" in payload["body"]
     assert "claude-session-123" in payload["body"]
+    assert len(payload["body"].encode("utf-8")) < 65_536
+    assert ("Transcript truncated" in payload["body"]) == bool(padding)
+    assert saved.read_bytes() == saved_bytes
     assert "model claude-sonnet-4-6" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 

@@ -21,6 +21,8 @@ MARKER_RE = re.compile(
 )
 PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,mergeStateStatus,author,body"
 PAGE = 100
+# Leave room for the review summary and findings within GitHub's body limit.
+_RAW_REVIEW_BYTES = 30_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -248,8 +250,17 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
+    raw = result.raw
+    encoded = raw.encode("utf-8")
+    if len(encoded) > _RAW_REVIEW_BYTES:
+        # Decode only complete characters if the byte boundary splits a code point.
+        raw = encoded[-_RAW_REVIEW_BYTES:].decode("utf-8", errors="ignore")
+        raw = (
+            "[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
+            "Full output remains in the saved local review artifact.]\n" + raw
+        )
     lines.append(
-        f"\n<details><summary>Raw reviewer output</summary>\n\n```\n{result.raw}\n```\n</details>"
+        f"\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
     )
     return "\n".join(lines)
 
