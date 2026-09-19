@@ -1,20 +1,6 @@
-# Third-party notices
-
-loop-zero's `typesafe-ai` skill and building reference are adapted from
-[TypeSafe AI's skills collection](https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai).
-Copyright (c) 2026 TypeSafe AI. The upstream MIT license is preserved in
-[core/skills/typesafe-ai/LICENSE](core/skills/typesafe-ai/LICENSE).
-
-loop-zero's `grill-me` skill is adapted from Matt Pocock's
-[skills collection](https://github.com/mattpocock/skills) (`grill-me`/`grilling`);
-consumers may also carry verbatim copies of his `grill-with-docs` and `tdd`
-skills. These skills are not bundled in this checkout. loop-zero's own MIT
-licence does not replace this notice. The collection's licence is reproduced
-verbatim below.
-
 MIT License
 
-Copyright (c) 2026 Matt Pocock
+Copyright (c) 2026 TypeSafe AI
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

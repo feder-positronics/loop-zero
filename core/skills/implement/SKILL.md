@@ -7,6 +7,8 @@ description: Deliver an understood bounded change with its owning behavior proof
 
 Deliver one bounded change with its behavior proof. Read [the contract](../../CONTRACT.md),
 `.loopzero/task.md`, repository guidance, and the affected public interfaces.
+When the task uses API keys, follow [the credential convention](../../CREDENTIALS.md)
+and document the integration's variable, local fallback, and target environment.
 
 ## Do
 

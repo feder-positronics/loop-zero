@@ -3,9 +3,12 @@
 Start with the top-level files; this directory only holds the contributor spec.
 
 - [../README.md](../README.md) — what loop-zero is, the six commands, adoption.
-- [../SETUP.md](../SETUP.md) — prerequisites, install from a SHA, first run.
+- [../SETUP.md](../SETUP.md) — prerequisites, install from a SHA, connect agent
+  skills, configure API keys, verify local setup, and first run.
 - [../workflow.example.toml](../workflow.example.toml) — annotated config.
 - [../core/CONTRACT.md](../core/CONTRACT.md) — the delivery rules.
+- [../core/CREDENTIALS.md](../core/CREDENTIALS.md) — default API-key lookup,
+  local storage, Bitwarden, rotation, and CI/production boundaries.
 - [../core/HANDOFF.md](../core/HANDOFF.md) — task file and PR body template.
 - [../core/skills/](../core/skills) — `plan`, `implement`, `review`,
   `security-review`, `diagnose`.
