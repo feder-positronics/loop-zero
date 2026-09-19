@@ -36,7 +36,7 @@ The live PR owns Validation and Review, and sections absent from task.md are kep
 Edit validation evidence on GitHub after creation; keep acceptance changes in
 both task.md (the reviewer's task context) and the PR by rerunning `pr`.
 
-## Adopt it in five steps
+## Adopt it in six steps
 
 1. Install from a pinned SHA: `uv tool install git+https://github.com/feder-positronics/loop-zero@<sha>`.
 2. Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` at
@@ -44,14 +44,26 @@ both task.md (the reviewer's task context) and the PR by rerunning `pr`.
 3. Make sure `git`, `gh auth status`, `bwrap` and `claude` or `codex` work in
    your shell (details in [SETUP.md](SETUP.md)).
 4. Point your agents at the skills in [core/skills](core/skills): `plan`,
-   `implement`, `review`, `security-review`, `diagnose`.
-5. Run `loopzero start first-task`, make a change, and walk the six commands.
+   `implement`, `review`, `security-review`, `diagnose`, and `typesafe-ai` when
+   needed. Follow [agent setup](SETUP.md#connect-your-agent) using a source
+   checkout at the same pinned revision as the CLI.
+5. For integrations that need API keys, follow
+   [credential setup](SETUP.md#api-keys-for-local-agents). TypeSafe uses
+   `TYPESAFE_API_KEY` or `~/.config/typesafe/api-key`; no key is needed for
+   loop-zero's ordinary checks.
+6. Run `loopzero start first-task`, make a change, and walk the six commands.
 
 ## Configuration
 
-All configuration lives in one file, `workflow.toml`, at the repository root
+Delivery configuration lives in one file, `workflow.toml`, at the repository root
 (start from [workflow.example.toml](workflow.example.toml)). This repository's
 own [workflow.toml](workflow.toml) is a working example.
+
+For API keys used during agent development, follow the
+[credential convention](core/CREDENTIALS.md): provider environment variable
+first, then a private local file outside the repository. See
+[setup](SETUP.md#api-keys-for-local-agents) for provisioning, Bitwarden use,
+rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 
 | Key | Meaning |
 | --- | --- |
