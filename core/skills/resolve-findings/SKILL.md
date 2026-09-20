@@ -61,6 +61,11 @@ one.
 - Mechanical format, lint, or rename fixes need checks, not another review.
 - A non-mechanical fix after the delta starts a fresh lineage and primary review;
   do not improvise extra review rounds.
+- A fresh lineage resets the budget, not the problem. When a second review flags
+  the same file or defect class again, stop patching single findings: audit the
+  whole class (every caller, reader, transition) with the `deep` profile, fix it
+  in one repair, and only then request review. After three `request_changes`
+  primaries on one PR, split the PR or return to `plan`; tell the requester why.
 
 ## Exit
 

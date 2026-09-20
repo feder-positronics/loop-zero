@@ -125,6 +125,8 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str) -> str:
             + '"line": integer|null, "title": string, "body": string}]}',
             "verdict MUST be \"request_changes\" if any finding is critical or important.",
             'Use "suggestion" for non-blocking remarks. Report only what you can justify.',
+            "When a finding is one instance of a defect class (a missed caller, reader, state "
+            + "transition or retry path), name every other instance in this diff in the same review.",
         )
     )
 
