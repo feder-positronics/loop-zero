@@ -7,6 +7,7 @@ import dataclasses
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 from loopzero import _proc, github, runners, sandbox, worktree
@@ -23,6 +24,10 @@ RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.Runn
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
 PAGE = 100
+# --wait: poll interval, default timeout, and how long a required check may stay
+# missing before GitHub is assumed to have dropped the event for this head.
+WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 10.0, 1800.0, 120.0
+_sleep = time.sleep
 OFFLINE_FAILURE_RE = re.compile(
     r"failed to fetch|dns error|network is unreachable|temporary failure in name resolution|"
     r"name or service not known|could not fetch url|newconnectionerror|err_pnpm_.*fetch|"
@@ -674,12 +679,19 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if waiting:
         github.mark_ready(config.repo, pr.number)
         print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
-        return 3
+        if args.wait is None:
+            return 3
+    if args.wait is not None and (waiting or _pending_checks(config, pr, readiness.reasons)):
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=bool(waiting))
+        if waited is None:
+            print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
+            return 3
+        pr, readiness = waited
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
         return 1
-    if pr.is_draft:
+    if pr.is_draft and not waiting:  # `waiting` means this run already marked it ready
         github.mark_ready(config.repo, pr.number)
     print(f"ready: {pr.url}")
     return 0
@@ -700,6 +712,73 @@ def _draft_checks_waiting(
     return tuple(name for name in config.required_ci if name in blocked)
 
 
+def _pending_checks(
+    config: Config, pr: github.PR, reasons: tuple[str, ...], kicked: bool = False
+) -> tuple[str, ...]:
+    """Reasons worth waiting on: every blocker is a required check that may still turn green.
+
+    `kicked` also accepts `skipped`: this run just marked the draft ready, and the
+    skipped result belongs to the draft until GitHub replaces it.
+    """
+    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if kicked else [])]
+    waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
+    return reasons if reasons and all(r in waitable for r in reasons) else ()
+
+
+def _wait_for_checks(
+    wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool
+) -> tuple[github.PR, github.Readiness] | None:
+    """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
+    started, shown = time.monotonic(), None
+    while True:
+        current = _require_pr(config, worktree.branch(wt))
+        if current.head_sha != pr.head_sha:
+            raise CliError(
+                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
+            )
+        readiness = _readiness(wt, config, current, pr.head_sha)
+        pending = _pending_checks(config, current, readiness.reasons, kicked)
+        if not pending:
+            return current, readiness
+        if pending != shown:
+            print("waiting: " + "; ".join(pending))
+            shown = pending
+        elapsed = time.monotonic() - started
+        # Only when nothing is running at all: a pending sibling check proves CI is alive.
+        if elapsed >= MISSING_RUN_GRACE and all(" missing on " in r for r in pending):
+            raise CliError(
+                f"{'; '.join(pending)} after {elapsed:.0f}s: GitHub created no run for this "
+                f"head. Recover with `gh pr close {pr.number}` then `gh pr reopen {pr.number}` "
+                "(same head, the review stays valid) and rerun"
+            )
+        if elapsed >= timeout:
+            return None
+        _sleep(min(WAIT_INTERVAL, timeout - elapsed))
+
+
+def _wait_for_merge(config: Config, branch: str, pr: github.PR, timeout: float) -> str | None:
+    """Poll until the queue lands the PR and return the merge SHA; None on timeout."""
+    started = time.monotonic()
+    print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
+    while True:
+        current = _require_pr(config, branch, allow_merged=True)
+        if current.head_sha != pr.head_sha:  # never clean up after an unreviewed head landed
+            raise CliError(
+                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
+            )
+        sha = github.merged_sha(config.repo, pr.number)
+        if sha:
+            return sha
+        if not github.merge_pending(config.repo, pr.number) and not github.merged_sha(
+            config.repo, pr.number
+        ):
+            raise CliError(f"PR #{pr.number} left the merge queue unmerged")
+        elapsed = time.monotonic() - started
+        if elapsed >= timeout:
+            return None
+        _sleep(min(WAIT_INTERVAL, timeout - elapsed))
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     branch = worktree.branch(wt)
@@ -716,6 +795,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if not readiness.ready:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
+    if sha is None and args.wait is not None:
+        sha = _wait_for_merge(config, branch, pr, args.wait)
+        if sha is None:
+            print(f"timed out waiting for the merge queue to land PR #{pr.number}")
+            return 3
     if sha is None:
         print(
             f"PR #{pr.number} is queued for merge into {config.base_branch}; "
@@ -791,12 +875,15 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--model", help="reviewer model override for this run")
     review.add_argument("--effort", help="reviewer effort override for this run")
     review.set_defaults(func=cmd_review)
-    sub.add_parser("ready", help="compute readiness and mark the PR ready").set_defaults(
-        func=cmd_ready
-    )
-    sub.add_parser("merge", help="recheck readiness, merge, remove the worktree").set_defaults(
-        func=cmd_merge
-    )
+    ready = sub.add_parser("ready", help="compute readiness and mark the PR ready")
+    merge = sub.add_parser("merge", help="recheck readiness, merge, remove the worktree")
+    for waiter, what in ((ready, "required checks on this head"), (merge, "the merge queue")):
+        waiter.add_argument(
+            "--wait", nargs="?", const=WAIT_TIMEOUT, type=float, metavar="SECONDS",
+            help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",
+        )
+    ready.set_defaults(func=cmd_ready)
+    merge.set_defaults(func=cmd_merge)
     status = sub.add_parser("status", help="show where this branch is in the sequence")
     status.add_argument("--path", action="store_true", help="print only the worktree path")
     status.set_defaults(func=cmd_status)

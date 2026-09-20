@@ -18,10 +18,17 @@ hold all state. Nothing is recorded anywhere else.
 4. `loopzero review` — run one independent model review on the exact head.
    Findings are posted as one GitHub PR review with inline comments.
 5. `loopzero ready` — compute readiness (below). If ready, mark the PR ready
-   for review.
-   If a draft is blocked only by missing or skipped required checks, mark it ready to trigger CI and exit 3 while waiting for those checks.
+   for review. If a draft is blocked only by missing or skipped required
+   checks, mark it ready to trigger CI and exit 3. With `--wait[=SECONDS]`
+   (default 1800) it polls the required checks of that unchanged head instead:
+   exit 0 ready, 1 blocked, 3 timed out. A required check still missing after
+   two minutes means GitHub created no run for the head; the error names the
+   recovery. Do not gate on `gh pr checks --watch`: it ignores checks that do
+   not exist yet.
 6. `loopzero merge` — recompute readiness, merge with the configured strategy,
-   verify the merge SHA, delete the branch and the worktree.
+   verify the merge SHA, delete the branch and the worktree. Under a merge
+   queue the first run enqueues; `--wait[=SECONDS]` follows the queue to the
+   landed SHA and cleans up in the same run.
 
 `loopzero status` prints where a branch is in this sequence, derived from Git
 and GitHub only.

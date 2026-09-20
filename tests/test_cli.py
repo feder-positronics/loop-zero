@@ -1114,6 +1114,106 @@ def test_ready_marks_draft_with_skipped_required_check_then_waits(
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
 
+def test_ready_waits_for_checks_on_original_head(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
+               {"check_runs": []},
+               {"check_runs": [{"name": "checks", "status": "in_progress"}]},
+               {"check_runs": [{"name": "checks", "status": "completed",
+                                  "conclusion": "success"}]})
+    gh.respond(f"api repos/{REPO}/commits/{'f' * 40}/check-runs",
+               {"check_runs": [{"name": "checks", "conclusion": "success"}]})
+    gh.respond("pr ready", "")
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    code, out, err = run(capsys, "ready", "--wait")
+
+    assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
+    assert "required check 'checks' is pending" in out
+    assert all("f" * 40 not in " ".join(c["argv"]) for c in gh.calls)
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
+def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt, conclusion="pending")
+
+    code, out, err = run(capsys, "ready", "--wait=0")
+
+    assert (code, err) == (3, "")
+    assert f"timed out waiting for required checks on {head[:12]}" in out
+
+
+def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt, conclusion="pending")
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
+               {"check_runs": [{"name": "checks", "status": "in_progress"}]},
+               {"check_runs": [{"name": "checks", "status": "completed",
+                                  "conclusion": "failure"}]})
+
+    code, out, err = run(capsys, "ready", "--wait")
+
+    assert (code, err) == (1, "")
+    assert out == "not ready: required check 'checks' is failure\n"
+
+
+def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    body = "# T1\n\n## Review\n"
+    gh.respond("pr list", [pr_json(headRefOid=head, body=body, isDraft=False)],
+               [pr_json(headRefOid="f" * 40, body=body, isDraft=False)])
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt, conclusion="pending")
+
+    code, out, err = run(capsys, "ready", "--wait")
+
+    assert code == 1 and out == ""
+    assert f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
+
+
+def test_ready_wait_reports_a_check_run_that_never_started(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    """#181: a required check still missing after the grace period is not a plain timeout."""
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": []})
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+
+    code, out, err = run(capsys, "ready", "--wait")
+
+    assert code == 1 and "waiting:" in out and "GitHub created no run for this head" in err
+    assert "gh pr close 7" in err and "gh pr reopen 7" in err
+
+
+def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A missing check next to a pending one means CI is alive: time out, do not abort."""
+    (tmp_path / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', '["a", "b"]'))
+    config = cli.config_mod.load(tmp_path / "workflow.toml")
+    pr = cli.github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE")
+    reasons = (f"required check 'a' missing on {'a' * 12}", "required check 'b' is pending")
+    monkeypatch.setattr(cli, "_require_pr", lambda *a, **k: pr)
+    monkeypatch.setattr(cli, "_readiness", lambda *a, **k: cli.github.Readiness(False, reasons))
+    monkeypatch.setattr(cli.worktree, "branch", lambda wt: "lz/t1")
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+
+    assert cli._wait_for_checks(Path("."), config, pr, 0.0, kicked=False) is None
+
+
 def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
@@ -1412,6 +1512,65 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
     assert "queued for merge into main" in out and "rerun `loopzero merge`" in out
     assert wt.exists()
     assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
+
+
+def test_merge_waits_for_queue_then_cleans_up(
+    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"}
+    gh.respond("pr view", open_pr, open_pr,
+               {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}})
+    queued = {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}}
+    gh.respond("api graphql", threads_json(), queued, queued)
+    gh.respond("api -X", "")
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    code, out, err = run(capsys, "merge", "--wait")
+
+    assert (code, err) == (0, "") and "e" * 40 in out
+    assert "PR #7 is queued for merge into main; waiting" in out and out.splitlines()[-1] == f"cd {repo}"
+    assert not wt.exists()
+
+
+def test_merge_wait_reports_queue_ejection(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"}
+    gh.respond("pr view", open_pr, open_pr)
+    def queue(value: bool) -> dict:
+        return {"data": {"repository": {"pullRequest": {"isInMergeQueue": value}}}}
+    gh.respond("api graphql", threads_json(), queue(True), queue(False))
+
+    code, out, err = run(capsys, "merge", "--wait")
+
+    assert code == 1 and "left the merge queue unmerged" in out + err
+    assert wt.exists()
+
+
+def test_merge_wait_refuses_a_head_that_changed_in_the_queue(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    body = "# T1\n\n## Review\n"
+    gh.respond("pr list", [pr_json(headRefOid=head, body=body, isDraft=False)],
+               [pr_json(headRefOid="f" * 40, body=body, isDraft=False)])
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"})
+    queued = {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}}
+    gh.respond("api graphql", threads_json(), queued)
+
+    code, _out, err = run(capsys, "merge", "--wait")
+
+    assert code == 1 and f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
+    assert wt.exists(), "no cleanup after an unreviewed head"
 
 
 def test_pr_ignores_corrupt_checks_report(wt: Path, gh: FakeGh, capsys) -> None:

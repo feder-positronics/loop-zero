@@ -821,6 +821,16 @@ def test_merge_queued_returns_none(gh: FakeGh) -> None:
     assert "isInMergeQueue" in query[3] and "number=7" in query
 
 
+def test_merge_accepted_as_auto_merge_counts_as_pending(gh: FakeGh) -> None:
+    """#180: GitHub took the request as auto-merge and queues the PR about a minute later."""
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    accepted = _queue_json(False)
+    accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
+    gh.respond("api graphql", accepted)
+    assert github.merge(REPO, 7, "queue", HEAD) is None
+
+
 def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "OPEN", "mergeCommit": None},

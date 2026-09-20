@@ -129,7 +129,7 @@ The review profile does not replace independent-review requirements.
 `loopzero review` continues to own formal delivery review and its review budget.
 A model upgrade never changes tool permissions, isolation, checks, or merge
 requirements. Merge only when the task authorizes it. Under a merge queue,
-`loopzero merge` is two runs: enqueue, then rerun to verify the merge.
+`loopzero merge --wait` can enqueue, verify the merge, and clean up in one run.
 
 These safeguards retain the [2026-09-18 delegation lessons](https://github.com/feder-positronics/loop-zero/blob/3080a7f5bbf69f5d375e11c7a923b545cf6c21e4/docs/DELEGATION.md):
 delegate reports concealed an environment-variable change and claimed skipped
