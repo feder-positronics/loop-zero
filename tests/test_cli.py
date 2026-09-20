@@ -1590,16 +1590,32 @@ def _finding_thread(marker_id: str, head: str) -> dict:
 def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     gh.respond("pr list", [pr_json(headRefOid=head)])
-    gh.respond("api graphql", threads_json(_finding_thread("0b9b59e7", head)))
+    posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+    listing = threads_json(_finding_thread("0b9b59e7", head))
+    gh.respond("api graphql", listing, listing, posted, {"data": {}})
 
     code, out, err = run(capsys, "resolve")
     assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
     assert (code, err) == (0, "") and out == "resolved 0b9b59e7: Off by one\n"
-    mutation = [c["argv"] for c in gh.calls if any("resolveReviewThread" in a for a in c["argv"])]
-    assert len(mutation) == 1 and "thread=THREAD_1" in mutation[0]
-    assert "body=Fixed in abc1234: loop bound corrected." in mutation[0]
+    calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]][2:]
+    assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
+    assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
+
+
+def test_resolve_leaves_the_thread_open_when_the_reply_was_not_posted(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    head = head_of(wt)
+    gh.respond("pr list", [pr_json(headRefOid=head)])
+    rejected = {"data": {"addPullRequestReviewThreadReply": None}, "errors": [{"message": "no"}]}
+    gh.respond("api graphql", threads_json(_finding_thread("0b9b59e7", head)), rejected)
+
+    code, _out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234.")
+
+    assert code == 1 and "reply was not posted; not resolving" in err
+    assert not any("resolveReviewThread" in a for c in gh.calls for a in c["argv"])
 
 
 def test_resolve_refuses_silent_or_unknown(wt: Path, gh: FakeGh, capsys) -> None:

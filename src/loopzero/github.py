@@ -378,10 +378,12 @@ def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
                    title=_title_of(rest), body=rest.strip())
 
 
-_RESOLVE_MUTATION = (
+_REPLY_MUTATION = (
     "mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:"
-    "{pullRequestReviewThreadId:$thread,body:$body}){comment{id}} "
-    "resolveReviewThread(input:{threadId:$thread}){thread{isResolved}}}"
+    "{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}"
+)
+_RESOLVE_MUTATION = (
+    "mutation($thread:ID!){resolveReviewThread(input:{threadId:$thread}){thread{isResolved}}}"
 )
 
 
@@ -398,8 +400,15 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
     """Reply in the thread of open finding `finding_id` and resolve it."""
     for marker_id, thread_id, finding in open_findings(repo, number):
         if marker_id == finding_id:
-            _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
-                "-F", f"thread={thread_id}", "-f", f"body={reply}")
+            # Two calls on purpose: fields of one mutation are not transactional, and a
+            # thread must never be resolved unless its reply was confirmed.
+            posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
+                              "-F", f"thread={thread_id}", "-f", f"body={reply}")
+            try:
+                posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
+            except (KeyError, TypeError) as exc:
+                raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
+            _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}")
             return finding
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
