@@ -1580,6 +1580,40 @@ def test_merge_wait_refuses_a_head_that_changed_in_the_queue(wt: Path, gh: FakeG
     assert wt.exists(), "no cleanup after an unreviewed head"
 
 
+def _finding_thread(marker_id: str, head: str) -> dict:
+    body = (f"<!-- loopzero:finding v=1 severity=important head={head} id={marker_id} -->\n"
+            "**important: Off by one**\n\nThe loop skips the last row.")
+    return {"id": "THREAD_1", "isResolved": False, "isOutdated": False, "path": "src/a.py",
+            "line": 3, "comments": {"nodes": [{"body": body}]}}
+
+
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    gh.respond("pr list", [pr_json(headRefOid=head)])
+    gh.respond("api graphql", threads_json(_finding_thread("0b9b59e7", head)))
+
+    code, out, err = run(capsys, "resolve")
+    assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
+
+    code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
+    assert (code, err) == (0, "") and out == "resolved 0b9b59e7: Off by one\n"
+    mutation = [c["argv"] for c in gh.calls if any("resolveReviewThread" in a for a in c["argv"])]
+    assert len(mutation) == 1 and "thread=THREAD_1" in mutation[0]
+    assert "body=Fixed in abc1234: loop bound corrected." in mutation[0]
+
+
+def test_resolve_refuses_silent_or_unknown(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    gh.respond("pr list", [pr_json(headRefOid=head)])
+    gh.respond("api graphql", threads_json(_finding_thread("0b9b59e7", head)))
+
+    code, _out, err = run(capsys, "resolve", "0b9b59e7", "  ")
+    assert code == 1 and "a reply saying what changed" in err
+    code, _out, err = run(capsys, "resolve", "deadbeef", "Fixed.")
+    assert code == 1 and "no open blocking finding deadbeef" in err
+    assert not any("resolveReviewThread" in a for c in gh.calls for a in c["argv"])
+
+
 def test_pr_ignores_corrupt_checks_report(wt: Path, gh: FakeGh, capsys) -> None:
     (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
     gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])

@@ -42,7 +42,8 @@ available runtime.
 7. After `loopzero review`, fix every `critical` and `important` finding in
    its thread, push, and rerun `loopzero check`. Mechanical format, lint, or
    rename repairs with unchanged behavior need no delta review; substantive
-   repairs get the one delta review. Reply with what changed; do not resolve a
+   repairs get the one delta review. Reply with what changed using
+   `loopzero resolve <id> "<fix commit and what changed>"`; do not resolve a
    thread silently.
 8. Stop at `loopzero ready`. Merge only when the task says so.
 
