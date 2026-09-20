@@ -487,7 +487,7 @@ def mark_ready(repo: str, number: int) -> None:
 
 _QUEUE_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name)"
-    "{pullRequest(number:$number){isInMergeQueue}}}"
+    "{pullRequest(number:$number){isInMergeQueue autoMergeRequest{enabledAt}}}}"
 )
 
 
@@ -500,14 +500,17 @@ def merged_sha(repo: str, number: int) -> str | None:
     return sha if view.get("state") == "MERGED" and sha else None
 
 
-def in_merge_queue(repo: str, number: int) -> bool:
+def merge_pending(repo: str, number: int) -> bool:
+    """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
+    request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     owner, name = repo.split("/", 1)
     data = _gh_json(
         "api", "graphql", "-f", f"query={_QUEUE_QUERY}", "-F", f"owner={owner}",
         "-F", f"name={name}", "-F", f"number={number}",
     )
     try:
-        return bool(data["data"]["repository"]["pullRequest"]["isInMergeQueue"])
+        pr = data["data"]["repository"]["pullRequest"]
+        return bool(pr["isInMergeQueue"] or pr.get("autoMergeRequest"))
     except (KeyError, TypeError):
         return False
 
@@ -532,7 +535,7 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     sha = merged_sha(repo, number)
     if sha:
         return sha
-    if in_merge_queue(repo, number):
+    if merge_pending(repo, number):
         return None
     # The queue may have landed the PR between the two reads; look once more.
     sha = merged_sha(repo, number)

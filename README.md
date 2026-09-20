@@ -21,8 +21,8 @@ finding is open and required CI is green. The full rules fit in
 | `loopzero check` | Run `workflow.toml` checks in a bwrap sandbox; exit code is the verdict. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. |
-| `loopzero ready` | Verify head, findings and CI; mark the PR ready for review. |
-| `loopzero merge` | Recheck readiness, merge with the configured strategy, remove branch and worktree. |
+| `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
+| `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for a merge queue before cleanup. |
 
 `loopzero status` prints where the current branch is in that sequence.
 
@@ -88,7 +88,7 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 | `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |
 | `checks.network` | Allow network inside the sandbox; default `false`. |
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
-| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; `merge` then enqueues and must be rerun to verify. |
+| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; use `merge --wait` to enqueue and verify in one run. |
 | `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`); when the author family is known, `review` only uses a different family. |
 | `delivery.reviewer_ro_paths` | Absolute reviewer CLI/runtime paths mounted read-only. Defaults to the resolved directory of the selected reviewer binary; list an npm or bun prefix for Claude when needed. |
 
