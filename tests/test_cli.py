@@ -1221,6 +1221,23 @@ def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
     assert cli._wait_for_checks(Path("."), config, pr, 0.0, kicked=False) is None
 
 
+def test_ready_wait_tolerates_a_late_required_job_of_a_running_workflow(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    """#189: the required job has no check run until its `needs` finish; CI is alive."""
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
+               {"check_runs": [{"name": "Backend Tests", "status": "in_progress"}]})
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+
+    code, out, err = run(capsys, "ready", "--wait=0")
+
+    assert (code, err) == (3, "") and "timed out waiting for required checks" in out
+
+
 def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
