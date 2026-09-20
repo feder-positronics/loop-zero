@@ -70,11 +70,52 @@ Give the delegate the objective, relevant source or context, allowed paths,
 acceptance evidence, selected model/effort, and the conditions for returning an
 unresolved question. Do not assume it inherited the conversation.
 
-Use a dedicated `loopzero start` worktree for each writing delegate. Read-only
-investigation can use a stable shared source. Work that touches the same files
-runs in sequence or is integrated deliberately; do not run overlapping writers
-in one checkout. Respect the runtime's concurrency limit and avoid competing
-test suites on one host because temporary-directory cleanup can interfere.
+### Launching a delegate
+
+Before launch:
+
+- close stdin so a background delegate cannot wait for input;
+- pass the model and effort resolved from the task worktree's `models.toml`;
+- capture output in a log file, record the launched PID, and stop it only by
+  that PID, never by a process-name pattern; and
+- give each writing delegate its own `loopzero start` worktree.
+
+For example, a writing delegate with the brief in a file (briefs contain
+quotes, so do not inline them). State the sandbox mode; never rely on the CLI
+default. Use `read-only` for investigation:
+
+```sh
+codex exec --model <model> -c model_reasoning_effort=<effort> \
+  --sandbox workspace-write --cd <worktree> \
+  --output-last-message <final-message-file> "$(cat <brief-file>)" \
+  </dev/null ><log-file> 2>&1 &
+echo $! ><pid-file>
+```
+
+Use a self-contained brief:
+
+```text
+Objective: <one bounded outcome>
+Source/context: <issue, decisions, and files to read>
+Allowed paths: <paths the delegate may change>
+Acceptance evidence: <observable evidence required for each criterion>
+Model/effort: <selection resolved from models.toml>
+Effort policy: Children inherit this policy; do not raise effort or launch a stronger model without returning to the parent.
+Delegate verification: <commands runnable in the delegate sandbox>
+Parent verification: <checks the parent will run instead>
+Return conditions: <when to stop and return an unresolved question>
+Final report: <changed files, evidence, check results, deviations, open questions>
+```
+
+When the delegate cannot run the decisive tests, the parent runs them before
+requesting review. After two repair rounds on the same defect class, the parent
+stops dispatching single-finding patches and reassesses the route.
+
+Read-only investigation can use a stable shared source. Work that touches the
+same files runs in sequence or is integrated deliberately; do not run
+overlapping writers in one checkout. Respect the runtime's concurrency limit
+and avoid competing test suites on one host because temporary-directory cleanup
+can interfere.
 A linked worktree may have its shared Git directory outside the delegate's
 writable sandbox; leave commits to the parent when that directory is not
 writable. Retarget stacked PRs before deleting their base branch.
