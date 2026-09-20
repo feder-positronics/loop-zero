@@ -1484,6 +1484,24 @@ def test_merge_wait_reports_queue_ejection(wt: Path, gh: FakeGh, capsys) -> None
     assert wt.exists()
 
 
+def test_merge_wait_refuses_a_head_that_changed_in_the_queue(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    body = "# T1\n\n## Review\n"
+    gh.respond("pr list", [pr_json(headRefOid=head, body=body, isDraft=False)],
+               [pr_json(headRefOid="f" * 40, body=body, isDraft=False)])
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("pr merge", "")
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"})
+    queued = {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}}
+    gh.respond("api graphql", threads_json(), queued)
+
+    code, _out, err = run(capsys, "merge", "--wait")
+
+    assert code == 1 and f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
+    assert wt.exists(), "no cleanup after an unreviewed head"
+
+
 def test_pr_ignores_corrupt_checks_report(wt: Path, gh: FakeGh, capsys) -> None:
     (wt / ".loopzero" / "checks.json").write_text('{"results": "nope"}')
     gh.respond("pr list", [pr_json(headRefOid=head_of(wt))])

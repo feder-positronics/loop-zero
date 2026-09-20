@@ -739,11 +739,16 @@ def _wait_for_checks(
         _sleep(min(WAIT_INTERVAL, timeout - elapsed))
 
 
-def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None:
+def _wait_for_merge(config: Config, branch: str, pr: github.PR, timeout: float) -> str | None:
     """Poll until the queue lands the PR and return the merge SHA; None on timeout."""
     started = time.monotonic()
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     while True:
+        current = _require_pr(config, branch, allow_merged=True)
+        if current.head_sha != pr.head_sha:  # never clean up after an unreviewed head landed
+            raise CliError(
+                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
+            )
         sha = github.merged_sha(config.repo, pr.number)
         if sha:
             return sha
@@ -774,7 +779,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
     if sha is None and args.wait is not None:
-        sha = _wait_for_merge(config, pr, args.wait)
+        sha = _wait_for_merge(config, branch, pr, args.wait)
         if sha is None:
             print(f"timed out waiting for the merge queue to land PR #{pr.number}")
             return 3
