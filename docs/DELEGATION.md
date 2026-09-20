@@ -80,10 +80,16 @@ Before launch:
   that PID, never by a process-name pattern; and
 - give each writing delegate its own `loopzero start` worktree.
 
-For example:
+For example, a writing delegate with the brief in a file (briefs contain
+quotes, so do not inline them). State the sandbox mode; never rely on the CLI
+default. Use `read-only` for investigation:
 
 ```sh
-codex exec </dev/null -m <model> -c model_reasoning_effort=<effort> -C <worktree> -o <final-message-file> '<brief>' > <log-file> 2>&1 & delegate_pid=$!; printf '%s\n' "$delegate_pid" > <pid-file>
+codex exec --model <model> -c model_reasoning_effort=<effort> \
+  --sandbox workspace-write --cd <worktree> \
+  --output-last-message <final-message-file> "$(cat <brief-file>)" \
+  </dev/null ><log-file> 2>&1 &
+echo $! ><pid-file>
 ```
 
 Use a self-contained brief:
