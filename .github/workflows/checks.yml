@@ -29,18 +29,8 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
-          # Caps are absolute. A candidate over a cap fails only if it also grew
-          # against its base, so a repository that is already over can still
-          # merge changes that hold or shrink and never deadlocks.
-          count() { git ls-tree -r --name-only "$1" -- "$2" | grep '\.py$' \
-            | while read -r f; do git show "$1:$f"; done | wc -l; }
           git fetch -q --depth=1 origin "$BASE_SHA"
-          src=$(count HEAD src/loopzero); tests=$(count HEAD tests)
-          base_src=$(count "$BASE_SHA" src/loopzero); base_tests=$(count "$BASE_SHA" tests)
-          echo "src=$src (base $base_src, delta $((src-base_src)), cap 3000)"
-          echo "tests=$tests (base $base_tests, delta $((tests-base_tests)), cap 3800)"
-          { test "$src" -le 3000 || test "$src" -le "$base_src"; } \
-            && { test "$tests" -le 3800 || test "$tests" -le "$base_tests"; }
+          scripts/size_budget.sh "$BASE_SHA"
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q
