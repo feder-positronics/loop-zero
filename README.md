@@ -25,6 +25,8 @@ finding is open and required CI is green. The full rules fit in
 | `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for a merge queue before cleanup. |
 
 `loopzero status` prints where the current branch is in that sequence.
+`loopzero resolve` lists the open blocking findings with their ids;
+`loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
 
 For agent-directed delegation, [models.toml](models.toml) holds the current
 provider, model, effort, and category defaults. Agents read it through the

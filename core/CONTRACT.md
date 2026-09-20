@@ -47,7 +47,9 @@ A PR is ready when none of these hold:
 - A CI check named in `[checks].required_ci` is missing or not green on the
   exact head.
 
-Resolve a blocker by pushing a fix or resolving the thread with a reason. There
+Resolve a blocker by pushing a fix or resolving the thread with a reason
+(`loopzero resolve <id> "<reason>"` replies and resolves one finding; it never
+resolves in bulk or without a reply). There
 is no waiver file and no override flag. Readiness is a checklist derived from
 Git and GitHub, not a tamper-proof boundary: anyone with write access can edit
 or resolve threads; branch protection and CI remain the enforced gates.

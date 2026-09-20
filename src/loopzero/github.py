@@ -33,7 +33,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
       reviewThreads(first: 100, after: $after) {
         pageInfo { hasNextPage endCursor }
         nodes {
-          isResolved isOutdated path line
+          id isResolved isOutdated path line
           comments(first: 1) { nodes { body } }
         }
       }
@@ -378,6 +378,41 @@ def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
                    title=_title_of(rest), body=rest.strip())
 
 
+_REPLY_MUTATION = (
+    "mutation($thread:ID!,$body:String!){addPullRequestReviewThreadReply(input:"
+    "{pullRequestReviewThreadId:$thread,body:$body}){comment{id}}}"
+)
+_RESOLVE_MUTATION = (
+    "mutation($thread:ID!){resolveReviewThread(input:{threadId:$thread}){thread{isResolved}}}"
+)
+
+
+def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
+    """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
+    return [
+        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or "", node["id"], f)
+        for node in _unresolved_threads(repo, number)
+        if (f := _parse_thread(node, None))
+    ]
+
+
+def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
+    """Reply in the thread of open finding `finding_id` and resolve it."""
+    for marker_id, thread_id, finding in open_findings(repo, number):
+        if marker_id == finding_id:
+            # Two calls on purpose: fields of one mutation are not transactional, and a
+            # thread must never be resolved unless its reply was confirmed.
+            posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
+                              "-F", f"thread={thread_id}", "-f", f"body={reply}")
+            try:
+                posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
+            except (KeyError, TypeError) as exc:
+                raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
+            _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}")
+            return finding
+    raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
+
+
 def open_blocking_findings(
     repo: str, number: int, current_head: str | None = None
 ) -> list[Finding]:
@@ -386,9 +421,15 @@ def open_blocking_findings(
     Only explicit critical and important markers block. When `current_head` is supplied, an
     outdated thread is ignored unless its marker names that head.
     """
+    return [
+        f for node in _unresolved_threads(repo, number) if (f := _parse_thread(node, current_head))
+    ]
+
+
+def _unresolved_threads(repo: str, number: int) -> list[dict]:
     owner, name = repo.split("/", 1)
     after: str | None = None
-    found: list[Finding] = []
+    found: list[dict] = []
     while True:
         args = [
             "api", "graphql", "-f", f"query={_THREADS_QUERY}", "-F", f"owner={owner}",
@@ -401,12 +442,7 @@ def open_blocking_findings(
             threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
             nodes = threads["nodes"]
             page = threads["pageInfo"]
-            for node in nodes:
-                if node.get("isResolved"):
-                    continue
-                finding = _parse_thread(node, current_head)
-                if finding:
-                    found.append(finding)
+            found += [node for node in nodes if not node.get("isResolved")]
             if not page["hasNextPage"]:
                 return found
             after = page["endCursor"]

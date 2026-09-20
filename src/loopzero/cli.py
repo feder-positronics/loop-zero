@@ -820,6 +820,21 @@ def _delete_remote_branch(config: Config, branch: str) -> None:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}", file=sys.stderr)
 
 
+def cmd_resolve(args: argparse.Namespace) -> int:
+    """List open blocking findings, or reply to one with what changed and resolve its thread."""
+    wt, config = _context(args)
+    pr = _require_pr(config, worktree.branch(wt))
+    if not args.finding:
+        for marker_id, _thread, f in github.open_findings(config.repo, pr.number):
+            print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
+        return 0
+    if not args.reply.strip():
+        raise CliError("a reply saying what changed (or why it does not apply) is required")
+    finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
+    print(f"resolved {args.finding}: {finding.title}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
     if args.path:
@@ -886,6 +901,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
     ready.set_defaults(func=cmd_ready)
     merge.set_defaults(func=cmd_merge)
+    resolve = sub.add_parser("resolve", help="list open findings, or reply to one and resolve it")
+    resolve.add_argument("finding", nargs="?", help="finding id from the list (8 hex digits)")
+    resolve.add_argument("reply", nargs="?", default="", help="what changed, e.g. the fix commit")
+    resolve.set_defaults(func=cmd_resolve)
     status = sub.add_parser("status", help="show where this branch is in the sequence")
     status.add_argument("--path", action="store_true", help="print only the worktree path")
     status.set_defaults(func=cmd_status)
