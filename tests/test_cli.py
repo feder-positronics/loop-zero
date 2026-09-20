@@ -12,7 +12,7 @@ from loopzero import cli
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
 from tests.test_github import FakeGh, pr_json, threads_json
-from tests.test_runners import APPROVE, CHANGES, _claude_envelope, _fake_claude
+from tests.test_runners import APPROVE, CHANGES, _claude_envelope, _fake_claude, _fake_codex
 from tests.test_sandbox import FAKE_BWRAP
 
 REPO = "acme/widgets"
@@ -551,6 +551,93 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert "+print('hi')" in prompt and "primary review" in prompt and "## Context and goal" in prompt
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
+
+
+@pytest.mark.parametrize(
+    ("options", "model", "effort"),
+    [((), "opus", "medium"), (("--model", "sonnet", "--effort", "high"), "sonnet", "high")],
+    ids=["configured", "overridden"],
+)
+def test_review_passes_and_records_model_effort(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, options, model: str, effort: str
+) -> None:
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text() + """
+[delivery.review.claude]
+model = "opus"
+effort = "medium"
+allowed_efforts = ["medium", "high"]
+""")
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "configure review")
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 1})
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+
+    code, _, err = run(capsys, "review", *options)
+
+    assert (code, err) == (0, "")
+    argv = (fake_bin / "claude.argv").read_text().split("\0")
+    assert argv[argv.index("--model") + 1] == model
+    assert argv[argv.index("--effort") + 1] == effort
+    saved = json.loads((wt / ".loopzero" / f"review-{head[:12]}-primary.json").read_text())
+    assert (saved["model"], saved["effort"]) == (model, effort)
+    payload = json.loads(next(c["--input"] for c in gh.calls if c["argv"][1] == post_key()[4:]))
+    assert f"model {model} (effort {effort})" in payload["body"]
+
+
+def test_codex_config_is_recorded_without_banner(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    workflow = wt / "workflow.toml"
+    text = workflow.read_text().replace(
+        'reviewers = ["claude", "codex"]', 'reviewers = ["codex"]'
+    )
+    workflow.write_text(text + """
+[delivery.review.codex]
+model = "gpt-5.6-luna"
+effort = "high"
+allowed_efforts = ["high"]
+""")
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "configure codex review")
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 1})
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+
+    code, _, err = run(capsys, "review")
+
+    assert (code, err) == (0, "")
+    saved = json.loads((wt / ".loopzero" / f"review-{head[:12]}-primary.json").read_text())
+    assert (saved["model"], saved["effort"]) == ("gpt-5.6-luna", "high")
+    payload = json.loads(next(c["--input"] for c in gh.calls if c["argv"][1] == post_key()[4:]))
+    assert "model gpt-5.6-luna (effort high)" in payload["body"]
+
+
+@pytest.mark.parametrize("options,configured", [((), "max"), (("--effort", "max"), "medium")])
+def test_review_rejects_disallowed_effort_before_launch(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, options, configured: str
+) -> None:
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text() + f"""
+[delivery.review.claude]
+effort = "{configured}"
+allowed_efforts = ["medium"]
+""")
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "configure review")
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [])
+
+    code, out, err = run(capsys, "review", *options)
+
+    assert code == 1 and out == "" and "effort 'max' is not allowed for claude" in err
+    assert not (fake_bin / "claude.argv").exists()
 
 
 def test_review_refuses_when_reviewer_dirties_worktree(

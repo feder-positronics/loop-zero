@@ -143,11 +143,11 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
 
 
-def _review(family: str, cwd: Path, diff: str = "--- a\n+++ b\n+x\n"):
+def _review(family: str, cwd: Path, diff: str = "--- a\n+++ b\n+x\n", **options):
     if not (cwd / ".git").exists():
         git(cwd, "init", "-q")
     return review_with(family, cwd=cwd, head="abc123", kind="primary",
-                       diff=diff, task_text="Do the thing")
+                       diff=diff, task_text="Do the thing", **options)
 
 
 # ----------------------------------------------------------------- prompt
@@ -169,12 +169,14 @@ def test_claude_approve(
 ) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"claude-sonnet-4-6": {}}))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    result = _review("claude", tmp_path)
+    result = _review("claude", tmp_path, model="opus", effort="medium")
     assert result.verdict == "approve" and result.findings == ()
     assert result.family == "claude" and result.head == "abc123" and result.kind == "primary"
-    assert result.model == "claude-sonnet-4-6" and result.duration_s is not None
+    assert result.model == "claude-sonnet-4-6" and result.effort == "medium" and result.duration_s is not None
     assert json.loads(result.raw)["structured_output"] == APPROVE
     argv = _argv(fake_bin, "claude")
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "medium"
     stdin = (fake_bin / "claude.stdin").read_text()
     assert stdin.startswith("You are an independent code reviewer")
     assert "Do the thing" in stdin and "+x" in stdin
@@ -510,15 +512,18 @@ def test_codex_approve(
     monkeypatch.setenv("CODEX_HOME", str(configured))
     monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
     _fake_codex(fake_bin, json.dumps(APPROVE))
-    result = _review("codex", tmp_path)
+    result = _review("codex", tmp_path, model="gpt-5.6-luna", effort="high")
     assert result.verdict == "approve" and result.family == "codex"
-    assert result.model is None and result.duration_s is not None
+    assert result.model == "gpt-5.6-luna" and result.effort == "high"
+    assert result.duration_s is not None
     argv = _argv(fake_bin, "codex")
     assert argv[0] == "exec"
+    assert argv[argv.index("-m") + 1] == "gpt-5.6-luna"
+    assert "model_reasoning_effort=high" in argv
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert "--ignore-user-config" in argv
     assert argv[argv.index("--cd") + 1] == str(tmp_path.resolve()) and "--ephemeral" in argv
-    assert argv[argv.index("-c") + 1] == "mcp_servers={}"
+    assert "mcp_servers={}" in argv
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
     assert isolated != str(configured) and "loopzero-review-home-" in isolated
@@ -536,9 +541,10 @@ def test_codex_approve(
 
 
 def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, json.dumps(CHANGES))
+    _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
     result = _review("codex", tmp_path)
     assert result.verdict == "request_changes" and len(result.findings) == 2
+    assert result.model == "fallback"
     assert json.loads(result.raw)["session_id"] == "codex-session-123"
     assert result.provenance["token_usage"]["input_tokens"] == 123
 

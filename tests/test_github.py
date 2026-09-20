@@ -295,7 +295,7 @@ def test_update_body(gh: FakeGh) -> None:
 def review(verdict: str = "request_changes", findings: tuple[Finding, ...] = ()) -> ReviewResult:
     return ReviewResult(family="codex", head=HEAD, kind="primary", verdict=verdict,
                         findings=findings, raw="RAW MODEL OUTPUT", model="gpt-5.3-codex",
-                        duration_s=12.34)
+                        effort="medium", duration_s=12.34)
 
 
 FINDINGS = (
@@ -334,7 +334,7 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str) -> None:
     assert "Global concern" in comments[3]["body"] and "no file" in comments[3]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
     body = payload["body"]
-    assert "model gpt-5.3-codex, 12.3s" in body
+    assert "model gpt-5.3-codex (effort medium), 12.3s" in body
     assert body.startswith(prefix + "\n" if prefix else "loopzero primary review")
     assert "**request_changes** (1 critical, 2 important, 2 suggestion)" in body
     assert loose.title in body and loose.body in body

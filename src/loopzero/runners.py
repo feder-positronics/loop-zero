@@ -443,11 +443,13 @@ def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str,
 
 def _review_claude(
     prompt: str, *, cwd: Path, head: str, kind: str, timeout: int,
-    ro_paths: tuple[str, ...],
+    ro_paths: tuple[str, ...], model: str | None, effort: str | None,
 ) -> ReviewResult:
     argv = [
         "claude",
         "-p",
+        *(["--model", model] if model else []),
+        *(["--effort", effort] if effort else []),
         "--output-format",
         "json",
         "--json-schema",
@@ -497,17 +499,18 @@ def _review_claude(
             raise RunnerBadOutput("claude: result text is not JSON", _tail(raw)) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
-    model = ", ".join(models) or None
+    reported_model = ", ".join(models) or None
     provenance = _claude_provenance(envelope, raw)
     return replace(
         parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
-        model=model, duration_s=done.duration_s, provenance=provenance,
+        model=reported_model or model, effort=effort,
+        duration_s=done.duration_s, provenance=provenance,
     )
 
 
 def _review_codex(
     prompt: str, *, cwd: Path, head: str, kind: str, timeout: int,
-    ro_paths: tuple[str, ...],
+    ro_paths: tuple[str, ...], model: str | None, effort: str | None,
 ) -> ReviewResult:
     with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
         home = Path(tmp)
@@ -520,6 +523,8 @@ def _review_codex(
         argv = [
             str(binary),
             "exec",
+            *(["-m", model] if model else []),
+            *(["-c", f"model_reasoning_effort={effort}"] if effort else []),
             *(["--ignore-user-config"] if ignore_user_config else []),
             "--json",
             "--sandbox",
@@ -553,7 +558,7 @@ def _review_codex(
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     return replace(
         parse_review(payload, family="codex", head=head, kind=kind, raw=raw),
-        model=banner_model.group(1) if banner_model else None,
+        model=model or (banner_model.group(1) if banner_model else None), effort=effort,
         duration_s=done.duration_s,
         provenance=provenance,
     )
@@ -569,6 +574,8 @@ def review_with(
     task_text: str,
     reviewer_ro_paths: tuple[str, ...] = (),
     timeout: int = 900,
+    model: str | None = None,
+    effort: str | None = None,
 ) -> ReviewResult:
     """Run one review of ``diff`` at ``head`` with the given model family."""
     if family not in FAMILIES:
@@ -579,7 +586,7 @@ def review_with(
     adapter = _review_claude if family == "claude" else _review_codex
     return adapter(
         prompt, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
-        ro_paths=reviewer_ro_paths,
+        ro_paths=reviewer_ro_paths, model=model, effort=effort,
     )
 
 
@@ -615,6 +622,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         findings=findings,
         raw=json.dumps(envelopes, separators=(",", ":")),
         model=", ".join(dict.fromkeys(r.model for r in results if r.model)) or None,
+        effort=", ".join(dict.fromkeys(r.effort for r in results if r.effort)) or None,
         duration_s=sum(r.duration_s for r in results if r.duration_s is not None),
         provenance=provenance,
         chunk_count=len(results),
