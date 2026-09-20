@@ -6,7 +6,11 @@ base = "main"
 
 [checks]
 # Omit scratch to use the built-in default directories.
-commands = ["uv run --group dev ruff check src tests", "uv run --group dev pytest -q"]
+commands = [
+  "uv run --group dev ruff check src tests",
+  "uv run --group dev pytest -q",
+  "scripts/size_budget.sh", # Same script and caps as CI; base is the merge-base with origin/main.
+]
 required_ci = ["checks"]
 ro_paths = ["/home/marcin/.local/bin", "/home/marcin/.local/share/uv"]
 writable = ["/home/marcin/.cache/uv"]

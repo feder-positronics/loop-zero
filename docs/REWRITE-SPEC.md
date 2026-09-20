@@ -10,13 +10,20 @@ generations/slots/leases, no provisional bindings, no settlement capsules, no
 compatibility mode for old runs. The old tree exists only in git history
 (`git show main:<path>`) and may be read for facts, never copied wholesale.
 
-Budget: `src/` <= 2,900 lines, `tests/` <= 3,650 lines, `core/` <= 600 lines
+Budget: `src/` <= 3,400 lines, `tests/` <= 4,300 lines, `core/` <= 600 lines
 of Markdown, one CI workflow. Anything that pushes past the budget needs a
 reason in the PR. CI compares each candidate with its base: over the cap, a
 change may still merge if it holds or shrinks the count, so an over-budget
 main never blocks its own repair. The caps were set to the measured counts on
 2026-09-18 after concurrent merges overshot the original 2,500/3,500, then
-raised by 40/50 for merge-queue handling in `merge` the same day.
+raised by 40/50 for merge-queue handling in `merge` the same day. Later raises
+to 3,000/3,800 left no headroom: by 2026-09-19 both counts sat exactly on the
+caps, #163 deleted a working resolver and #165 consolidated tests to fit 11
+lines. On 2026-09-20 the owner approved one budgeted raise to 3,400/4,300 to
+fund the CLI fixes filed as #166-#175 (#169). The caps live only in
+`scripts/size_budget.sh`, which CI and `loopzero check` both run and which
+prints the remaining headroom. A further raise needs an issue naming what it
+pays for.
 
 ## The delivery procedure (the whole contract)
 
