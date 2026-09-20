@@ -727,7 +727,8 @@ def _wait_for_checks(
             print("waiting: " + "; ".join(pending))
             shown = pending
         elapsed = time.monotonic() - started
-        if elapsed >= MISSING_RUN_GRACE and any(" missing on " in r for r in pending):
+        # Only when nothing is running at all: a pending sibling check proves CI is alive.
+        if elapsed >= MISSING_RUN_GRACE and all(" missing on " in r for r in pending):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: GitHub created no run for this "
                 f"head. Recover with `gh pr close {pr.number}` then `gh pr reopen {pr.number}` "

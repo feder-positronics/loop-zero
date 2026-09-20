@@ -1127,6 +1127,22 @@ def test_ready_wait_reports_a_check_run_that_never_started(
     assert "gh pr close 7" in err and "gh pr reopen 7" in err
 
 
+def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """A missing check next to a pending one means CI is alive: time out, do not abort."""
+    (tmp_path / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', '["a", "b"]'))
+    config = cli.config_mod.load(tmp_path / "workflow.toml")
+    pr = cli.github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE")
+    reasons = (f"required check 'a' missing on {'a' * 12}", "required check 'b' is pending")
+    monkeypatch.setattr(cli, "_require_pr", lambda *a, **k: pr)
+    monkeypatch.setattr(cli, "_readiness", lambda *a, **k: cli.github.Readiness(False, reasons))
+    monkeypatch.setattr(cli.worktree, "branch", lambda wt: "lz/t1")
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+
+    assert cli._wait_for_checks(Path("."), config, pr, 0.0, kicked=False) is None
+
+
 def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
@@ -1458,8 +1474,8 @@ def test_merge_wait_reports_queue_ejection(wt: Path, gh: FakeGh, capsys) -> None
     gh.respond("pr merge", "")
     open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"}
     gh.respond("pr view", open_pr, open_pr)
-    queue = lambda value: {
-        "data": {"repository": {"pullRequest": {"isInMergeQueue": value}}}}
+    def queue(value: bool) -> dict:
+        return {"data": {"repository": {"pullRequest": {"isInMergeQueue": value}}}}
     gh.respond("api graphql", threads_json(), queue(True), queue(False))
 
     code, out, err = run(capsys, "merge", "--wait")
