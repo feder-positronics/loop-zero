@@ -368,7 +368,7 @@ def _append_review(body: str, result: ReviewResult) -> str:
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
-    """Best-effort refresh of an existing PR, without querying GitHub before first push."""
+    """Best-effort refresh of an existing PR after the branch has an upstream."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
     upstream = _proc.run(argv, cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
     if upstream.exit_code != 0:
@@ -448,8 +448,25 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_task_branch(config, branch)
     _require_clean(wt)
     _require_pr_details(wt)
-    _git(wt, "push", "-u", "origin", branch)
     pr = github.pr_for_branch(config.repo, branch)
+    force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
+    push = ["push", "-u", "origin"]
+    if force_lease:
+        # Only rewrite history this worktree has seen; an unknown remote head is someone else's.
+        known = _proc.run(["git", "cat-file", "-e", f"{pr.head_sha}^{{commit}}"], cwd=wt,
+                          env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
+        if known.exit_code != 0:
+            raise CliError(
+                f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
+            )
+        push.append(f"--force-with-lease={branch}:{pr.head_sha}")
+    push.append(branch)
+    try:
+        _git(wt, *push)
+    except CliError as exc:
+        if force_lease:
+            raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
+        raise
     if pr is not None and pr.state == "OPEN":
         body = _pr_body(wt, head, _sync_task_narrative(wt, pr.body or ""))
         if body != (pr.body or "").replace("\r\n", "\n"):

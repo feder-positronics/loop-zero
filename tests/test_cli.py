@@ -444,13 +444,21 @@ def test_check_fails_when_base_workflow_is_malformed(
 # --- pr ------------------------------------------------------------------------------------
 
 
-def test_pr_pushes_and_creates_draft(wt: Path, repo: Path, gh: FakeGh, capsys) -> None:
+def test_pr_pushes_and_creates_draft(
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys
+) -> None:
     run(capsys, "check")
     head = head_of(wt)
     gh.respond("pr list", [], [pr_json(headRefOid=head)])
     gh.respond("pr create", URL + "\n")
+    pushes = tmp_path / "pushes"
+    fake_tool("git", f'''\
+if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
+exec /usr/bin/git "$@"
+''')
     code, out, err = run(capsys, "pr")
     assert (code, out, err) == (0, URL + "\n", "")
+    assert pushes.read_text().strip() == "push -u origin lz/t1"
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", "lz/t1").strip() == head
     create = next(c for c in gh.calls if c["argv"][:2] == ["pr", "create"])
@@ -513,6 +521,69 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
         ["pr", "list"], ["api", f"repos/{REPO}/pulls/7"]
     ]
     assert "(no `loopzero check` run recorded)" in gh.calls[1]["--input"]
+
+
+def test_pr_uses_lease_for_rewritten_open_pr(
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys
+) -> None:
+    old = head_of(wt)
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    git(wt, "reset", "-q", "--soft", "HEAD~1")
+    git(wt, "commit", "-q", "-m", "rebased feature")
+    head = head_of(wt)
+    pushes = tmp_path / "pushes"
+    fake_tool("git", f'''\
+if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
+exec /usr/bin/git "$@"
+''')
+    gh.respond("pr list", [pr_json(headRefOid=old)])
+    gh.respond(f"api repos/{REPO}/pulls/7", {})
+
+    code, out, err = run(capsys, "pr")
+
+    assert (code, out, err) == (0, URL + "\n", "")
+    assert pushes.read_text().strip() == (
+        f"push -u origin --force-with-lease=lz/t1:{old} lz/t1"
+    )
+    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == head
+
+
+def test_pr_reports_rejected_lease_without_overwriting_remote(
+    wt: Path, repo: Path, gh: FakeGh, tmp_path: Path, capsys
+) -> None:
+    old = head_of(wt)
+    origin = repo.parent / "origin.git"
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    git(wt, "reset", "-q", "--soft", "HEAD~1")
+    git(wt, "commit", "-q", "-m", "rebased feature")
+    mover = tmp_path / "mover"
+    git(tmp_path, "clone", "-q", str(origin), str(mover))
+    git(mover, "checkout", "-q", "-b", "lz/t1", "origin/lz/t1")
+    (mover / "remote.txt").write_text("moved\n")
+    git(mover, "add", "remote.txt")
+    git(mover, "commit", "-q", "-m", "remote move")
+    git(mover, "push", "-q", "origin", "lz/t1")
+    moved = git(origin, "rev-parse", "refs/heads/lz/t1").strip()
+    gh.respond("pr list", [pr_json(headRefOid=old)])
+
+    code, out, err = run(capsys, "pr")
+
+    assert code == 1 and out == "" and "remote moved" in err
+    assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == moved
+
+
+def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
+    wt: Path, repo: Path, gh: FakeGh, capsys
+) -> None:
+    origin = repo.parent / "origin.git"
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    pushed = git(origin, "rev-parse", "refs/heads/lz/t1").strip()
+    gh.respond("pr list", [pr_json(headRefOid="f" * 40)])  # head pushed by someone else
+
+    code, out, err = run(capsys, "pr")
+
+    assert code == 1 and out == "" and "is not in this worktree" in err
+    assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == pushed
 
 
 def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
