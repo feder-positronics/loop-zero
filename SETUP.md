@@ -12,7 +12,10 @@
 
 ## Install
 
-Pin to a full commit SHA; upgrade by re-running with a new SHA. User-wide:
+Pin to a full commit SHA; upgrade by re-running with a new SHA.
+`loopzero --version` prints the installed revision. Never edit the installed
+package: a hotfix is a branch, a PR, and a reinstall from the merged SHA.
+User-wide:
 
 ```sh
 uv tool install "git+https://github.com/feder-positronics/loop-zero@<sha>"
