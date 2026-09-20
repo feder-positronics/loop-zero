@@ -16,7 +16,8 @@ hold all state. Nothing is recorded anywhere else.
    `pr` calls sync task narrative but preserve live Validation, Review and extra
    sections; `check` refreshes only the checks block. A draft never needs a clean review.
 4. `loopzero review` — run one independent model review on the exact head.
-   Findings are posted as one GitHub PR review with inline comments.
+   Findings are posted as one GitHub PR review with inline comments. It exits 0
+   on `approve` and 5 on `request_changes`.
 5. `loopzero ready` — compute readiness (below). If ready, mark the PR ready
    for review. If a draft is blocked only by missing or skipped required
    checks, mark it ready to trigger CI and exit 3. With `--wait[=SECONDS]`
@@ -98,3 +99,9 @@ prevent the reviewer from sending readable data over the required network.
 
 Every command fails closed and loud: a missing tool or a nonzero exit prints
 the command and the tail of its output and stops. Nothing retries on its own.
+
+Keep that property when chaining commands: never pipe a `loopzero` command
+into `tail`, `grep` or `head` (the filter's exit status replaces the verdict);
+redirect output to a file, chain with `&&` under `set -o pipefail`, and treat
+exit 3 (waiting) and 5 (changes requested) as outcomes, not crashes. The last
+line of output states the verdict.

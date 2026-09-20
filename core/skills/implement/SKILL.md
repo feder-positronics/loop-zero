@@ -32,7 +32,9 @@ available runtime.
    Fix nonzero exits; do not edit the
    check list to make them pass. Running the test command directly is for
    iteration only: the sandbox hides host tools that CI also lacks, so only
-   the `loopzero check` report counts as proof.
+   the `loopzero check` report counts as proof. Never filter a `loopzero`
+   command through a pipe; its exit code is the verdict (see the contract's
+   Failure section).
 5. Commit in small steps with messages that state what changed. Keep the
    diff free of unrelated formatting churn.
 6. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped

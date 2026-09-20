@@ -586,6 +586,13 @@ def test_pr_refuses_to_overwrite_a_pr_head_it_has_never_seen(
     assert git(origin, "rev-parse", "refs/heads/lz/t1").strip() == pushed
 
 
+def test_version_names_the_installed_revision(capsys) -> None:
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["--version"])
+    out = capsys.readouterr().out
+    assert stop.value.code == 0 and re.fullmatch(r"loopzero \S+ .+\n", out), out
+
+
 def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
     (wt / "scratch.txt").write_text("x")
     code, out, err = run(capsys, "pr")
@@ -609,7 +616,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     gh.respond(post_key(), {"id": 1})
     _fake_claude(fake_bin, _claude_envelope(CHANGES))
     code, out, err = run(capsys, "review")
-    assert (code, err) == (0, "")
+    assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out == (
         f"primary review by claude on {head[:12]}: request_changes "
         "(0 critical, 1 important, 1 suggestion)\n"
@@ -755,7 +762,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     (fake_bin / "claude.stdin").unlink()
     gh.respond(post_key(), {"id": 5})
     code, out, err = run(capsys, "review", "--repost")
-    assert (code, err) == (0, "") and out.startswith("primary review by claude"), err
+    assert (code, err) == (5, "") and out.startswith("primary review by claude"), err
     assert not (fake_bin / "claude.stdin").exists(), "no model invoked"
     payload = json.loads(next(
         c["--input"] for c in reversed(gh.calls)

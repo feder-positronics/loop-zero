@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import importlib.metadata
 import json
 import re
 import sys
@@ -537,7 +538,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")
-    return 0
+    return 0 if result.verdict == "approve" else 5  # the exit code is the verdict, as for check
 
 
 def _run_review(
@@ -860,6 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config", type=Path, default=None, help="path to workflow.toml (default: repo root)"
     )
+    parser.add_argument("--version", action="version", version=_version())
     sub = parser.add_subparsers(dest="command", required=True)
     start = sub.add_parser("start", help="create an owned worktree and branch for <slug>")
     start.add_argument("slug")
@@ -888,6 +890,16 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--path", action="store_true", help="print only the worktree path")
     status.set_defaults(func=cmd_status)
     return parser
+
+
+def _version() -> str:
+    """Package version plus the pinned source revision when installed from Git."""
+    dist = importlib.metadata.distribution("loopzero")
+    try:
+        commit = json.loads(dist.read_text("direct_url.json") or "{}")["vcs_info"]["commit_id"]
+    except (KeyError, TypeError, json.JSONDecodeError):
+        commit = "unknown revision (not installed from a Git URL)"
+    return f"loopzero {dist.version} {commit}"
 
 
 def main(argv: list[str] | None = None) -> int:
