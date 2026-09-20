@@ -17,6 +17,13 @@ class ResourceLimits:
 
 
 @dataclass(frozen=True)
+class ReviewConfig:
+    model: str | None = None
+    effort: str | None = None
+    allowed_efforts: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Config:
     repo: str  # "owner/name"
     base_branch: str  # "main"
@@ -33,6 +40,7 @@ class Config:
     scratch: tuple[str, ...] = (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
     env: tuple[tuple[str, str], ...] = ()  # fixed variables set inside the sandbox; win over host
     limits: ResourceLimits = ResourceLimits()  # best-effort per-check shell resource limits
+    review: dict[str, ReviewConfig] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -76,3 +84,4 @@ class ReviewResult:
     duration_s: float | None = None
     provenance: dict[str, object] = field(default_factory=dict)
     chunk_count: int = 1
+    effort: str | None = None

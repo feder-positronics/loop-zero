@@ -9,7 +9,7 @@ from typing import Any
 
 from . import _proc
 from . import worktree as worktree_mod
-from .types import Config, LoopZeroError, ResourceLimits
+from .types import Config, LoopZeroError, ResourceLimits, ReviewConfig
 
 MERGE_STRATEGIES = ("squash", "merge", "rebase", "queue")
 REVIEWER_FAMILIES = ("claude", "codex")
@@ -38,6 +38,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
         "reviewers": list,
         "reviewer_ro_paths": list,
         "review_chunk_bytes": int,
+        "review": dict,
     },
 }
 
@@ -147,6 +148,24 @@ def _build(data: dict[str, Any]) -> Config:
     review_chunk_bytes = delivery.get("review_chunk_bytes", 200_000)
     if isinstance(review_chunk_bytes, bool) or review_chunk_bytes <= 0:
         raise ConfigError("delivery.review_chunk_bytes must be a positive int")
+    review: dict[str, ReviewConfig] = {}
+    for family, table in delivery.get("review", {}).items():
+        if family not in REVIEWER_FAMILIES:
+            raise ConfigError(f"unknown review family delivery.review.{family}")
+        if not isinstance(table, dict):
+            raise ConfigError(f"[delivery.review.{family}] must be a table")
+        _reject_unknown(
+            f"[delivery.review.{family}]", table, ("model", "effort", "allowed_efforts")
+        )
+        for key in ("model", "effort"):
+            if key in table and (not isinstance(table[key], str) or not table[key]):
+                raise ConfigError(f"delivery.review.{family}.{key} must be a non-empty str")
+        if "allowed_efforts" in table and not isinstance(table["allowed_efforts"], list):
+            raise ConfigError(f"delivery.review.{family}.allowed_efforts must be a list")
+        allowed = _strings(
+            f"delivery.review.{family}.allowed_efforts", table.get("allowed_efforts", [])
+        )
+        review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
 
     kwargs: dict[str, Any] = {}
     if "env_allowlist" in checks:
@@ -175,6 +194,7 @@ def _build(data: dict[str, Any]) -> Config:
         required_ci=_strings("checks.required_ci", checks.get("required_ci", [])),
         merge_strategy=merge,
         reviewers=reviewers,
+        review=review,
         reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),

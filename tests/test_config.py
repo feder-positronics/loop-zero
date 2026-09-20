@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from loopzero import config
-from loopzero.types import Config, ResourceLimits
+from loopzero.types import Config, ResourceLimits, ReviewConfig
 
 FULL = """
 [repo]
@@ -26,6 +26,11 @@ merge = "rebase"
 reviewers = ["codex"]
 reviewer_ro_paths = ["/opt/claude", "/opt/codex"]
 review_chunk_bytes = 12345
+
+[delivery.review.codex]
+model = "gpt-5.6-luna"
+effort = "medium"
+allowed_efforts = ["low", "medium", "high"]
 """
 
 
@@ -43,6 +48,7 @@ def test_load_full_config(tmp_path):
         required_ci=("checks",),
         merge_strategy="rebase",
         reviewers=("codex",),
+        review={"codex": ReviewConfig("gpt-5.6-luna", "medium", ("low", "medium", "high"))},
         reviewer_ro_paths=("/opt/claude", "/opt/codex"),
         review_chunk_bytes=12345,
         network=True,
@@ -101,6 +107,12 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = []\n', "at least one reviewer"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewer_ro_paths = ["relative"]\n', "must be absolute"),
         ('[repo]\nname = "o/n"\n[delivery]\nreview_chunk_bytes = 0\n', "positive int"),
+        ('[repo]\nname = "o/n"\n[delivery.review.codex]\nmode = "x"\n',
+         "unknown key\\(s\\) in \\[delivery.review.codex\\]: mode"),
+        ('[repo]\nname = "o/n"\n[delivery.review.codex]\nallowed_efforts = [1]\n',
+         "allowed_efforts must be a list of non-empty strings"),
+        ('[repo]\nname = "o/n"\n[delivery.review.codex]\nallowed_efforts = "medium"\n',
+         "allowed_efforts must be a list"),
         ('[repo]\nname = "o/n"\n[checks]\nro_paths = ["rel/path"]\n', "must be absolute"),
         ('[repo]\nname = "o/n"\n[checks]\nwritable = ["/run/x"]\n', "writable must not expose"),
         ('[repo]\nname = "o/n"\n[checks]\nscratch = ["../x"]\n', "scratch entries must be relative"),

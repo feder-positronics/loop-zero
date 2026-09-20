@@ -487,7 +487,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         )
     else:
         try:
-            result = _run_review(wt, config, head, kind, reviewed)
+            result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort)
         except sandbox.SandboxUnavailable as exc:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
@@ -518,7 +518,10 @@ def cmd_review(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | None) -> ReviewResult:
+def _run_review(
+    wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
+    model: str | None = None, effort: str | None = None,
+) -> ReviewResult:
     since = reviewed if kind == "delta" else _primary_base(wt, config)
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
@@ -529,11 +532,23 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
     excluded = [family for family in config.reviewers if family == author]
     if not candidates:
         raise IndependentReviewerUnavailable(_independence_message(author, excluded, failures))
+    selected: dict[str, tuple[str | None, str | None]] = {}
+    for family in candidates:  # validate every candidate before launching any reviewer
+        settings = config.review.get(family)
+        chosen = effort or (settings.effort if settings else None)
+        if settings and chosen and settings.allowed_efforts and chosen not in settings.allowed_efforts:
+            raise CliError(
+                f"effort {chosen!r} is not allowed for {family}; "
+                f"expected one of {settings.allowed_efforts}"
+            )
+        selected[family] = (model or (settings.model if settings else None), chosen)
     for family in candidates:
+        selected_model, selected_effort = selected[family]
         try:
             result = runners.review_with(
                 family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task,
                 reviewer_ro_paths=config.reviewer_ro_paths,
+                model=selected_model, effort=selected_effort,
             )
             break
         except runners.RunnerPromptTooLong:
@@ -546,6 +561,7 @@ def _run_review(wt: Path, config: Config, head: str, kind: str, reviewed: str | 
                 runners.review_with(
                     family, cwd=wt, head=head, kind=kind, diff=chunk, task_text=task,
                     reviewer_ro_paths=config.reviewer_ro_paths,
+                    model=selected_model, effort=selected_effort,
                 )
                 for chunk in chunks
             ]
@@ -755,6 +771,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument(
         "--repost", action="store_true", help="post the saved review for HEAD without a model"
     )
+    review.add_argument("--model", help="reviewer model override for this run")
+    review.add_argument("--effort", help="reviewer effort override for this run")
     review.set_defaults(func=cmd_review)
     sub.add_parser("ready", help="compute readiness and mark the PR ready").set_defaults(
         func=cmd_ready

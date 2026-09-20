@@ -235,11 +235,12 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
               ("critical", "important", "suggestion")}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
+    effort = f" (effort {result.effort})" if result.effort else ""
     lines = [prefix.rstrip("\n")] if prefix else []
     lines += [
         (
             f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-            f"model {result.model or 'unknown'}, {duration}: "
+            f"model {result.model or 'unknown'}{effort}, {duration}: "
             f"**{result.verdict}** ({summary})"
         ),
     ]

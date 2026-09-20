@@ -55,3 +55,15 @@ reviewers = ["claude", "codex"]
 # loop-zero mounts the resolved directory of the selected reviewer binary.
 # Claude installations may need their npm or bun prefix listed here.
 # reviewer_ro_paths = ["/home/<you>/.local/share/npm", "/home/<you>/.bun"]
+
+# Optional per-family defaults. `--model` and `--effort` override these for one run;
+# `allowed_efforts` rejects any configured or overridden effort not in the list.
+# [delivery.review.claude]
+# model = "opus"
+# effort = "medium"
+# allowed_efforts = ["medium", "high"]
+
+# [delivery.review.codex]
+# model = "gpt-5.6-luna"
+# effort = "medium"
+# allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
