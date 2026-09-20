@@ -15,6 +15,15 @@ Read the relevant section when its condition applies.
   completion in the closing delivery; a child issue does not own its parent's
   blueprint.
 
+## Evidence Shown For Approval
+
+- Any count, census, or state presented to the requester for a decision carries
+  its provenance on the same line: environment, service or host, how the
+  connection was resolved, and the time read. Local and staging data are never
+  labelled production.
+- A request to approve a production change restates that provenance. If the
+  source turns out wrong, say so, void the approval, and ask again.
+
 ## Collision, Waiting, And Re-entry
 
 - Treat the issue as singly owned. Recheck branches and PRs before the first edit,
