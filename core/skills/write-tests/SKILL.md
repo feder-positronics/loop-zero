@@ -33,8 +33,9 @@ quality needs more detail.
 
 ## Validate And Exit
 
-Run the focused test while developing, demonstrate that it fails for the
-intended bad behavior, then run the narrow neighboring suite and
+Run the focused test while developing and watch it fail on the pre-fix code
+for the intended bad behavior; record that failing line in `.loopzero/task.md`.
+A test never seen failing is not yet proof. Then run the narrow neighboring suite and
 `loopzero check`. Keep fixtures minimal and deterministic and preserve the
 runner's exit status.
 

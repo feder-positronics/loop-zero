@@ -18,6 +18,7 @@ threads.
 - Does the change meet each acceptance line? Missing proof is a finding.
 - Would it break a caller, data shape, permission boundary, or build?
 - Is any test asserting less than the objective claims?
+- Does every test or acceptance check named in the PR body or docs exist in the diff or tree?
 
 Report demonstrated failures with a failure condition and impact. Separate
 "could not verify" from "is wrong". Generic advice is not a finding.

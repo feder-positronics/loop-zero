@@ -25,8 +25,9 @@ available runtime.
    the missing seam instead of disguising it as coverage.
 3. Make the test oracle independent of the implementation: assert observable
    outputs, state, or boundary effects, not the same calculation, mock calls, or
-   internal steps used by the code. Demonstrate that the test can fail for the
-   intended regression before relying on its green result.
+   internal steps used by the code. A regression test counts only after you
+   watched it fail on the pre-fix code; record that failing output line in
+   `.loopzero/task.md` Notes. A test that passes without the fix proves nothing.
 4. Run focused checks while iterating, then `loopzero check` before pushing.
    Fix nonzero exits; do not edit the
    check list to make them pass. Running the test command directly is for

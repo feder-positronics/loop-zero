@@ -12,7 +12,8 @@ smallest repair route, not a fix.
 ## Do
 
 1. Reproduce with the smallest case you can: one test, one command, one
-   input. Record the exact command and output.
+   input. Record the exact command and output, and which environment and
+   data source it ran against; do not report local or staging state as production.
 2. Decide whether the failure is environmental (missing tool, network,
    sandbox, stale dependency) or behavioral (the code does the wrong thing).
    Run the reproduction through `loopzero check` to rule out the first.
