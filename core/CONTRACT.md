@@ -62,6 +62,8 @@ or resolve threads; branch protection and CI remain the enforced gates.
 - Fixes after the delta review require a fresh lineage: new commits, new
   primary review.
 - Mechanical fixes (format, lint, rename) need checks rerun, not a review.
+- A fresh lineage is not a way to keep patching: repeated findings of one defect
+  class mean the class was not audited; see `resolve-findings`.
 - A reviewer run that yields no verdict (missing tool, authentication failure,
   unparseable output) does not consume the budget; `loopzero review` moves to
   the next configured family and exits nonzero with each reason if all fail.

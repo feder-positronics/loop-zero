@@ -18,7 +18,13 @@ or `.loopzero/task.md`, and enough code to verify current behavior and ownership
 ## Do
 
 1. State the objective in one paragraph. If the request contains two
-   independent outcomes, split it into two tasks.
+   independent outcomes, split it into two tasks. For state machines,
+   migrations, auth, or concurrency, one PR changes one behavioral invariant,
+   and its acceptance names that invariant's callers, readers, and transitions.
+   Generated code (SDKs, lockfiles) goes in its own mechanical commit. A slice
+   beyond roughly 1,500 hand-written changed lines is split, or the task file
+   says why it cannot be: a reviewer samples a diff that large, it does not
+   verify it.
 2. Write acceptance as observable conditions: a test that passes, a command
    whose output changes, a page that renders. No adjectives.
 3. List the paths you expect to touch, their current owner or governing

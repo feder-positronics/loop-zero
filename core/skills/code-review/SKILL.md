@@ -20,6 +20,10 @@ threads.
 - Is any test asserting less than the objective claims?
 - Does every test or acceptance check named in the PR body or docs exist in the diff or tree?
 
+When a failure is one instance of a class (a missed caller, reader, state
+transition, or retry path), find and report the other instances in the same
+review; a sibling discovered next round is a miss of this one.
+
 Report demonstrated failures with a failure condition and impact. Separate
 "could not verify" from "is wrong". Generic advice is not a finding.
 
