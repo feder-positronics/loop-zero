@@ -185,16 +185,16 @@ loopzero check                        # exit 0, or FAIL; renders the PR Validati
 loopzero pr                           # draft PR opens; URL printed
 loopzero review                       # model review posted on the PR
 loopzero check && loopzero review     # after fixing blocking threads: delta review
-loopzero ready                        # marks PR ready if head/findings/CI pass
-loopzero merge                        # merges, deletes branch and worktree
+loopzero ready --wait                 # waits for required CI, then marks the PR ready
+loopzero merge --wait                 # merges (following a merge queue), deletes branch and worktree
 loopzero status                       # at any point: next step and why
 ```
 
 ## Merging under a merge queue
 
 When the base branch uses a GitHub merge queue, `loopzero merge` enqueues the
-PR and exits after printing that it is queued. Nothing polls. Run
-`loopzero merge` again once the queue has landed it; that run verifies the
+PR. With `--wait` it follows the queue to the landed commit; without it, it
+exits after printing that it is queued, and a later `loopzero merge` verifies the
 merge commit, deletes the remote branch and removes the worktree. The
 repository must allow auto-merge (Settings, General, "Allow auto-merge"),
 otherwise `gh pr merge` fails with "Auto merge is not allowed". Set

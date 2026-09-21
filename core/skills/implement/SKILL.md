@@ -45,7 +45,9 @@ available runtime.
    repairs get the one delta review. Reply with what changed using
    `loopzero resolve <id> "<fix commit and what changed>"`; do not resolve a
    thread silently.
-8. Stop at `loopzero ready`. Merge only when the task says so.
+8. Stop at `loopzero ready --wait`; it waits for the required checks, so never
+   write a `gh` polling loop. Merge only when the task says so, with
+   `loopzero merge --wait`.
 
 ## Stop when
 

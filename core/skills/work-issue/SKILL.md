@@ -42,9 +42,10 @@ available runtime.
 6. Run `loopzero review` for the independent primary review. Address every open
    `critical` and `important` thread, reply with the fix commit, rerun
    `loopzero check`, and use the single delta review allowed by the contract.
-7. Run `loopzero ready`. If it reports missing CI, wait for the named checks and
-   rerun it; do not bypass readiness or resolve a finding silently.
-8. Recheck issue and competing-PR state, then run `loopzero merge`. Do not close
+7. Run `loopzero ready --wait`; it waits for the required checks on this head.
+   Never write a `gh` polling loop. Do not bypass readiness or resolve a finding
+   silently.
+8. Recheck issue and competing-PR state, then run `loopzero merge --wait`. Do not close
    an umbrella issue from a partial delivery.
 
 ## Stops

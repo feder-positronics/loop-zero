@@ -28,6 +28,7 @@ PAGE = 100
 # --wait: poll interval, default timeout, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
 WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 10.0, 1800.0, 120.0
+NEXT_WAIT = "next: loopzero ready --wait"  # named at the moment of need; agents hand-roll polls otherwise
 _sleep = time.sleep
 OFFLINE_FAILURE_RE = re.compile(
     r"failed to fetch|dns error|network is unreachable|temporary failure in name resolution|"
@@ -681,6 +682,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
         github.mark_ready(config.repo, pr.number)
         print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
         if args.wait is None:
+            print(f"waiting for required checks; {NEXT_WAIT}")
             return 3
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness.reasons)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=bool(waiting))
@@ -691,6 +693,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
+        if args.wait is None and _pending_checks(config, pr, readiness.reasons):
+            print(f"not ready: required checks pending or missing; {NEXT_WAIT}")
         return 1
     if pr.is_draft and not waiting:  # `waiting` means this run already marked it ready
         github.mark_ready(config.repo, pr.number)
@@ -799,7 +803,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         _cleanup(wt)
         return 0
     if not readiness.ready:
-        raise CliError("not ready to merge: " + "; ".join(readiness.reasons))
+        hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness.reasons) else ""
+        raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
     if sha is None and args.wait is not None:
         sha = _wait_for_merge(config, branch, pr, args.wait)
@@ -809,7 +814,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if sha is None:
         print(
             f"PR #{pr.number} is queued for merge into {config.base_branch}; "
-            "rerun `loopzero merge` once the queue lands it to verify and clean up"
+            "next: loopzero merge --wait follows the queue, verifies and cleans up"
         )
         return 0
     print(sha)
@@ -897,8 +902,12 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--model", help="reviewer model override for this run")
     review.add_argument("--effort", help="reviewer effort override for this run")
     review.set_defaults(func=cmd_review)
-    ready = sub.add_parser("ready", help="compute readiness and mark the PR ready")
-    merge = sub.add_parser("merge", help="recheck readiness, merge, remove the worktree")
+    ready = sub.add_parser(
+        "ready", help="compute readiness and mark the PR ready; --wait polls required checks"
+    )
+    merge = sub.add_parser(
+        "merge", help="recheck readiness, merge, remove the worktree; --wait follows a merge queue"
+    )
     for waiter, what in ((ready, "required checks on this head"), (merge, "the merge queue")):
         waiter.add_argument(
             "--wait", nargs="?", const=WAIT_TIMEOUT, type=float, metavar="SECONDS",
