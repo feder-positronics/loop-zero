@@ -1104,6 +1104,32 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
     assert out == "not ready: required check 'checks' is failure\n"
 
 
+def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
+               {"check_runs": [{"name": "checks", "status": "in_progress"}]})
+
+    code, out, err = run(capsys, "ready")
+
+    assert (code, err) == (1, "")
+    assert out.splitlines() == [
+        "not ready: required check 'checks' is pending",
+        "not ready: required checks pending or missing; next: loopzero ready --wait",
+    ]
+
+    arm_pr(gh, head, isDraft=False)
+    arm_readiness(gh, head, wt)
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
+               {"check_runs": [{"name": "checks", "status": "in_progress"}]})
+    code, out, err = run(capsys, "merge")
+
+    assert (code, out) == (1, "")
+    assert "required check 'checks' is pending; next: loopzero ready --wait" in err
+
+
 def test_ready_marks_draft_with_skipped_required_check_then_waits(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
@@ -1115,9 +1141,11 @@ def test_ready_marks_draft_with_skipped_required_check_then_waits(
 
     code, out, err = run(capsys, "ready")
 
-    assert (code, out, err) == (
-        3, "marked ready; waiting for required checks: checks\n", "",
-    )
+    assert (code, err) == (3, "")
+    assert out.splitlines() == [
+        "marked ready; waiting for required checks: checks",
+        "waiting for required checks; next: loopzero ready --wait",
+    ]
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
 
@@ -1533,7 +1561,9 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
                {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
     code, out, err = run(capsys, "merge")
     assert (code, err) == (0, "")
-    assert "queued for merge into main" in out and "rerun `loopzero merge`" in out
+    assert "queued for merge into main" in out and out.endswith(
+        "next: loopzero merge --wait follows the queue, verifies and cleans up\n"
+    )
     assert wt.exists()
     assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
 
