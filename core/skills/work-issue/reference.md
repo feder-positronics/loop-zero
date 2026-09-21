@@ -26,6 +26,12 @@ Read the relevant section when its condition applies.
 
 ## Collision, Waiting, And Re-entry
 
+- Where the base has no merge queue, a branch that is merely behind does not
+  need a rebase while implementation or repairs continue. Rebase once, when the
+  change is otherwise finished, then run checks and request the exact-head
+  review: a review taken before that final rebase is spent for nothing.
+  Serialize final integration across parallel tasks instead of racing rebases.
+
 - Treat the issue as singly owned. Recheck branches and PRs before the first edit,
   before publication, and before merge; if another delivery appears, stop and
   reconcile rather than continuing concurrently.
@@ -42,3 +48,5 @@ Read the relevant section when its condition applies.
   issue only when a previously satisfied acceptance criterion has regressed.
 - Ordinary monitoring after shipped acceptance is separate work. Later evidence
   gets a new, explicitly requested review or issue; do not create reminder issues.
+- Deferred work does not extend this delivery. Take it up only as a separately
+  requested task, preferably in a fresh session.
