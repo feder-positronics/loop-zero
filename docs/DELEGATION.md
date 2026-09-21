@@ -8,9 +8,10 @@ no delegation quota, line-count threshold, or required exception record.
 
 ## Resolve the model before delegation
 
-Read `models.toml` at the task repository's worktree root before choosing an
-executor. Consumers keep their own copy; do not silently use the loop-zero
-checkout's preferences for another project. If the file is missing or unclear,
+Read the task repository's canonical routing source before choosing an
+executor: `models.toml` at its worktree root, or the equivalent its repository
+instructions name explicitly. Never import another repository's defaults,
+including this checkout's, for a different project. If the file is missing or unclear,
 report that and follow explicit user choices rather than inventing defaults.
 
 The agent reads this small TOML file directly. It is configuration for agent

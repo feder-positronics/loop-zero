@@ -20,7 +20,7 @@ finding is open and required CI is green. The full rules fit in
 | `loopzero start <slug>` | Create a worktree and branch from base; write the Context/Problem/Goal task template. |
 | `loopzero check` | Run `workflow.toml` checks in a bwrap sandbox; exit code is the verdict. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
-| `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. |
+| `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
 | `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for a merge queue before cleanup. |
 

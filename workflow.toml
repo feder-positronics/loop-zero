@@ -20,3 +20,16 @@ network = false
 [delivery]
 merge = "queue"
 reviewers = ["claude", "codex"]
+
+# Owner policy (2026-09-19): Opus at medium; use high exceptionally, with a concrete
+# reason in the PR; max is forbidden (the Luna exception is not enabled here because the
+# allow-list is per family). Codex follows models.toml `review = "deep"`.
+[delivery.review.claude]
+model = "opus"
+effort = "medium"
+allowed_efforts = ["low", "medium", "high"]
+
+[delivery.review.codex]
+model = "gpt-6-astra"
+effort = "medium"
+allowed_efforts = ["low", "medium", "high", "xhigh"]

@@ -12,7 +12,8 @@ and document the integration's variable, local fallback, and target environment.
 
 Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
 when splitting work or choosing an executor. Read the task repository's
-`models.toml` for model and effort; delegate useful bounded units through the
+routing source (`models.toml`, or its named equivalent) for model and effort;
+delegate useful bounded units through the
 available runtime.
 
 ## Do
@@ -40,9 +41,9 @@ available runtime.
 6. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped
    work, then run `loopzero pr`.
 7. After `loopzero review`, fix every `critical` and `important` finding in
-   its thread, push, and rerun `loopzero check`. Mechanical format, lint, or
-   rename repairs with unchanged behavior need no delta review; substantive
-   repairs get the one delta review. Reply with what changed using
+   its thread, push, and rerun `loopzero check`. Every pushed head needs review, so put
+   mechanical format, lint, or rename repairs in the same push as the substantive
+   repairs and spend the one delta review on that head. Reply with what changed using
    `loopzero resolve <id> "<fix commit and what changed>"`; do not resolve a
    thread silently.
 8. Stop at `loopzero ready --wait`; it waits for the required checks, so never

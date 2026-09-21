@@ -34,6 +34,11 @@ hold all state. Nothing is recorded anywhere else.
 `loopzero status` prints where a branch is in this sequence, derived from Git
 and GitHub only.
 
+End each delivery response with its outcome: the authorized scope is complete,
+or it is blocked (name the exact dependency or decision), or it is waiting
+(name the event, the next action, and whether it resumes on its own or needs
+the requester).
+
 ## Blockers
 
 A PR is ready when none of these hold:
@@ -71,7 +76,9 @@ or resolve threads; branch protection and CI remain the enforced gates.
   reviewed commit and inherits the primary's open threads.
 - Fixes after the delta review require a fresh lineage: new commits, new
   primary review.
-- Mechanical fixes (format, lint, rename) need checks rerun, not a review.
+- Every committed head change needs renewed review within this budget, because
+  readiness requires the reviewed head to be the PR head. Batch mechanical fixes
+  (format, lint, rename) into the commit the delta review will read.
 - A fresh lineage is not a way to keep patching: repeated findings of one defect
   class mean the class was not audited; see `resolve-findings`.
 - A reviewer run that yields no verdict (missing tool, authentication failure,
