@@ -3,8 +3,12 @@
 ## Prerequisites
 
 - `git` 2.40+, Python 3.14, [uv](https://docs.astral.sh/uv/).
-- `gh` logged in with `repo` scope; `bwrap` on `PATH` (`loopzero check`
-  refuses to run without it).
+- `gh` from the [upstream release](https://github.com/cli/cli/releases)
+  (tested with 2.101.0), logged in with `repo` scope. Distribution packages lag:
+  Ubuntu's 2.46.0 lacks `gh pr checks --json`, so scripts written for a current
+  `gh` fail on it. Without root, unpack the release tarball and put `bin/gh`
+  in `~/.local/bin` ahead of `/usr/bin` on `PATH`.
+- `bwrap` on `PATH` (`loopzero check` refuses to run without it).
 - `claude` or `codex` CLI logged in; both if the reviewer must differ from
   the author.
 - On CI or any unattended host give Claude a non-rotating API key or setup
