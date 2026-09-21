@@ -1141,12 +1141,11 @@ def test_ready_marks_draft_with_skipped_required_check_then_waits(
 
     code, out, err = run(capsys, "ready")
 
-    assert (code, out, err) == (
-        3,
-        "marked ready; waiting for required checks: checks\n"
-        "waiting for required checks; next: loopzero ready --wait\n",
-        "",
-    )
+    assert (code, err) == (3, "")
+    assert out.splitlines() == [
+        "marked ready; waiting for required checks: checks",
+        "waiting for required checks; next: loopzero ready --wait",
+    ]
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
 
