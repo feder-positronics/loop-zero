@@ -11,14 +11,15 @@ commands = [
   "uv run --group dev pytest -q",
   "scripts/size_budget.sh", # Same script and caps as CI; base is the merge-base with origin/main.
 ]
-required_ci = ["checks"]
+required_ci = ["checks", "Loop-zero Eligibility"]
 ro_paths = ["/home/marcin/.local/bin", "/home/marcin/.local/share/uv"]
 writable = ["/home/marcin/.cache/uv"]
 env = { UV_CACHE_DIR = "/home/marcin/.cache/uv", UV_PYTHON_INSTALL_DIR = "/home/marcin/.local/share/uv/python" }
 network = false
 
 [delivery]
-merge = "queue"
+merge = "mergify"
+mergify_queue = "main"
 reviewers = ["claude", "codex"]
 review_publishers = ["eowca"]
 
