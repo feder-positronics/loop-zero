@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import stat
@@ -10,6 +11,8 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
+
+import yaml
 
 from . import github
 from .types import LoopZeroError
@@ -110,8 +113,51 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
         raise MergifyError("invalid Mergify queue membership response") from exc
 
 
+class _ConfigLoader(yaml.SafeLoader):
+    def construct_mapping(self, node, deep=False):
+        self.flatten_mapping(node)
+        keys = [self.construct_object(key, deep=True) for key, _ in node.value]
+        if len(keys) != len(set(keys)):
+            raise yaml.YAMLError("duplicate configuration key")
+        return super().construct_mapping(node, deep=deep)
+
+
+def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
+    """Read the vendor's canonical input, not a deprecated raw queue-rule default."""
+    repo_path = f"repos/{repo}"
+    metadata = github.api_get(repo_path)
+    if not isinstance(metadata, dict) or metadata.get("default_branch") != branch:
+        return False
+    path = f"{repo_path}/contents/.mergify.yml?ref={quote(branch, safe='')}"
+    blob = github.api_get(path)
+    try:
+        if (blob["type"] != "file" or blob["encoding"] != "base64"
+                or not isinstance(blob["sha"], str) or len(blob["sha"]) != 40
+                or any(char not in "0123456789abcdef" for char in blob["sha"])
+                or not isinstance(blob["content"], str) or len(blob["content"]) > 90000):
+            return False
+        document = yaml.load(base64.b64decode("".join(blob["content"].split()), validate=True),
+                             Loader=_ConfigLoader)
+        if not isinstance(document, dict) or "extends" in document or "scopes" in document:
+            return False
+        mode = document["merge_queue"]
+        parallel = mode["max_parallel_checks"]
+        rules = document["queue_rules"]
+        if (mode.get("mode") != "serial" or type(parallel) is not int or parallel <= 1
+                or not isinstance(rules, list)
+                or sum(isinstance(rule, dict) and rule.get("name") == queue for rule in rules) != 1):
+            return False
+    except (KeyError, TypeError, ValueError, yaml.YAMLError, RecursionError):
+        return False
+    # File identity, not main's commit: unrelated merges must not invalidate this proof.
+    current = github.api_get(path)
+    metadata = github.api_get(repo_path)
+    return (isinstance(current, dict) and current.get("sha") == blob["sha"]
+            and isinstance(metadata, dict) and metadata.get("default_branch") == branch)
+
+
 def configured(repo: str, branch: str, queue: str) -> bool:
-    """Attest that Mergify exposes this branch queue and the named queue rule."""
+    """Require live queue identity and stable canonical speculative configuration."""
     status_data = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
     if status_data is None:
         return False
@@ -123,12 +169,10 @@ def configured(repo: str, branch: str, queue: str) -> bool:
     rules = rules_data.get("configuration")
     if not isinstance(rules, list):
         raise MergifyError("invalid Mergify queue configuration response")
-    return any(
+    return status_data.get("mode") == "serial" and sum(
         isinstance(rule, dict) and rule.get("name") == queue
-        and isinstance(rule.get("config"), dict)
-        and rule["config"].get("allow_inplace_checks") is False
-        for rule in rules
-    )
+        and isinstance(rule.get("config"), dict) for rule in rules
+    ) == 1 and _preserves_source_heads(repo, branch, queue)
 
 
 def dequeue(repo: str, number: int) -> None:
