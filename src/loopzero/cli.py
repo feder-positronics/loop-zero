@@ -785,11 +785,11 @@ def _wait_for_merge(config: Config, branch: str, pr: github.PR, timeout: float) 
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
-        sha = github.merged_sha(config.repo, pr.number)
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
         if not github.merge_pending(config.repo, pr.number) and not github.merged_sha(
-            config.repo, pr.number
+            config.repo, pr.number, expected_head=pr.head_sha
         ):
             raise CliError(f"PR #{pr.number} left the merge queue unmerged")
         elapsed = time.monotonic() - started
@@ -898,7 +898,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if readiness is None:
         sha = github.merged_sha(
             config.repo, pr.number,
-            expected_head=pr.head_sha if config.merge_strategy == "mergify" else None,
+            expected_head=pr.head_sha,
         )
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")

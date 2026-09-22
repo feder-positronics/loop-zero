@@ -570,13 +570,13 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         _gh(*argv, timeout=300)
     except GhError as exc:
         raise MergeFailed(exc.command, exc.tail) from exc
-    sha = merged_sha(repo, number)
+    sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
     if merge_pending(repo, number):
         return None
     # The queue may have landed the PR between the two reads; look once more.
-    sha = merged_sha(repo, number)
+    sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")

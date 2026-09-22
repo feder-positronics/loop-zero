@@ -22,7 +22,7 @@ REAL_GH = shutil.which("gh")
 def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     """Drive every public operation through production code and retain its exact argv."""
     fake = FakeGh(fake_bin, tmp_path)
-    merged = {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}, "headRefName": "lz/x"}
+    merged = {"state": "MERGED", "headRefOid": HEAD, "mergeCommit": {"oid": "c" * 40}, "headRefName": "lz/x"}
     fake.respond("pr list", [pr_json()], [pr_json()])
     fake.respond("pr view", pr_json(), pr_json(), merged)
     fake.respond("pr create", f"https://github.com/{REPO}/pull/7\n")

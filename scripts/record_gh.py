@@ -123,7 +123,7 @@ def commands(repo: str, pr: int, head_ref: str, head_sha: str) -> dict[str, list
     return {
         "pr_view_merged": [
             "pr", "view", str(pr), "--repo", repo, "--json",
-            "mergeCommit,state,headRefName",
+            "mergeCommit,state,headRefName,headRefOid",
         ],
         "pr_list_by_head": [
             "pr", "list", "--repo", repo, "--head", head_ref, "--state", "all",
