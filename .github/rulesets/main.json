@@ -44,6 +44,9 @@
         "required_status_checks": [
           {
             "context": "checks"
+          },
+          {
+            "context": "Loop-zero Eligibility"
           }
         ]
       }

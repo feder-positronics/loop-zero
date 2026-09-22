@@ -277,6 +277,20 @@ PR configuration. A source push needs a status on its new SHA; base-only movemen
 does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
+For the supplied Actions publisher, create an environment named
+`mergify-eligibility`, restrict its deployment branches to the protected default
+branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
+repository secret. Use the narrowest Mergify credential that can read queue status.
+The environment prevents a workflow dispatched from another ref from receiving the
+organization credential; it does not make a GitHub commit-status context unforgeable.
+
+GitHub and Mergify match `Loop-zero Eligibility` by context name. A repository
+writer who can add an Actions workflow can publish the same context with its
+`GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
+boundary or replace this publisher with a dedicated GitHub App and bind the
+required status check to that App's integration ID. Do not describe the Actions
+publisher as protection from a malicious repository writer.
+
 The evaluator preserves COMMENT model reviews with resolved blocking findings,
 and the existing outdated-thread policy: outdated findings on other SHAs do not
 block, but unresolved current critical/important findings do. Suggestions do not

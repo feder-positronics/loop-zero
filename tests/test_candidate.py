@@ -160,6 +160,11 @@ def test_rejects_candidate_absent_from_live_status() -> None:
         run_attestation(status_reads=[first])
 
 
+def test_rejects_missing_live_status_as_candidate_error() -> None:
+    with pytest.raises(CandidateError, match="status is not an object"):
+        run_attestation(status_reads=[None])
+
+
 def test_rejects_source_head_missing_from_candidate_history() -> None:
     values = payloads(event())
     values["/repos/owner/repo/compare/" + "2" * 40 + "..." + "c" * 40] = {

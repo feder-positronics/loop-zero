@@ -11,10 +11,12 @@ model review remain separate evidence.
 1. Install the Mergify GitHub App for loop-zero and IntelFlo. The verified public
    App is `mergify` (10562), with author `mergify[bot]` (37929162). Recheck the live
    installation rather than granting an actor by display name.
-2. Create a Mergify admin application key for feder-positronics. Store local CLI
-   credentials in `MERGIFY_API_KEY` or private `~/.config/mergify/api-key`, and CI
-   credentials as the repository Actions secret `MERGIFY_API_KEY`. A CI-scoped
-   key and a GitHub Actions installation token cannot read queue membership.
+2. Create the narrowest Mergify application key that can read queue status for
+   these repositories. Store local CLI credentials in `MERGIFY_API_KEY` or private
+   `~/.config/mergify/api-key`. In Actions, create a `mergify-eligibility`
+   environment restricted to deployments from the protected default branch and
+   store its `MERGIFY_API_KEY` there, never as a repository secret. A CI-scoped key
+   and a GitHub Actions installation token cannot read queue membership.
 3. Deliver shared authored-head eligibility and Mergify CLI support before
    enabling this configuration. Set trusted review publishers to the GitHub
    accounts that actually post model reviews (currently `eowca`).
@@ -57,8 +59,9 @@ branch. Do not reduce parallel checks to one: that can enable source-head update
 These JSON files are review artifacts; no workflow automatically applies them.
 
 - `.github/rulesets/main.json` replaces ruleset 23666528. Its only behavioral
-  change is removing GitHub's native merge queue; existing PR, status, deletion
-  and non-fast-forward rules remain. Strict status checking was already false.
+  changes are removing GitHub's native merge queue and requiring
+  `Loop-zero Eligibility`; existing PR, `checks`, deletion and non-fast-forward
+  rules remain. Strict status checking was already false.
   This ruleset has **no bypass actors**, including Mergify.
 - `.github/rulesets/mergify-owner.json` is a separate update restriction for main.
   Only Mergify App 10562 bypasses that restriction. Its bypass grants no exemption
@@ -74,6 +77,15 @@ Verify that Mergify works with those remaining rules on the disposable target;
 if it needs broader authority, prepare that concrete change for review first.
 IntelFlo's corresponding strict-to-queue transition requires the approval reserved
 by its review-gate policy after the diff and scenario evidence are prepared.
+
+The supplied publisher uses a GitHub Actions commit status. GitHub and Mergify
+match that status by context name, so a repository writer who can add a workflow
+can forge it with `GITHUB_TOKEN`. The protected environment keeps the Mergify key
+out of branch workflows but cannot solve status identity. Before cutover, record
+explicit owner acceptance of this cooperative writer boundary, or replace the
+publisher with a dedicated GitHub App and bind the ruleset check to its integration
+ID. Branch names, PR bodies and untrusted event metadata alone remain insufficient
+to pass the candidate attestor.
 
 ## Cutover proof and rollback
 

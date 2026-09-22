@@ -34,14 +34,26 @@ def main() -> int:
     number = event_number(event)
     pr = github.api_get(f"repos/{cfg.repo}/pulls/{number}")
     head = pr["head"]["sha"]
-    def publish(state: str, message: str) -> None:
-        github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
-    publish("pending", "Refreshing live source review evidence")
-    if pr["head"]["ref"].startswith("mergify/merge-queue/") or pr["user"]["login"] == "mergify[bot]":
-        if "pull_request" not in event:
+    candidate = (
+        pr["head"]["ref"].startswith("mergify/merge-queue/")
+        or pr["user"]["login"] == "mergify[bot]"
+    )
+    if candidate:
+        event_pr = event.get("pull_request")
+        if not isinstance(event_pr, dict):
             raise LoopZeroError(
                 "candidate eligibility requires a pull_request_target creation or head-update event"
             )
+        if event.get("action") not in {"opened", "synchronize"}:
+            print("ignored candidate metadata event")
+            return 0
+        event_head = event_pr.get("head")
+        if not isinstance(event_head, dict) or event_head.get("sha") != head:
+            raise LoopZeroError("candidate event head is no longer current")
+    def publish(state: str, message: str) -> None:
+        github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
+    publish("pending", "Refreshing live source review evidence")
+    if candidate:
         from loopzero.candidate import attest_candidate
         from loopzero.mergify import api_get
         def policy(source_number: int, source: dict) -> None:

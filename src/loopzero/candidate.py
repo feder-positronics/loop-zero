@@ -53,7 +53,8 @@ def _object(value: JsonValue, message: str) -> JsonObject:
     return value
 
 
-def _flatten_batches(status: JsonObject) -> dict[str, JsonObject]:
+def _flatten_batches(status: object) -> dict[str, JsonObject]:
+    _require(isinstance(status, dict), "Mergify status is not an object")
     batches = status.get("batches")
     _require(isinstance(batches, list), "Mergify status has no batches list")
     indexed: dict[str, JsonObject] = {}
