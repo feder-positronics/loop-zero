@@ -57,6 +57,15 @@ cutover. The workflow sets `environment.deployment: false`, so using the environ
 for its secret and branch policy does not create deployment objects. These are
 reviewed payloads; this repository does not apply them.
 
+For initial bootstrap before this publisher exists on the default branch, a
+read-only workflow inventory may instead prove that no default-branch workflow
+consumes the repository secret. After creating and reading back the main-only
+environment and confirming the environment secret is present, remove that unused
+repository-scoped copy. The available repository token cannot inventory organization
+secrets, so this procedure makes no claim about them and must not delete them. A
+successful default-branch publisher run and a rejected non-main environment run are
+still required before queue cutover.
+
 ## Admission and CI
 
 `loopzero merge --wait` requests `@mergifyio queue main`, confirms membership via
