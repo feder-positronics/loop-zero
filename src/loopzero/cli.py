@@ -824,7 +824,11 @@ def _wait_for_mergify(
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged")
+            sha = github.merged_sha(config.repo, pr.number)
+            if sha:
+                return sha
+            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
+                           f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
         if time.monotonic() - started >= timeout:
             return None
         _sleep(min(WAIT_INTERVAL, timeout - (time.monotonic() - started)))
@@ -841,6 +845,8 @@ def _merge_with_mergify(
         raise CliError("not ready to request Mergify: " + "; ".join(blockers))
     queue = config.mergify_queue
     assert queue is not None
+    if behind in readiness.reasons and not mergify.configured(config.repo, config.base_branch, queue):
+        raise CliError("Mergify queue configuration is unverified; cannot admit a behind branch")
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )
@@ -855,7 +861,11 @@ def _merge_with_mergify(
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
         confirmed_marker = True
     if not confirmed and confirmed_marker:
-        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged")
+        sha = github.merged_sha(config.repo, pr.number)
+        if sha:
+            return sha
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
+                       f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
     if not confirmed and not requested:
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
         requested = True

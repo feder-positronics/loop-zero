@@ -109,3 +109,17 @@ def test_credential_file_must_be_private(tmp_path, monkeypatch):
         mergify._credential(key)
     key.chmod(0o600)
     assert mergify._credential(key) == "secret"
+
+
+@pytest.mark.parametrize("field,value", [("number", "7"), ("position", None), ("queued_at", None)])
+def test_malformed_membership_never_confirms(monkeypatch, field, value):
+    payload = {"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main"}
+    payload[field] = value
+    monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
+    with pytest.raises(mergify.MergifyError):
+        mergify.membership("acme/widgets", 7, "main")
+
+
+def test_redirect_is_refused_before_credentials_can_leave_origin():
+    with pytest.raises(mergify.MergifyError, match="redirect"):
+        mergify._NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid/")

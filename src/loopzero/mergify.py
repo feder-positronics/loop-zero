@@ -46,7 +46,7 @@ def _credential(path: Path | None = None) -> str:
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
         raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}")
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
         raise MergifyError(f"unable to open Mergify credential file: {path}") from exc
     info = os.fstat(fd)
@@ -96,12 +96,15 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
     if data is None:
         return None
     try:
-        if int(data["number"]) != number:
+        if type(data["number"]) is not int or data["number"] != number:
             raise ValueError("pull request number mismatch")
         actual = str(data["queue_rule_name"])
         if actual != queue:
             raise ValueError(f"expected queue {queue!r}, got {actual!r}")
-        return Membership(actual, str(data["queued_at"]), int(data["position"]))
+        if (not isinstance(data["queued_at"], str) or not data["queued_at"]
+                or type(data["position"]) is not int or data["position"] < 0):
+            raise ValueError("invalid queue position or admission time")
+        return Membership(actual, data["queued_at"], data["position"])
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
 

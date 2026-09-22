@@ -1574,8 +1574,9 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
     assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
 
 
+@pytest.mark.parametrize("attested", [True, False])
 def test_mergify_merge_requests_once_for_behind_head(
-    wt: Path, gh: FakeGh, capsys, monkeypatch
+    wt: Path, gh: FakeGh, capsys, monkeypatch, attested
 ) -> None:
     workflow = (wt / "workflow.toml").read_text().replace(
         'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
@@ -1587,6 +1588,7 @@ def test_mergify_merge_requests_once_for_behind_head(
     arm_pr(gh, head, isDraft=False, mergeStateStatus="BEHIND")
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
+    monkeypatch.setattr(mergify, "configured", lambda *_: attested)
     requested = []
     monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
@@ -1594,9 +1596,12 @@ def test_mergify_merge_requests_once_for_behind_head(
 
     code, out, err = run(capsys, "merge")
 
-    assert (code, err) == (0, "")
-    assert requested == [(REPO, 7, head, "main")]
-    assert "requested from Mergify queue main" in out
+    if attested:
+        assert (code, err) == (0, "")
+        assert requested == [(REPO, 7, head, "main")]
+        assert "requested from Mergify queue main" in out
+    else:
+        assert code == 1 and "queue configuration is unverified" in err and not requested
 
 
 def test_ready_allows_behind_only_after_configured_mergify_attestation(
@@ -1632,6 +1637,7 @@ def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None})
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
     monkeypatch.setattr(
@@ -1832,3 +1838,42 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher):
     gh.respond(reviews_key(), [rev(head, "primary", login=publisher)])
     arm_readiness(gh, head, wt)
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
+
+
+@pytest.mark.parametrize("outcome", ["merged", "ejected", "head_changed", "timeout", "api_error"])
+def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monkeypatch, outcome):
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(
+        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'))
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-qm", "mergify delivery")
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    gh.respond("api -X", "")
+    gh.respond("pr view", {"state": "MERGED" if outcome == "merged" else "OPEN",
+                           "mergeCommit": {"oid": "e" * 40} if outcome == "merged" else None})
+    if outcome == "head_changed":
+        gh.respond("pr list", [pr_json(headRefOid=head, isDraft=False)],
+                   [pr_json(headRefOid=head, isDraft=False)],
+                   [pr_json(headRefOid="f" * 40, isDraft=False)])
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("duplicate admission"))
+    reads = []
+    def membership(*_):
+        reads.append(True)
+        if len(reads) > 1:
+            if outcome == "api_error":
+                raise mergify.MergifyError("HTTP 503")
+            if outcome == "ejected":
+                return None
+        return mergify.Membership("main", "2026-09-22T12:00:00Z", 1)
+    monkeypatch.setattr(mergify, "membership", membership)
+    code, out, err = run(capsys, "merge", "--wait=0")
+    if outcome == "merged":
+        assert code == 0 and "e" * 40 in out and not wt.exists()
+    else:
+        assert wt.exists() and code == (3 if outcome == "timeout" else 1)
+        message = {"ejected": "left Mergify queue", "head_changed": "head changed",
+                   "timeout": "timed out", "api_error": "HTTP 503"}[outcome]
+        assert message in out + err
