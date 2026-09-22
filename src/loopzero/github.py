@@ -528,11 +528,12 @@ _QUEUE_QUERY = (
 )
 
 
-def merged_sha(repo: str, number: int) -> str | None:
+def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
     """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
-    view = _gh_json(
-        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,state,headRefName"
-    ) or {}
+    fields = "mergeCommit,state,headRefName" + (",headRefOid" if expected_head else "")
+    view = _gh_json("pr", "view", str(number), "--repo", repo, "--json", fields) or {}
+    if expected_head and view.get("headRefOid") != expected_head:
+        raise GhError(("gh", "pr", "view"), "PR head changed before merge verification")
     sha = (view.get("mergeCommit") or {}).get("oid")
     return sha if view.get("state") == "MERGED" and sha else None
 

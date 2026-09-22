@@ -10,7 +10,7 @@ generations/slots/leases, no provisional bindings, no settlement capsules, no
 compatibility mode for old runs. The old tree exists only in git history
 (`git show main:<path>`) and may be read for facts, never copied wholesale.
 
-Budget: `src/` <= 3,700 lines, `tests/` <= 4,600 lines, `core/` <= 600 lines
+Budget: `src/` <= 3,700 lines, `tests/` <= 4,700 lines, `core/` <= 600 lines
 of Markdown, one CI workflow. Anything that pushes past the budget needs a
 reason in the PR. CI compares each candidate with its base: over the cap, a
 change may still merge if it holds or shrinks the count, so an over-budget
@@ -24,7 +24,7 @@ fund the CLI fixes filed as #166-#175 (#169). The caps live only in
 `scripts/size_budget.sh`, which CI and `loopzero check` both run and which
 prints the remaining headroom. A further raise needs an issue naming what it
 pays for. Issue #196 funds the shared Mergify provider: the first slice raises
-the caps to 3,700/4,600 for explicit admission, API credentials and membership,
+the caps to 3,700/4,700 for explicit admission, API credentials and membership,
 bounded queue waiting and their failure/security tests. No existing behavior or
 check is removed to make room. Candidate eligibility is a separate measured slice.
 

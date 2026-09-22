@@ -217,6 +217,14 @@ Mergify queue-rule name. `loopzero merge` posts the documented
 membership through `https://api.mergify.com/v1`. A command comment is only a
 request; a behind branch is treated as queued only after that API confirms it.
 
+Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
+than one (the rollout uses three). In-place updates rewrite the reviewed source
+head and are unsupported. Admission requires the vendor queue configuration to
+report computed `allow_inplace_checks: false`; missing/true values fail closed,
+even for an up-to-date source because main can advance after admission. Confirm
+this API evidence after deploying queue configuration. Direct reuse of valid CI
+without rewriting the source remains compatible.
+
 Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
 in `~/.config/mergify/api-key` with mode `0600` in a private directory. The
 environment variable wins. An invalid supplied credential fails the operation;

@@ -78,7 +78,8 @@ def api_get(repo: str, suffix: str) -> object | None:
     endpoint = f"{API}/repos/{owner}/{name}{suffix}"
     request = urllib.request.Request(
         endpoint,
-        headers={"Accept": "application/json", "Authorization": f"Bearer {_credential()}"},
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
     )
     try:
         with _open(request) as response:
@@ -122,7 +123,12 @@ def configured(repo: str, branch: str, queue: str) -> bool:
     rules = rules_data.get("configuration")
     if not isinstance(rules, list):
         raise MergifyError("invalid Mergify queue configuration response")
-    return any(isinstance(rule, dict) and rule.get("name") == queue for rule in rules)
+    return any(
+        isinstance(rule, dict) and rule.get("name") == queue
+        and isinstance(rule.get("config"), dict)
+        and rule["config"].get("allow_inplace_checks") is False
+        for rule in rules
+    )
 
 
 def dequeue(repo: str, number: int) -> None:
@@ -130,7 +136,8 @@ def dequeue(repo: str, number: int) -> None:
     endpoint = f"{API}/repos/{owner}/{name}/merge-queue/pull/{number}/dequeue"
     request = urllib.request.Request(
         endpoint, method="POST",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {_credential()}"},
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
     )
     try:
         with _open(request):

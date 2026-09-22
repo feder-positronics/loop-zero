@@ -39,6 +39,7 @@ def test_membership_uses_bearer_and_validates_queue(monkeypatch):
         "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     )
     assert seen[0].headers["Authorization"] == "Bearer secret"
+    assert seen[0].headers["User-agent"] == "loopzero"
 
 
 def test_membership_maps_404_only_to_absent(monkeypatch):
@@ -79,13 +80,17 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
     assert seen[0].full_url.endswith("/merge-queue/pull/7/dequeue")
 
 
-def test_configured_requires_branch_status_and_named_rule(monkeypatch):
+@pytest.mark.parametrize("inplace", [False, True, None, "false", 0])
+def test_configured_requires_branch_status_and_named_rule(monkeypatch, inplace):
     responses = iter([
         {"batches": [], "waiting_pull_requests": [], "mode": "serial"},
-        {"configuration": [{"name": "main", "config": {}}]},
+        {"configuration": [
+            {"name": "other", "config": {"allow_inplace_checks": False}},
+            {"name": "main", "config": {"allow_inplace_checks": inplace}},
+        ]},
     ])
     monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
-    assert mergify.configured("acme/widgets", "main", "main")
+    assert mergify.configured("acme/widgets", "main", "main") is (inplace is False)
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
