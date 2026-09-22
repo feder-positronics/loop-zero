@@ -6,13 +6,13 @@
     "--repo",
     "<REPO>",
     "--json",
-    "mergeCommit,state,headRefName"
+    "mergeCommit,state,headRefName,headRefOid"
   ],
   "exit_code": 0,
-  "stdout": "{\"headRefName\":\"lz/add-workflow-config-note\",\"mergeCommit\":{\"oid\":\"<SHA_1>\"},\"state\":\"MERGED\"}\n",
+  "stdout": "{\"headRefName\":\"lz/mergify-config-attestation\",\"headRefOid\":\"<SHA_1>\",\"mergeCommit\":{\"oid\":\"<SHA_2>\"},\"state\":\"MERGED\"}\n",
   "stderr": "",
   "input_files": {},
-  "gh_version": "gh version 2.46.0 (2025-12-13 Ubuntu 2.46.0-4)",
-  "recorded_at": "2026-09-18T12:07:16.649268+00:00",
+  "gh_version": "gh version 2.101.0 (2026-09-15)",
+  "recorded_at": "2026-09-22T15:13:49.587856+00:00",
   "scenario": "pr_view_merged"
 }

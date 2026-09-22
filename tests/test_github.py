@@ -774,14 +774,14 @@ def test_merge_success_replays_recorded_verification(
         ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
     )
     gh.load_scenario("pr_view_merged", {
-        "<REPO>": REPO, "<PR>": "7", "<SHA_1>": "c" * 40,
+        "<REPO>": REPO, "<PR>": "7", "<SHA_1>": HEAD, "<SHA_2>": "c" * 40,
     })
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
                           "--match-head-commit", HEAD]
     assert "--delete-branch" not in gh.argv(0)
     assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json",
-                          "mergeCommit,state,headRefName"]
+                          "mergeCommit,state,headRefName,headRefOid"]
     gh.assert_complete()
 
 
@@ -803,7 +803,7 @@ def _queue_json(queued: bool) -> dict:
 
 
 def test_merge_unverified(gh: FakeGh) -> None:
-    unmerged = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"}
+    unmerged = {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"}
     gh.respond("pr merge", "")
     gh.respond("pr view", unmerged, unmerged)
     gh.respond("api graphql", _queue_json(False))
@@ -814,7 +814,7 @@ def test_merge_unverified(gh: FakeGh) -> None:
 
 def test_merge_queued_returns_none(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"})
     gh.respond("api graphql", _queue_json(True))
     assert github.merge(REPO, 7, "squash", HEAD) is None
     query = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"])
@@ -824,7 +824,7 @@ def test_merge_queued_returns_none(gh: FakeGh) -> None:
 def test_merge_accepted_as_auto_merge_counts_as_pending(gh: FakeGh) -> None:
     """#180: GitHub took the request as auto-merge and queues the PR about a minute later."""
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"})
     accepted = _queue_json(False)
     accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
     gh.respond("api graphql", accepted)
@@ -833,8 +833,8 @@ def test_merge_accepted_as_auto_merge_counts_as_pending(gh: FakeGh) -> None:
 
 def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None},
-               {"state": "MERGED", "mergeCommit": {"oid": "d" * 40}})
+    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None},
+               {"state": "MERGED", "headRefOid": HEAD, "mergeCommit": {"oid": "d" * 40}})
     gh.respond("api graphql", _queue_json(False))
     assert github.merge(REPO, 7, "squash", HEAD) == "d" * 40
 
@@ -848,7 +848,7 @@ def test_merged_sha_only_for_merged_state(gh: FakeGh) -> None:
 
 def test_merge_queue_strategy_omits_method_flag(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/x"})
+    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"})
     gh.respond("api graphql", _queue_json(True))
     assert github.merge(REPO, 7, "queue", HEAD) is None
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--match-head-commit", HEAD]

@@ -1381,15 +1381,20 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys) -> None:
     assert wt.exists()
 
 
-def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys) -> None:
+@pytest.mark.parametrize("changed", [False, True])
+def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys, changed) -> None:
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "headRefOid": "f" * 40 if changed else head_of(wt), "mergeCommit": {"oid": "c" * 40}})
     gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
+    if changed:
+        assert code == 1 and "head changed" in err and wt.exists()
+        assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
+        return
     assert (code, out, err) == (0, f"{'c' * 40}\ncd {repo}\n", "")
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
     assert "--squash" in merge and merge[merge.index("--match-head-commit") + 1] == head
@@ -1403,7 +1408,7 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "d" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "headRefOid": head_of(wt), "mergeCommit": {"oid": "d" * 40}})
     gh.respond("api -X", "")
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("worktree is dirty")))
@@ -1420,7 +1425,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "f" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "headRefOid": head_of(wt), "mergeCommit": {"oid": "f" * 40}})
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli._proc.ProcTimeout("gh api timed out", "")))
     monkeypatch.setattr(cli, "_cleanup", lambda _: None)
@@ -1441,7 +1446,7 @@ def test_second_merge_retries_remote_branch_cleanup(
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "headRefOid": head_of(wt), "mergeCommit": {"oid": "e" * 40}})
     gh.respond(
         "api -X",
         {"stdout": "", "stderr": "HTTP 500: delete failed", "exit": 1},
@@ -1542,13 +1547,18 @@ def test_review_and_ready_refuse_closed_pr(wt: Path, gh: FakeGh, capsys) -> None
         assert code == 1 and "PR #7 is CLOSED, not open" in err, command
 
 
+@pytest.mark.parametrize("changed", [False, True])
 def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
-    wt: Path, repo: Path, gh: FakeGh, capsys
+    wt: Path, repo: Path, gh: FakeGh, capsys, changed
 ) -> None:
     arm_pr(gh, head_of(wt), state="MERGED", isDraft=False)
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}})
+    gh.respond("pr view", {"state": "MERGED", "headRefOid": "f" * 40 if changed else head_of(wt), "mergeCommit": {"oid": "e" * 40}})
     gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
+    if changed:
+        assert code == 1 and "head changed" in err and wt.exists()
+        assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
+        return
     assert (code, err) == (0, "")
     assert out.splitlines()[-1] == f"cd {repo}"
     assert f"PR #7 was already merged as {'e' * 12}" in out and "e" * 40 in out
@@ -1562,7 +1572,7 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"})
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1", "headRefOid": head_of(wt)})
     gh.respond("api graphql", threads_json(),
                {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}})
     code, out, err = run(capsys, "merge")
@@ -1668,9 +1678,9 @@ def test_merge_waits_for_queue_then_cleans_up(
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"}
+    open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1", "headRefOid": head_of(wt)}
     gh.respond("pr view", open_pr, open_pr,
-               {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}})
+               {"state": "MERGED", "headRefOid": head_of(wt), "mergeCommit": {"oid": "e" * 40}})
     queued = {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}}
     gh.respond("api graphql", threads_json(), queued, queued)
     gh.respond("api -X", "")
@@ -1689,7 +1699,7 @@ def test_merge_wait_reports_queue_ejection(wt: Path, gh: FakeGh, capsys) -> None
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"}
+    open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1", "headRefOid": head_of(wt)}
     gh.respond("pr view", open_pr, open_pr)
     def queue(value: bool) -> dict:
         return {"data": {"repository": {"pullRequest": {"isInMergeQueue": value}}}}
@@ -1701,21 +1711,23 @@ def test_merge_wait_reports_queue_ejection(wt: Path, gh: FakeGh, capsys) -> None
     assert wt.exists()
 
 
-def test_merge_wait_refuses_a_head_that_changed_in_the_queue(wt: Path, gh: FakeGh, capsys) -> None:
+@pytest.mark.parametrize("late", [False, True])
+def test_merge_wait_refuses_a_head_that_changed_in_the_queue(wt: Path, gh: FakeGh, capsys, late) -> None:
     head = head_of(wt)
     body = "# T1\n\n## Review\n"
     gh.respond("pr list", [pr_json(headRefOid=head, body=body, isDraft=False)],
-               [pr_json(headRefOid="f" * 40, body=body, isDraft=False)])
+               [pr_json(headRefOid=head if late else "f" * 40, body=body, isDraft=False)])
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1"})
+    gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefOid": head},
+               {"state": "MERGED", "mergeCommit": {"oid": "e" * 40}, "headRefOid": "f" * 40})
     queued = {"data": {"repository": {"pullRequest": {"isInMergeQueue": True}}}}
     gh.respond("api graphql", threads_json(), queued)
 
     code, _out, err = run(capsys, "merge", "--wait")
 
-    assert code == 1 and f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
+    assert code == 1 and "PR head changed" in err
     assert wt.exists(), "no cleanup after an unreviewed head"
 
 
