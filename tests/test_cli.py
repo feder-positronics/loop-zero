@@ -1853,7 +1853,7 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher):
 
 @pytest.mark.parametrize("outcome", ["merged", "ejected", "head_changed", "timeout", "api_error",
     "unsafe_config", "config_error", "merged_head_changed", "ejection_head_changed", "already_merged",
-    "already_merged_changed", "unsafe_pending"])
+    "already_merged_changed", "unsafe_pending", "requested_head_changed"])
 def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monkeypatch, outcome):
     (wt / "workflow.toml").write_text(WORKFLOW.replace(
         'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'))
@@ -1871,7 +1871,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         gh.respond("pr view", {"state": "OPEN", "headRefOid": head},
                    {"state": "MERGED", "headRefOid": "f" * 40,
                     "mergeCommit": {"oid": "e" * 40}})
-    if outcome == "head_changed":
+    if outcome in {"head_changed", "requested_head_changed"}:
         gh.respond("pr list", [pr_json(headRefOid=head, isDraft=False)],
                    [pr_json(headRefOid=head, isDraft=False)],
                    [pr_json(headRefOid="f" * 40, isDraft=False)])
@@ -1885,13 +1885,15 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
                 return False
         return True
     monkeypatch.setattr(mergify, "configured", configured)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, outcome != "unsafe_pending"))
-    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("duplicate admission"))
+    monkeypatch.setattr(mergify, "markers", lambda *_: (outcome != "requested_head_changed",
+                                                        outcome not in {"unsafe_pending", "requested_head_changed"}))
+    requests = []
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
     monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: pytest.fail("unsafe confirmation"))
     reads = []
     def membership(*_):
         reads.append(True)
-        if outcome == "unsafe_pending" and len(reads) == 1:
+        if outcome in {"unsafe_pending", "requested_head_changed"} and len(reads) == 1:
             return None
         if len(reads) > 1:
             if outcome == "api_error":
@@ -1901,6 +1903,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         return mergify.Membership("main", "2026-09-22T12:00:00Z", 1)
     monkeypatch.setattr(mergify, "membership", membership)
     code, out, err = run(capsys, "merge", "--wait=0")
+    assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged"}:
         assert code == 0 and "e" * 40 in out and not wt.exists()
     else:
@@ -1908,7 +1911,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         message = {"ejected": "left Mergify queue", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
-                   "merged_head_changed": "head changed", "already_merged_changed": "head changed", "ejection_head_changed": "head changed"}[outcome]
+                   "requested_head_changed": "head changed", "merged_head_changed": "head changed", "already_merged_changed": "head changed", "ejection_head_changed": "head changed"}[outcome]
         assert message in out + err
 
 

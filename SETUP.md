@@ -225,6 +225,29 @@ even for an up-to-date source because main can advance after admission. Confirm
 this API evidence after deploying queue configuration. Direct reuse of valid CI
 without rewriting the source remains compatible.
 
+The named queue **must** require `check-success = Loop-zero Eligibility` in
+`queue_conditions`, with the trusted source and candidate publishers described
+below deployed first. Preserve that condition on candidates (omit
+`merge_conditions` to inherit it, or include the same check explicitly). For example:
+
+```yaml
+queue_rules:
+  - name: main
+    queue_conditions:
+      - base = main
+      - -draft
+      - check-success = Loop-zero Eligibility
+```
+
+This is a required server-side gate: the command API has no expected-SHA field,
+and a request can be processed after the source changes. The CLI's head-change
+error refuses further delivery and cleanup; it cannot revoke an asynchronous
+command atomically. A newly pushed head must lack eligibility until its own
+review passes. Never deploy the adapter with only product-CI queue conditions.
+Before pushing to a requested or queued PR, withdraw it, confirm removal, then
+push, review the new head and explicitly admit it again. Do not interpret a CLI
+failure as proof that Mergify has removed an outstanding request.
+
 Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
 in `~/.config/mergify/api-key` with mode `0600` in a private directory. The
 environment variable wins. An invalid supplied credential fails the operation;
