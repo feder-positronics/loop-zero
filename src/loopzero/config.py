@@ -36,6 +36,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
     "delivery": {
         "merge": str,
         "reviewers": list,
+        "review_publishers": list,
         "reviewer_ro_paths": list,
         "review_chunk_bytes": int,
         "review": dict,
@@ -84,8 +85,8 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     return _base_source(worktree, base_branch)[1]
 
 
-def load_base(worktree: Path, base_branch: str) -> dict[str, Any] | None:
-    """Read the base revision's `[checks]`, or None when it has no workflow file."""
+def load_base(worktree: Path, base_branch: str, section: str = "checks") -> dict[str, Any] | None:
+    """Read a base revision section, or None when it has no workflow file."""
     base, revision = _base_source(worktree, base_branch)
     shown = _proc.run(
         ["git", "show", f"{base}:workflow.toml"],
@@ -104,9 +105,9 @@ def load_base(worktree: Path, base_branch: str) -> dict[str, Any] | None:
         data = tomllib.loads(shown.stdout)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"origin/{base_branch}:workflow.toml: invalid TOML: {exc}") from exc
-    checks = data.get("checks", {})
+    checks = data.get(section, {})
     if not isinstance(checks, dict):
-        raise ConfigError(f"origin/{base_branch}:workflow.toml: [checks] must be a table")
+        raise ConfigError(f"origin/{base_branch}:workflow.toml: [{section}] must be a table")
     return checks
 
 
@@ -194,6 +195,8 @@ def _build(data: dict[str, Any]) -> Config:
         required_ci=_strings("checks.required_ci", checks.get("required_ci", [])),
         merge_strategy=merge,
         reviewers=reviewers,
+        review_publishers=_strings("delivery.review_publishers",
+                                   delivery.get("review_publishers", [])),
         review=review,
         reviewer_ro_paths=reviewer_ro_paths,
         review_chunk_bytes=review_chunk_bytes,
@@ -209,7 +212,7 @@ def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
 
 
 def _strings(label: str, value: list[Any]) -> tuple[str, ...]:
-    if not all(isinstance(item, str) and item for item in value):
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ConfigError(f"{label} must be a list of non-empty strings")
     return tuple(value)
 

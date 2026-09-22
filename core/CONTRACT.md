@@ -55,7 +55,11 @@ A PR is ready when none of these hold:
 Resolve a blocker by pushing a fix or resolving the thread with a reason
 (`loopzero resolve <id> "<reason>"` replies and resolves one finding; it never
 resolves in bulk or without a reply). There
-is no waiver file and no override flag. Readiness is a checklist derived from
+is no waiver file and no override flag. Hosted review eligibility uses the exact authored SHA, with publishers configured in
+trusted base `workflow.toml`; pending or dismissed review evidence is ineligible.
+Local readiness additionally requires its sandboxed check receipt and source CI.
+
+Readiness is a checklist derived from
 Git and GitHub, not a tamper-proof boundary: anyone with write access can edit
 or resolve threads; branch protection and CI remain the enforced gates.
 

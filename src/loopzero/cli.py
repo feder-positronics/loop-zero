@@ -11,16 +11,13 @@ import sys
 import time
 from pathlib import Path
 
-from loopzero import _proc, github, runners, sandbox, worktree
+from loopzero import _proc, eligibility, github, runners, sandbox, worktree
 from loopzero import config as config_mod
 from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
-REVIEW_MARKER_RE = re.compile(
-    r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
-    r"kind=(primary|delta)(?:\s+source=(?:model|repost))?\s*-->"
-)
+REVIEW_MARKER_RE = eligibility.REVIEW_MARKER_RE
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
@@ -88,6 +85,9 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     if base_checks is None:
         return config_mod.load(path)
     config = config_mod.load(path, checks=base_checks)
+    delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
+    config = dataclasses.replace(config, review_publishers=config_mod._strings(
+        "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
         revision = config_mod.base_revision(root, config.base_branch)
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
@@ -221,12 +221,12 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None
 ) -> github.Readiness:
-    markers = _lineage_markers(
-        wt, reviews if reviews is not None else _pr_reviews(config.repo, pr.number), head
+    reviewed = eligibility.reviewed_head(
+        reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
+        head, config.review_publishers or (github.login(),),
     )
-    latest = markers[-1] if markers else None
     result = github.readiness(
-        config.repo, pr, config.base_branch, config.required_ci, latest.head if latest else None
+        config.repo, pr, config.base_branch, config.required_ci, reviewed
     )
     report = _load_report(wt)
     if report is None or report.head != head or report.dirty or not report.ok:

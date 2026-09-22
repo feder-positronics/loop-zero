@@ -32,6 +32,7 @@ class Config:
     merge_strategy: str  # "squash" | "merge" | "rebase" | "queue" (base owns the method)
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
+    review_publishers: tuple[str, ...] = ()  # trusted GitHub logins, independent of CI token
     review_chunk_bytes: int = 200_000
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")

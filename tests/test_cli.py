@@ -1350,6 +1350,17 @@ def test_review_treats_forged_marker_as_fresh_lineage(wt: Path, gh: FakeGh, fake
     assert code == 0 and out.startswith("primary review by claude")
 
 
+@pytest.mark.parametrize("state", ["DISMISSED", "PENDING"])
+def test_ready_rejects_revoked_latest_review(wt: Path, gh: FakeGh, capsys, state) -> None:
+    head = head_of(wt)
+    arm_pr(gh, head)
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state)])
+    gh.respond("pr ready", "")
+    arm_readiness(gh, head, wt)
+    code, out, _ = run(capsys, "ready")
+    assert code == 1 and "no review recorded for the current head" in out
+
+
 def test_ready_allows_resolved_request_changes_threads(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
@@ -1723,3 +1734,37 @@ def test_budget_message_explains_rewrite(wt: Path, gh: FakeGh, capsys) -> None:
     gh.respond(reviews_key(), [rev(base, "primary"), rev(head, "delta")])
     code, _, err = run(capsys, "review")
     assert code == 1 and "rewrite the reviewed commits (squash/amend)" in err
+
+
+@pytest.mark.parametrize("state,verdict,expected", [
+    ("APPROVED", "approve", True), ("COMMENTED", "request_changes", True),
+    ("DISMISSED", "approve", False), ("PENDING", "approve", False),
+    ("COMMENTED", "", False),
+])
+def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, expected):
+    from loopzero import eligibility
+    head = head_of(wt)
+    gh.respond("pr view", pr_json(headRefOid=head, mergeStateStatus="BEHIND"))
+    gh.respond("api user", {"login": "ci-service"})
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state, verdict=verdict)])
+    gh.respond("api graphql", threads_json())
+    assert eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is expected
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head,
+                             "--publish"]) == (0 if expected else 1)
+    states = [json.loads(c["--input"])["state"] for c in gh.calls if "--input" in c]
+    assert states == ["pending", "success" if expected else "failure"]
+    gh.respond("pr view", pr_json(headRefOid="b" * 40))
+    assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
+
+
+@pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
+def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher):
+    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary", login=publisher)])
+    arm_readiness(gh, head, wt)
+    assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)

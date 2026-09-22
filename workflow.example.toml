@@ -50,6 +50,8 @@ network = false
 merge = "squash"  # or "queue" when main has a merge queue
 # Reviewer preference, in order. `loopzero review` picks the first family
 # that is installed and differs from the author's family when that is known.
+# Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
+# review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
 # Optional absolute paths for reviewer binaries and runtimes. When omitted,
 # loop-zero mounts the resolved directory of the selected reviewer binary.

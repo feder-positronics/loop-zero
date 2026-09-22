@@ -208,3 +208,40 @@ merge commit, deletes the remote branch and removes the worktree. The
 repository must allow auto-merge (Settings, General, "Allow auto-merge"),
 otherwise `gh pr merge` fails with "Auto merge is not allowed". Set
 `delivery.merge = "queue"` so the queue owns the merge method.
+
+## Hosted review eligibility
+
+Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.
+Local readiness reads that list from the base configuration (legacy installations
+without it use the local GitHub login). Hosted evaluation requires an explicit list;
+its CI token's login is never a reviewer identity.
+
+From a trusted base checkout, run:
+
+```sh
+python -m loopzero.eligibility --config workflow.toml --pr 123 --head <full-source-sha> --publish
+```
+
+Give that process only repository metadata read and commit-status write access.
+It posts `Loop-zero Eligibility` as pending before reading live reviews/threads,
+then success or failure on the specified source SHA. An API failure leaves pending.
+Do not check out or execute candidate code with this credential. Serialize all
+refreshes for a PR, including manual refreshes; use trusted base configuration, never
+PR configuration. A source push needs a status on its new SHA; base-only movement
+does not invalidate an unchanged source review. This status does not replace
+integration CI or a local `loopzero check` receipt.
+
+The evaluator preserves COMMENT model reviews with resolved blocking findings,
+and the existing outdated-thread policy: outdated findings on other SHAs do not
+block, but unresolved current critical/important findings do. Suggestions do not
+block. Dismissing the latest review cannot restore an earlier approval.
+
+Before queue adoption, wire source pushes, review submissions/edits/dismissal,
+review-comment creation/edits/deletion and an explicit refresh to this publisher.
+Actions has no review-thread resolution/reopening trigger. Until an App webhook
+receiver exists, queue users must withdraw an item before altering findings or
+resolving/reopening threads, refresh eligibility, then explicitly request delivery
+again. External UI edits without that protocol are not covered. This is the
+existing cooperative trust policy, not instantaneous invalidation: metadata can
+change after the last read and before landing. Do not claim atomic review/merge
+validation or enable unattended landing without accepting this boundary.
