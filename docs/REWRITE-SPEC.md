@@ -138,7 +138,11 @@ reviewer_ro_paths = ["/absolute/reviewer/runtime/path"]
 
 ## Rules for every module
 
-- Python 3.14, stdlib only in `src/`. Tests use pytest and fake executables
+- Python 3.14, stdlib only in `src/` except PyYAML for parsing Mergify
+  configuration (owner-approved 2026-09-22). Import it only in the configuration
+  reader, use SafeLoader with duplicate-key rejection, and validate the supported
+  configuration structure. This exception does not authorize other runtime
+  dependencies. Tests use pytest and fake executables
   placed on `PATH` by fixtures (fake `gh`, fake `claude`, fake `codex`,
   fake `bwrap`). No network, no real credentials in tests.
 - Every subprocess call goes through one helper `loopzero._proc.run(argv, cwd,

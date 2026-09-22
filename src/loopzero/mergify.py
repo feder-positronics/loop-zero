@@ -12,8 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-import yaml
-
 from . import github
 from .types import LoopZeroError
 
@@ -113,17 +111,18 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
         raise MergifyError("invalid Mergify queue membership response") from exc
 
 
-class _ConfigLoader(yaml.SafeLoader):
-    def construct_mapping(self, node, deep=False):
-        self.flatten_mapping(node)
-        keys = [self.construct_object(key, deep=True) for key, _ in node.value]
-        if len(keys) != len(set(keys)):
-            raise yaml.YAMLError("duplicate configuration key")
-        return super().construct_mapping(node, deep=deep)
-
-
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     """Read the vendor's canonical input, not a deprecated raw queue-rule default."""
+    import yaml
+
+    class _ConfigLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            self.flatten_mapping(node)
+            keys = [self.construct_object(key, deep=True) for key, _ in node.value]
+            if len(keys) != len(set(keys)):
+                raise yaml.YAMLError("duplicate configuration key")
+            return super().construct_mapping(node, deep=deep)
+
     repo_path = f"repos/{repo}"
     metadata = github.api_get(repo_path)
     if not isinstance(metadata, dict) or metadata.get("default_branch") != branch:

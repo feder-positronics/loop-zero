@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import subprocess
+import sys
 import urllib.error
 
 import pytest
@@ -194,3 +196,12 @@ def test_malformed_membership_never_confirms(monkeypatch, field, value):
 def test_redirect_is_refused_before_credentials_can_leave_origin():
     with pytest.raises(mergify.MergifyError, match="redirect"):
         mergify._NoRedirect().redirect_request(None, None, 302, "", {}, "https://other.invalid/")
+
+
+def test_hosted_import_does_not_load_yaml():
+    result = subprocess.run([sys.executable, "-c", ("import sys; "
+                             "sys.modules['yaml'] = None; "
+                             "from loopzero import hosted, mergify; "
+                             "assert callable(mergify.api_get)")],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
