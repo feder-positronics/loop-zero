@@ -10,7 +10,8 @@ from loopzero.candidate import CandidateError, attest_candidate
 
 
 def event() -> dict:
-    return {
+    value = {
+        "action": "synchronize",
         "repository": {"id": 7, "full_name": "owner/repo"},
         "pull_request": {
             "number": 900,
@@ -34,6 +35,8 @@ def event() -> dict:
             },
         },
     }
+    value["sender"] = deepcopy(value["pull_request"]["user"])
+    return value
 
 
 def status() -> dict:
@@ -131,6 +134,8 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     ("mutation", "message"),
     [
         (lambda value: value["pull_request"]["user"].update(id=1), "Mergify GitHub App"),
+        (lambda value: value["sender"].update(id=1), "head event was not sent"),
+        (lambda value: value.update(action="edited"), "creation or head-update event"),
         (
             lambda value: value["pull_request"]["head"].update(ref="feature/forged"),
             "unexpected head ref",

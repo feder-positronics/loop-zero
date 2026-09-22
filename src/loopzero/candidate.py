@@ -249,6 +249,10 @@ def attest_candidate(
     event_pr = event.get("pull_request")
     _require(isinstance(repository, dict), "GitHub event repository is missing")
     _require(isinstance(event_pr, dict), "GitHub event pull request is missing")
+    _require(
+        event.get("action") in {"opened", "synchronize"},
+        "Candidate attestation requires its creation or head-update event",
+    )
     full_name = repository.get("full_name")
     _require(
         isinstance(full_name, str) and _REPOSITORY.fullmatch(full_name) is not None,
@@ -284,6 +288,10 @@ def attest_candidate(
     _require(
         _identity(event_pr.get("user")) == expected_identity,
         "Candidate author is not the verified Mergify GitHub App",
+    )
+    _require(
+        _identity(event.get("sender")) == expected_identity,
+        "Candidate head event was not sent by the verified Mergify GitHub App",
     )
 
     candidate_number = event_pr.get("number")

@@ -23,6 +23,9 @@ model review remain separate evidence.
    check conditions into its temporary candidate checks. The candidate publisher
    must verify live vendor membership, candidate identity, all constituent source
    heads and their review eligibility before publishing success on the candidate.
+   Candidate success is published only from an `opened` or `synchronize`
+   `pull_request_target` event whose sender is the verified Mergify bot; manual and
+   workflow-run refreshes cannot authenticate a candidate head and fail closed.
 
 ## Admission and CI
 
@@ -31,6 +34,11 @@ Mergify's API, and waits for GitHub to report the original PR MERGED. A submitte
 comment or `Mergify Merge Queue` badge does not prove membership. New source
 commits need new review evidence and explicit delivery intent. No persistent
 label automatically requeues a pushed branch.
+
+After the trusted publisher first reaches `main`, refresh existing source PRs with
+the eligibility workflow's manual PR-number input before requesting queue admission.
+A temporary candidate cannot be refreshed manually: dequeue and request it again so
+Mergify creates or updates the candidate and supplies a fresh authenticated event.
 
 Keep the `checks` required check in loop-zero, and `PR Policy` plus
 `PR Quality Gate` in IntelFlo. The queue injects the GitHub rules at both admission

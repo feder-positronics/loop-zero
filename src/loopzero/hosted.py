@@ -30,13 +30,18 @@ def main() -> int:
     cfg = config.load("workflow.toml")
     if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
-    number = event_number(json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text()))
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    number = event_number(event)
     pr = github.api_get(f"repos/{cfg.repo}/pulls/{number}")
     head = pr["head"]["sha"]
     def publish(state: str, message: str) -> None:
         github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
     publish("pending", "Refreshing live source review evidence")
     if pr["head"]["ref"].startswith("mergify/merge-queue/") or pr["user"]["login"] == "mergify[bot]":
+        if "pull_request" not in event:
+            raise LoopZeroError(
+                "candidate eligibility requires a pull_request_target creation or head-update event"
+            )
         from loopzero.candidate import attest_candidate
         from loopzero.mergify import api_get
         def policy(source_number: int, source: dict) -> None:
@@ -45,7 +50,7 @@ def main() -> int:
             if not result.ready:
                 raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
         attest_candidate(
-            {"repository": github.api_get(f"repos/{cfg.repo}"), "pull_request": pr},
+            event,
             github_get=lambda path: github.api_get(path.lstrip("/")),
             mergify_status=lambda owner, repo, branch: api_get(
                 f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
