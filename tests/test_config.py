@@ -79,6 +79,21 @@ def test_load_applies_defaults(tmp_path):
     assert loaded.limits == ResourceLimits(memory_mb=4096, processes=512, file_mb=2048)
 
 
+def test_mergify_delivery_requires_and_loads_queue(tmp_path):
+    loaded = config.load(write(tmp_path, """
+[repo]
+name = "o/n"
+[delivery]
+merge = "mergify"
+mergify_queue = "main"
+"""))
+    assert loaded.merge_strategy == "mergify"
+    assert loaded.mergify_queue == "main"
+
+    with pytest.raises(config.ConfigError, match="mergify_queue is required"):
+        config.load(write(tmp_path, '[repo]\nname = "o/n"\n[delivery]\nmerge = "mergify"\n'))
+
+
 def test_missing_file(tmp_path):
     with pytest.raises(config.ConfigError, match="config file not found"):
         config.load(tmp_path / "nope.toml")
