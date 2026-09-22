@@ -78,7 +78,8 @@ def api_get(repo: str, suffix: str) -> object | None:
     endpoint = f"{API}/repos/{owner}/{name}{suffix}"
     request = urllib.request.Request(
         endpoint,
-        headers={"Accept": "application/json", "Authorization": f"Bearer {_credential()}"},
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
     )
     try:
         with _open(request) as response:
@@ -130,7 +131,8 @@ def dequeue(repo: str, number: int) -> None:
     endpoint = f"{API}/repos/{owner}/{name}/merge-queue/pull/{number}/dequeue"
     request = urllib.request.Request(
         endpoint, method="POST",
-        headers={"Accept": "application/json", "Authorization": f"Bearer {_credential()}"},
+        headers={"Accept": "application/json", "User-Agent": "loopzero",
+                 "Authorization": f"Bearer {_credential()}"},
     )
     try:
         with _open(request):

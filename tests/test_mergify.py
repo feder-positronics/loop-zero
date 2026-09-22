@@ -39,6 +39,7 @@ def test_membership_uses_bearer_and_validates_queue(monkeypatch):
         "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     )
     assert seen[0].headers["Authorization"] == "Bearer secret"
+    assert seen[0].headers["User-agent"] == "loopzero"
 
 
 def test_membership_maps_404_only_to_absent(monkeypatch):
