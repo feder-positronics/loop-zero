@@ -39,4 +39,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MERGIFY_API_KEY: ${{ secrets.MERGIFY_API_KEY }}
           PYTHONPATH: src
-        run: uv run --python 3.14 --no-project python -m loopzero.hosted
+        run: uv run --python 3.14 --frozen --no-dev python -m loopzero.hosted

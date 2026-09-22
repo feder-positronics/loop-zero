@@ -219,10 +219,18 @@ request; a behind branch is treated as queued only after that API confirms it.
 
 Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
 than one (the rollout uses three). In-place updates rewrite the reviewed source
-head and are unsupported. Admission requires the vendor queue configuration to
-report computed `allow_inplace_checks: false`; missing/true values fail closed,
-even for an up-to-date source because main can advance after admission. Confirm
-this API evidence after deploying queue configuration. Direct reuse of valid CI
+head and are unsupported. Admission checks the live serial queue's identity and
+reads `.mergify.yml` from GitHub's default branch, requiring explicit integer
+parallelism greater than one and the matching queue name. The configuration blob
+must stay unchanged across verification. Local/PR files, `extends`, scopes,
+duplicate YAML keys and ambiguous or missing values do not establish this proof.
+
+The deprecated queue-rule API's `allow_inplace_checks` field is not the runtime
+verdict: [Mergify's API examples](https://docs.mergify.com/api/queues/) show `true` for both in-place and draft-PR
+checks. Verify actual `mergeability_check.check_type = draft_pr` and unchanged
+source heads in a disposable live rehearsal before cutover. GitHub blob stability
+does not prove vendor ingestion; drain queues before configuration changes and
+repeat this verification before resuming admission. Direct reuse of valid CI
 without rewriting the source remains compatible.
 
 The named queue **must** require `check-success = Loop-zero Eligibility` in

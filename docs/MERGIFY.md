@@ -87,6 +87,10 @@ It documents no disable switch. With no scopes configured, prove that this path
 requires green exact-head eligibility and existing CI, and that behind/cumulative
 PRs get fresh integration candidates. Do not promise every PR gets a temporary
 branch. Do not reduce parallel checks to one: that can enable source-head updates.
+The adapter reads stable default-branch configuration; the deprecated rule API
+field is not a runtime verdict. After any configuration change, drain first and
+verify vendor draft-PR placement before resuming. GitHub blob identity alone
+does not establish that Mergify has ingested that revision.
 
 ## Reviewed protection proposal
 
