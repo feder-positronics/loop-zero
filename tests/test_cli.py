@@ -1402,6 +1402,40 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     assert git(repo, "branch", "--list", "lz/t1") == ""
 
 
+@pytest.mark.parametrize("state", ["clean", "dirty", "wrong_primary"])
+def test_merged_bare_primary_cleans_only_clean_linked_worktree(
+    repo: Path, gh: FakeGh, capsys, monkeypatch, state
+) -> None:
+    primary = repo.parent / "origin.git"
+    linked = repo.parent / "linked task"
+    git(primary, "worktree", "add", "-q", "-b", "lz/bare", str(linked), "main")
+    monkeypatch.chdir(linked)
+    head = head_of(linked)
+    git(primary, "update-ref", "refs/remotes/origin/main", head)
+    arm_pr(gh, head, isDraft=False, state="MERGED")
+    gh.respond("pr view", {"state": "MERGED", "headRefOid": head,
+                           "mergeCommit": {"oid": "c" * 40}})
+    gh.respond("api -X", "")
+    if state == "dirty":
+        (linked / "README.md").write_text("uncommitted work\n")
+    if state == "wrong_primary":
+        original = cli._git
+        monkeypatch.setattr(cli, "_git", lambda cwd, *args: (
+            f"worktree {repo}\0" if args == ("worktree", "list", "--porcelain", "-z")
+            else original(cwd, *args)))
+
+    code, out, err = run(capsys, "merge")
+
+    if state == "wrong_primary":
+        assert code == 1 and "does not own this linked worktree" in err
+    else:
+        assert code == 0 and out.endswith(f"cd {primary}\n"), (out, err)
+        assert ("worktree is dirty" in err) if state == "dirty" else not err
+    assert linked.exists() is (state != "clean")
+    assert bool(git(primary, "branch", "--list", "lz/bare")) is (state != "clean")
+    assert "bare" in git(primary, "worktree", "list", "--porcelain")
+
+
 def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatch) -> None:
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
