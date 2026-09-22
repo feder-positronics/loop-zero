@@ -11,7 +11,7 @@ from . import _proc
 from . import worktree as worktree_mod
 from .types import Config, LoopZeroError, ResourceLimits, ReviewConfig
 
-MERGE_STRATEGIES = ("squash", "merge", "rebase", "queue")
+MERGE_STRATEGIES = ("squash", "merge", "rebase", "queue", "mergify")
 REVIEWER_FAMILIES = ("claude", "codex")
 # Host locations that must never be exposed to the sandbox, even read-only, because they
 # hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home
@@ -35,6 +35,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
     },
     "delivery": {
         "merge": str,
+        "mergify_queue": str,
         "reviewers": list,
         "review_publishers": list,
         "reviewer_ro_paths": list,
@@ -138,6 +139,11 @@ def _build(data: dict[str, Any]) -> Config:
     merge = delivery.get("merge", "squash")
     if merge not in MERGE_STRATEGIES:
         raise ConfigError(f"delivery.merge must be one of {MERGE_STRATEGIES}, got {merge!r}")
+    mergify_queue = delivery.get("mergify_queue")
+    if merge == "mergify" and not mergify_queue:
+        raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
+    if mergify_queue is not None and not mergify_queue.strip():
+        raise ConfigError("delivery.mergify_queue must not be empty")
     reviewers = _strings("delivery.reviewers", delivery.get("reviewers", list(REVIEWER_FAMILIES)))
     if not reviewers:
         raise ConfigError("delivery.reviewers must list at least one reviewer")
@@ -194,6 +200,7 @@ def _build(data: dict[str, Any]) -> Config:
         checks=_strings("checks.commands", checks.get("commands", [])),
         required_ci=_strings("checks.required_ci", checks.get("required_ci", [])),
         merge_strategy=merge,
+        mergify_queue=mergify_queue,
         reviewers=reviewers,
         review_publishers=_strings("delivery.review_publishers",
                                    delivery.get("review_publishers", [])),

@@ -209,6 +209,21 @@ repository must allow auto-merge (Settings, General, "Allow auto-merge"),
 otherwise `gh pr merge` fails with "Auto merge is not allowed". Set
 `delivery.merge = "queue"` so the queue owns the merge method.
 
+### Mergify
+
+Set `delivery.merge = "mergify"` and `delivery.mergify_queue` to the exact
+Mergify queue-rule name. `loopzero merge` posts the documented
+`@mergifyio queue <name>` command once for the current source head, then confirms
+membership through `https://api.mergify.com/v1`. A command comment is only a
+request; a behind branch is treated as queued only after that API confirms it.
+
+Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
+in `~/.config/mergify/api-key` with mode `0600` in a private directory. The
+environment variable wins. An invalid supplied credential fails the operation;
+loop-zero does not fall back to another account. The key is sent only to the
+fixed hosted Mergify API origin. GitHub Actions' usual `ghs_*` token is not a
+supported Mergify API credential.
+
 ## Hosted review eligibility
 
 Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.

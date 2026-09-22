@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import cli
+from loopzero import cli, mergify
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
 from tests.test_github import FakeGh, pr_json, threads_json
@@ -1577,6 +1577,75 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
     )
     assert wt.exists()
     assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
+
+
+def test_mergify_merge_requests_once_for_behind_head(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    workflow = (wt / "workflow.toml").read_text().replace(
+        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
+    )
+    (wt / "workflow.toml").write_text(workflow)
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "use mergify")
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False, mergeStateStatus="BEHIND")
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    requested = []
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *args: requested.append(args))
+
+    code, out, err = run(capsys, "merge")
+
+    assert (code, err) == (0, "")
+    assert requested == [(REPO, 7, head, "main")]
+    assert "requested from Mergify queue main" in out
+
+
+def test_ready_allows_behind_only_after_configured_mergify_attestation(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    workflow = (wt / "workflow.toml").read_text().replace(
+        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
+    )
+    (wt / "workflow.toml").write_text(workflow)
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "use mergify")
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False, mergeStateStatus="BEHIND")
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    monkeypatch.setattr(mergify, "configured", lambda *args: True)
+
+    code, out, err = run(capsys, "ready")
+
+    assert (code, err) == (0, "") and out == f"ready: {URL}\n"
+
+
+def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    workflow = (wt / "workflow.toml").read_text().replace(
+        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
+    )
+    (wt / "workflow.toml").write_text(workflow)
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "use mergify")
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary")])
+    arm_readiness(gh, head, wt)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(
+        mergify, "request", lambda *_: pytest.fail("resume must not submit another command")
+    )
+
+    code, _out, err = run(capsys, "merge", "--wait=1")
+
+    assert code == 1 and "left Mergify queue main unmerged" in err
 
 
 def test_merge_waits_for_queue_then_cleans_up(
