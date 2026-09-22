@@ -80,13 +80,14 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
     assert seen[0].full_url.endswith("/merge-queue/pull/7/dequeue")
 
 
-def test_configured_requires_branch_status_and_named_rule(monkeypatch):
+@pytest.mark.parametrize("inplace", [False, True, None, "false"])
+def test_configured_requires_branch_status_and_named_rule(monkeypatch, inplace):
     responses = iter([
         {"batches": [], "waiting_pull_requests": [], "mode": "serial"},
-        {"configuration": [{"name": "main", "config": {}}]},
+        {"configuration": [{"name": "main", "config": {"allow_inplace_checks": inplace}}]},
     ])
     monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
-    assert mergify.configured("acme/widgets", "main", "main")
+    assert mergify.configured("acme/widgets", "main", "main") is (inplace is False)
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):

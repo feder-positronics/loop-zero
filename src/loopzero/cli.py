@@ -845,8 +845,8 @@ def _merge_with_mergify(
         raise CliError("not ready to request Mergify: " + "; ".join(blockers))
     queue = config.mergify_queue
     assert queue is not None
-    if behind in readiness.reasons and not mergify.configured(config.repo, config.base_branch, queue):
-        raise CliError("Mergify queue configuration is unverified; cannot admit a behind branch")
+    if not mergify.configured(config.repo, config.base_branch, queue):
+        raise CliError("Mergify queue configuration is unverified or permits in-place head updates")
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )

@@ -1575,8 +1575,9 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
 
 
 @pytest.mark.parametrize("attested", [True, False])
+@pytest.mark.parametrize("merge_state", ["BEHIND", "CLEAN"])
 def test_mergify_merge_requests_once_for_behind_head(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, attested
+    wt: Path, gh: FakeGh, capsys, monkeypatch, attested, merge_state
 ) -> None:
     workflow = (wt / "workflow.toml").read_text().replace(
         'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
@@ -1585,7 +1586,7 @@ def test_mergify_merge_requests_once_for_behind_head(
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-q", "-m", "use mergify")
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False, mergeStateStatus="BEHIND")
+    arm_pr(gh, head, isDraft=False, mergeStateStatus=merge_state)
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     monkeypatch.setattr(mergify, "configured", lambda *_: attested)
@@ -1638,6 +1639,7 @@ def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt)
     gh.respond("pr view", {"state": "OPEN", "mergeCommit": None})
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
     monkeypatch.setattr(
@@ -1857,6 +1859,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         gh.respond("pr list", [pr_json(headRefOid=head, isDraft=False)],
                    [pr_json(headRefOid=head, isDraft=False)],
                    [pr_json(headRefOid="f" * 40, isDraft=False)])
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
     monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("duplicate admission"))
     reads = []

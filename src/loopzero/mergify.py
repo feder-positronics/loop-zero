@@ -123,7 +123,12 @@ def configured(repo: str, branch: str, queue: str) -> bool:
     rules = rules_data.get("configuration")
     if not isinstance(rules, list):
         raise MergifyError("invalid Mergify queue configuration response")
-    return any(isinstance(rule, dict) and rule.get("name") == queue for rule in rules)
+    return any(
+        isinstance(rule, dict) and rule.get("name") == queue
+        and isinstance(rule.get("config"), dict)
+        and rule["config"].get("allow_inplace_checks") is False
+        for rule in rules
+    )
 
 
 def dequeue(repo: str, number: int) -> None:
