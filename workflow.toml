@@ -20,6 +20,7 @@ network = false
 [delivery]
 merge = "queue"
 reviewers = ["claude", "codex"]
+review_publishers = ["eowca"]
 
 # Owner policy (2026-09-19): Opus at medium; use high exceptionally, with a concrete
 # reason in the PR; max is forbidden (the Luna exception is not enabled here because the
