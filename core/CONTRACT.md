@@ -22,9 +22,9 @@ hold all state. Nothing is recorded anywhere else.
    for review. If a draft is blocked only by missing or skipped required
    checks, mark it ready to trigger CI and exit 3. With `--wait[=SECONDS]`
    (default 1800) it polls the required checks of that unchanged head instead:
-   exit 0 ready, 1 blocked, 3 timed out. A required check still missing after
-   two minutes means GitHub created no run for the head; the error names the
-   recovery. Do not gate on `gh pr checks --watch`: it ignores checks that do
+   exit 0 ready, 1 blocked, 3 timed out. If required checks remain missing after
+   two minutes with no visible pending checks, inspect workflow scheduling,
+   triggers and permissions for that head, then retry after correcting the cause. Do not gate on `gh pr checks --watch`: it ignores checks that do
    not exist yet.
 6. `loopzero merge` — recompute readiness, merge with the configured strategy,
    verify the merge SHA, delete the branch and the worktree. Under a merge

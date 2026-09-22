@@ -758,17 +758,17 @@ def _wait_for_checks(
             print("waiting: " + "; ".join(pending))
             shown = pending
         elapsed = time.monotonic() - started
-        # Only when nothing runs on the head at all. A job's check run exists only once the
-        # job starts, so a late required job is "missing" for as long as its workflow runs.
+        # Missing check runs do not prove that no workflow was scheduled. Diagnose only
+        # when no visible pending check explains why the required jobs have not appeared.
         if (
             elapsed >= MISSING_RUN_GRACE
             and all(" missing on " in r for r in pending)
             and "pending" not in github.check_runs(config.repo, pr.head_sha).values()
         ):
             raise CliError(
-                f"{'; '.join(pending)} after {elapsed:.0f}s: GitHub created no run for this "
-                f"head. Recover with `gh pr close {pr.number}` then `gh pr reopen {pr.number}` "
-                "(same head, the review stays valid) and rerun"
+                f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
+                f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
+                "retry `loopzero ready --wait`"
             )
         if elapsed >= timeout:
             return None
