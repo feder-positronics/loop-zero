@@ -1221,10 +1221,10 @@ def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys) -> None
     assert f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
 
 
-def test_ready_wait_reports_a_check_run_that_never_started(
+def test_ready_wait_reports_missing_checks_without_lifecycle_recovery(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
-    """#181: a required check still missing after the grace period is not a plain timeout."""
+    """Absent check runs call for diagnosis, not a PR lifecycle restart."""
     head = head_of(wt)
     arm_pr(gh, head, isDraft=False)
     gh.respond(reviews_key(), [rev(head, "primary")])
@@ -1234,8 +1234,8 @@ def test_ready_wait_reports_a_check_run_that_never_started(
 
     code, out, err = run(capsys, "ready", "--wait")
 
-    assert code == 1 and "waiting:" in out and "GitHub created no run for this head" in err
-    assert "gh pr close 7" in err and "gh pr reopen 7" in err
+    assert code == 1 and "waiting:" in out and f"head {head[:12]}" in err and "workflow scheduling, triggers and permissions" in err
+    assert "after correcting the cause, retry `loopzero ready --wait`" in err and not any(s in err for s in ("close", "reopen", "retrigger", "created no run"))
 
 
 def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
