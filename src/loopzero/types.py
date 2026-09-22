@@ -31,7 +31,6 @@ class Config:
     required_ci: tuple[str, ...]  # exact GitHub check names that must be green
     merge_strategy: str  # "squash" | "merge" | "rebase" | "queue" | "mergify"
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
-    mergify_queue: str | None = None
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
     review_publishers: tuple[str, ...] = ()  # trusted GitHub logins, independent of CI token
     review_chunk_bytes: int = 200_000
@@ -43,6 +42,7 @@ class Config:
     env: tuple[tuple[str, str], ...] = ()  # fixed variables set inside the sandbox; win over host
     limits: ResourceLimits = ResourceLimits()  # best-effort per-check shell resource limits
     review: dict[str, ReviewConfig] = field(default_factory=dict)
+    mergify_queue: str | None = None
 
 
 @dataclass(frozen=True)

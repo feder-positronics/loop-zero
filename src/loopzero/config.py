@@ -142,8 +142,8 @@ def _build(data: dict[str, Any]) -> Config:
     mergify_queue = delivery.get("mergify_queue")
     if merge == "mergify" and not mergify_queue:
         raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
-    if mergify_queue is not None and not mergify_queue.strip():
-        raise ConfigError("delivery.mergify_queue must not be empty")
+    if mergify_queue is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", mergify_queue):
+        raise ConfigError("delivery.mergify_queue must be a non-empty command-safe name")
     reviewers = _strings("delivery.reviewers", delivery.get("reviewers", list(REVIEWER_FAMILIES)))
     if not reviewers:
         raise ConfigError("delivery.reviewers must list at least one reviewer")

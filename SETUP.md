@@ -260,3 +260,8 @@ again. External UI edits without that protocol are not covered. This is the
 existing cooperative trust policy, not instantaneous invalidation: metadata can
 change after the last read and before landing. Do not claim atomic review/merge
 validation or enable unattended landing without accepting this boundary.
+
+After cancellation or ejection, repair the cause and explicitly requeue with
+`@mergifyio queue main` on the PR, then resume `loopzero merge --wait`.
+The CLI never retries a failed admission automatically. Resume request markers
+are scoped to the publishing GitHub login; use the same account across sessions.
