@@ -47,8 +47,11 @@ A PR is ready when none of these hold:
 - An open review thread on the PR carries an unresolved `critical` or
   `important` finding.
 - The head moved after the last review.
-- The branch is behind the base as reported by GitHub; branch protection
-  requires an up-to-date branch so CI ran on what will actually land.
+- GitHub reports the branch as `BEHIND`, unless configured Mergify mode has
+  verified source-preserving integration. Mergify validates a separate integration
+  candidate against the base, so base movement alone does not invalidate review
+  of the authored head. Actual merge conflicts remain blockers; source edits,
+  including conflict fixes, require renewed review and checks.
 - A CI check named in `[checks].required_ci` is missing or not green on the
   exact head.
 
