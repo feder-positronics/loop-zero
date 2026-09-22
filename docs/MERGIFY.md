@@ -11,9 +11,9 @@ model review remain separate evidence.
 1. Install the Mergify GitHub App for loop-zero and IntelFlo. The verified public
    App is `mergify` (10562), with author `mergify[bot]` (37929162). Recheck the live
    installation rather than granting an actor by display name.
-2. Create the narrowest Mergify application key that can read queue status for
-   these repositories. Store local CLI credentials in `MERGIFY_API_KEY` or private
-   `~/.config/mergify/api-key`. In Actions, create a `mergify-eligibility`
+2. Create a Mergify admin application key; the vendor's queue read endpoints do
+   not offer a narrower application-key scope. Store local CLI credentials in
+   `MERGIFY_API_KEY` or private `~/.config/mergify/api-key`. In Actions, create a `mergify-metadata`
    environment restricted to deployments from the protected default branch and
    store its `MERGIFY_API_KEY` there, never as a repository secret. A CI-scoped key
    and a GitHub Actions installation token cannot read queue membership.
@@ -28,6 +28,34 @@ model review remain separate evidence.
    Candidate success is published only from an `opened` or `synchronize`
    `pull_request_target` event whose sender is the verified Mergify bot; manual and
    workflow-run refreshes cannot authenticate a candidate head and fail closed.
+
+Review the environment boundary as configuration before applying it. The exact
+GitHub API payloads are:
+
+```json
+PUT /repos/feder-positronics/loop-zero/environments/mergify-metadata
+{
+  "wait_timer": 0,
+  "prevent_self_review": false,
+  "reviewers": [],
+  "deployment_branch_policy": {
+    "protected_branches": false,
+    "custom_branch_policies": true
+  }
+}
+```
+
+```json
+POST /repos/feder-positronics/loop-zero/environments/mergify-metadata/deployment-branch-policies
+{"name": "main", "type": "branch"}
+```
+
+After creating that policy, move `MERGIFY_API_KEY` into the environment, verify a
+default-branch publisher run can read queue status, and only then delete the
+repository-scoped secret. Read the environment and branch-policy APIs back before
+cutover. The workflow sets `environment.deployment: false`, so using the environment
+for its secret and branch policy does not create deployment objects. These are
+reviewed payloads; this repository does not apply them.
 
 ## Admission and CI
 

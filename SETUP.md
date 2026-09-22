@@ -278,7 +278,7 @@ does not invalidate an unchanged source review. This status does not replace
 integration CI or a local `loopzero check` receipt.
 
 For the supplied Actions publisher, create an environment named
-`mergify-eligibility`, restrict its deployment branches to the protected default
+`mergify-metadata`, restrict its deployment branches to the protected default
 branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
 repository secret. Use the narrowest Mergify credential that can read queue status.
 The environment prevents a workflow dispatched from another ref from receiving the

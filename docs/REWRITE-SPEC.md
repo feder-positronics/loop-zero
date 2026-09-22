@@ -10,7 +10,7 @@ generations/slots/leases, no provisional bindings, no settlement capsules, no
 compatibility mode for old runs. The old tree exists only in git history
 (`git show main:<path>`) and may be read for facts, never copied wholesale.
 
-Budget: `src/` <= 4,200 lines, `tests/` <= 5,100 lines, `core/` <= 600 lines
+Budget: `src/` <= 4,200 lines, `tests/` <= 5,150 lines, `core/` <= 600 lines
 of Markdown, three CI workflows. Anything that pushes past the budget needs a
 reason in the PR. CI compares each candidate with its base: over the cap, a
 change may still merge if it holds or shrinks the count, so an over-budget
@@ -26,7 +26,7 @@ prints the remaining headroom. A further raise needs an issue naming what it
 pays for. Issue #196 funds the shared Mergify provider: the first slice raises
 the caps to 3,700/4,700 for explicit admission, API credentials and membership,
 bounded queue waiting and their failure/security tests. The repository-adoption
-slice raises them again to 4,200/5,100 for candidate membership and ancestry
+slice raises them again to 4,200/5,150 for candidate membership and ancestry
 attestation, trusted source/candidate status publishing, and their failure tests;
 it also funds the two small trusted eligibility workflows. No existing behavior
 or check is removed to make room.

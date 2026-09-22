@@ -205,7 +205,7 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     assert "pull_request_target:" in workflow
     assert "ref: ${{ github.event.repository.default_branch }}" in workflow
     assert "persist-credentials: false" in workflow
-    assert "environment: mergify-eligibility" in workflow
+    assert "environment:\n      name: mergify-metadata\n      deployment: false" in workflow
     assert "permissions:\n      contents: read\n      pull-requests: read\n      statuses: write" in workflow
     assert "PYTHONPATH: src" in workflow
     assert "python -m loopzero.hosted" in workflow
