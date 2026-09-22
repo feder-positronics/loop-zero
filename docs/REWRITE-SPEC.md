@@ -24,7 +24,7 @@ fund the CLI fixes filed as #166-#175 (#169). The caps live only in
 `scripts/size_budget.sh`, which CI and `loopzero check` both run and which
 prints the remaining headroom. A further raise needs an issue naming what it
 pays for. Issue #196 funds the shared Mergify provider: the first slice raises
-the caps to 3,700/4,600 for explicit admission, API credentials and membership,
+the caps to 3,700/4,700 for explicit admission, API credentials and membership,
 bounded queue waiting and their failure/security tests. The repository-adoption
 slice raises them again to 4,200/5,100 for candidate membership and ancestry
 attestation, trusted source/candidate status publishing, and their failure tests;

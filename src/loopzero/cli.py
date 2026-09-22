@@ -230,6 +230,14 @@ def _readiness(
         result = github.Readiness(
             ready=False, reasons=(*result.reasons, "run loopzero check at this head")
         )
+    if config.merge_strategy == "mergify" and pr.state == "OPEN":
+        behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+        reasons = result.reasons
+        if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
+            reasons = tuple(reason for reason in reasons if reason != behind)
+        else:
+            reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
+        result = github.Readiness(not reasons, reasons)
     return result
 
 
@@ -691,13 +699,6 @@ def cmd_ready(args: argparse.Namespace) -> int:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
         pr, readiness = waited
-    behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
-    if (
-        config.merge_strategy == "mergify"
-        and readiness.reasons == (behind,)
-        and mergify.configured(config.repo, config.base_branch, config.mergify_queue or "")
-    ):
-        readiness = github.Readiness(True, ())
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
@@ -810,9 +811,11 @@ def _wait_for_mergify(
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
-        sha = github.merged_sha(config.repo, pr.number)
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
+        if not mergify.configured(config.repo, config.base_branch, queue):
+            raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
         after = _require_pr(config, branch, allow_merged=True)
         if after.head_sha != pr.head_sha:
@@ -824,7 +827,7 @@ def _wait_for_mergify(
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            sha = github.merged_sha(config.repo, pr.number)
+            sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
             if sha:
                 return sha
             raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
@@ -861,7 +864,7 @@ def _merge_with_mergify(
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
         confirmed_marker = True
     if not confirmed and confirmed_marker:
-        sha = github.merged_sha(config.repo, pr.number)
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
         raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
@@ -884,21 +887,25 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args, pin_checks=True)
     branch = worktree.branch(wt)
+    if args.cancel:
+        if config.merge_strategy != "mergify":
+            raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
+        pr = _require_pr(config, branch)
+        mergify.dequeue(config.repo, pr.number)
+        print(f"requested removal of PR #{pr.number} from Mergify")
+        return 0
     pr, readiness = _pr_readiness(wt, config, allow_merged=True)
     if readiness is None:
-        sha = github.merged_sha(config.repo, pr.number)
+        sha = github.merged_sha(
+            config.repo, pr.number,
+            expected_head=pr.head_sha if config.merge_strategy == "mergify" else None,
+        )
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
         print(sha)
         _delete_remote_branch(config, branch)
         _cleanup(wt)
-        return 0
-    if args.cancel:
-        if config.merge_strategy != "mergify":
-            raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
-        mergify.dequeue(config.repo, pr.number)
-        print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
     if config.merge_strategy == "mergify":
         sha = _merge_with_mergify(wt, config, branch, pr, readiness, args.wait)

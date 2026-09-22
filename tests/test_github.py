@@ -858,3 +858,14 @@ def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     with pytest.raises(github.MergeFailed):
         github.merge(REPO, 7, "fast-forward", HEAD)
     assert gh.calls == []
+
+
+@pytest.mark.parametrize("actual", [HEAD, "f" * 40, None])
+def test_merged_sha_binds_confirmation_to_source_head(gh, actual):
+    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40},
+                           "headRefOid": actual})
+    if actual == HEAD:
+        assert github.merged_sha(REPO, 7, expected_head=HEAD) == "c" * 40
+    else:
+        with pytest.raises(github.GhError, match="head changed"):
+            github.merged_sha(REPO, 7, expected_head=HEAD)
