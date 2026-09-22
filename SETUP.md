@@ -237,7 +237,7 @@ From a trusted base checkout, run:
 python -m loopzero.eligibility --config workflow.toml --pr 123 --head <full-source-sha> --publish
 ```
 
-Give that process only repository metadata read and commit-status write access.
+Give that process pull-request read and commit-status write access.
 It posts `Loop-zero Eligibility` as pending before reading live reviews/threads,
 then success or failure on the specified source SHA. An API failure leaves pending.
 Do not check out or execute candidate code with this credential. Serialize all

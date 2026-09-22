@@ -939,10 +939,15 @@ def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, ca
     assert not (fake_bin / "claude.stdin").exists()
 
 
-def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys) -> None:
+@pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
+def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n')
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-qm", "configure trusted publishers")
+    git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary")])
+    gh.respond(reviews_key(), [rev(head, "primary", login=publisher)])
     code, _, err = run(capsys, "review")
     assert code == 1 and "already has a primary review" in err
 
@@ -1350,26 +1355,16 @@ def test_review_treats_forged_marker_as_fresh_lineage(wt: Path, gh: FakeGh, fake
     assert code == 0 and out.startswith("primary review by claude")
 
 
-@pytest.mark.parametrize("state", ["DISMISSED", "PENDING"])
-def test_ready_rejects_revoked_latest_review(wt: Path, gh: FakeGh, capsys, state) -> None:
+@pytest.mark.parametrize("state", ["DISMISSED", "PENDING", "COMMENTED"])
+def test_ready_respects_latest_review_state(wt: Path, gh: FakeGh, capsys, state) -> None:
     head = head_of(wt)
     arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state)])
+    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")])
     gh.respond("pr ready", "")
     arm_readiness(gh, head, wt)
     code, out, _ = run(capsys, "ready")
-    assert code == 1 and "no review recorded for the current head" in out
-
-
-def test_ready_allows_resolved_request_changes_threads(wt: Path, gh: FakeGh, capsys) -> None:
-    head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary", state="COMMENTED",
-                                   verdict="request_changes")])
-    arm_readiness(gh, head, wt)
-    gh.respond("pr ready", "")
-    code, out, _ = run(capsys, "ready")
-    assert code == 0 and out == f"ready: {URL}\n"
+    assert (code, out) == ((0, f"ready: {URL}\n") if state == "COMMENTED" else
+                           (1, "not ready: no review recorded for the current head\n"))
 
 
 def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys) -> None:
