@@ -69,8 +69,16 @@ def _toplevel() -> Path:
 
 
 def _repo_root(wt: Path) -> Path:
-    """The main checkout that owns this worktree (parent of the common .git directory)."""
-    return Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).parent
+    """The verified primary checkout or bare repository owning this linked worktree."""
+    first = _git(wt, "worktree", "list", "--porcelain", "-z").split("\0", 1)[0]
+    if not first.startswith("worktree "):
+        raise CliError("Git did not identify the primary worktree; refusing cleanup")
+    root = Path(first.removeprefix("worktree "))
+    common_args = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if (root.resolve() == wt.resolve()
+            or Path(_git(root, *common_args)).resolve() != Path(_git(wt, *common_args)).resolve()):
+        raise CliError("primary repository does not own this linked worktree; refusing cleanup")
+    return root
 
 
 def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = False) -> Config:
