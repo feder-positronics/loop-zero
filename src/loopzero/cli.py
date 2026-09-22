@@ -11,16 +11,13 @@ import sys
 import time
 from pathlib import Path
 
-from loopzero import _proc, github, runners, sandbox, worktree
+from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
 from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
-REVIEW_MARKER_RE = re.compile(
-    r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
-    r"kind=(primary|delta)(?:\s+source=(?:model|repost))?\s*-->"
-)
+REVIEW_MARKER_RE = eligibility.REVIEW_MARKER_RE
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
@@ -88,6 +85,9 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     if base_checks is None:
         return config_mod.load(path)
     config = config_mod.load(path, checks=base_checks)
+    delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
+    config = dataclasses.replace(config, review_publishers=config_mod._strings(
+        "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
         revision = config_mod.base_revision(root, config.base_branch)
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
@@ -169,22 +169,19 @@ class Marker:
     verdict: str  # "approve" | "request_changes" | ""
 
 
-def _lineage_markers(wt: Path, reviews: list[dict], head: str) -> list[Marker]:
-    """Markers posted by this token, on the commit they name, whose head is an ancestor of `head`.
-
-    A marker is only trusted when the review's `commit_id` equals the marker head and the
-    review author is the token login; anything else could be hand-posted.
-    """
+def _lineage_markers(wt: Path, reviews: list[dict], head: str,
+                     publishers: tuple[str, ...] = ()) -> list[Marker]:
+    """Trusted publisher markers on their named commits within this head's ancestry."""
     found: list[Marker] = []
-    token_login: str | None = None
+    trusted = {login.casefold() for login in publishers}
     for review in reviews:
         body = review.get("body") or ""
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
-        if token_login is None:
-            token_login = github.login()
-        if (review.get("user") or {}).get("login") != token_login:
+        if not trusted:
+            trusted = {github.login().casefold()}
+        if (review.get("user") or {}).get("login", "").casefold() not in trusted:
             continue
         if not _is_ancestor(wt, match.group(1), head):
             continue
@@ -221,18 +218,26 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None
 ) -> github.Readiness:
-    markers = _lineage_markers(
-        wt, reviews if reviews is not None else _pr_reviews(config.repo, pr.number), head
+    reviewed = eligibility.reviewed_head(
+        reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
+        head, config.review_publishers or (github.login(),),
     )
-    latest = markers[-1] if markers else None
     result = github.readiness(
-        config.repo, pr, config.base_branch, config.required_ci, latest.head if latest else None
+        config.repo, pr, config.base_branch, config.required_ci, reviewed
     )
     report = _load_report(wt)
     if report is None or report.head != head or report.dirty or not report.ok:
         result = github.Readiness(
             ready=False, reasons=(*result.reasons, "run loopzero check at this head")
         )
+    if config.merge_strategy == "mergify" and pr.state == "OPEN":
+        behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+        reasons = result.reasons
+        if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
+            reasons = tuple(reason for reason in reasons if reason != behind)
+        else:
+            reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
+        result = github.Readiness(not reasons, reasons)
     return result
 
 
@@ -487,7 +492,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
 
 
 def cmd_review(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
@@ -495,8 +500,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
+    if config.review_publishers and github.login().casefold() not in {
+        login.casefold() for login in config.review_publishers
+    }:
+        raise CliError("current GitHub login is not a configured review publisher")
     kind, reviewed = _decide_kind(
-        _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
+        _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head, config.review_publishers), head
     )
     if args.repost:
         author = runners.author_family(wt, head)
@@ -789,15 +798,122 @@ def _wait_for_merge(config: Config, branch: str, pr: github.PR, timeout: float) 
         _sleep(min(WAIT_INTERVAL, timeout - elapsed))
 
 
+def _wait_for_mergify(
+    config: Config, branch: str, pr: github.PR, timeout: float, confirmed: bool
+) -> str | None:
+    """Follow one exact source head from request through confirmed membership to merge."""
+    started = time.monotonic()
+    queue = config.mergify_queue
+    assert queue is not None
+    while True:
+        current = _require_pr(config, branch, allow_merged=True)
+        if current.head_sha != pr.head_sha:
+            raise CliError(
+                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
+            )
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        if sha:
+            return sha
+        if not mergify.configured(config.repo, config.base_branch, queue):
+            raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
+        state = mergify.membership(config.repo, pr.number, queue)
+        after = _require_pr(config, branch, allow_merged=True)
+        if after.head_sha != pr.head_sha:
+            raise CliError(
+                f"PR head changed while waiting: {pr.head_sha[:12]} to {after.head_sha[:12]}"
+            )
+        if state is not None and not confirmed:
+            mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+            confirmed = True
+            print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
+        elif state is None and confirmed:
+            sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+            if sha:
+                return sha
+            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
+                           f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
+        if time.monotonic() - started >= timeout:
+            return None
+        _sleep(min(WAIT_INTERVAL, timeout - (time.monotonic() - started)))
+
+
+def _merge_with_mergify(
+    wt: Path, config: Config, branch: str, pr: github.PR,
+    readiness: github.Readiness, timeout: float | None,
+) -> str | None:
+    """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
+    behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+    blockers = tuple(reason for reason in readiness.reasons if reason != behind)
+    if blockers:
+        raise CliError("not ready to request Mergify: " + "; ".join(blockers))
+    queue = config.mergify_queue
+    assert queue is not None
+    if not mergify.configured(config.repo, config.base_branch, queue):
+        raise CliError("Mergify queue configuration is unverified or permits in-place head updates")
+    requested, confirmed_marker = mergify.markers(
+        config.repo, pr.number, pr.head_sha, queue
+    )
+    state = mergify.membership(config.repo, pr.number, queue)
+    current = _require_pr(config, branch, allow_merged=True)
+    if current.head_sha != pr.head_sha:
+        raise CliError(
+            f"PR head changed during Mergify lookup: {pr.head_sha[:12]} to {current.head_sha[:12]}"
+        )
+    confirmed = state is not None
+    if confirmed and not confirmed_marker:
+        mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
+        confirmed_marker = True
+    if not confirmed and confirmed_marker:
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        if sha:
+            return sha
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
+                       f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
+    if not confirmed and not requested:
+        mergify.request(config.repo, pr.number, pr.head_sha, queue)
+        requested = True
+    if timeout is not None:
+        return _wait_for_mergify(config, branch, pr, timeout, confirmed)
+    state_name = "confirmed in" if confirmed else "requested from"
+    print(
+        f"PR #{pr.number} {state_name} Mergify queue {queue}; "
+        "next: loopzero merge --wait follows the queue, verifies and cleans up"
+    )
+    return None
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
+    if args.cancel and args.wait is not None:
+        raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args, pin_checks=True)
     branch = worktree.branch(wt)
+    if args.cancel:
+        if config.merge_strategy != "mergify":
+            raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
+        pr = _require_pr(config, branch)
+        mergify.dequeue(config.repo, pr.number)
+        print(f"requested removal of PR #{pr.number} from Mergify")
+        return 0
     pr, readiness = _pr_readiness(wt, config, allow_merged=True)
     if readiness is None:
-        sha = github.merged_sha(config.repo, pr.number)
+        sha = github.merged_sha(
+            config.repo, pr.number,
+            expected_head=pr.head_sha if config.merge_strategy == "mergify" else None,
+        )
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
+        print(sha)
+        _delete_remote_branch(config, branch)
+        _cleanup(wt)
+        return 0
+    if config.merge_strategy == "mergify":
+        sha = _merge_with_mergify(wt, config, branch, pr, readiness, args.wait)
+        if sha is None:
+            if args.wait is not None:
+                print(f"timed out waiting for Mergify to land PR #{pr.number}")
+                return 3
+            return 0
         print(sha)
         _delete_remote_branch(config, branch)
         _cleanup(wt)
@@ -863,7 +979,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
-    markers = _lineage_markers(wt, reviews, head)
+    markers = _lineage_markers(wt, reviews, head, config.review_publishers)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
@@ -873,6 +989,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")
+    if config.merge_strategy == "mergify" and pr.state == "OPEN" and pr.head_sha == head:
+        queue = config.mergify_queue
+        assert queue is not None
+        requested, confirmed = mergify.markers(config.repo, pr.number, head, queue)
+        state = mergify.membership(config.repo, pr.number, queue)
+        label = "confirmed" if state else "ejected" if confirmed else "requested" if requested else "none"
+        print(f"mergify:  {label} ({queue})")
     return 0
 
 
@@ -913,6 +1036,9 @@ def build_parser() -> argparse.ArgumentParser:
             "--wait", nargs="?", const=WAIT_TIMEOUT, type=float, metavar="SECONDS",
             help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",
         )
+    merge.add_argument(
+        "--cancel", action="store_true", help="request removal from the configured Mergify queue"
+    )
     ready.set_defaults(func=cmd_ready)
     merge.set_defaults(func=cmd_merge)
     resolve = sub.add_parser("resolve", help="list open findings, or reply to one and resolve it")

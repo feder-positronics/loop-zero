@@ -1,0 +1,19 @@
+# Admission is explicit: @mergifyio queue main. No automatic queue rules.
+# Requires Loop-zero Eligibility on originals AND attested temporary candidates.
+merge_queue:
+  mode: serial
+  max_parallel_checks: 3
+  queue_controls_comment: false
+  reset_on_external_merge: always
+  skip_intermediate_results: false
+
+queue_rules:
+  - name: main
+    batch_size: 1
+    branch_protection_injection_mode: queue
+    max_checks_retries: 0
+    merge_method: squash
+    queue_conditions:
+      - base = main
+      - -draft
+      - check-success = Loop-zero Eligibility

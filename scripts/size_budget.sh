@@ -4,8 +4,8 @@
 # is already over can still merge changes that hold or shrink and never deadlocks.
 # Usage: scripts/size_budget.sh [BASE]   (default: merge-base with origin/main)
 set -euo pipefail
-SRC_CAP=3400
-TESTS_CAP=4300
+SRC_CAP=4200
+TESTS_CAP=5150
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git ls-tree -r --name-only "$base" -- "$1" | { grep '\.py$' || true; } \

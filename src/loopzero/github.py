@@ -489,6 +489,7 @@ def readiness(
     base_branch: str,
     required_ci: tuple[str, ...],
     reviewed_head: str | None,
+    *, allow_behind: bool = False,
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -498,7 +499,7 @@ def readiness(
         reasons.append(f"PR targets {pr.base_ref}, configured base is {base_branch}")
     if pr.mergeable == "CONFLICTING":
         reasons.append(f"PR #{pr.number} has merge conflicts with {pr.base_ref}")
-    if pr.merge_state == "BEHIND":
+    if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks")
     if not reviewed_head:
         reasons.append("no review recorded for the current head")
@@ -527,11 +528,12 @@ _QUEUE_QUERY = (
 )
 
 
-def merged_sha(repo: str, number: int) -> str | None:
+def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
     """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
-    view = _gh_json(
-        "pr", "view", str(number), "--repo", repo, "--json", "mergeCommit,state,headRefName"
-    ) or {}
+    fields = "mergeCommit,state,headRefName" + (",headRefOid" if expected_head else "")
+    view = _gh_json("pr", "view", str(number), "--repo", repo, "--json", fields) or {}
+    if expected_head and view.get("headRefOid") != expected_head:
+        raise GhError(("gh", "pr", "view"), "PR head changed before merge verification")
     sha = (view.get("mergeCommit") or {}).get("oid")
     return sha if view.get("state") == "MERGED" and sha else None
 
@@ -590,3 +592,9 @@ def delete_remote_branch(repo: str, branch: str) -> None:
         )
         if not absent:
             raise
+
+
+def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
+    """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
+    _api(f"repos/{repo}/statuses/{head}",
+         {"state": state, "context": context, "description": description})

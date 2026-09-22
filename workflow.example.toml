@@ -46,10 +46,14 @@ ro_paths = ["/home/<you>/.local/bin", "/home/<you>/.local/share/uv"]
 network = false
 
 [delivery]
-# Merge strategy passed to `gh pr merge`: "squash", "merge" or "rebase".
-merge = "squash"  # or "queue" when main has a merge queue
+# Merge strategy: "squash", "merge", "rebase", GitHub "queue", or "mergify".
+merge = "squash"
+# Required with merge = "mergify"; the exact Mergify queue rule name.
+# mergify_queue = "main"
 # Reviewer preference, in order. `loopzero review` picks the first family
 # that is installed and differs from the author's family when that is known.
+# Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
+# review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
 # Optional absolute paths for reviewer binaries and runtimes. When omitted,
 # loop-zero mounts the resolved directory of the selected reviewer binary.

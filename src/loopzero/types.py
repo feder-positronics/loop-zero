@@ -29,9 +29,10 @@ class Config:
     base_branch: str  # "main"
     checks: tuple[str, ...]  # shell commands run in sandbox, in order
     required_ci: tuple[str, ...]  # exact GitHub check names that must be green
-    merge_strategy: str  # "squash" | "merge" | "rebase" | "queue" (base owns the method)
+    merge_strategy: str  # "squash" | "merge" | "rebase" | "queue" | "mergify"
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
+    review_publishers: tuple[str, ...] = ()  # trusted GitHub logins, independent of CI token
     review_chunk_bytes: int = 200_000
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
@@ -41,6 +42,7 @@ class Config:
     env: tuple[tuple[str, str], ...] = ()  # fixed variables set inside the sandbox; win over host
     limits: ResourceLimits = ResourceLimits()  # best-effort per-check shell resource limits
     review: dict[str, ReviewConfig] = field(default_factory=dict)
+    mergify_queue: str | None = None
 
 
 @dataclass(frozen=True)

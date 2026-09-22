@@ -1,0 +1,25 @@
+{
+  "name": "main: updates only through Mergify",
+  "target": "branch",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": [
+        "refs/heads/main"
+      ],
+      "exclude": []
+    }
+  },
+  "rules": [
+    {
+      "type": "update"
+    }
+  ],
+  "bypass_actors": [
+    {
+      "actor_id": 10562,
+      "actor_type": "Integration",
+      "bypass_mode": "always"
+    }
+  ]
+}

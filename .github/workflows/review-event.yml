@@ -1,0 +1,13 @@
+# Unprivileged notification only. The trusted workflow_run consumer re-fetches metadata.
+name: review event
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
+permissions: {}
+jobs:
+  notify:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: 'true'

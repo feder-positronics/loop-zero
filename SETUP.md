@@ -208,3 +208,105 @@ merge commit, deletes the remote branch and removes the worktree. The
 repository must allow auto-merge (Settings, General, "Allow auto-merge"),
 otherwise `gh pr merge` fails with "Auto merge is not allowed". Set
 `delivery.merge = "queue"` so the queue owns the merge method.
+
+### Mergify
+
+Set `delivery.merge = "mergify"` and `delivery.mergify_queue` to the exact
+Mergify queue-rule name. `loopzero merge` posts the documented
+`@mergifyio queue <name>` command once for the current source head, then confirms
+membership through `https://api.mergify.com/v1`. A command comment is only a
+request; a behind branch is treated as queued only after that API confirms it.
+
+Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
+than one (the rollout uses three). In-place updates rewrite the reviewed source
+head and are unsupported. Admission requires the vendor queue configuration to
+report computed `allow_inplace_checks: false`; missing/true values fail closed,
+even for an up-to-date source because main can advance after admission. Confirm
+this API evidence after deploying queue configuration. Direct reuse of valid CI
+without rewriting the source remains compatible.
+
+The named queue **must** require `check-success = Loop-zero Eligibility` in
+`queue_conditions`, with the trusted source and candidate publishers described
+below deployed first. Preserve that condition on candidates (omit
+`merge_conditions` to inherit it, or include the same check explicitly). For example:
+
+```yaml
+queue_rules:
+  - name: main
+    queue_conditions:
+      - base = main
+      - -draft
+      - check-success = Loop-zero Eligibility
+```
+
+This is a required server-side gate: the command API has no expected-SHA field,
+and a request can be processed after the source changes. The CLI's head-change
+error refuses further delivery and cleanup; it cannot revoke an asynchronous
+command atomically. A newly pushed head must lack eligibility until its own
+review passes. Never deploy the adapter with only product-CI queue conditions.
+Before pushing to a requested or queued PR, withdraw it, confirm removal, then
+push, review the new head and explicitly admit it again. Do not interpret a CLI
+failure as proof that Mergify has removed an outstanding request.
+
+Provide an admin-scope Mergify application key in `MERGIFY_API_KEY`, or store it
+in `~/.config/mergify/api-key` with mode `0600` in a private directory. The
+environment variable wins. An invalid supplied credential fails the operation;
+loop-zero does not fall back to another account. The key is sent only to the
+fixed hosted Mergify API origin. GitHub Actions' usual `ghs_*` token is not a
+supported Mergify API credential.
+
+## Hosted review eligibility
+
+Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.
+Local readiness reads that list from the base configuration (legacy installations
+without it use the local GitHub login). Hosted evaluation requires an explicit list;
+its CI token's login is never a reviewer identity.
+
+From a trusted base checkout, run:
+
+```sh
+python -m loopzero.eligibility --config workflow.toml --pr 123 --head <full-source-sha> --publish
+```
+
+Give that process pull-request read and commit-status write access.
+It posts `Loop-zero Eligibility` as pending before reading live reviews/threads,
+then success or failure on the specified source SHA. An API failure leaves pending.
+Do not check out or execute candidate code with this credential. Serialize all
+refreshes for a PR, including manual refreshes; use trusted base configuration, never
+PR configuration. A source push needs a status on its new SHA; base-only movement
+does not invalidate an unchanged source review. This status does not replace
+integration CI or a local `loopzero check` receipt.
+
+For the supplied Actions publisher, create an environment named
+`mergify-metadata`, restrict its deployment branches to the protected default
+branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
+repository secret. Use the narrowest Mergify credential that can read queue status.
+The environment prevents a workflow dispatched from another ref from receiving the
+organization credential; it does not make a GitHub commit-status context unforgeable.
+
+GitHub and Mergify match `Loop-zero Eligibility` by context name. A repository
+writer who can add an Actions workflow can publish the same context with its
+`GITHUB_TOKEN`. Before cutover, either explicitly accept that cooperative writer
+boundary or replace this publisher with a dedicated GitHub App and bind the
+required status check to that App's integration ID. Do not describe the Actions
+publisher as protection from a malicious repository writer.
+
+The evaluator preserves COMMENT model reviews with resolved blocking findings,
+and the existing outdated-thread policy: outdated findings on other SHAs do not
+block, but unresolved current critical/important findings do. Suggestions do not
+block. Dismissing the latest review cannot restore an earlier approval.
+
+Before queue adoption, wire source pushes, review submissions/edits/dismissal,
+review-comment creation/edits/deletion and an explicit refresh to this publisher.
+Actions has no review-thread resolution/reopening trigger. Until an App webhook
+receiver exists, queue users must withdraw an item before altering findings or
+resolving/reopening threads, refresh eligibility, then explicitly request delivery
+again. External UI edits without that protocol are not covered. This is the
+existing cooperative trust policy, not instantaneous invalidation: metadata can
+change after the last read and before landing. Do not claim atomic review/merge
+validation or enable unattended landing without accepting this boundary.
+
+After cancellation or ejection, repair the cause and explicitly requeue with
+`@mergifyio queue main` on the PR, then resume `loopzero merge --wait`.
+The CLI never retries a failed admission automatically. Resume request markers
+are scoped to the publishing GitHub login; use the same account across sessions.
