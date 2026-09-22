@@ -169,22 +169,19 @@ class Marker:
     verdict: str  # "approve" | "request_changes" | ""
 
 
-def _lineage_markers(wt: Path, reviews: list[dict], head: str) -> list[Marker]:
-    """Markers posted by this token, on the commit they name, whose head is an ancestor of `head`.
-
-    A marker is only trusted when the review's `commit_id` equals the marker head and the
-    review author is the token login; anything else could be hand-posted.
-    """
+def _lineage_markers(wt: Path, reviews: list[dict], head: str,
+                     publishers: tuple[str, ...] = ()) -> list[Marker]:
+    """Trusted publisher markers on their named commits within this head's ancestry."""
     found: list[Marker] = []
-    token_login: str | None = None
+    trusted = {login.casefold() for login in publishers}
     for review in reviews:
         body = review.get("body") or ""
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
-        if token_login is None:
-            token_login = github.login()
-        if (review.get("user") or {}).get("login") != token_login:
+        if not trusted:
+            trusted = {github.login().casefold()}
+        if (review.get("user") or {}).get("login", "").casefold() not in trusted:
             continue
         if not _is_ancestor(wt, match.group(1), head):
             continue
@@ -487,7 +484,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
 
 
 def cmd_review(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
@@ -495,8 +492,12 @@ def cmd_review(args: argparse.Namespace) -> int:
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
+    if config.review_publishers and github.login().casefold() not in {
+        login.casefold() for login in config.review_publishers
+    }:
+        raise CliError("current GitHub login is not a configured review publisher")
     kind, reviewed = _decide_kind(
-        _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head), head
+        _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head, config.review_publishers), head
     )
     if args.repost:
         author = runners.author_family(wt, head)
@@ -863,7 +864,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
-    markers = _lineage_markers(wt, reviews, head)
+    markers = _lineage_markers(wt, reviews, head, config.review_publishers)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
