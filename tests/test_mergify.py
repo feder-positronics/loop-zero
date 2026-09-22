@@ -93,7 +93,7 @@ def queue_api(monkeypatch):
             nonlocal reads
             if path == "repos/acme/widgets":
                 return {"default_branch": default}
-            assert path == "repos/acme/widgets/contents/.mergify.yml?ref=main"
+            assert path == "repos/acme/widgets/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
             reads += 1
             return {"type": "file", "encoding": "base64", "sha": str(reads if changed else 1)*40,
                     "content": base64.b64encode(text.encode()).decode()}
