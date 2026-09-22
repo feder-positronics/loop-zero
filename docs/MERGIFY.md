@@ -35,9 +35,6 @@ GitHub API payloads are:
 ```json
 PUT /repos/feder-positronics/loop-zero/environments/mergify-metadata
 {
-  "wait_timer": 0,
-  "prevent_self_review": false,
-  "reviewers": [],
   "deployment_branch_policy": {
     "protected_branches": false,
     "custom_branch_policies": true
@@ -129,6 +126,23 @@ to pass the candidate attestor.
 Freeze landing briefly and drain the native queue before replacing its authority.
 Never admit to native GitHub and Mergify queues simultaneously on main. Read back
 effective rules before admitting reviewed work.
+
+The approved cutover commit changes the trusted `workflow.toml` together with the
+ruleset transition; this proposal deliberately leaves the live values unchanged:
+
+```toml
+[checks]
+required_ci = ["checks", "Loop-zero Eligibility"]
+
+[delivery]
+merge = "mergify"
+mergify_queue = "main"
+```
+
+Keep the local required-check list, Mergify `queue_conditions`, and the effective
+GitHub ruleset on exactly those context names. Validate the consumer configuration
+before admission so `loopzero merge` waits for source eligibility before posting the
+queue command.
 
 Prove: two reviewed siblings land without source rewrites; a pushed head loses
 eligibility; dismissed reviews and supported finding mutations withdraw eligibility;
