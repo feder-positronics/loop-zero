@@ -58,9 +58,10 @@ later) both read it directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
 such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
 first session after an install or upgrade; there, use a local, untracked
 `CLAUDE.md` containing `@AGENTS.md`. `/memory` lists the loaded files.
-For TypeSafe work, explicitly request `typesafe-ai` from that catalog. In this
-repository, `.agents/skills` links `plan`, `implement`, `work-issue`, and
-`typesafe-ai` to their canonical skills for discovery. Other consumers must
+For TypeSafe work, explicitly request [typesafe-ai](integrations/typesafe-ai/SKILL.md)
+from the optional integrations. In this repository, `.agents/skills` links
+`plan`, `implement`, `work-issue`, and `typesafe-ai` to their canonical skills
+for discovery. Other consumers must
 connect their own agent.
 
 For model routing, copy [models.toml](models.toml) into the consuming repository
@@ -174,7 +175,7 @@ The sandboxes' existing tool authentication is unchanged.
 
 ### TypeSafe credentials (optional)
 
-The [TypeSafe skill](core/skills/typesafe-ai/SKILL.md) uses:
+The [TypeSafe skill](integrations/typesafe-ai/SKILL.md) uses:
 
 | Setting | Value |
 | --- | --- |

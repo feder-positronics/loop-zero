@@ -13,8 +13,8 @@ serves the task's acceptance criteria.
 
 ## Ground
 
-Read [the contract](../../CONTRACT.md), repository guidance, the current request
-or `.loopzero/task.md`, and the affected application boundary. Read
+Read [the contract](../../core/CONTRACT.md), repository guidance, the current
+request or `.loopzero/task.md`, and the affected application boundary. Read
 [the building reference](reference.md) for judgment design and composition.
 Start with the [live documentation index](https://docs.typesafe.ai/llms.txt),
 then read the current API or chosen SDK, relevant primitive, and closest cookbook
@@ -23,24 +23,26 @@ and use installed SDK types or available local docs without inventing contracts.
 
 ## Local Credentials
 
-Follow [the shared credential convention](../../CREDENTIALS.md). For TypeSafe,
+Follow [the shared credential convention](../../core/CREDENTIALS.md). For TypeSafe,
 use `TYPESAFE_API_KEY` first, then `~/.config/typesafe/api-key` for host-side
 calls to `https://api.typesafe.ai`. See
-[TypeSafe setup](../../../SETUP.md#typesafe-credentials-optional) for provisioning.
+[TypeSafe setup](../../SETUP.md#typesafe-credentials-optional) for provisioning.
 Resolve the key inside the calling process without printing it. Keep application
 credentials out of required checks and review sandboxes. Installing this skill
 does not change the SDK's credential lookup behavior.
 
 ## Fit The Existing Workflow
 
-- Use [plan](../plan/SKILL.md) if the objective or acceptance is unclear, or
-  [write-design-doc](../write-design-doc/SKILL.md) when a durable design contract
-  is needed. This method does not create a separate task or delivery process.
-- For code changes, follow [implement](../implement/SKILL.md). Record the state
-  sent to TypeSafe, expected decisions, uncertainty handling, service-failure
+- Use [plan](../../core/skills/plan/SKILL.md) if the objective or acceptance is
+  unclear, or [write-design-doc](../../core/skills/write-design-doc/SKILL.md)
+  when a durable design contract is needed. This method does not create a
+  separate task or delivery process.
+- For code changes, follow [implement](../../core/skills/implement/SKILL.md).
+  Record the state sent to TypeSafe, expected decisions, uncertainty handling, service-failure
   behavior, and material validation limits in the existing task and PR sections.
-- Apply [security-review](../security-review/SKILL.md) to changed credentials,
-  outbound data, or execution boundaries within the contract's review budget.
+- Apply [security-review](../../core/skills/security-review/SKILL.md) to
+  changed credentials, outbound data, or execution boundaries within the
+  contract's review budget.
   Keep API keys server-side and out of prompts, fixtures, logs, and commits.
 
 ## Build And Verify

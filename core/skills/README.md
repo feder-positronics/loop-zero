@@ -1,8 +1,8 @@
 # Skill routing
 
 For subagent model selection, use the shared [delegation guidance](../../docs/DELEGATION.md)
-and the task repository's `models.toml`. `plan`, `implement`, and `work-issue`
-are linked under `.agents/skills` for discovery in this checkout.
+and the task repository's `models.toml`. `plan`, `implement`, `work-issue`,
+and `typesafe-ai` are linked under `.agents/skills` for discovery in this checkout.
 
 For API-key integrations, all skills use the shared
 [credential convention](../CREDENTIALS.md): the documented provider environment
@@ -20,41 +20,31 @@ Existing provider login flows and sandbox authentication remain separate.
 | `review-design-doc` | Review an existing design artifact for material design and implementation-readiness gaps without editing it. | method |
 | `refine-design-doc` | Converge an existing design artifact through review, focused edits, and validation. | method |
 | `design-mockup` | Explore a UI direction as a standalone, non-production HTML/CSS mockup. | method |
-| `typesafe-ai` | Design and integrate TypeSafe typed judgments within the current planning or delivery task. | method |
 | `explain` | Explain a complex topic in Markdown, standalone HTML, or an evidence-backed project briefing. | method |
 | `backlog` | Produce a live, read-only view of GitHub issues, PRs, blockers, collisions, and next work. | method |
-| `diagnose` | Start with one small reproduction and separate environmental from behavioral failure when the cause may be found directly. | method |
+| `diagnose` | Establish a failure's cause with one small reproduction and, when needed, ranked discriminating experiments. | method |
 | `resolve-findings` | Decide bounded responses to existing PR review threads before fixes are applied. | method |
 | `code-review` | Independently review a frozen code diff against its acceptance criteria and emit JSON findings for `loopzero review`. | method |
 | `review` | Assess an artifact, system, architecture, workflow, agent configuration, or idea without implementing changes. | method |
 | `security-review` | Add a security-boundary review when a diff touches auth, permissions, secrets, external calls, config, file or shell primitives, serialization, or dependencies. | method |
-| `debug` | Escalate to ranked, discriminating experiments when initial reproduction leaves multiple plausible causes. | method |
 | `write-tests` | Add or improve behavior-focused tests when testing itself is the task. | method |
 | `fix-failing-tests` | Classify observed test failures and repair the smallest correct owner. | method |
 | `refine-code` | Simplify the current task's code without changing its observable contract. | method |
 | `remove-dead-code` | Explicitly remove an evidenced dead-code batch through recoverable quarantine and checks. | method |
 
-Start with `diagnose` for a newly observed failure; use `debug` when that first
-reproduction does not isolate the cause and competing hypotheses need explicit
-experiments. `code-review` defines the structured frozen-diff review behavior
-and matches the JSON accepted by `loopzero review`; the command builds its own
+Use `diagnose` for a newly observed failure whose cause needs proof; use
+`fix-failing-tests` for an understood failing test. `code-review` defines the
+structured frozen-diff review behavior and matches the JSON accepted by
+`loopzero review`; the command builds its own
 reviewer prompt. `review` is the broader read-only assessment for non-diff
 targets.
 
-`typesafe-ai` adds semantic decision guidance to the owning task; it does not
-replace `plan`, `implement`, or the contract's checks and review gates. Its
-canonical source is `core/skills/typesafe-ai`; `.agents/skills/typesafe-ai`
-links there for Codex discovery in this repository. Maintain the adaptation in
-`core/skills` rather than reinstalling an upstream copy over that link.
-For live calls it uses the [local credential convention](../../SETUP.md#typesafe-credentials-optional):
-`TYPESAFE_API_KEY`, then `~/.config/typesafe/api-key`. Required checks and review
-sandboxes do not inherit this credential.
+Optional vendor integration skills live under [integrations/](../../integrations/).
 
-## Consumer-Side Aliases
+## Optional consumer conventions
 
-These are thin routing aliases for consumers, not additional skill directories:
+Consumers may keep these routing conventions without adding core skill directories:
 
-- `align` routes to `plan`;
 - `tdd` routes to `write-tests` in test-first mode;
 - `grill-with-docs` routes to `grill-me`, then `write-design-doc` for the
   durable artifact.

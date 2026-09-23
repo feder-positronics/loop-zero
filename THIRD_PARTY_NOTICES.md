@@ -3,7 +3,7 @@
 loop-zero's `typesafe-ai` skill and building reference are adapted from
 [TypeSafe AI's skills collection](https://github.com/typesafe-ai/skills/tree/main/skills/typesafe-ai).
 Copyright (c) 2026 TypeSafe AI. The upstream MIT license is preserved in
-[core/skills/typesafe-ai/LICENSE](core/skills/typesafe-ai/LICENSE).
+[integrations/typesafe-ai/LICENSE](integrations/typesafe-ai/LICENSE).
 
 loop-zero's `grill-me` skill is adapted from Matt Pocock's
 [skills collection](https://github.com/mattpocock/skills) (`grill-me`/`grilling`);

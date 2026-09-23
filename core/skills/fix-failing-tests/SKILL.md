@@ -38,7 +38,7 @@ command evidence if the suite cannot become green.
 ## Exit
 
 Stop for a material product decision rather than choosing it silently. Route an
-unknown product symptom to [debug](../debug/SKILL.md) and net-new coverage to
+unknown product symptom to [diagnose](../diagnose/SKILL.md) and net-new coverage to
 [write-tests](../write-tests/SKILL.md).
 
 Standalone fixes that are broad or change product behavior require
