@@ -19,7 +19,7 @@ REVIEW_MARKER_RE = re.compile(
 CONTEXT = "Loop-zero Eligibility"
 
 
-def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...]) -> str | None:
+def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...]) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
     trusted = {login.casefold() for login in publishers}
     latest = next((r for r in reversed(reviews)
@@ -34,7 +34,11 @@ def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...]) -
     verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or any(
         f"**{value}**" in body for value in ("approve", "request_changes")
     )
-    return head if verdict else None
+    return latest if verdict else None
+
+
+def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...]) -> str | None:
+    return head if eligible_review(reviews, head, publishers) else None
 
 
 def evaluate(repo: str, number: int, head: str, base: str,

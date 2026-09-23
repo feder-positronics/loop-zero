@@ -80,6 +80,7 @@ class PR:
 class Readiness:
     ready: bool
     reasons: tuple[str, ...]
+    waitable_failures: tuple[str, ...] = ()
 
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
@@ -452,20 +453,36 @@ def _unresolved_threads(repo: str, number: int) -> list[dict]:
 
 def check_runs(repo: str, head_sha: str) -> dict[str, str]:
     """Map signal name to state, using only the latest check run of each name."""
-    signals: dict[str, list[str]] = {}
+    return _check_signals(repo, head_sha)[0]
+
+
+def _check_signals(repo: str, head_sha: str, review_at: str | None = None, review_grace: bool = False
+                   ) -> tuple[dict[str, str], tuple[str, ...]]:
+    signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
     for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
     for name, cr in latest_runs.items():
-        signals[name] = [cr.get("conclusion") or cr.get("status") or "unknown"]
-    latest_status: dict[str, str] = {}
+        signals[name] = [(cr.get("conclusion") or cr.get("status") or "unknown",
+                          cr.get("completed_at") or cr.get("started_at"))]
+    latest_status: dict[str, dict] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
-        latest_status.setdefault(status["context"], status.get("state") or "unknown")
-    for name, state in latest_status.items():
-        signals.setdefault(name, []).append(state)
-    return {name: _aggregate_signal(states) for name, states in signals.items()}
+        latest_status.setdefault(status["context"], status)
+    for name, status in latest_status.items():
+        signals.setdefault(name, []).append((status.get("state") or "unknown",
+                                               status.get("created_at")))
+    states = {name: _aggregate_signal([state for state, _ in values])
+              for name, values in signals.items()}
+    pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
+    stale = tuple(name for name, values in signals.items() if review_at
+                  and states[name] not in pending and states[name] != "success"
+                  and all(at and at < review_at for state, at in values
+                          if state != "success" and state not in pending)
+                  and (review_grace or any(at and at >= review_at
+                                           for state, at in values if state in pending)))
+    return states, stale
 
 
 def _check_run_order(run: dict) -> tuple[int, str]:
@@ -490,6 +507,8 @@ def readiness(
     required_ci: tuple[str, ...],
     reviewed_head: str | None,
     *, allow_behind: bool = False,
+    review_at: str | None = None,
+    review_grace: bool = False,
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -508,14 +527,17 @@ def readiness(
     for f in open_blocking_findings(repo, pr.number, pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
-    checks = check_runs(repo, pr.head_sha) if required_ci else {}
+    checks, stale = (_check_signals(repo, pr.head_sha, review_at, review_grace)
+                     if required_ci else ({}, ()))
     for name in required_ci:
         conclusion = checks.get(name)
         if conclusion is None:
             reasons.append(f"required check '{name}' missing on {pr.head_sha[:12]}")
         elif conclusion != "success":
             reasons.append(f"required check '{name}' is {conclusion}")
-    return Readiness(ready=not reasons, reasons=tuple(reasons))
+    return Readiness(ready=not reasons, reasons=tuple(reasons),
+                     waitable_failures=tuple(f"required check '{name}' is {checks[name]}"
+                                             for name in required_ci if name in stale))
 
 
 def mark_ready(repo: str, number: int) -> None:

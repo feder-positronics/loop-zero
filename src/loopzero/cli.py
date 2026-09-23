@@ -9,6 +9,7 @@ import json
 import re
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
@@ -227,12 +228,18 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None
 ) -> github.Readiness:
-    reviewed = eligibility.reviewed_head(
+    review = eligibility.eligible_review(
         reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
         head, config.review_publishers or (github.login(),),
     )
+    review_at = review.get("submitted_at") if review else None
+    # GitHub's UTC submission time predates this process; monotonic time cannot date it.
+    review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
+                  .replace(tzinfo=UTC).timestamp()) if review_at else None
     result = github.readiness(
-        config.repo, pr, config.base_branch, config.required_ci, reviewed
+        config.repo, pr, config.base_branch, config.required_ci,
+        head if review else None, review_at=review_at,
+        review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
     )
     report = _load_report(wt)
     if report is None or report.head != head or report.dirty or not report.ok:
@@ -246,7 +253,7 @@ def _readiness(
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
-        result = github.Readiness(not reasons, reasons)
+        result = github.Readiness(not reasons, reasons, result.waitable_failures)
     return result
 
 
@@ -702,7 +709,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
         if args.wait is None:
             print(f"waiting for required checks; {NEXT_WAIT}")
             return 3
-    if args.wait is not None and (waiting or _pending_checks(config, pr, readiness.reasons)):
+    if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=bool(waiting))
         if waited is None:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
@@ -711,7 +718,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
-        if args.wait is None and _pending_checks(config, pr, readiness.reasons):
+        if args.wait is None and _pending_checks(config, pr, readiness):
             print(f"not ready: required checks pending or missing; {NEXT_WAIT}")
         return 1
     if pr.is_draft and not waiting:  # `waiting` means this run already marked it ready
@@ -736,7 +743,7 @@ def _draft_checks_waiting(
 
 
 def _pending_checks(
-    config: Config, pr: github.PR, reasons: tuple[str, ...], kicked: bool = False
+    config: Config, pr: github.PR, readiness: github.Readiness, kicked: bool = False
 ) -> tuple[str, ...]:
     """Reasons worth waiting on: every blocker is a required check that may still turn green.
 
@@ -745,6 +752,8 @@ def _pending_checks(
     """
     states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if kicked else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
+    waitable.update(readiness.waitable_failures)
+    reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
@@ -760,7 +769,7 @@ def _wait_for_checks(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
         readiness = _readiness(wt, config, current, pr.head_sha)
-        pending = _pending_checks(config, current, readiness.reasons, kicked)
+        pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness
         if pending != shown:
@@ -928,7 +937,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         _cleanup(wt)
         return 0
     if not readiness.ready:
-        hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness.reasons) else ""
+        hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness) else ""
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
     if sha is None and args.wait is not None:
