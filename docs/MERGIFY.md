@@ -92,6 +92,21 @@ field is not a runtime verdict. After any configuration change, drain first and
 verify vendor draft-PR placement before resuming. GitHub blob identity alone
 does not establish that Mergify has ingested that revision.
 
+When a parent batch has vanished from live status, attestation still checks every
+live source it discovers. It additionally requires the candidate's complete tree
+to equal a clean integration of those pinned source heads onto current main, in
+source order derived from the candidate's first-parent merge topology. A temporary
+bare Git store fetches SHA-pinned objects using the GitHub CLI's token; it never
+checks out or executes candidate content. Ambiguous topology, conflicts, missing
+objects, resource limits or unequal trees fail closed and identify missing batches.
+Main and the live attestation inputs are reread before success. Complete live
+lineages retain the existing behavior. Squashed parents can pass; unavailable live
+predecessors behind a missing batch and unrelated main advances may still reject.
+The fallback requires Linux `prlimit` and Git with `merge-tree --write-tree`; it
+is bounded to 32 sources, 100,000 reachable objects, 256 MiB on disk, 8 MiB command
+output, 1 GiB address space per Git process, history depth 200 and 120 seconds of
+Git work.
+
 ## Reviewed protection proposal
 
 These JSON files are review artifacts; no workflow automatically applies them.

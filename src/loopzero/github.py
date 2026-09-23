@@ -132,6 +132,11 @@ def api_get(endpoint: str) -> object:
     return _gh_json("api", endpoint)
 
 
+def auth_token() -> str:
+    """Token of the authenticated `gh` host, for Git transports that cannot call gh."""
+    return _gh("auth", "token", "--hostname", "github.com").strip()
+
+
 def login() -> str:
     """Login of the user the `gh` token belongs to."""
     data = api_get("user")

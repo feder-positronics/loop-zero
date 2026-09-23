@@ -96,22 +96,7 @@ def candidate_publisher(tmp_path, monkeypatch, event, values=None):
 
 
 def test_candidate_publishes_aggregate_source_eligibility(tmp_path, monkeypatch):
-    candidate = candidate_event()
-    values = candidate_payloads(candidate)
-    event_path = tmp_path / "event.json"
-    event_path.write_text(json.dumps(candidate))
-    (tmp_path / "workflow.toml").write_text(
-        '[repo]\nname="owner/repo"\nbase="main"\n'
-        '[delivery]\nreview_publishers=["trusted-publisher"]\n'
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
-    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
-
-    def github_get(path):
-        if path == "repos/owner/repo":
-            return candidate["repository"]
-        return values["/" + path]
+    published = candidate_publisher(tmp_path, monkeypatch, candidate_event())
 
     evaluated = []
 
@@ -119,10 +104,7 @@ def test_candidate_publishes_aggregate_source_eligibility(tmp_path, monkeypatch)
         evaluated.append((repo, number, head, base, publishers))
         return github.Readiness(True, ())
 
-    published = []
-    monkeypatch.setattr(github, "api_get", github_get)
     monkeypatch.setattr(github, "pr_view", lambda *_args: SimpleNamespace(head_sha="c" * 40))
-    monkeypatch.setattr(github, "commit_status", lambda *args: published.append(args))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     monkeypatch.setattr(
         "loopzero.mergify.api_get",
@@ -144,29 +126,9 @@ def test_candidate_publishes_aggregate_source_eligibility(tmp_path, monkeypatch)
     ]
 
 
-def test_candidate_manual_refresh_cannot_authenticate_the_candidate_head(
-    tmp_path, monkeypatch
-):
-    candidate = candidate_event()
-    values = candidate_payloads(candidate)
-    event_path = tmp_path / "event.json"
-    event_path.write_text(json.dumps({"inputs": {"pr": "900"}}))
-    (tmp_path / "workflow.toml").write_text(
-        '[repo]\nname="owner/repo"\nbase="main"\n'
-        '[delivery]\nreview_publishers=["trusted-publisher"]\n'
-    )
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
-    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
-    monkeypatch.setattr(
-        github,
-        "api_get",
-        lambda path: candidate["repository"]
-        if path == "repos/owner/repo"
-        else values["/" + path],
-    )
-    published = []
-    monkeypatch.setattr(github, "commit_status", lambda *args: published.append(args))
+def test_candidate_manual_refresh_cannot_authenticate_the_candidate_head(tmp_path, monkeypatch):
+    published = candidate_publisher(tmp_path, monkeypatch, candidate_event())
+    (tmp_path / "event.json").write_text(json.dumps({"inputs": {"pr": "900"}}))
 
     with pytest.raises(hosted.LoopZeroError, match="pull_request_target creation"):
         hosted.main()
