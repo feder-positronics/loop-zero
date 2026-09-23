@@ -13,7 +13,16 @@ import pytest
 
 from loopzero import github
 from loopzero.types import Finding, ReviewResult
-from tests.test_github import HEAD, PR_FILES, REPO, FakeGh, merge_json, pr_json, threads_json
+from tests.test_github import (
+    HEAD,
+    PR_FILES,
+    REPO,
+    FakeGh,
+    merge_json,
+    pr_json,
+    rest_pr_json,
+    threads_json,
+)
 
 REAL_GH = shutil.which("gh")
 
@@ -23,10 +32,11 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     """Drive every public operation through production code and retain its exact argv."""
     fake = FakeGh(fake_bin, tmp_path)
     merged = merge_json(state='MERGED', head=HEAD, sha='c' * 40)
-    fake.respond("pr list", [pr_json()], [pr_json()])
-    fake.respond("pr view", pr_json(), pr_json())
-    fake.respond("pr create", f"https://github.com/{REPO}/pull/7\n")
-    fake.respond(f"api repos/{REPO}/pulls/7", {}, merged)
+    fake.respond_pr_list([pr_json()], branch="lz/x")
+    fake.respond_pr_view(pr_json(), pr_json(), branch="lz/x")
+    fake.respond_pr_create(pr_json(), branch="lz/x")
+    fake.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    fake.append(f"api repos/{REPO}/pulls/7", merged)
     fake.respond("api user", {"login": "bot-user"})
     fake.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
     fake.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
@@ -91,25 +101,20 @@ def offline_run(argv: list[str], tmp_path: Path, call: dict | None = None) -> st
 def test_contract_capture_covers_all_github_operations(captured_argv: list[dict]) -> None:
     calls = [call["argv"] for call in captured_argv]
     assert {tuple(argv[:2]) for argv in calls} >= {
-        ("pr", "list"), ("pr", "view"), ("pr", "create"), ("pr", "ready"),
-        ("pr", "merge"), ("api", "graphql"), ("api", "-X"),
+        ("pr", "ready"), ("pr", "merge"), ("api", "graphql"), ("api", "-X"),
+        ("api", f"repos/{REPO}/pulls"), ("api", f"repos/{REPO}/pulls/7"),
     }
+    assert not any(argv[:2] in (["pr", "list"], ["pr", "view"], ["pr", "create"])
+                   for argv in calls)
     assert any("/files" in argv[1] for argv in calls if argv[0] == "api")
     assert any("/check-runs" in argv[1] for argv in calls if argv[0] == "api")
     assert any("/statuses" in argv[1] for argv in calls if argv[0] == "api")
 
 
-def test_every_captured_json_field_is_known_to_gh(
-    captured_argv: list[dict], tmp_path: Path
-) -> None:
-    fields = {call["argv"][call["argv"].index("--json") + 1]
-              for call in captured_argv if "--json" in call["argv"]}
-    assert fields
-    for field_list in fields:
-        output = offline_run(
-            ["pr", "view", "1", "--repo", REPO, "--json", field_list], tmp_path
-        )
-        assert "Unknown JSON field" not in output, output
+def test_pr_metadata_uses_rest_without_graphql_fields(captured_argv: list[dict]) -> None:
+    calls = [call["argv"] for call in captured_argv]
+    assert not any("--json" in argv for argv in calls)
+    assert any("?state=open&head=acme%3Alz%2Fx" in argv[1] for argv in calls)
 
 
 def test_captured_api_methods_match_the_wire(
@@ -136,7 +141,7 @@ def test_captured_api_methods_match_the_wire(
         assert methods and methods[0] == expected, (argv, expected, output)
 
 
-@pytest.mark.parametrize("command", ["create", "ready", "merge"])
+@pytest.mark.parametrize("command", ["ready", "merge"])
 def test_captured_pr_mutations_use_graphql_post(
     captured_argv: list[dict], tmp_path: Path, command: str
 ) -> None:
@@ -150,8 +155,7 @@ def test_strict_fake_rejects_exhausted_calls(
 ) -> None:
     fake = FakeGh(fake_bin, tmp_path)
     fake.expect(
-        ["pr", "view", "7", "--repo", REPO, "--json", github.PR_FIELDS],
-        pr_json(),
+        ["api", f"repos/{REPO}/pulls/7"], rest_pr_json(pr_json()),
     )
     assert github.pr_view(REPO, 7).number == 7
     fake.assert_complete()

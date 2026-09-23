@@ -7,6 +7,7 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import pytest
 
@@ -15,6 +16,12 @@ from loopzero.types import Finding, ReviewResult
 
 REPO = "acme/widgets"
 HEAD = "a" * 40
+
+
+def pr_list_key(branch: str = "lz/t1", state: str = "open") -> str:
+    head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
+    return (f"api repos/{REPO}/pulls?state={state}&head={head}"
+            "&sort=created&direction=desc&per_page=1")
 
 # `respond` preserves the original key-based fake. New tests use `expect`, which
 # consumes complete argv interactions in order and never repeats a response.
@@ -57,11 +64,17 @@ if strict is not None:
         sys.exit(97)
     resp = expected
 else:
+    def response_key(args):
+        basic = " ".join(args[:2])
+        method = args[args.index("--method") + 1] if "--method" in args else ""
+        specific = basic + " --method " + method
+        return specific if specific in plan.get("compat", {{}}) else basic
+    key = response_key(argv)
     responses = plan.get("compat", {{}}).get(key)
     if responses is None:
         sys.stderr.write("fake gh: no response for " + key + "\\n")
         sys.exit(97)
-    idx = sum(1 for c in log[:-1] if " ".join(c["argv"][:2]) == key)
+    idx = sum(1 for c in log[:-1] if response_key(c["argv"]) == key)
     resp = responses[min(idx, len(responses) - 1)]
 sys.stdout.write(resp.get("stdout", ""))
 sys.stderr.write(resp.get("stderr", ""))
@@ -91,6 +104,43 @@ class FakeGh:
             for r in responses
         ]
         self.scenario_file.write_text(json.dumps(plan))
+
+    def append(self, key: str, *responses: object) -> None:
+        plan = json.loads(self.scenario_file.read_text())
+        if "strict" in plan:
+            raise AssertionError("cannot append compatibility response to strict scenario")
+        plan["compat"].setdefault(key, []).extend(self._response(r) for r in responses)
+        self.scenario_file.write_text(json.dumps(plan))
+
+    def respond_pr_list(self, *snapshots: list[dict], branch: str = "lz/t1") -> None:
+        """Arm explicit REST list and selected detail responses for successive lookups."""
+        head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
+        prefix = f"api repos/{REPO}/pulls?"
+        suffix = f"&head={head}&sort=created&direction=desc&per_page=1"
+        open_pages, closed_pages = [], []
+        details: dict[int, list[dict]] = {}
+        for snapshot in snapshots:
+            selected = next((p for p in snapshot if p.get("state", "OPEN") == "OPEN"), None)
+            open_pages.append([{"number": selected["number"]}] if selected else [])
+            if selected is None:
+                selected = snapshot[0] if snapshot else None
+                closed_pages.append([{"number": selected["number"]}] if selected else [])
+            if selected is not None:
+                number = selected["number"]
+                details.setdefault(number, []).append(rest_pr_json(selected, branch=branch))
+        self.append(prefix + "state=open" + suffix, *open_pages)
+        if closed_pages:
+            self.append(prefix + "state=closed" + suffix, *closed_pages)
+        for number, responses in details.items():
+            self.append(f"api repos/{REPO}/pulls/{number}", *responses)
+
+    def respond_pr_view(self, *responses: dict, branch: str = "lz/t1") -> None:
+        for response in responses:
+            self.append(f"api repos/{REPO}/pulls/{response.get('number', 7)}",
+                        rest_pr_json(response, branch=branch))
+
+    def respond_pr_create(self, response: dict, branch: str = "lz/t1") -> None:
+        self.respond(f"api repos/{REPO}/pulls", rest_pr_json(response, branch=branch))
 
     @staticmethod
     def _response(response: object, *, exit: int = 0, stderr: str = "") -> dict[str, Any]:
@@ -173,6 +223,26 @@ def pr_json(**over: object) -> dict:
     return {**base, **over}
 
 
+def rest_pr_json(data: dict, *, branch: str = "lz/t1") -> dict:
+    """REST pull detail fixture corresponding to an existing GraphQL-shaped test PR."""
+    if "headRefOid" not in data:
+        return dict(data)  # preserve intentionally malformed fixtures
+    mergeable = data.get("mergeable")
+    return {
+        "number": data.get("number", 7), "html_url": data.get("url"),
+        "head": {"sha": data["headRefOid"], "ref": branch,
+                 "repo": {"full_name": REPO}},
+        "base": {"ref": data.get("baseRefName", "main")},
+        "draft": data.get("isDraft", True),
+        "state": "open" if data.get("state", "OPEN") == "OPEN" else "closed",
+        "merged": data.get("state") == "MERGED",
+        "mergeable": {"MERGEABLE": True, "CONFLICTING": False}.get(mergeable),
+        "mergeable_state": (data.get("mergeStateStatus") or "unknown").lower(),
+        "user": data.get("author", {"login": "someone-else"}),
+        "body": data.get("body"),
+    }
+
+
 def merge_json(state="OPEN", head=HEAD, sha=None) -> dict:
     return {"state": "open" if state == "OPEN" else "closed", "merged": state == "MERGED",
             "head": {"sha": head}, "merge_commit_sha": sha}
@@ -208,7 +278,7 @@ PR_FILES = [
 
 
 def arm_review(gh: FakeGh, files: list | None = None, author: str = "someone-else") -> None:
-    gh.respond("pr view", pr_json(author={"login": author}))
+    gh.respond_pr_view( pr_json(author={"login": author}))
     gh.respond("api user", {"login": "bot-user"})
     gh.respond(REVIEWS_KEY, {"id": 1})
     gh.respond(FILES_KEY, PR_FILES if files is None else files)
@@ -238,10 +308,10 @@ def test_missing_gh_raises_typed_error(fake_bin: Path, monkeypatch: pytest.Monke
 
 
 def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
-    gh.fail("pr list", "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
+    gh.fail(pr_list_key("lz/x"), "To get started with GitHub CLI, please run:  gh auth login\n", exit=4)
     with pytest.raises(github.GhAuth) as info:
         github.pr_for_branch(REPO, "lz/x")
-    assert info.value.command[:3] == ("gh", "pr", "list")
+    assert info.value.command[:2] == ("gh", "api")
     assert "gh auth login" in info.value.tail
     assert "required token scope: repo" in info.value.tail
 
@@ -258,37 +328,116 @@ def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:
 
 
 def test_pr_for_branch_none_when_empty(gh: FakeGh) -> None:
-    gh.respond("pr list", [])
+    gh.respond_pr_list([], branch="lz/x")
     assert github.pr_for_branch(REPO, "lz/x") is None
-    assert gh.argv(0) == [
-        "pr", "list", "--repo", REPO, "--head", "lz/x", "--state", "all",
-        "--limit", "10", "--json", github.PR_FIELDS,
-    ]
+    assert gh.argv(0) == pr_list_key("lz/x").split(" ", 1)
+    assert gh.argv(1)[1].startswith(f"repos/{REPO}/pulls?state=closed")
 
 
 def test_pr_for_branch_prefers_open(gh: FakeGh) -> None:
-    gh.respond("pr list", [pr_json(number=3, state="CLOSED"), pr_json(number=9)])
+    gh.respond_pr_list([pr_json(number=3, state="CLOSED"), pr_json(number=9)], branch="lz/x")
     pr = github.pr_for_branch(REPO, "lz/x")
     assert pr == github.PR(9, f"https://github.com/{REPO}/pull/7", HEAD, "main", True,
                            "OPEN", "MERGEABLE", "someone-else")
 
 
+def test_pr_for_branch_falls_back_to_latest_closed_or_merged(gh: FakeGh) -> None:
+    gh.respond_pr_list([pr_json(number=9, state="MERGED"),
+                        pr_json(number=3, state="CLOSED")], branch="lz/x")
+
+    pr = github.pr_for_branch(REPO, "lz/x")
+
+    assert pr is not None and pr.number == 9 and pr.state == "MERGED"
+    assert [c["argv"][1] for c in gh.calls[:2]] == [
+        pr_list_key("lz/x").split(" ", 1)[1],
+        pr_list_key("lz/x", "closed").split(" ", 1)[1],
+    ]
+
+
+def test_pr_for_branch_encodes_qualified_unicode_head(gh: FakeGh) -> None:
+    branch = "lz/fün/space name"
+    gh.respond_pr_list([pr_json()], branch=branch)
+
+    assert github.pr_for_branch(REPO, branch) is not None
+    assert gh.argv(0) == pr_list_key(branch).split(" ", 1)
+
+
+@pytest.mark.parametrize("head_change", [
+    {"ref": "lz/other"}, {"repo": {"full_name": "fork/widgets"}},
+    {"repo": "malformed"},
+])
+def test_pr_for_branch_rejects_changed_or_foreign_detail(gh: FakeGh, head_change: dict) -> None:
+    detail = rest_pr_json(pr_json())
+    detail["head"].update(head_change)
+    gh.respond(pr_list_key(), [{"number": 7}])
+    gh.respond(f"api repos/{REPO}/pulls/7", detail)
+
+    with pytest.raises(github.GhError, match="PR changed during branch lookup"):
+        github.pr_for_branch(REPO, "lz/t1")
+
+
+@pytest.mark.parametrize("mergeable,merge_state,expected", [
+    (True, "clean", ("MERGEABLE", "CLEAN")),
+    (False, "dirty", ("CONFLICTING", "DIRTY")),
+    (None, None, ("UNKNOWN", "UNKNOWN")),
+    (True, "behind", ("MERGEABLE", "BEHIND")),
+])
+def test_pr_view_maps_rest_merge_evidence(
+    gh: FakeGh, mergeable, merge_state, expected
+) -> None:
+    detail = rest_pr_json(pr_json())
+    detail["mergeable"], detail["mergeable_state"] = mergeable, merge_state
+    gh.respond(f"api repos/{REPO}/pulls/7", detail)
+
+    pr = github.pr_view(REPO, 7)
+
+    assert (pr.mergeable, pr.merge_state) == expected
+    assert pr.head_sha == HEAD and pr.base_ref == "main" and pr.is_draft
+
+
+@pytest.mark.parametrize("invalid", [
+    {"merged": "false"}, {"draft": None}, {"head": {"sha": "short"}},
+    {"mergeable": "false"}, {"number": 8}, {"user": ["malformed"]},
+])
+def test_pr_view_rejects_malformed_or_mismatched_rest_detail(gh: FakeGh, invalid: dict) -> None:
+    detail = rest_pr_json(pr_json()) | invalid
+    gh.respond(f"api repos/{REPO}/pulls/7", detail)
+
+    with pytest.raises(github.GhError):
+        github.pr_view(REPO, 7)
+
+
 def test_create_draft_pr_passes_body_file_and_returns_pr(gh: FakeGh) -> None:
-    gh.respond("pr create", f"https://github.com/{REPO}/pull/7\n")
-    gh.respond("pr list", [pr_json()])
+    gh.respond_pr_create(pr_json(), branch="lz/x")
     pr = github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body text\n")
     create = gh.calls[0]
     argv = create["argv"]
-    assert argv[:2] == ["pr", "create"] and "--draft" in argv
-    assert argv[argv.index("--head") + 1] == "lz/x"
-    assert argv[argv.index("--base") + 1] == "main"
-    assert argv[argv.index("--title") + 1] == "Title"
-    assert create["--body-file"] == "Body text\n"
+    assert argv[:4] == ["api", f"repos/{REPO}/pulls", "--method", "POST"]
+    assert json.loads(create["--input"]) == {"head": "lz/x", "base": "main", "title": "Title",
+                                            "body": "Body text\n", "draft": True}
     assert pr.number == 7 and pr.is_draft
+    assert len(gh.calls) == 1
+
+
+@pytest.mark.parametrize("change", [
+    {"draft": False}, {"base": {"ref": "other"}},
+    {"head": {"sha": HEAD, "ref": "lz/x", "repo": {"full_name": "fork/widgets"}}},
+])
+def test_create_draft_pr_rejects_inconsistent_response_without_retry(
+    gh: FakeGh, change: dict
+) -> None:
+    detail = rest_pr_json(pr_json(), branch="lz/x")
+    detail.update(change)
+    gh.respond(f"api repos/{REPO}/pulls", detail)
+
+    with pytest.raises(github.GhError, match="created PR differs"):
+        github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body")
+
+    assert len(gh.calls) == 1
 
 
 def test_update_body(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7", {})
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     github.update_body(REPO, 7, "new body")
     assert gh.argv(0)[:4] == ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH"]
     assert json.loads(gh.calls[0]["--input"]) == {"body": "new body"}
@@ -435,13 +584,14 @@ def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str)
     github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
     (payload,) = review_payloads(gh)
     assert payload["event"] == "COMMENT"
-    assert [c["argv"][:2] for c in gh.calls[:2]] == [["pr", "view"], ["api", "user"]]
-    assert gh.argv(0) == ["pr", "view", "7", "--repo", REPO, "--json", github.PR_FIELDS]
+    assert [c["argv"][:2] for c in gh.calls[:2]] == [["api", f"repos/{REPO}/pulls/7"],
+                                                   ["api", "user"]]
+    assert gh.argv(0) == ["api", f"repos/{REPO}/pulls/7"]
 
 
 def test_post_review_uses_given_pr_without_lookup(gh: FakeGh) -> None:
     arm_review(gh)
-    pr = github._pr_from_json(pr_json(author={"login": "bot-user"}))
+    pr = github._pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"})))
     github.post_review(REPO, 7, HEAD, review(verdict="approve"), pr=pr)
     assert calls_for(gh, "pr view") == []
     assert review_payloads(gh)[0]["event"] == "COMMENT"
@@ -506,7 +656,7 @@ def test_open_blocking_findings_missing_pr_is_gh_error(gh: FakeGh, data: dict) -
 
 
 def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
-    gh.respond("pr list", [{"number": 7, "url": "u"}])
+    gh.respond_pr_list([{"number": 7, "url": "u"}], branch="lz/x")
     with pytest.raises(github.GhError, match="PR #7 not found or not accessible"):
         github.pr_for_branch(REPO, "lz/x")
 
@@ -661,26 +811,26 @@ def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
 
 def test_readiness_ready(gh: FakeGh) -> None:
     arm_readiness(gh)
-    pr = github._pr_from_json(pr_json())
+    pr = github._pr_from_rest(rest_pr_json(pr_json()))
     assert github.readiness(REPO, pr, "main", ("checks",), HEAD) == github.Readiness(True, ())
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
 def test_readiness_head_moved(gh: FakeGh) -> None:
     arm_readiness(gh)
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), "b" * 40)
+    r = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), "b" * 40)
     assert not r.ready and any("differs from reviewed" in x for x in r.reasons)
 
 
 def test_readiness_no_review(gh: FakeGh) -> None:
     arm_readiness(gh)
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), None)
+    r = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), None)
     assert r.reasons == ("no review recorded for the current head",)
 
 
 def test_readiness_blocking_finding(gh: FakeGh) -> None:
     arm_readiness(gh, threads=(thread(f"{marker('important')}\n**important: Oops**"),))
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    r = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD)
     assert r.reasons == ("open important finding at src/a.py:3: Oops",)
 
 
@@ -688,7 +838,7 @@ def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
     body = f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n" \
            "**critical: Global**\n\nno file"
     arm_readiness(gh, threads=(thread(body, path="src/first.py", line=12),))
-    r = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    r = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD)
     assert not r.ready
     assert r.reasons == ("open critical finding at src/first.py:12: Global",)
 
@@ -696,7 +846,7 @@ def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
 def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> None:
     arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
                                thread(f"{marker('suggestion')}\nY")))
-    assert github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD).ready
+    assert github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD).ready
 
 
 def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
@@ -709,7 +859,7 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
         thread(f"{marker('critical')}\n**critical: Current**", outdated=True),
         thread(f"{marker('critical')}\n**critical: Resolved**", resolved=True),
     ))
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD)
     assert result.reasons == (
         "open important finding at src/a.py:3: Still applies",
         "open critical finding at src/a.py:3: Current",
@@ -719,7 +869,7 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
 def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
     arm_readiness(gh, runs={"checks": "failure"})
     r = github.readiness(
-        REPO, github._pr_from_json(pr_json()), "main", ("checks", "e2e"), HEAD
+        REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD
     )
     assert r.reasons == (
         "required check 'checks' is failure",
@@ -743,7 +893,7 @@ def test_readiness_waits_for_newer_active_producing_workflow(gh: FakeGh, failure
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.reasons == (f"required check 'checks' is {failure}",)
@@ -775,7 +925,7 @@ def test_readiness_does_not_wait_for_unrelated_or_finished_run(gh: FakeGh, chang
          "status": "completed", "created_at": "2026-09-23T21:53:00Z"}, replacement,
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.reasons == ("required check 'checks' is failure",)
@@ -796,7 +946,7 @@ def test_readiness_newer_run_in_same_second_waits(gh: FakeGh) -> None:
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.waitable_failures == result.reasons
@@ -817,7 +967,7 @@ def test_readiness_keeps_failing_commit_status_blocker(gh: FakeGh) -> None:
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.reasons == ("required check 'checks' is failure",)
@@ -833,7 +983,7 @@ def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
     ]})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.ready
@@ -851,7 +1001,7 @@ def test_readiness_wait_does_not_lookup_nonfailure_conclusion(
     }]})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.reasons == (f"required check 'checks' is {conclusion}",)
@@ -877,7 +1027,7 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
                     "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
                ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.waitable_failures == result.reasons
@@ -896,7 +1046,7 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
                {"stdout": "", "stderr": "HTTP 403: Actions read denied", "exit_code": 1})
 
     with pytest.raises(github.GhError, match="Actions read denied"):
-        github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+        github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                          workflow_wait=True)
 
 
@@ -918,7 +1068,7 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
         "run_attempt": 2, "run_started_at": started,
     }]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
 
     assert result.waitable_failures == (result.reasons if waitable else ())
@@ -931,14 +1081,14 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
 ], ids=["behind-base", "merge-conflict", "merged-pr"])
 def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:
     arm_readiness(gh)
-    pr = github._pr_from_json(pr_json(**metadata))
+    pr = github._pr_from_rest(rest_pr_json(pr_json(**metadata)))
     r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
     assert r.reasons == (reason,)
 
 
 def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:
     gh.respond("api graphql", threads_json())
-    assert github.readiness(REPO, github._pr_from_json(pr_json()), "main", (), HEAD).ready
+    assert github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", (), HEAD).ready
     assert [c["argv"][:2] for c in gh.calls] == [["api", "graphql"]]
 
 
@@ -1055,10 +1205,62 @@ def test_gh_retries_only_transient_reads(monkeypatch, args, attempts):
 @pytest.mark.parametrize("error", ["API rate limit exceeded", "API rate limit already exceeded",
                                   "secondary rate limit", "HTTP 429 Too Many Requests"])
 def test_rate_limit_is_not_retried(gh, monkeypatch, error):
-    gh.fail("pr list", error)
+    gh.fail(pr_list_key("lz/x"), error)
     monkeypatch.setattr(github, "_retry_sleep", lambda _: pytest.fail("retried rate limit"))
     with pytest.raises(github.GhError, match="rate limit|429"):
         github.pr_for_branch(REPO, "lz/x")
+    assert len(gh.calls) == 1
+
+
+def test_graphql_limit_reports_verified_reset_from_one_diagnostic(gh: FakeGh) -> None:
+    gh.respond("api graphql",
+               {"stdout": "", "stderr": "GraphQL: API rate limit exceeded", "exit": 1},
+               {"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}})
+
+    with pytest.raises(github.GhError, match="GraphQL quota resets at 2099-01-01") as info:
+        github._gh("api", "graphql", "-f", "query={viewer{login}}")
+
+    assert info.value.command[-1] == "query={viewer{login}}"
+    assert len(gh.calls) == 2
+    assert "rateLimit { remaining resetAt }" in gh.calls[1]["argv"][-1]
+
+
+@pytest.mark.parametrize("diagnostic", [
+    "null", "[]", {"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}},
+    {"data": []}, {"data": {"rateLimit": None}},
+])
+def test_bad_graphql_reset_evidence_preserves_original_error(gh: FakeGh, diagnostic: object) -> None:
+    gh.respond("api graphql",
+               {"stdout": "", "stderr": "GraphQL: API rate limit exceeded", "exit": 1},
+               diagnostic)
+
+    with pytest.raises(github.GhError, match="GraphQL: API rate limit exceeded") as info:
+        github._gh("api", "graphql", "-f", "query={viewer{login}}")
+
+    assert "quota resets at" not in str(info.value)
+    assert info.value.command[-1] == "query={viewer{login}}"
+    assert len(gh.calls) == 2
+
+
+@pytest.mark.parametrize("message", ["secondary rate limit", "HTTP 429 Too Many Requests",
+                                     "GraphQL: API rate limit exceeded"])
+def test_rest_or_secondary_limit_never_probes_graphql(gh: FakeGh, message: str) -> None:
+    gh.fail(pr_list_key("lz/x"), message)
+
+    with pytest.raises(github.GhError, match="Rate limited"):
+        github.pr_for_branch(REPO, "lz/x")
+
+    assert len(gh.calls) == 1
+
+
+def test_graphql_limit_prefers_failing_response_reset_header(gh: FakeGh) -> None:
+    gh.fail("api graphql", "GraphQL: API rate limit exceeded\n"
+            "x-ratelimit-resource: graphql\nx-ratelimit-remaining: 0\n"
+            "x-ratelimit-reset: 4070908800")  # 2099-01-01 UTC
+
+    with pytest.raises(github.GhError, match="response header"):
+        github._gh("api", "graphql", "-f", "query={viewer{login}}")
+
     assert len(gh.calls) == 1
 
 
