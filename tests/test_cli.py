@@ -1207,6 +1207,51 @@ def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys) -> None:
     assert out == "not ready: required check 'checks' is failure\n"
 
 
+@pytest.mark.parametrize("name", ["checks", "Loop-zero Eligibility"])
+@pytest.mark.parametrize("pending,age,new_failure,expected,waited", [
+    (True, 180, False, 0, True), (False, 30, False, 0, True),
+    (True, 30, True, 1, False), (False, 120, False, 1, False),
+    (False, 119, False, 1, True),
+])
+def test_ready_wait_review_failure_freshness(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, expected, waited
+) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
+    head = head_of(wt)
+    arm_pr(gh, head, isDraft=False)
+    gh.respond(reviews_key(), [rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}])
+    arm_readiness(gh, head, wt)
+    clock = [1790164800 + age]  # 2026-09-23T12:00:00Z plus review age
+    monkeypatch.setattr(cli.time, "time", lambda: clock[0])
+    failed_at = "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:00:00Z"
+    runs = [{"name": name, "status": "completed", "conclusion": "failure",
+             "completed_at": failed_at}] if name == "checks" else [
+        {"name": name, "status": "in_progress", "started_at": "2026-09-23T12:00:20Z"}
+    ] if pending else []
+    statuses = [{"context": name, "state": "failure", "created_at": failed_at}] if name != "checks" else [
+        {"context": name, "state": "pending", "created_at": "2026-09-23T12:00:20Z"}
+    ] if pending else []
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": runs})
+    gh.respond(f"api repos/{REPO}/commits/{head}/statuses", statuses)
+    sleeps = []
+    def advance(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+        if expected == 0:
+            gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
+                       {"check_runs": [{"name": name, "conclusion": "success"}]})
+            gh.respond(f"api repos/{REPO}/commits/{head}/statuses",
+                       [{"context": name, "state": "success"}])
+    monkeypatch.setattr(cli, "_sleep", advance)
+
+    code, out, err = run(capsys, "--config", "workflow.toml", "ready", "--wait")
+
+    assert (code, err, bool(sleeps)) == (expected, "", waited)
+    assert out.endswith(f"ready: {URL}\n" if expected == 0 else
+                        f"not ready: required check '{name}' is failure\n")
+    assert (f"waiting: required check '{name}' is failure" in out) == waited
+
+
 def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     body = "# T1\n\n## Review\n"
