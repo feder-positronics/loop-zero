@@ -10,8 +10,9 @@ Start with the top-level files; this directory only holds the contributor spec.
 - [../core/CREDENTIALS.md](../core/CREDENTIALS.md) — default API-key lookup,
   local storage, Bitwarden, rotation, and CI/production boundaries.
 - [../core/HANDOFF.md](../core/HANDOFF.md) — task file and PR body template.
-- [../core/skills/](../core/skills) — `plan`, `implement`, `review`,
-  `security-review`, `diagnose`.
+- [../core/skills/](../core/skills) — 19 core skills; start with `plan`,
+  `implement`, `work-issue`, or `write-design-doc`.
+- [../integrations/](../integrations/) — optional vendor integration skills.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — module map, shared types, budgets, and
   rules for anyone changing `src/`.
 - [design/2026-09-18-feature-plan.md](design/2026-09-18-feature-plan.md) —

@@ -56,9 +56,11 @@ artifact without rerunning the model.
    your repo root and set `repo.name`, `checks.commands` and `required_ci`.
 3. Make sure `git`, `gh auth status`, `bwrap` and `claude` or `codex` work in
    your shell (details in [SETUP.md](SETUP.md)).
-4. Point your agents at the skills in [core/skills](core/skills): `plan`,
-   `implement`, `review`, `security-review`, `diagnose`, and `typesafe-ai` when
-   needed. Follow [agent setup](SETUP.md#connect-your-agent) using a source
+4. Point your agents at the four entry skills in [core/skills](core/skills):
+   `plan`, `implement`, `work-issue`, and `write-design-doc`. Use the catalog's
+   methods, including `diagnose`, `review`, and `security-review`, as needed. Optional
+   TypeSafe guidance lives in [integrations/typesafe-ai](integrations/typesafe-ai).
+   Follow [agent setup](SETUP.md#connect-your-agent) using a source
    checkout at the same pinned revision as the CLI.
 5. For integrations that need API keys, follow
    [credential setup](SETUP.md#api-keys-for-local-agents). TypeSafe uses
@@ -111,7 +113,8 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 
 - [core/CONTRACT.md](core/CONTRACT.md) — the rules, under 80 lines.
 - [core/HANDOFF.md](core/HANDOFF.md) — the task file and PR body template.
-- [core/skills/](core/skills) — five agent skills.
+- [core/skills/](core/skills) — core agent skills and their routing.
+- [integrations/](integrations/) — optional vendor integration skills.
 - [SETUP.md](SETUP.md) — install, configure, first run.
 - [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — module map and shared types
   for contributors.

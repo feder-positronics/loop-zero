@@ -11,7 +11,6 @@ except for broad `review` and `design-mockup`, which were adapted from intelflo.
 | `code-review` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/review/SKILL.md` | renamed and adapted |
 | `security-review` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/security-review/SKILL.md` | adapted |
 | `diagnose` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/diagnose/SKILL.md` | adapted |
-| `debug` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/debug/SKILL.md` | adapted |
 | `write-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/write-tests/SKILL.md` | adapted |
 | `fix-failing-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/fix-failing-tests/SKILL.md` | adapted |
 | `refine-code` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/refine-code/SKILL.md` | adapted |
@@ -22,6 +21,9 @@ except for broad `review` and `design-mockup`, which were adapted from intelflo.
 | `remove-dead-code` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/remove-dead-code/SKILL.md` | adapted |
 | `review` | https://github.com/feder-positronics/intelflo | `7188cb3f582dd2c1a349fccd06097d89d42d67eb` | `.cursor/skills/review/SKILL.md` | adapted |
 | `design-mockup` | https://github.com/feder-positronics/intelflo | `7188cb3f582dd2c1a349fccd06097d89d42d67eb` | `.cursor/skills/design-mockup/SKILL.md` | adapted |
+
+The `diagnose` adaptation also incorporates ranked hypothesis and
+discriminating experiment guidance from the same pinned loop-zero source.
 
 Pocock provenance is retained only where text was adapted; `grill-me` derives
 from Pocock's `grill-me`/`grilling`.

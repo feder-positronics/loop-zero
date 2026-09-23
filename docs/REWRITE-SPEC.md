@@ -68,7 +68,7 @@ to make room.
 | `src/loopzero/github.py` | github | `gh`-CLI wrapper: `create_draft_pr`, `post_review`, `open_blocking_findings`, `check_runs`, `mark_ready`, `merge`, `pr_for_branch`. All via `gh api`/`gh pr`; no PyGithub. |
 | `src/loopzero/worktree.py` | github | `start`, `cleanup`, `head`, `base`, `is_dirty`, `task_file` helpers. |
 | `src/loopzero/cli.py` | cli (wave 2) | argparse; composes the modules into the six commands. |
-| `core/CONTRACT.md`, `core/skills/*`, `README.md`, `SETUP.md`, `workflow.example.toml` | docs | The human-facing contract, five skills (plan, implement, review, security-review, diagnose), adoption guide. |
+| `core/CONTRACT.md`, `core/skills/*`, `README.md`, `SETUP.md`, `workflow.example.toml` | docs | The human-facing contract, core skills, adoption guide. |
 
 ## Shared types (put in `src/loopzero/types.py`; owner: sandbox task creates it first, others import)
 
