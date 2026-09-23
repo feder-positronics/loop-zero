@@ -112,6 +112,19 @@ When the delegate cannot run the decisive tests, the parent runs them before
 requesting review. After two repair rounds on the same defect class, the parent
 stops dispatching single-finding patches and reassesses the route.
 
+Bound size in the plan, not the brief: split oversized scope into separate tasks
+up front rather than telling a delegate to stop at a line count. Continue an
+unfinished delegate by resuming its session (for example `codex exec resume`)
+rather than starting a fresh one that re-reads everything. Delegate verification
+matches what CI will run, coverage gates included, against a freshly fetched
+base; when the sandbox leaves a tool cache read-only, the brief points it at
+scratch (for example `UV_CACHE_DIR=/tmp/uv-cache`).
+
+A subagent's own background agents may report to the top-level session instead
+of that subagent. Have subagents run their reviewers in the foreground, or
+forward each result to the owning subagent as soon as it arrives; never assume
+it was received.
+
 Read-only investigation can use a stable shared source. Work that touches the
 same files runs in sequence or is integrated deliberately; do not run
 overlapping writers in one checkout. Respect the runtime's concurrency limit

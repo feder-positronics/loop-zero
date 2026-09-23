@@ -1860,7 +1860,7 @@ def test_budget_message_explains_rewrite(wt: Path, gh: FakeGh, capsys) -> None:
     arm_pr(gh, head)
     gh.respond(reviews_key(), [rev(base, "primary"), rev(head, "delta")])
     code, _, err = run(capsys, "review")
-    assert code == 1 and "rewrite the reviewed commits (squash/amend)" in err
+    assert code == 1 and "class-wide repair" in err and "(squash/amend)" in err
 
 
 @pytest.mark.parametrize("state,verdict,expected", [
