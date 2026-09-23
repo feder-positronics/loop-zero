@@ -416,9 +416,7 @@ def test_primary_review_diffs_from_merge_base_not_base_tip(
     git(repo, "push", "-q", "origin", "main")
     git(wt, "fetch", "-q", "origin")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 4})
+    arm_empty_primary_review_post(gh, head, 4)
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
 
     code, _, _ = run(capsys, "review")
@@ -609,11 +607,41 @@ def arm_pr(gh: FakeGh, head: str, **over) -> None:
     gh.respond(f"api repos/{REPO}/pulls/7", {})
 
 
-def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
-    head = head_of(wt)
+def arm_empty_primary_review_history(gh: FakeGh, head: str) -> None:
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 1})
+
+
+def arm_empty_primary_review_post(gh: FakeGh, head: str, post_id: int = 1) -> None:
+    arm_empty_primary_review_history(gh, head)
+    gh.respond(post_key(), {"id": post_id})
+
+
+def arm_approved_ready_pr(gh: FakeGh, head: str, wt: Path, **pr_overrides) -> None:
+    arm_approved_pr_with_check_result(gh, head, wt, "success", **pr_overrides)
+
+
+def arm_approved_pr_with_check_result(
+    gh: FakeGh, head: str, wt: Path, conclusion: str, *, review_login: str = LOGIN,
+    **pr_overrides,
+) -> None:
+    arm_pr(gh, head, **pr_overrides)
+    gh.respond(reviews_key(), [rev(head, "primary", login=review_login)])
+    arm_readiness(gh, head, wt, conclusion=conclusion)
+
+
+def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None:
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text().replace(
+        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
+    ))
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", message)
+
+
+def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
+    head = head_of(wt)
+    arm_empty_primary_review_post(gh, head)
     _fake_claude(fake_bin, _claude_envelope(CHANGES))
     code, out, err = run(capsys, "review")
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
@@ -649,9 +677,7 @@ allowed_efforts = ["medium", "high"]
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-q", "-m", "configure review")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 1})
+    arm_empty_primary_review_post(gh, head)
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
 
     code, _, err = run(capsys, "review", *options)
@@ -682,9 +708,7 @@ allowed_efforts = ["high"]
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-q", "-m", "configure codex review")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 1})
+    arm_empty_primary_review_post(gh, head)
     _fake_codex(fake_bin, json.dumps(APPROVE))
 
     code, _, err = run(capsys, "review")
@@ -709,8 +733,7 @@ allowed_efforts = ["medium"]
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-q", "-m", "configure review")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
 
     code, out, err = run(capsys, "review", *options)
 
@@ -722,8 +745,7 @@ def test_review_refuses_when_reviewer_dirties_worktree(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
     reviewer = _fake_claude(fake_bin, _claude_envelope(APPROVE))
     reviewer.write_text(reviewer.read_text().replace("#!/bin/sh\n", "#!/bin/sh\ntouch drift.txt\n"))
 
@@ -739,8 +761,7 @@ def test_review_refuses_when_reviewer_dirties_worktree(
 def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_bin: Path,
                                                     capsys, padding: str) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
     gh.fail(post_key(), "HTTP 500 server error")
     envelope = {"padding": padding,
                 **_claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}})}
@@ -780,8 +801,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
 def test_repost_refuses_missing_or_stale_file(wt: Path, gh: FakeGh, fake_bin: Path,
                                               capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
     code, _, err = run(capsys, "review", "--repost")
     assert code == 1 and "no saved primary review" in err
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
@@ -794,8 +814,7 @@ def test_repost_refuses_missing_or_stale_file(wt: Path, gh: FakeGh, fake_bin: Pa
 
 def test_repost_refuses_hand_written_review(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
     saved.write_text(json.dumps({
         "family": "claude", "head": head, "kind": "primary", "verdict": "approve",
@@ -822,9 +841,7 @@ def test_review_chunks_oversized_diff_with_same_family(
     git(wt, "add", "workflow.toml", "large_a.py", "large_b.py")
     git(wt, "commit", "-q", "-m", "large review")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 8})
+    arm_empty_primary_review_post(gh, head, 8)
     envelope = json.dumps(_claude_envelope(APPROVE))
     fake_tool("claude", f"""
         input=$(mktemp)
@@ -865,8 +882,7 @@ def test_review_without_independent_family_exits_four_and_repost_cannot_bypass(
         "claude-authored\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
     )
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
 
     code, out, err = run(capsys, "review")
 
@@ -983,9 +999,7 @@ def test_review_falls_through_when_preferred_family_fails(
 ) -> None:
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 4})
+    arm_empty_primary_review_post(gh, head, 4)
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     fake_tool("codex", "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
@@ -997,8 +1011,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
 
     def fail(family, **kwargs):
         if family == "claude":
@@ -1025,8 +1038,7 @@ def test_review_reports_missing_bwrap_like_check(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, monkeypatch
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
+    arm_empty_primary_review_history(gh, head)
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     original = cli.runners.shutil.which
     monkeypatch.setattr(
@@ -1039,9 +1051,7 @@ def test_review_reports_missing_bwrap_like_check(
 
 def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypatch) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    gh.respond(post_key(), {"id": 4})
+    arm_empty_primary_review_post(gh, head, 4)
 
     def review_with(family, **kwargs):
         if family == "claude":
@@ -1059,9 +1069,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 
 def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary", state="APPROVED")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
     assert (code, err) == (0, "") and out == f"ready: {URL}\n"
@@ -1084,9 +1092,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
 
 def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, baseRefName="release")
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", baseRefName="release")
 
     code, out, err = run(capsys, "ready")
 
@@ -1099,9 +1105,7 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', "[]"))
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, conclusion="failure")
+    arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
 
     code, out, err = run(capsys, "ready")
 
@@ -1111,9 +1115,7 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
 
 def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
                {"check_runs": [{"name": "checks", "status": "in_progress"}]})
 
@@ -1139,9 +1141,7 @@ def test_ready_marks_draft_with_skipped_required_check_then_waits(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, conclusion="skipped")
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped")
     gh.respond("pr ready", "")
 
     code, out, err = run(capsys, "ready")
@@ -1158,9 +1158,7 @@ def test_ready_waits_for_checks_on_original_head(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt)
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
                {"check_runs": []},
                {"check_runs": [{"name": "checks", "status": "in_progress"}]},
@@ -1181,9 +1179,7 @@ def test_ready_waits_for_checks_on_original_head(
 
 def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, conclusion="pending")
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
 
     code, out, err = run(capsys, "ready", "--wait=0")
 
@@ -1193,9 +1189,7 @@ def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys) -> None:
 
 def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, conclusion="pending")
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
                {"check_runs": [{"name": "checks", "status": "in_progress"}]},
                {"check_runs": [{"name": "checks", "status": "completed",
@@ -1271,9 +1265,7 @@ def test_ready_wait_reports_missing_checks_without_lifecycle_recovery(
 ) -> None:
     """Absent check runs call for diagnosis, not a PR lifecycle restart."""
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": []})
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
 
@@ -1304,9 +1296,7 @@ def test_ready_wait_tolerates_a_late_required_job_of_a_running_workflow(
 ) -> None:
     """#189: the required job has no check run until its `needs` finish; CI is alive."""
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
                {"check_runs": [{"name": "Backend Tests", "status": "in_progress"}]})
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
@@ -1341,9 +1331,7 @@ def test_ready_non_draft_with_skipped_required_check_refuses(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt, conclusion="skipped")
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=False)
 
     code, out, err = run(capsys, "ready")
 
@@ -1429,9 +1417,7 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys) -> None:
 @pytest.mark.parametrize("changed", [False, True])
 def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys, changed) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "MERGED", "headRefOid": "f" * 40 if changed else head_of(wt), "mergeCommit": {"oid": "c" * 40}})
     gh.respond("api -X", "")
@@ -1483,9 +1469,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
 
 def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatch) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "MERGED", "headRefOid": head_of(wt), "mergeCommit": {"oid": "d" * 40}})
     gh.respond("api -X", "")
@@ -1500,9 +1484,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "MERGED", "headRefOid": head_of(wt), "mergeCommit": {"oid": "f" * 40}})
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
@@ -1551,9 +1533,7 @@ def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
     assert code == 0
     assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
     assert "pr:       none" in out
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary", state="APPROVED")])
-    arm_readiness(gh, head, wt, conclusion="pending")
+    arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
     code, out, _ = run(capsys, "status")
     assert code == 0 and "dirty:    yes" in out
@@ -1567,9 +1547,7 @@ def test_status_silently_ignores_legacy_report_without_dirty(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     report_path = wt / ".loopzero" / "checks.json"
     report = json.loads(report_path.read_text())
     del report["dirty"]
@@ -1647,9 +1625,7 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
 
 def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1", "headRefOid": head_of(wt)})
     gh.respond("api graphql", threads_json(),
@@ -1668,16 +1644,9 @@ def test_merge_queued_prints_and_keeps_worktree(wt: Path, gh: FakeGh, capsys) ->
 def test_mergify_merge_requests_once_for_behind_head(
     wt: Path, gh: FakeGh, capsys, monkeypatch, attested, merge_state
 ) -> None:
-    workflow = (wt / "workflow.toml").read_text().replace(
-        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
-    )
-    (wt / "workflow.toml").write_text(workflow)
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "use mergify")
+    commit_mergify_configuration(wt)
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False, mergeStateStatus=merge_state)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False, mergeStateStatus=merge_state)
     monkeypatch.setattr(mergify, "configured", lambda *_: attested)
     requested = []
     monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
@@ -1700,16 +1669,9 @@ def test_mergify_merge_requests_once_for_behind_head(
 def test_ready_allows_behind_only_after_configured_mergify_attestation(
     wt: Path, gh: FakeGh, capsys, monkeypatch, command, merge_state, attested
 ) -> None:
-    workflow = (wt / "workflow.toml").read_text().replace(
-        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
-    )
-    (wt / "workflow.toml").write_text(workflow)
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "use mergify")
+    commit_mergify_configuration(wt)
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False, mergeStateStatus=merge_state)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False, mergeStateStatus=merge_state)
     monkeypatch.setattr(mergify, "configured", lambda *args: attested)
 
     monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
@@ -1726,16 +1688,9 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
 def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
-    workflow = (wt / "workflow.toml").read_text().replace(
-        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'
-    )
-    (wt / "workflow.toml").write_text(workflow)
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "use mergify")
+    commit_mergify_configuration(wt)
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr view", {"state": "OPEN", "mergeCommit": None, "headRefOid": head})
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
@@ -1753,9 +1708,7 @@ def test_merge_waits_for_queue_then_cleans_up(
     wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1", "headRefOid": head_of(wt)}
     gh.respond("pr view", open_pr, open_pr,
@@ -1774,9 +1727,7 @@ def test_merge_waits_for_queue_then_cleans_up(
 
 def test_merge_wait_reports_queue_ejection(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
     open_pr = {"state": "OPEN", "mergeCommit": None, "headRefName": "lz/t1", "headRefOid": head_of(wt)}
     gh.respond("pr view", open_pr, open_pr)
@@ -1936,9 +1887,9 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher):
     (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary", login=publisher)])
-    arm_readiness(gh, head, wt)
+    arm_approved_pr_with_check_result(
+        gh, head, wt, "success", review_login=publisher, isDraft=False
+    )
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
@@ -1946,14 +1897,12 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher):
     "unsafe_config", "config_error", "merged_head_changed", "ejection_head_changed", "already_merged",
     "already_merged_changed", "unsafe_pending", "requested_head_changed"])
 def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monkeypatch, outcome):
-    (wt / "workflow.toml").write_text(WORKFLOW.replace(
-        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'))
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-qm", "mergify delivery")
+    commit_mergify_configuration(wt, "mergify delivery")
     head = head_of(wt)
-    arm_pr(gh, head, isDraft=False, state="MERGED" if outcome.startswith("already_") else "OPEN")
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_pr_with_check_result(
+        gh, head, wt, "success", isDraft=False,
+        state="MERGED" if outcome.startswith("already_") else "OPEN",
+    )
     gh.respond("api -X", "")
     gh.respond("pr view", {"state": "MERGED" if outcome in {"merged", "merged_head_changed", "already_merged", "already_merged_changed"} else "OPEN",
                            "mergeCommit": {"oid": "e" * 40} if outcome in {"merged", "merged_head_changed", "already_merged", "already_merged_changed"} else None,
@@ -2011,14 +1960,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
 def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(
     wt, gh, capsys, monkeypatch, queue_state, check_state
 ):
-    (wt / "workflow.toml").write_text(WORKFLOW.replace(
-        'merge = "squash"', 'merge = "mergify"\nmergify_queue = "main"'))
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-qm", "mergify delivery")
+    commit_mergify_configuration(wt, "mergify delivery")
     head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
+    arm_approved_ready_pr(gh, head, wt)
     gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
                {"check_runs": [] if check_state == "missing" else [
                    {"name": "checks", "status": "completed", "conclusion": "skipped"}]},

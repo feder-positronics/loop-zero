@@ -197,15 +197,7 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
             raise RunnerBadOutput(f"{family}: finding line is not an integer", _tail(raw))
         if not isinstance(item["title"], str) or not isinstance(item["body"], str):
             raise RunnerBadOutput(f"{family}: finding title/body must be strings", _tail(raw))
-        findings.append(
-            Finding(
-                severity=item["severity"],
-                path=path,
-                line=line,
-                title=item["title"],
-                body=item["body"],
-            )
-        )
+        findings.append(Finding(**item))
     if any(f.severity in BLOCKING for f in findings):
         verdict = "request_changes"
     return ReviewResult(

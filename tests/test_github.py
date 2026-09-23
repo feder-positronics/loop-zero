@@ -595,46 +595,30 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     assert pages == ["page=1", "page=2"]
 
 
-def test_check_runs_stale_skipped_newer_success_is_success(gh: FakeGh) -> None:
-    runs = [
+@pytest.mark.parametrize(("runs", "expected"), [
+    ([
         {"id": 10, "name": "checks", "status": "completed", "conclusion": "skipped"},
         {"id": 11, "name": "checks", "status": "completed", "conclusion": "success"},
-    ]
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD)["checks"] == "success"
-
-
-def test_check_runs_newer_pending_older_success_is_pending(gh: FakeGh) -> None:
-    runs = [
+    ], {"checks": "success"}),
+    ([
         {"id": 20, "name": "checks", "status": "in_progress", "conclusion": None},
         {"id": 19, "name": "checks", "status": "completed", "conclusion": "success"},
-    ]
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD)["checks"] == "pending"
-
-
-def test_check_runs_two_names_one_failing_is_failure(gh: FakeGh) -> None:
-    runs = [
+    ], {"checks": "pending"}),
+    ([
         {"id": 30, "name": "checks", "status": "completed", "conclusion": "success"},
         {"id": 31, "name": "lint", "status": "completed", "conclusion": "failure"},
-    ]
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD) == {"checks": "success", "lint": "failure"}
-
-
-def test_check_runs_ties_ids_by_started_at(gh: FakeGh) -> None:
-    runs = [
+    ], {"checks": "success", "lint": "failure"}),
+    ([
         {"id": 40, "name": "checks", "started_at": "2026-09-18T01:00:00Z",
          "status": "completed", "conclusion": "failure"},
         {"id": 40, "name": "checks", "started_at": "2026-09-18T02:00:00Z",
          "status": "completed", "conclusion": "success"},
-    ]
+    ], {"checks": "success"}),
+], ids=["stale-skipped", "newer-pending", "distinct-names", "timestamp-tie"])
+def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD)["checks"] == "success"
+    assert github.check_runs(REPO, HEAD) == expected
 
 
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
@@ -730,26 +714,16 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
     )
 
 
-def test_readiness_behind_base(gh: FakeGh) -> None:
+@pytest.mark.parametrize(("metadata", "reason"), [
+    ({"mergeStateStatus": "BEHIND"}, "PR #7 is behind main; rebase and rerun checks"),
+    ({"mergeable": "CONFLICTING"}, "PR #7 has merge conflicts with main"),
+    ({"state": "MERGED"}, "PR #7 is MERGED, not open"),
+], ids=["behind-base", "merge-conflict", "merged-pr"])
+def test_readiness_metadata_blocker(gh: FakeGh, metadata: dict, reason: str) -> None:
     arm_readiness(gh)
-    pr = github._pr_from_json(pr_json(mergeStateStatus="BEHIND"))
+    pr = github._pr_from_json(pr_json(**metadata))
     r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
-    assert r.reasons == ("PR #7 is behind main; rebase and rerun checks",)
-
-
-def test_readiness_conflicting(gh: FakeGh) -> None:
-    arm_readiness(gh)
-    pr = github._pr_from_json(pr_json(mergeable="CONFLICTING"))
-    r = github.readiness(REPO, pr, "main", ("checks",), HEAD)
-    assert r.reasons == ("PR #7 has merge conflicts with main",)
-
-
-def test_readiness_pr_not_open(gh: FakeGh) -> None:
-    arm_readiness(gh)
-    r = github.readiness(
-        REPO, github._pr_from_json(pr_json(state="MERGED")), "main", ("checks",), HEAD
-    )
-    assert r.reasons == ("PR #7 is MERGED, not open",)
+    assert r.reasons == (reason,)
 
 
 def test_readiness_without_required_ci_skips_check_lookup(gh: FakeGh) -> None:

@@ -7,8 +7,16 @@ checking out or executing candidate code.
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import os
 import re
+import signal
+import subprocess
+import tempfile
+import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 MERGIFY_APP_ID = 10562
@@ -20,6 +28,12 @@ QUEUE_BRANCH_PREFIX = "mergify/merge-queue/"
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+_TREE_SECONDS = 120
+_TREE_BYTES = 256 * 1024 * 1024
+_TREE_OUTPUT = 8 * 1024 * 1024
+_TREE_OBJECTS = 100_000
+_TREE_DEPTH = 200  # IntelFlo main at depth 200: ~16k objects, 29 MiB (full: 147k)
+_PASS_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
 
 JsonObject = dict[str, Any]
 JsonValue = JsonObject | list[Any]
@@ -81,7 +95,7 @@ def _flatten_batches(status: object) -> dict[str, JsonObject]:
     return indexed
 
 
-def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int]]:
+def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int], list[str]]:
     indexed = _flatten_batches(status)
     matches = [
         batch
@@ -96,13 +110,16 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
     pending = [candidate_id]
     visited: set[str] = set()
     source_numbers: list[int] = []
+    missing: list[str] = []
     while pending:
         batch_id = pending.pop()
         if batch_id in visited:
             continue
         batch = indexed.get(batch_id)
-        _require(batch is not None, f"Mergify parent batch is missing: {batch_id}")
         visited.add(batch_id)
+        if batch is None:
+            missing.append(batch_id)
+            continue
         pull_requests = batch.get("pull_requests")
         _require(
             isinstance(pull_requests, list),
@@ -128,7 +145,7 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
         len(source_numbers) == len(set(source_numbers)),
         f"Mergify batch for PR #{candidate_number} repeats a source pull request",
     )
-    return candidate_id, sorted(source_numbers)
+    return candidate_id, sorted(source_numbers), sorted(missing)
 
 
 def _candidate_snapshot(
@@ -238,6 +255,101 @@ def _attest_source(
     return source_sha
 
 
+def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> None:
+    """Reconstruct only first-parent, two-parent integrations; never execute objects."""
+    from loopzero import github
+
+    _require(len(sources) <= 32 and len(set(sources)) == len(sources),
+             "ambiguous or oversized source set")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        try:
+            token = github.auth_token()
+        except github.GhError:
+            raise CandidateError("GitHub fetch authentication unavailable") from None
+    with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
+        root = Path(directory)
+        env = {name: os.environ[name] for name in _PASS_ENV if name in os.environ} | {
+            "PATH": os.environ.get("PATH", os.defpath), "HOME": directory,
+            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_AUTHOR_NAME": "loopzero", "GIT_AUTHOR_EMAIL": "loopzero@localhost",
+            "GIT_COMMITTER_NAME": "loopzero", "GIT_COMMITTER_EMAIL": "loopzero@localhost",
+            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
+            "GIT_CONFIG_VALUE_0": "Authorization: Basic " + base64.b64encode(
+                f"x-access-token:{token}".encode()).decode(),
+        }
+        deadline = time.monotonic() + _TREE_SECONDS
+
+        def git(*args: str) -> str:
+            with (root / "output").open("w+b") as output:
+                process = subprocess.Popen(
+                    ["prlimit", "--as=1073741824", f"--fsize={_TREE_BYTES}", "--",
+                     "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
+                     "-c", "maintenance.auto=false", *args], cwd=root, env=env,
+                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+                def store_size() -> int:  # Git renames temporaries: skip files that vanish
+                    total = 0
+                    for folder, _, names in os.walk(root):
+                        for name in names:
+                            with contextlib.suppress(FileNotFoundError):
+                                total += os.lstat(os.path.join(folder, name)).st_size
+                    return total
+
+                try:
+                    while process.poll() is None:
+                        _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
+                        _require(time.monotonic() < deadline, "Git time bound exceeded")
+                        time.sleep(0.02)
+                    _require(process.returncode == 0,
+                             f"git {args[0]} exited {process.returncode}: objects unavailable, "
+                             "resource bound hit, or integration conflict")
+                    _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
+                    output.seek(0)
+                    result = output.read(_TREE_OUTPUT + 1)
+                    _require(len(result) <= _TREE_OUTPUT, "Git object/output bound exceeded")
+                    return result.decode().strip()
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+
+        git("init", "--bare", "--template=", ".")
+        heads = [main, candidate, *sources]
+        git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+            f"--depth={_TREE_DEPTH}",
+            f"https://github.com/{repo}.git", *heads)
+        objects = git("rev-list", "--objects", "--no-object-names", *heads).splitlines()
+        _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
+        graph = {row[0]: row[1:] for line in git(
+            "rev-list", "--parents", candidate).splitlines() if (row := line.split())}
+        pending, reverse_order = set(sources), []
+        cursor = candidate
+        while cursor in graph and pending:
+            parents = graph[cursor]
+            if cursor in pending:
+                pending.remove(cursor)
+                reverse_order.append(cursor)
+            if len(parents) > 1:
+                _require(len(parents) == 2, "ambiguous candidate integration topology")
+                if parents[1] in pending:
+                    pending.remove(parents[1])
+                    reverse_order.append(parents[1])
+            cursor = parents[0] if parents else ""
+        _require(not pending, "ambiguous source order in candidate topology")
+        integrated = main
+        for source in reversed(reverse_order):
+            tree = git("merge-tree", "--write-tree", integrated, source)
+            _require(_SHA.fullmatch(tree) is not None, "invalid integration tree")
+            integrated = git("commit-tree", tree, "-p", integrated, "-p", source,
+                             "-m", "Candidate tree attestation")
+        _require(git("rev-parse", f"{integrated}^{{tree}}") ==
+                 git("rev-parse", f"{candidate}^{{tree}}"), "candidate tree mismatch")
+
+
 def attest_candidate(
     event: JsonObject,
     *,
@@ -318,6 +430,8 @@ def attest_candidate(
     )
 
     first_lineage = _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
+    main_path = f"/repos/{full_name}/git/ref/heads/main"
+    main_before = github_get(main_path) if first_lineage[2] else None
     source_snapshots: dict[int, tuple[str, tuple[object, ...]]] = {}
     for number in first_lineage[1]:
         source = _object(
@@ -333,6 +447,20 @@ def attest_candidate(
         )
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
         source_policy(number, source)
+
+    if first_lineage[2]:
+        try:
+            main_ref = _object(main_before, "main ref unavailable")
+            main_sha = _object(main_ref.get("object"), "main object unavailable").get("sha")
+            _require(isinstance(main_sha, str) and _SHA.fullmatch(main_sha) is not None,
+                     "invalid main head")
+            _verify_tree(full_name, main_sha, candidate_sha,
+                         [snapshot[0] for snapshot in source_snapshots.values()])
+            _require(github_get(main_path) == main_before, "main changed during attestation")
+        except (CandidateError, OSError, ValueError) as exc:
+            raise CandidateError(
+                f"Missing Mergify parent batches {', '.join(first_lineage[2])}: {exc}"
+            ) from None
 
     second_lineage = _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
     _require(
