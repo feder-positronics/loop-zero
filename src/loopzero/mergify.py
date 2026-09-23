@@ -210,11 +210,9 @@ def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
 
 def request(repo: str, number: int, head: str, queue: str) -> None:
     body = f"@mergifyio queue {queue}\n\n{_marker(REQUEST, head, queue)}"
-    github._gh("pr", "comment", str(number), "--repo", repo, "--body", body)
+    github._api(f"repos/{repo}/issues/{number}/comments", {"body": body})
 
 
 def mark_confirmed(repo: str, number: int, head: str, queue: str) -> None:
-    github._gh(
-        "pr", "comment", str(number), "--repo", repo, "--body",
-        _marker(CONFIRMED, head, queue),
-    )
+    github._api(f"repos/{repo}/issues/{number}/comments",
+                {"body": _marker(CONFIRMED, head, queue)})

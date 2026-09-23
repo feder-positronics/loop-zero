@@ -173,6 +173,27 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
     assert mergify.markers("acme/widgets", 7, head, "main") == (False, True)
 
 
+@pytest.mark.parametrize(("writer", "body"), [
+    (mergify.request, "@mergifyio queue main\n\n<!-- loopzero:mergify-request head=abc queue=main -->"),
+    (mergify.mark_confirmed, "<!-- loopzero:mergify-confirmed head=abc queue=main -->"),
+])
+def test_comment_writes_use_github_rest_api(monkeypatch, writer, body):
+    calls = []
+
+    def run(argv, **_kwargs):
+        with open(argv[-1], encoding="utf-8") as handle:
+            payload = json.load(handle)
+        calls.append((argv[1:-1], payload))
+        return type("Done", (), {"exit_code": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(mergify.github, "run", run)
+    writer("acme/widgets", 7, "abc", "main")
+
+    assert calls == [([
+        "api", "repos/acme/widgets/issues/7/comments", "--method", "POST", "--input",
+    ], {"body": body})]
+
+
 def test_credential_file_must_be_private(tmp_path, monkeypatch):
     monkeypatch.delenv("MERGIFY_API_KEY", raising=False)
     key = tmp_path / "api-key"
