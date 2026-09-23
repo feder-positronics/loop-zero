@@ -51,6 +51,13 @@ Point your agent's repository instructions at that checkout's
 `core/skills/README.md` and `core/CREDENTIALS.md`. Use the relevant skill from
 the catalog for each task. Keep the source directory structure intact so
 relative links resolve; copying an individual `SKILL.md` loses its references.
+Keep those instructions in `AGENTS.md`: Codex and Claude Code (v2.1.277 or
+later) both read it directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
+`CLAUDE.local.md` on the same path; Claude reads any of them instead of
+`AGENTS.md`. Claude cannot read `AGENTS.md` directly with third-party providers
+such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
+first session after an install or upgrade; there, use a local, untracked
+`CLAUDE.md` containing `@AGENTS.md`. `/memory` lists the loaded files.
 For TypeSafe work, explicitly request `typesafe-ai` from that catalog. In this
 repository, `.agents/skills` links `plan`, `implement`, `work-issue`, and
 `typesafe-ai` to their canonical skills for discovery. Other consumers must
