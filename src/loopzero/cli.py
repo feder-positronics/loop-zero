@@ -25,7 +25,9 @@ UNEXPECTED = (KeyError, TypeError)
 PAGE = 100
 # --wait: poll interval, default timeout, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
-WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 10.0, 1800.0, 120.0
+# Each poll costs several GitHub API calls from a quota shared by every session.
+WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 30.0, 1800.0, 120.0
+PUSH_TIMEOUT = 600.0  # consumer pre-push hooks (lint, tests) routinely exceed GIT_TIMEOUT
 NEXT_WAIT = "next: loopzero ready --wait"  # named at the moment of need; agents hand-roll polls otherwise
 _sleep = time.sleep
 OFFLINE_FAILURE_RE = re.compile(
@@ -56,10 +58,8 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str) -> str:
-    done = _proc.run(
-        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT
-    )
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
+    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout)
     if done.exit_code != 0:
         raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
     return done.stdout.strip()
@@ -490,7 +490,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         push.append(f"--force-with-lease={branch}:{pr.head_sha}")
     push.append(branch)
     try:
-        _git(wt, *push)
+        _git(wt, *push, timeout=PUSH_TIMEOUT)
     except CliError as exc:
         if force_lease:
             raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc

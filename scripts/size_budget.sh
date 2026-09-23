@@ -4,9 +4,9 @@
 # is already over can still merge changes that hold or shrink and never deadlocks.
 # Usage: scripts/size_budget.sh [BASE]   (default: merge-base with origin/main)
 set -euo pipefail
-# Raised for Mergify missing-parent tree verification (owner decision 2026-09-23).
-SRC_CAP=4330
-TESTS_CAP=5300
+# Raised for Mergify missing-parent tree verification and GitHub retry/push resilience (owner go-ahead 2026-09-23).
+SRC_CAP=4350
+TESTS_CAP=5330
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git ls-tree -r --name-only "$base" -- "$1" | { grep '\.py$' || true; } \

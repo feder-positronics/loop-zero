@@ -843,3 +843,25 @@ def test_merged_sha_binds_confirmation_to_source_head(gh, actual):
     else:
         with pytest.raises(github.GhError, match="head changed"):
             github.merged_sha(REPO, 7, expected_head=HEAD)
+
+
+@pytest.mark.parametrize("args, attempts", [
+    (("api", "repos/acme/widgets/pulls/1"), 2),
+    (("api", "graphql", "-f", "query=query { viewer { login } }"), 2),
+    (("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x"), 1),
+    (("api", "graphql", "-f", "query=mutation { resolve }"), 1),
+])
+def test_gh_retries_only_transient_reads(monkeypatch, args, attempts):
+    seen: list[list[str]] = []
+    def run(argv, **_):
+        seen.append(argv)
+        failed = len(seen) == 1
+        return type("Done", (), {"exit_code": int(failed), "stdout": "ok", "stderr": "HTTP 503" * failed})
+    monkeypatch.setattr(github, "run", run)
+    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+    if attempts == 2:
+        assert github._gh(*args) == "ok"
+    else:
+        with pytest.raises(github.GhError):
+            github._gh(*args)
+    assert len(seen) == attempts
