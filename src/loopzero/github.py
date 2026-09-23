@@ -136,15 +136,15 @@ def _gh_json(*args: str) -> object:
         raise GhError(("gh", *args), f"invalid JSON from gh: {out[-600:]}") from exc
 
 
-def _paged(endpoint: str) -> list:
+def _paged(endpoint: str, key: str = "check_runs") -> list:
     """Collect a list endpoint page by page until a short page."""
     items: list = []
     page = 1
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
                          "-F", f"page={page}") or []
-        if isinstance(chunk, dict):  # check-runs wraps the list
-            chunk = chunk.get("check_runs") or []
+        if isinstance(chunk, dict):
+            chunk = chunk.get(key) or []
         items += chunk
         if len(chunk) < PAGE:
             return items
@@ -492,7 +492,8 @@ def check_runs(repo: str, head_sha: str) -> dict[str, str]:
     return _check_signals(repo, head_sha)[0]
 
 
-def _check_signals(repo: str, head_sha: str, review_at: str | None = None, review_grace: bool = False
+def _check_signals(repo: str, head_sha: str, review_at: str | None = None, review_grace: bool = False,
+                   required_ci: tuple[str, ...] = ()
                    ) -> tuple[dict[str, str], tuple[str, ...]]:
     signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
@@ -518,7 +519,45 @@ def _check_signals(repo: str, head_sha: str, review_at: str | None = None, revie
                           if state != "success" and state not in pending)
                   and (review_grace or any(at and at >= review_at
                                            for state, at in values if state in pending)))
-    return states, stale
+    superseded: list[str] = []
+    workflows: list[dict] | None = None
+    for name in required_ci:
+        cr = latest_runs.get(name)
+        if (name in stale or cr is None or states.get(name) in pending | {"success"}
+                or cr.get("conclusion") in pending | {"success", None}
+                or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
+                or any(state not in pending | {"success"} for state, _ in signals[name][1:])):
+            continue
+        if workflows is None:
+            workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+        if _has_active_replacement(cr, workflows, head_sha):
+            superseded.append(name)
+    return states, (*stale, *superseded)
+
+
+def _has_active_replacement(check: dict, workflows: list[dict], head_sha: str) -> bool:
+    """A producer can be superseded only by its own workflow on the same head."""
+    suite_id = check["check_suite"]["id"]
+    producer = next((workflow for workflow in workflows if workflow.get("check_suite_id") == suite_id
+                     and workflow.get("head_sha") == head_sha), None)
+    if producer is None or not producer.get("workflow_id"):
+        return False
+    created = producer.get("created_at")
+    for workflow in workflows:
+        if (workflow.get("head_sha") != head_sha
+                or workflow.get("workflow_id") != producer["workflow_id"]
+                or workflow.get("status") not in {"queued", "in_progress", "waiting", "pending", "requested"}):
+            continue
+        if workflow.get("id") == producer.get("id"):
+            if (workflow.get("run_attempt", 1) > 1 and check.get("completed_at")
+                    and workflow.get("run_started_at")
+                    and workflow["run_started_at"] > check["completed_at"]):
+                return True
+        elif (created and isinstance(producer.get("id"), int)
+              and workflow.get("created_at") and isinstance(workflow.get("id"), int)
+              and (workflow["created_at"], workflow["id"]) > (created, producer["id"])):
+            return True
+    return False
 
 
 def _check_run_order(run: dict) -> tuple[int, str]:
@@ -563,7 +602,7 @@ def readiness(
     for f in open_blocking_findings(repo, pr.number, pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
-    checks, stale = (_check_signals(repo, pr.head_sha, review_at, review_grace)
+    checks, stale = (_check_signals(repo, pr.head_sha, review_at, review_grace, required_ci)
                      if required_ci else ({}, ()))
     for name in required_ci:
         conclusion = checks.get(name)
