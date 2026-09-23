@@ -119,7 +119,7 @@ def _fake_codex(
           case "$1" in
             --output-last-message) out="$2"; shift;;
             --output-schema) schema="$2"; shift;;
-            --sandbox) [ "$2" = read-only ] || {{ echo "bad sandbox $2" >&2; exit 64; }}; shift;;
+            --sandbox) [ "$2" = danger-full-access ] || {{ echo "bad sandbox $2" >&2; exit 64; }}; shift;;
           esac
           shift
         done
@@ -520,7 +520,8 @@ def test_codex_approve(
     assert argv[0] == "exec"
     assert argv[argv.index("-m") + 1] == "gpt-5.6-luna"
     assert "model_reasoning_effort=high" in argv
-    assert argv[argv.index("--sandbox") + 1] == "read-only"
+    # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
+    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert "--ignore-user-config" in argv
     assert argv[argv.index("--cd") + 1] == str(tmp_path.resolve()) and "--ephemeral" in argv
     assert "mcp_servers={}" in argv
@@ -532,9 +533,10 @@ def test_codex_approve(
     assert argv[argv.index("--output-schema") + 1].endswith("/schema.json")
     assert argv[argv.index("--output-last-message") + 1].endswith("/last.json")
     sandbox_argv = _bwrap_argv(fake_bwrap)
-    assert (str(configured.resolve()), f"{SANDBOX_HOME}/.codex") in _pairs(
-        sandbox_argv, "--bind"
-    )
+    writable = _pairs(sandbox_argv, "--bind")
+    auth_bind = (str((configured / "auth.json").resolve()), f"{SANDBOX_HOME}/.codex/auth.json")
+    assert auth_bind in writable
+    assert all(dst in (SANDBOX_HOME, auth_bind[1]) for _, dst in writable)
     command = sandbox_argv[sandbox_argv.index("--") + 1 :]
     assert command[command.index("--output-schema") + 1] == f"{SANDBOX_HOME}/schema.json"
     assert command[command.index("--output-last-message") + 1] == f"{SANDBOX_HOME}/last.json"
