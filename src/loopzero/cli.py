@@ -228,7 +228,8 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
 
 
 def _readiness(
-    wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None
+    wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
+    *, workflow_wait: bool = False,
 ) -> github.Readiness:
     review = eligibility.eligible_review(
         reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
@@ -242,6 +243,7 @@ def _readiness(
         config.repo, pr, config.base_branch, config.required_ci,
         head if review else None, review_at=review_at,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
+        workflow_wait=workflow_wait,
     )
     report = _load_report(wt)
     if report is None or report.head != head or report.dirty or not report.ok:
@@ -679,7 +681,7 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
 
 
 def _pr_readiness(
-    wt: Path, config: Config, *, allow_merged: bool = False
+    wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False
 ) -> tuple[github.PR, github.Readiness | None]:
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     branch, head = worktree.branch(wt), worktree.head(wt)
@@ -688,7 +690,7 @@ def _pr_readiness(
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
-    return pr, _readiness(wt, config, pr, head)
+    return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait)
 
 
 def _cleanup(wt: Path) -> None:
@@ -702,7 +704,7 @@ def _cleanup(wt: Path) -> None:
 
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
-    pr, readiness = _pr_readiness(wt, config)
+    pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
     assert readiness is not None
     waiting = _draft_checks_waiting(config, pr, readiness)
     if waiting:
@@ -781,7 +783,7 @@ def _wait_for_checks(
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
-        readiness = _readiness(wt, config, current, pr.head_sha)
+        readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness

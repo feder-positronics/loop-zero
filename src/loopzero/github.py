@@ -524,7 +524,7 @@ def _check_signals(repo: str, head_sha: str, review_at: str | None = None, revie
     for name in required_ci:
         cr = latest_runs.get(name)
         if (name in stale or cr is None or states.get(name) in pending | {"success"}
-                or cr.get("conclusion") in pending | {"success", None}
+                or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
                 or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
                 or any(state not in pending | {"success"} for state, _ in signals[name][1:])):
             continue
@@ -584,6 +584,7 @@ def readiness(
     *, allow_behind: bool = False,
     review_at: str | None = None,
     review_grace: bool = False,
+    workflow_wait: bool = False,
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -602,7 +603,8 @@ def readiness(
     for f in open_blocking_findings(repo, pr.number, pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
-    checks, stale = (_check_signals(repo, pr.head_sha, review_at, review_grace, required_ci)
+    checks, stale = (_check_signals(repo, pr.head_sha, review_at, review_grace,
+                                   required_ci if workflow_wait else ())
                      if required_ci else ({}, ()))
     for name in required_ci:
         conclusion = checks.get(name)

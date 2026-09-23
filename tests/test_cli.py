@@ -1082,6 +1082,9 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
     arm_readiness(gh, head, wt, conclusion="failure")
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": [{
+        "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10}}]})
     code, out, _ = run(capsys, "ready")
     assert code == 1
     assert out.splitlines() == [
@@ -1089,6 +1092,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
 def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys) -> None:

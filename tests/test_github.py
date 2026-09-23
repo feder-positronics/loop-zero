@@ -736,7 +736,8 @@ def test_readiness_waits_for_newer_active_producing_workflow(gh: FakeGh, failure
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.reasons == (f"required check 'checks' is {failure}",)
     assert result.waitable_failures == result.reasons
@@ -767,7 +768,8 @@ def test_readiness_does_not_wait_for_unrelated_or_finished_run(gh: FakeGh, chang
          "status": "completed", "created_at": "2026-09-23T21:53:00Z"}, replacement,
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.reasons == ("required check 'checks' is failure",)
     assert result.waitable_failures == ()
@@ -787,7 +789,8 @@ def test_readiness_newer_run_in_same_second_waits(gh: FakeGh) -> None:
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.waitable_failures == result.reasons
 
@@ -807,7 +810,8 @@ def test_readiness_keeps_failing_commit_status_blocker(gh: FakeGh) -> None:
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.reasons == ("required check 'checks' is failure",)
     assert result.waitable_failures == ()
@@ -822,9 +826,29 @@ def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
     ]})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.ready
+    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
+
+
+@pytest.mark.parametrize("conclusion", ["skipped", "neutral"])
+def test_readiness_wait_does_not_lookup_nonfailure_conclusion(
+    gh: FakeGh, conclusion: str
+) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "name": "checks", "status": "completed", "conclusion": conclusion,
+        "check_suite": {"id": 10},
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.reasons == (f"required check 'checks' is {conclusion}",)
+    assert result.waitable_failures == ()
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
@@ -846,7 +870,8 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
                     "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
                ]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.waitable_failures == result.reasons
     pages = [c["argv"][-1] for c in gh.calls if "actions/runs" in c["argv"][1]]
@@ -864,7 +889,8 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
                {"stdout": "", "stderr": "HTTP 403: Actions read denied", "exit_code": 1})
 
     with pytest.raises(github.GhError, match="Actions read denied"):
-        github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+        github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                         workflow_wait=True)
 
 
 @pytest.mark.parametrize("started,waitable", [
@@ -885,7 +911,8 @@ def test_readiness_rerun_attempt_requires_start_after_old_failure(
         "run_attempt": 2, "run_started_at": started,
     }]})
 
-    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD)
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
 
     assert result.waitable_failures == (result.reasons if waitable else ())
 
