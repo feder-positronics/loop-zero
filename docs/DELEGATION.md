@@ -104,7 +104,7 @@ Model/effort: <selection resolved from models.toml>
 Effort policy: Children inherit this policy; do not raise effort or launch a stronger model without returning to the parent.
 Delegate verification: <commands runnable in the delegate sandbox>
 Parent verification: <checks the parent will run instead>
-Return conditions: <when to stop and return an unresolved question>
+Return conditions: <when to stop and return an unresolved question>; a progress summary is not a stop: continue until the acceptance evidence exists or a named blocker needs the parent
 Final report: <changed files, evidence, check results, deviations, open questions>
 ```
 

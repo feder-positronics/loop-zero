@@ -11,10 +11,7 @@ When the task uses API keys, follow [the credential convention](../../CREDENTIAL
 and document the integration's variable, local fallback, and target environment.
 
 Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
-when splitting work or choosing an executor. Read the task repository's
-routing source (`models.toml`, or its named equivalent) for model and effort;
-delegate useful bounded units through the
-available runtime.
+when splitting work or choosing an executor.
 
 ## Do
 

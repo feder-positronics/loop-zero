@@ -8,10 +8,7 @@ description: Bound a requested change with objective, acceptance, ownership, aff
 Turn one request into a change small enough for one PR. Do not implement it.
 
 Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
-when splitting work or choosing an executor. Read the task repository's
-routing source (`models.toml`, or its named equivalent) for model and effort;
-delegate useful bounded units through the
-available runtime.
+when splitting work or choosing an executor.
 
 Read [the contract](../../CONTRACT.md), repository guidance, the relevant issue
 or `.loopzero/task.md`, and enough code to verify current behavior and ownership.
