@@ -10,10 +10,7 @@ and either closure or an explicit partial-delivery boundary. Preserve the issue
 as intake context and the PR as delivery record.
 
 Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
-when splitting work or choosing an executor. Read the task repository's
-routing source (`models.toml`, or its named equivalent) for model and effort;
-delegate useful bounded units through the
-available runtime.
+when splitting work or choosing an executor.
 
 ## Intake
 

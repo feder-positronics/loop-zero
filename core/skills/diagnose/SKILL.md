@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Establish the cause of broken behavior by reproduction and evidence before choosing a repair.
+description: Establish the cause of a newly observed failure with one small reproduction before choosing a repair; when that reproduction leaves several plausible causes, use debug.
 ---
 
 # diagnose
