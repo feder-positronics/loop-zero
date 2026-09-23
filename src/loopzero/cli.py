@@ -788,7 +788,8 @@ def _wait_for_checks(
         if not kicked and (waiting := _draft_checks_waiting(config, current, readiness)):
             github.mark_ready(config.repo, pr.number)
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
-            return _wait_for_checks(wt, config, pr, timeout, kicked=True)
+            remaining = max(0.0, timeout - (time.monotonic() - started))  # keep the deadline
+            return _wait_for_checks(wt, config, pr, remaining, kicked=True)
         pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked
