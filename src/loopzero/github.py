@@ -6,10 +6,11 @@ import hashlib
 import json
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from loopzero._proc import ToolMissing, run
+from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.types import Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
@@ -83,14 +84,41 @@ class Readiness:
     waitable_failures: tuple[str, ...] = ()
 
 
+TRANSIENT_RE = re.compile(r"rate limit|HTTP 5\d\d|timed out|connection reset|no server is currently",
+                          re.IGNORECASE)
+RETRY_DELAYS = (5.0, 20.0, 60.0)
+_retry_sleep = time.sleep
+
+
+def _read_only(args: tuple[str, ...]) -> bool:
+    """Only reads are retried: a repeated write could post or change state twice."""
+    if args[:2] == ("api", "graphql"):
+        return not any("mutation" in arg for arg in args)
+    if args[:1] == ("api",):
+        methods = [args[i + 1] for i, arg in enumerate(args[:-1]) if arg in ("-X", "--method")]
+        if methods:
+            return all(method.upper() == "GET" for method in methods)
+        return not {"-f", "-F", "--field", "--raw-field", "--input"} & set(args)
+    return args[:2] in {("pr", "view"), ("pr", "list"), ("pr", "checks")}
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
     argv = ("gh", *args)
-    try:
-        done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV, timeout=timeout)
-    except ToolMissing as exc:
-        raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
-    if done.exit_code != 0:
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV, timeout=timeout)
+        except ToolMissing as exc:
+            raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
+        except ProcTimeout:
+            if delay is None or not _read_only(args):
+                raise
+            _retry_sleep(delay)
+            continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
+        if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
+            break
+        _retry_sleep(delay)
+    if done.exit_code != 0:
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(argv, f"{tail.rstrip()}\n{GH_AUTH_REMEDY}")
         raise GhError(argv, tail)
