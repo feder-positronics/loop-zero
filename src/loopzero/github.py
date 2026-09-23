@@ -84,7 +84,7 @@ class Readiness:
     waitable_failures: tuple[str, ...] = ()
 
 
-TRANSIENT_RE = re.compile(r"rate limit|HTTP 5\d\d|timed out|connection reset|no server is currently",
+TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|connection reset|no server is currently",
                           re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
@@ -115,6 +115,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
             _retry_sleep(delay)
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
+        if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
+            raise GhError(argv, tail + "\nRate limited: retry after GitHub's reset or Retry-After; "
+                          "No automatic retry.")
         if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
             break
         _retry_sleep(delay)
@@ -585,12 +588,20 @@ _QUEUE_QUERY = (
 
 def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
     """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
-    fields = "mergeCommit,state,headRefName" + (",headRefOid" if expected_head else "")
-    view = _gh_json("pr", "view", str(number), "--repo", repo, "--json", fields) or {}
-    if expected_head and view.get("headRefOid") != expected_head:
-        raise GhError(("gh", "pr", "view"), "PR head changed before merge verification")
-    sha = (view.get("mergeCommit") or {}).get("oid")
-    return sha if view.get("state") == "MERGED" and sha else None
+    argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
+    view = api_get(argv[2])
+    if not isinstance(view, dict) or type(view.get("merged")) is not bool:
+        raise GhError(argv, "invalid PR merge evidence")
+    if expected_head and (not isinstance(view.get("head"), dict)
+                          or view["head"].get("sha") != expected_head):
+        raise GhError(argv, "PR head changed before merge verification")
+    if view["merged"] and view.get("state") == "closed":
+        sha = view.get("merge_commit_sha")
+        if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
+            return sha
+    elif not view["merged"] and view.get("state") == "open":
+        return None  # An open PR's merge_commit_sha is only a test merge.
+    raise GhError(argv, "PR closed without a verified merge or invalid merge evidence")
 
 
 def merge_pending(repo: str, number: int) -> bool:

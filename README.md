@@ -49,6 +49,18 @@ complete. The full transcript stays in the saved local
 `.loopzero/review-<head>-<kind>.json` artifact; `loopzero review --repost` uses that
 artifact without rerunning the model.
 
+Wait commands observe immediately, then back off to 30, 60 and 120 second intervals
+(with up to 10% earlier jitter), bounded by the remaining wait timeout. Readiness
+still checks current reviews and findings on every observation. Mergify wait ticks
+use REST for both source-head guards and verified merge observation, avoiding
+recurring GraphQL PR reads. Native GitHub queue membership still requires GraphQL.
+
+A GitHub rate-limit error stops the command immediately instead of using transient
+5/20/60-second retries. Resume after the primary reset or secondary `Retry-After`
+period; loopzero does not schedule a retry. REST and GraphQL have separate primary
+budgets, and all sessions using the same user share that user's allowance. See
+[GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
+
 ## Adopt it in six steps
 
 1. Install from a pinned SHA: `uv tool install git+https://github.com/feder-positronics/loop-zero@<sha>`.
