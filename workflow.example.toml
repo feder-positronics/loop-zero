@@ -63,11 +63,11 @@ reviewers = ["claude", "codex"]
 # Optional per-family defaults. `--model` and `--effort` override these for one run;
 # `allowed_efforts` rejects any configured or overridden effort not in the list.
 # [delivery.review.claude]
-# model = "opus"
+# model = "claude-opus-5-5"
 # effort = "medium"
 # allowed_efforts = ["medium", "high"]
 
 # [delivery.review.codex]
-# model = "gpt-5.6-luna"
+# model = "gpt-6-luna"
 # effort = "medium"
 # allowed_efforts = ["low", "medium", "high", "xhigh", "max"]

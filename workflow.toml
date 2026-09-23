@@ -27,7 +27,7 @@ review_publishers = ["eowca"]
 # reason in the PR; max is forbidden (the Luna exception is not enabled here because the
 # allow-list is per family). Codex follows models.toml `review = "deep"`.
 [delivery.review.claude]
-model = "opus"
+model = "claude-opus-5-5"
 effort = "medium"
 allowed_efforts = ["low", "medium", "high"]
 
