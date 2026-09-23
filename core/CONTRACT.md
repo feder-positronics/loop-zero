@@ -122,6 +122,9 @@ redirect output to a file, chain with `&&` under `set -o pipefail`, and treat
 exit 3 (waiting) and 5 (changes requested) as outcomes, not crashes. The last
 line of output states the verdict.
 
+A successful `loopzero merge` deletes the worktree the shell may be standing in:
+end the command there and `cd` to the root it prints before running anything else.
+
 Wait with `loopzero ready --wait` and `loopzero merge --wait`, never with a
 hand-written `gh` loop. Any other poll needs a deadline, visible progress,
 stderr kept, and a stop on command errors: a silent loop looks like running CI.

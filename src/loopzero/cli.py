@@ -212,8 +212,9 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     if deltas:
         raise CliError(
             "review budget exhausted for this lineage (primary and delta already posted); "
-            "rewrite the reviewed commits (squash/amend) so they are no longer ancestors of "
-            "HEAD, then run review again"
+            "a fresh lineage is for one class-wide repair, not the next finding (see "
+            "resolve-findings): audit the class, then rewrite the reviewed commits "
+            "(squash/amend) so they are no longer ancestors of HEAD and run review again"
         )
     if len(primaries) > 1:
         raise CliError("more than one primary review marker found for this lineage; refusing")
