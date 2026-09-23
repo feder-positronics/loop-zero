@@ -6,9 +6,11 @@ import argparse
 import dataclasses
 import importlib.metadata
 import json
+import random
 import re
 import sys
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -757,13 +759,24 @@ def _pending_checks(
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
+def _poll_until(started: float, timeout: float) -> Iterator[None]:
+    delay = WAIT_INTERVAL
+    while True:
+        yield  # Observe immediately, including --wait=0, and once at the deadline.
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            return
+        _sleep(min(remaining, delay * random.uniform(0.9, 1.0)))
+        delay = min(120.0, delay * 2)
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool
 ) -> tuple[github.PR, github.Readiness] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     started, shown = time.monotonic(), None
-    while True:
-        current = _require_pr(config, worktree.branch(wt))
+    for _ in _poll_until(started, timeout):
+        current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
@@ -788,58 +801,40 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "retry `loopzero ready --wait`"
             )
-        if elapsed >= timeout:
-            return None
-        _sleep(min(WAIT_INTERVAL, timeout - elapsed))
 
 
-def _wait_for_merge(config: Config, branch: str, pr: github.PR, timeout: float) -> str | None:
+def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None:
     """Poll until the queue lands the PR and return the merge SHA; None on timeout."""
     started = time.monotonic()
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
-    while True:
-        current = _require_pr(config, branch, allow_merged=True)
-        if current.head_sha != pr.head_sha:  # never clean up after an unreviewed head landed
-            raise CliError(
-                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
-            )
+    for _ in _poll_until(started, timeout):
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
-        if not github.merge_pending(config.repo, pr.number) and not github.merged_sha(
-            config.repo, pr.number, expected_head=pr.head_sha
-        ):
+        if not github.merge_pending(config.repo, pr.number):
+            sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+            if sha:
+                return sha
             raise CliError(f"PR #{pr.number} left the merge queue unmerged")
-        elapsed = time.monotonic() - started
-        if elapsed >= timeout:
-            return None
-        _sleep(min(WAIT_INTERVAL, timeout - elapsed))
 
 
 def _wait_for_mergify(
-    config: Config, branch: str, pr: github.PR, timeout: float, confirmed: bool
+    config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
     """Follow one exact source head from request through confirmed membership to merge."""
     started = time.monotonic()
     queue = config.mergify_queue
     assert queue is not None
-    while True:
-        current = _require_pr(config, branch, allow_merged=True)
-        if current.head_sha != pr.head_sha:
-            raise CliError(
-                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
-            )
+    for _ in _poll_until(started, timeout):
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
         if not mergify.configured(config.repo, config.base_branch, queue):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
-        after = _require_pr(config, branch, allow_merged=True)
-        if after.head_sha != pr.head_sha:
-            raise CliError(
-                f"PR head changed while waiting: {pr.head_sha[:12]} to {after.head_sha[:12]}"
-            )
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        if sha:
+            return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
@@ -850,9 +845,6 @@ def _wait_for_mergify(
                 return sha
             raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
                            f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
-        if time.monotonic() - started >= timeout:
-            return None
-        _sleep(min(WAIT_INTERVAL, timeout - (time.monotonic() - started)))
 
 
 def _merge_with_mergify(
@@ -891,7 +883,7 @@ def _merge_with_mergify(
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
         requested = True
     if timeout is not None:
-        return _wait_for_mergify(config, branch, pr, timeout, confirmed)
+        return _wait_for_mergify(config, pr, timeout, confirmed)
     state_name = "confirmed in" if confirmed else "requested from"
     print(
         f"PR #{pr.number} {state_name} Mergify queue {queue}; "
@@ -941,7 +933,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
     sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
     if sha is None and args.wait is not None:
-        sha = _wait_for_merge(config, branch, pr, args.wait)
+        sha = _wait_for_merge(config, pr, args.wait)
         if sha is None:
             print(f"timed out waiting for the merge queue to land PR #{pr.number}")
             return 3

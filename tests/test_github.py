@@ -173,6 +173,11 @@ def pr_json(**over: object) -> dict:
     return {**base, **over}
 
 
+def merge_json(state="OPEN", head=HEAD, sha=None) -> dict:
+    return {"state": "open" if state == "OPEN" else "closed", "merged": state == "MERGED",
+            "head": {"sha": head}, "merge_commit_sha": sha}
+
+
 def threads_json(*nodes: dict, has_next: bool = False, cursor: str | None = None) -> dict:
     return {"data": {"repository": {"pullRequest": {"reviewThreads": {
         "pageInfo": {"hasNextPage": has_next, "endCursor": cursor}, "nodes": list(nodes),
@@ -741,21 +746,18 @@ def test_mark_ready(gh: FakeGh) -> None:
     assert gh.argv(0) == ["pr", "ready", "7", "--repo", REPO]
 
 
-def test_merge_success_replays_recorded_verification(
+def test_merge_success_verifies_rest_landing(
     gh: FakeGh,
 ) -> None:
     gh.expect(
         ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
     )
-    gh.load_scenario("pr_view_merged", {
-        "<REPO>": REPO, "<PR>": "7", "<SHA_1>": HEAD, "<SHA_2>": "c" * 40,
-    })
+    gh.expect(["api", f"repos/{REPO}/pulls/7"], merge_json("MERGED", sha="c" * 40))
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
                           "--match-head-commit", HEAD]
     assert "--delete-branch" not in gh.argv(0)
-    assert gh.argv(1) == ["pr", "view", "7", "--repo", REPO, "--json",
-                          "mergeCommit,state,headRefName,headRefOid"]
+    assert gh.argv(1) == ["api", f"repos/{REPO}/pulls/7"]
     gh.assert_complete()
 
 
@@ -777,72 +779,47 @@ def _queue_json(queued: bool) -> dict:
 
 
 def test_merge_unverified(gh: FakeGh) -> None:
-    unmerged = {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"}
+    unmerged = merge_json(state='OPEN', head=HEAD, sha=None)
     gh.respond("pr merge", "")
-    gh.respond("pr view", unmerged, unmerged)
+    gh.respond(f"api repos/{REPO}/pulls/7", unmerged, unmerged)
     gh.respond("api graphql", _queue_json(False))
     with pytest.raises(github.MergeFailed, match="neither merged nor queued"):
         github.merge(REPO, 7, "merge", HEAD)
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
 
 
-def test_merge_queued_returns_none(gh: FakeGh) -> None:
+@pytest.mark.parametrize("strategy,auto", [("squash", False), ("queue", False), ("queue", True)])
+def test_merge_queued_returns_none(gh: FakeGh, strategy, auto) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"})
-    gh.respond("api graphql", _queue_json(True))
-    assert github.merge(REPO, 7, "squash", HEAD) is None
-    query = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"])
-    assert "isInMergeQueue" in query[3] and "number=7" in query
-
-
-def test_merge_accepted_as_auto_merge_counts_as_pending(gh: FakeGh) -> None:
-    """#180: GitHub took the request as auto-merge and queues the PR about a minute later."""
-    gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"})
-    accepted = _queue_json(False)
-    accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json())
+    accepted = _queue_json(not auto)
+    if auto:
+        accepted["data"]["repository"]["pullRequest"]["autoMergeRequest"] = {"enabledAt": "t"}
     gh.respond("api graphql", accepted)
-    assert github.merge(REPO, 7, "queue", HEAD) is None
+    assert github.merge(REPO, 7, strategy, HEAD) is None
+    assert ("--squash" in gh.argv(0)) == (strategy == "squash")
+    assert "--queue" not in gh.argv(0)
 
 
 def test_merge_landed_between_reads_is_reported_merged(gh: FakeGh) -> None:
     gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None},
-               {"state": "MERGED", "headRefOid": HEAD, "mergeCommit": {"oid": "d" * 40}})
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json(state='OPEN', head=HEAD, sha=None),
+               merge_json(state='MERGED', head=HEAD, sha='d' * 40))
     gh.respond("api graphql", _queue_json(False))
     assert github.merge(REPO, 7, "squash", HEAD) == "d" * 40
 
 
 def test_merged_sha_only_for_merged_state(gh: FakeGh) -> None:
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40}},
-               {"state": "OPEN", "mergeCommit": None})
+    gh.respond(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', sha='c' * 40),
+               merge_json(state='OPEN', sha="d" * 40))
     assert github.merged_sha(REPO, 7) == "c" * 40
     assert github.merged_sha(REPO, 7) is None
-
-
-def test_merge_queue_strategy_omits_method_flag(gh: FakeGh) -> None:
-    gh.respond("pr merge", "")
-    gh.respond("pr view", {"state": "OPEN", "headRefOid": HEAD, "mergeCommit": None, "headRefName": "lz/x"})
-    gh.respond("api graphql", _queue_json(True))
-    assert github.merge(REPO, 7, "queue", HEAD) is None
-    assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--match-head-commit", HEAD]
 
 
 def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     with pytest.raises(github.MergeFailed):
         github.merge(REPO, 7, "fast-forward", HEAD)
     assert gh.calls == []
-
-
-@pytest.mark.parametrize("actual", [HEAD, "f" * 40, None])
-def test_merged_sha_binds_confirmation_to_source_head(gh, actual):
-    gh.respond("pr view", {"state": "MERGED", "mergeCommit": {"oid": "c" * 40},
-                           "headRefOid": actual})
-    if actual == HEAD:
-        assert github.merged_sha(REPO, 7, expected_head=HEAD) == "c" * 40
-    else:
-        with pytest.raises(github.GhError, match="head changed"):
-            github.merged_sha(REPO, 7, expected_head=HEAD)
 
 
 @pytest.mark.parametrize("args, attempts", [
@@ -868,3 +845,23 @@ def test_gh_retries_only_transient_reads(monkeypatch, args, attempts):
         with pytest.raises(github.GhError):
             github._gh(*args)
     assert len(seen) == attempts
+
+
+@pytest.mark.parametrize("error", ["API rate limit exceeded", "API rate limit already exceeded",
+                                  "secondary rate limit", "HTTP 429 Too Many Requests"])
+def test_rate_limit_is_not_retried(gh, monkeypatch, error):
+    gh.fail("pr list", error)
+    monkeypatch.setattr(github, "_retry_sleep", lambda _: pytest.fail("retried rate limit"))
+    with pytest.raises(github.GhError, match="rate limit|429"):
+        github.pr_for_branch(REPO, "lz/x")
+    assert len(gh.calls) == 1
+
+
+@pytest.mark.parametrize("view", [None, {}, merge_json("CLOSED"),
+    merge_json("MERGED"), merge_json("MERGED", sha="invalid"),
+    merge_json("MERGED", sha="c" * 40) | {"merged": "true"},
+    merge_json(head="f" * 40), merge_json(head=None), merge_json() | {"head": []}])
+def test_invalid_merge_evidence_fails_closed(gh, view):
+    gh.respond(f"api repos/{REPO}/pulls/7", view)
+    with pytest.raises(github.GhError, match="merge evidence|without a verified merge|head changed"):
+        github.merged_sha(REPO, 7, expected_head=HEAD)
