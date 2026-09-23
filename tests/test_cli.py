@@ -1082,6 +1082,9 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
     arm_pr(gh, head)
     gh.respond(reviews_key(), [])
     arm_readiness(gh, head, wt, conclusion="failure")
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": [{
+        "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10}}]})
     code, out, _ = run(capsys, "ready")
     assert code == 1
     assert out.splitlines() == [
@@ -1089,6 +1092,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys) -> None:
         "not ready: required check 'checks' is failure",
     ]
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
 def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys) -> None:
@@ -1200,6 +1204,53 @@ def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys) -> None:
 
     assert (code, err) == (1, "")
     assert out == "not ready: required check 'checks' is failure\n"
+
+
+@pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1)])
+def test_ready_wait_defers_old_failure_until_replacement_job_appears(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, replacement: str, expected: int
+) -> None:
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    old = {"id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
+           "check_suite": {"id": 10}, "completed_at": "2026-09-23T21:54:41Z"}
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": [old]})
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": [
+        {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": head,
+         "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
+        {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": head,
+         "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
+    ]})
+    monkeypatch.setattr(cli, "_sleep", lambda _: gh.respond(
+        f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": [
+            {"id": 101, "name": "checks", "status": "completed", "conclusion": replacement}]}))
+
+    code, out, err = run(capsys, "ready", "--wait=1")
+
+    assert (code, err) == (expected, "")
+    assert "waiting: required check 'checks' is failure" in out
+    assert out.endswith(f"ready: {URL}\n" if expected == 0 else
+                        "not ready: required check 'checks' is failure\n")
+
+
+def test_ready_wait_active_replacement_times_out(wt: Path, gh: FakeGh, capsys) -> None:
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", {"check_runs": [{
+        "id": 100, "name": "checks", "status": "completed", "conclusion": "cancelled",
+        "check_suite": {"id": 10}, "completed_at": "2026-09-23T21:54:41Z"}]})
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": [
+        {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": head,
+         "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
+        {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": head,
+         "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
+    ]})
+
+    code, out, err = run(capsys, "ready", "--wait=0")
+
+    assert (code, err) == (3, "")
+    assert "waiting: required check 'checks' is cancelled" in out
+    assert "timed out waiting for required checks" in out
 
 
 @pytest.mark.parametrize("name", ["checks", "Loop-zero Eligibility"])

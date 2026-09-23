@@ -54,6 +54,10 @@ Wait commands observe immediately, then back off to 30, 60 and 120 second interv
 still checks current reviews and findings on every observation. Mergify wait ticks
 use REST for both source-head guards and verified merge observation, avoiding
 recurring GraphQL PR reads. Native GitHub queue membership still requires GraphQL.
+With `ready --wait`, a failed or cancelled required GitHub Actions check may
+trigger a workflow-run lookup to see whether a newer run on the same head is
+still active. Fine-grained GitHub tokens need Actions read permission for that
+lookup.
 
 A GitHub rate-limit error stops the command immediately instead of using transient
 5/20/60-second retries. Resume after the primary reset or secondary `Retry-After`

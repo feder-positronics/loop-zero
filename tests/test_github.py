@@ -656,6 +656,7 @@ def test_readiness_ready(gh: FakeGh) -> None:
     arm_readiness(gh)
     pr = github._pr_from_json(pr_json())
     assert github.readiness(REPO, pr, "main", ("checks",), HEAD) == github.Readiness(True, ())
+    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
 def test_readiness_head_moved(gh: FakeGh) -> None:
@@ -717,6 +718,203 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
         "required check 'checks' is failure",
         f"required check 'e2e' missing on {HEAD[:12]}",
     )
+
+
+@pytest.mark.parametrize("failure", ["failure", "cancelled"])
+def test_readiness_waits_for_newer_active_producing_workflow(gh: FakeGh, failure: str) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "id": 100, "name": "checks", "status": "completed", "conclusion": failure,
+        "check_suite": {"id": 10}, "started_at": "2026-09-23T21:53:00Z",
+        "completed_at": "2026-09-23T21:54:41Z",
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
+        {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
+         "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
+        {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": HEAD,
+         "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
+    ]})
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.reasons == (f"required check 'checks' is {failure}",)
+    assert result.waitable_failures == result.reasons
+    assert not result.ready
+
+
+@pytest.mark.parametrize("change", ["workflow", "head", "completed", "older"])
+def test_readiness_does_not_wait_for_unrelated_or_finished_run(gh: FakeGh, change: str) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10}, "started_at": "2026-09-23T21:53:00Z",
+        "completed_at": "2026-09-23T21:54:41Z",
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    replacement = {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": HEAD,
+                   "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"}
+    if change == "workflow":
+        replacement["workflow_id"] = 8
+    elif change == "head":
+        replacement["head_sha"] = "b" * 40
+    elif change == "completed":
+        replacement["status"] = "completed"
+    else:
+        replacement["created_at"] = "2026-09-23T21:52:00Z"
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
+        {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
+         "status": "completed", "created_at": "2026-09-23T21:53:00Z"}, replacement,
+    ]})
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.reasons == ("required check 'checks' is failure",)
+    assert result.waitable_failures == ()
+
+
+def test_readiness_newer_run_in_same_second_waits(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10},
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
+        {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
+         "status": "completed", "created_at": "2026-09-23T21:54:21Z"},
+        {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": HEAD,
+         "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
+    ]})
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.waitable_failures == result.reasons
+
+
+def test_readiness_keeps_failing_commit_status_blocker(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10},
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [
+        {"context": "checks", "state": "failure"}])
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
+        {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
+         "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
+        {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": HEAD,
+         "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
+    ]})
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.reasons == ("required check 'checks' is failure",)
+    assert result.waitable_failures == ()
+
+
+def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [
+        {"name": "checks", "status": "completed", "conclusion": "success"},
+        {"name": "optional", "status": "completed", "conclusion": "failure",
+         "check_suite": {"id": 10}},
+    ]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.ready
+    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
+
+
+@pytest.mark.parametrize("conclusion", ["skipped", "neutral"])
+def test_readiness_wait_does_not_lookup_nonfailure_conclusion(
+    gh: FakeGh, conclusion: str
+) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "name": "checks", "status": "completed", "conclusion": conclusion,
+        "check_suite": {"id": 10},
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.reasons == (f"required check 'checks' is {conclusion}",)
+    assert result.waitable_failures == ()
+    assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
+
+
+def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10},
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    filler = [{"id": i + 100, "check_suite_id": i + 100, "workflow_id": 99,
+               "head_sha": HEAD, "status": "completed"} for i in range(100)]
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
+               {"workflow_runs": filler},
+               {"workflow_runs": [
+                   {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
+                    "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
+                   {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": HEAD,
+                    "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
+               ]})
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.waitable_failures == result.reasons
+    pages = [c["argv"][-1] for c in gh.calls if "actions/runs" in c["argv"][1]]
+    assert pages == ["page=1", "page=2"]
+
+
+def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10},
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
+               {"stdout": "", "stderr": "HTTP 403: Actions read denied", "exit_code": 1})
+
+    with pytest.raises(github.GhError, match="Actions read denied"):
+        github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                         workflow_wait=True)
+
+
+@pytest.mark.parametrize("started,waitable", [
+    ("2026-09-23T21:55:00Z", True), ("2026-09-23T21:54:00Z", False),
+])
+def test_readiness_rerun_attempt_requires_start_after_old_failure(
+    gh: FakeGh, started: str, waitable: bool
+) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+        "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
+        "check_suite": {"id": 10}, "completed_at": "2026-09-23T21:54:41Z",
+    }]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [{
+        "id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
+        "status": "in_progress", "created_at": "2026-09-23T21:53:00Z",
+        "run_attempt": 2, "run_started_at": started,
+    }]})
+
+    result = github.readiness(REPO, github._pr_from_json(pr_json()), "main", ("checks",), HEAD,
+                              workflow_wait=True)
+
+    assert result.waitable_failures == (result.reasons if waitable else ())
 
 
 @pytest.mark.parametrize(("metadata", "reason"), [
