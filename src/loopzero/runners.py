@@ -328,10 +328,13 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
             (home / ".claude.json").touch()
             binds.append((state_file, Path(sandbox.SANDBOX_HOME) / ".claude.json"))
     else:
-        source_dir = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).resolve()
-        if source_dir.is_dir():
+        # Only auth.json: codex rewrites it in place on refresh, and the reviewer's
+        # shell runs unsandboxed inside bwrap, so the rest of CODEX_HOME stays private.
+        auth_file = (Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json").resolve()
+        if auth_file.is_file():
             (home / ".codex").mkdir()
-            binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".codex"))
+            (home / ".codex" / "auth.json").touch()
+            binds.append((auth_file, Path(sandbox.SANDBOX_HOME) / ".codex" / "auth.json"))
     return tuple(binds)
 
 
@@ -529,8 +532,11 @@ def _review_codex(
             *(["-c", f"model_reasoning_effort={effort}"] if effort else []),
             *(["--ignore-user-config"] if ignore_user_config else []),
             "--json",
+            # Codex's own sandbox is nested bwrap, which hosts restricting unprivileged
+            # user namespaces deny, so every shell read failed. The loop-zero bwrap
+            # above already keeps the tree read-only and HOME private.
             "--sandbox",
-            "read-only",
+            "danger-full-access",
             "--cd",
             str(cwd),
             "--ephemeral",
