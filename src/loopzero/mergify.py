@@ -205,7 +205,7 @@ def _marker(kind: str, head: str, queue: str) -> str:
 
 
 def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
-    login, requested, confirmed = github.login(), False, False  # a later own requeue re-requests
+    login, requested, confirmed = github.login(token=""), False, False  # operator; requeue re-requests
     for item in github._paged(f"repos/{repo}/issues/{number}/comments"):
         if isinstance(item, dict) and (item.get("user") or {}).get("login") == login:
             lines = str(item.get("body") or "").splitlines()

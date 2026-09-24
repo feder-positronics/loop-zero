@@ -166,7 +166,7 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
     head, marker = "a" * 40, f"<!-- loopzero:mergify-confirmed head={'a' * 40} queue=main -->"
     rows = [("trusted", "@mergifyio queue main"), ("attacker", marker),  # early queue: no request
             ("trusted", f"prefix {marker}"), ("trusted", marker), ("attacker", "@mergifyio requeue")]
-    monkeypatch.setattr(mergify.github, "login", lambda: "trusted")
+    monkeypatch.setattr(mergify.github, "login", lambda token=None: "trusted" if token == "" else "app[bot]")
     for later, requeued in [("", False), ("@mergifyio queued", False), ("@mergifyio requeued", False),
             ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
         comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
