@@ -1159,25 +1159,24 @@ def test_ready_marks_draft_with_skipped_required_check_then_waits(
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
 
+@pytest.mark.parametrize("settled", ["success", "skipped"])
 def test_ready_waits_for_checks_on_original_head(
-    wt: Path, gh: FakeGh, capsys, monkeypatch
+    wt: Path, gh: FakeGh, capsys, monkeypatch, settled: str
 ) -> None:
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', '["a", "b"]'))
     head = head_of(wt)
     arm_approved_ready_pr(gh, head, wt)
-    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs",
-               {"check_runs": []},
-               {"check_runs": [{"name": "checks", "status": "in_progress"}]},
-               {"check_runs": [{"name": "checks", "status": "completed",
-                                  "conclusion": "success"}]})
-    gh.respond(f"api repos/{REPO}/commits/{'f' * 40}/check-runs",
-               {"check_runs": [{"name": "checks", "conclusion": "success"}]})
+    pending = {"check_runs": [{"name": "a", "status": "in_progress"}]}
+    gh.respond(f"api repos/{REPO}/commits/{head}/check-runs", pending, pending,
+               {"check_runs": [{"name": "a", "conclusion": settled}]},
+               {"check_runs": [{"name": name, "conclusion": "success"}
+                               for name in ("a", "b")]})
     gh.respond("pr ready", "")
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
-
-    code, out, err = run(capsys, "ready", "--wait")
-
+    monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
+    code, out, err = run(capsys, "--config", "workflow.toml", "ready", "--wait")
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
-    assert "required check 'checks' is pending" in out
+    assert "required check 'a' is pending" in out
     assert all("f" * 40 not in " ".join(c["argv"]) for c in gh.calls)
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
