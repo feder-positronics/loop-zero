@@ -967,8 +967,7 @@ def test_review_publisher_check_uses_app_identity(
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-qm", "configure publisher")
+    git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     arm_pr(gh, head_of(wt))
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
@@ -979,6 +978,24 @@ def test_review_publisher_check_uses_app_identity(
     assert code == (0 if allowed else 1)
     if not allowed:
         assert "not a configured review publisher" in err
+
+
+@pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN), (["app", ""], "app[bot]")])
+def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys, tokens, publisher):
+    monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
+    monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
+        f(token), len(tokens) > 1 and tokens.pop(0))[0])
+    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    git(wt, "commit", "-qam", "configure publisher")
+    git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+    arm_pr(gh, head_of(wt))
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 3})
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    assert run(capsys, "review")[0] == 0
+    assert [c["token"] or "" for c in gh.calls if "/reviews" in " ".join(c["argv"])
+            and "POST" in c["argv"]] == ["" if publisher == LOGIN else "app"]
 
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])

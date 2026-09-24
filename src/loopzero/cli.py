@@ -520,7 +520,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
-    if config.review_publishers and github.login().casefold() not in {
+    token = github.app_token()  # one identity for the publisher check and the post
+    if config.review_publishers and github.login(token=token).casefold() not in {
         login.casefold() for login in config.review_publishers
     }:
         raise CliError("current GitHub login is not a configured review publisher")
@@ -554,7 +555,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         prefix = review_marker(head, kind, "model")
     try:
         github.post_review(
-            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr
+            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token
         )
     except github.GhError as exc:
         path = _review_file(wt, head, kind)

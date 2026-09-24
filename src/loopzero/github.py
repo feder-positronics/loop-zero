@@ -106,7 +106,7 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return args[:2] in {("pr", "view"), ("pr", "list"), ("pr", "checks")}
 
 
-def _app_token() -> str:
+def app_token() -> str:
     global _app_token_cache
     token, expires = _app_token_cache
     if token and time.monotonic() < expires:
@@ -127,7 +127,7 @@ def _app_token() -> str:
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None) -> str:
     argv = ("gh", *args)
-    selected = token if token is not None else (_app_token() if _read_only(args) else "")
+    selected = token if token is not None else (app_token() if _read_only(args) else "")
     for delay in (*RETRY_DELAYS, None):
         try:
             done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV,
@@ -350,7 +350,7 @@ def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) ->
 
 
 def update_body(repo: str, number: int, body: str) -> None:
-    _api(f"repos/{repo}/pulls/{number}", {"body": body}, method="PATCH", token=_app_token())
+    _api(f"repos/{repo}/pulls/{number}", {"body": body}, method="PATCH", token=app_token())
 
 
 def finding_id(head_sha: str, path: str | None, line: int | None, title: str) -> str:
@@ -445,6 +445,7 @@ def post_review(
     result: ReviewResult,
     body_prefix: str = "",
     pr: PR | None = None,
+    token: str | None = None,
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
@@ -456,7 +457,7 @@ def post_review(
     changed file with a hunk, so every blocking finding creates a review thread.
     """
     author = (pr or pr_view(repo, number)).author
-    token = _app_token()
+    token = app_token() if token is None else token  # "" means the operator identity
     if token or author and author == login(token=token):
         event = "COMMENT"
     else:
