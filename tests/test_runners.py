@@ -419,6 +419,7 @@ def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> No
         ("claude", "prompt is too long", RunnerPromptTooLong),
         ("codex", "context_length_exceeded", RunnerPromptTooLong),
         ("codex", "maximum context length exceeded", RunnerPromptTooLong),
+        ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong),
         ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
         ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
     ],

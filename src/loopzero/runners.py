@@ -96,7 +96,7 @@ _USAGE_LIMIT = re.compile(r'reached your [\w .-]*limit|hit your (?:usage )?limit
 _TOO_LONG_PATTERNS = (
     re.compile(r"prompt is too long", re.IGNORECASE),
     re.compile(r"context_length_exceeded", re.IGNORECASE),
-    re.compile(r"maximum context length", re.IGNORECASE),
+    re.compile(r"maximum context length|input_too_large", re.IGNORECASE),  # codex: >1 Mi chars
 )
 
 
