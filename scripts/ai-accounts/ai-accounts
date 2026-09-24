@@ -1,0 +1,513 @@
+#!/usr/bin/env python3
+"""Monitor Claude and Codex subscription accounts and keep the best one active.
+
+Store: ~/.local/state/ai-accounts (0700). Never prints secrets.
+
+  ai-accounts status [--json]            show accounts, tiers and the active ones
+  ai-accounts check [--quiet]            probe every account, switch if a better tier exists
+  ai-accounts use <provider> <name>      activate an account by hand (kept while it stays best tier)
+  ai-accounts add claude <name>          store a `claude setup-token` token read from stdin
+  ai-accounts add codex <name>           create a CODEX_HOME for another ChatGPT login
+  ai-accounts label claude <name> <email>
+                                         name a Claude account (setup-token tokens cannot read it)
+  ai-accounts exec <p[,p]> -- CMD...     run CMD with the active account(s) in its environment
+  ai-accounts run <p[,p]> [--retry-exit N,...] -- CMD...
+                                         like exec; on a usage-limit failure (any nonzero exit, or
+                                         only exits N) re-check and retry once if the account changed
+
+Claude tiers: 2 = Fable + Opus usable, 1 = Opus only, 0 = none. Codex tiers: 2 = every
+model usable, 1 = some models restricted, 0 = none. -1 = unknown (probe failed).
+An account is usable below AI_ACCOUNTS_MARGIN (default 0.95) of every limit window.
+Claude accounts authenticate with CLAUDE_CODE_OAUTH_TOKEN; Codex accounts with CODEX_HOME
+("main" is ~/.codex). The monitor keeps the current account while it is in the best
+available tier and switches otherwise, preferring the least-used account.
+"""
+from __future__ import annotations
+
+import base64
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+STATE = Path(os.environ.get("AI_ACCOUNTS_HOME", Path.home() / ".local/state/ai-accounts"))
+MARGIN = float(os.environ.get("AI_ACCOUNTS_MARGIN", "0.95"))
+CODEX_MAIN = Path.home() / ".codex"
+CLAUDE_TIERS = ((2, "fable+opus", ("claude-fable-5-1", "claude-opus-5-5")),
+                (1, "opus", ("claude-opus-5-5",)))
+CODEX_TIER_NAMES = {2: "all-models", 1: "restricted", 0: "none", -1: "unknown"}
+CLAUDE_TIER_NAMES = {2: "fable+opus", 1: "opus", 0: "none", -1: "unknown"}
+# Per-account files; everything else in ~/.codex is shared so threads resume across accounts.
+CODEX_PRIVATE = ("auth.json",)
+USAGE_LIMIT_RE = re.compile(
+    r"usage limit reached|reached your [\w .-]*limit|hit your (?:usage )?limit|usage_limit_reached",
+    re.IGNORECASE)
+PROVIDERS = ("claude", "codex")
+
+
+def now() -> float:
+    return time.time()
+
+
+def iso(ts: float | None) -> str:
+    if not ts:
+        return "-"
+    return dt.datetime.fromtimestamp(ts).astimezone().strftime("%a %H:%M")
+
+
+def log(msg: str) -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(STATE / "log", "a", encoding="utf-8") as fh:
+        fh.write(f"{dt.datetime.now().astimezone().isoformat(timespec='seconds')} {msg}\n")
+
+
+def notify(msg: str) -> None:
+    log(msg)
+    if shutil.which("notify-send"):
+        subprocess.run(["notify-send", "-a", "ai-accounts", "AI account switched", msg],
+                       check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def write_private(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
+
+
+# ----------------------------------------------------------------- accounts
+
+
+def claude_accounts() -> list[str]:
+    d = STATE / "claude/tokens"
+    return sorted(p.name for p in d.iterdir() if p.is_file()) if d.is_dir() else []
+
+
+def codex_accounts() -> list[str]:
+    d = STATE / "codex/homes"
+    extra = sorted(p.name for p in d.iterdir() if p.is_dir()) if d.is_dir() else []
+    return (["main"] if (CODEX_MAIN / "auth.json").is_file() else []) + extra
+
+
+def accounts(provider: str) -> list[str]:
+    return claude_accounts() if provider == "claude" else codex_accounts()
+
+
+def codex_home(name: str) -> Path:
+    return CODEX_MAIN if name == "main" else STATE / "codex/homes" / name
+
+
+def claude_token(name: str) -> str:
+    return (STATE / "claude/tokens" / name).read_text(encoding="utf-8").strip()
+
+
+def active(provider: str) -> str | None:
+    names = accounts(provider)
+    f = STATE / provider / "active"
+    cur = f.read_text(encoding="utf-8").strip() if f.is_file() else ""
+    if cur in names:
+        return cur
+    return names[0] if names else None
+
+
+def set_active(provider: str, name: str) -> None:
+    write_private(STATE / provider / "active", name + "\n")
+
+
+def shared(entry: Path) -> bool:
+    return entry.name not in CODEX_PRIVATE and not entry.name.endswith(".lock")
+
+
+def sync_codex_home(home: Path) -> None:
+    """Keep an extra CODEX_HOME a mirror of ~/.codex except its own auth.json.
+
+    Entries the account created itself move into ~/.codex (unless ~/.codex already has one),
+    then every shared ~/.codex entry is linked, including ones created after `add`.
+    """
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Own lock (check() holds .lock while calling this); Codex may still create entries
+    # concurrently, so a lost race on one entry is skipped, not fatal.
+    with open(STATE / ".codex-sync.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for entry in home.iterdir():
+            target = CODEX_MAIN / entry.name
+            if shared(entry) and not entry.is_symlink() and not target.exists() \
+                    and not target.is_symlink():
+                try:
+                    os.rename(entry, target)
+                except FileNotFoundError:
+                    pass
+        for src in CODEX_MAIN.iterdir():
+            dst = home / src.name
+            if shared(src) and not dst.exists() and not dst.is_symlink():
+                try:
+                    dst.symlink_to(src)
+                except FileExistsError:
+                    pass
+
+
+def account_env(provider: str) -> dict[str, str]:
+    name = active(provider)
+    if name is None:
+        return {}
+    if provider == "claude":
+        return {"CLAUDE_CODE_OAUTH_TOKEN": claude_token(name)}
+    if name != "main":
+        sync_codex_home(codex_home(name))
+    return {"CODEX_HOME": str(codex_home(name))}
+
+
+# ----------------------------------------------------------------- probes
+
+
+def _http(req: urllib.request.Request, timeout: int = 30) -> tuple[int, dict[str, str], bytes]:
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, {k.lower(): v for k, v in resp.headers.items()}, resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
+
+
+def probe_claude_model(token: str, model: str) -> dict:
+    """One max_tokens=1 request; the unified rate-limit headers describe the account."""
+    body = json.dumps({
+        "model": model, "max_tokens": 1,
+        "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "messages": [{"role": "user", "content": "hi"}],
+    }).encode()
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
+        "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01", "content-type": "application/json",
+    })
+    code, headers, _ = _http(req)
+    prefix = "anthropic-ratelimit-unified-"
+    util = {k[len(prefix):-len("-utilization")]: float(v) for k, v in headers.items()
+            if k.startswith(prefix) and k.endswith("-utilization")}
+    rejected = [k[len(prefix):-len("-status")] for k, v in headers.items()
+                if k.startswith(prefix) and k.endswith("-status") and v == "rejected"
+                and k != prefix + "overage-status"]
+    ok = code == 200 and not rejected and all(u < MARGIN for u in util.values())
+    # The binding claims are the rejected or over-margin ones; usable again after the last resets.
+    binding = set(rejected) | {k for k, u in util.items() if u >= MARGIN}
+    resets = [int(headers.get(f"{prefix}{k}-reset", "0")) for k in binding]
+    return {"http": code, "ok": ok, "util": util, "rejected": rejected,
+            "org": headers.get("anthropic-organization-id"),
+            "reset": max(resets) if resets and not ok else None}
+
+
+def check_claude(name: str) -> dict:
+    token = claude_token(name)
+    models: dict[str, dict] = {}
+    email = claude_email(name, None)
+    try:
+        for _, _, needed in CLAUDE_TIERS:
+            for model in needed:
+                if model not in models:
+                    models[model] = probe_claude_model(token, model)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"tier": -1, "email": email, "error": f"network: {exc}"}
+    if any(m["http"] in (401, 403) for m in models.values()):
+        return {"tier": -1, "email": email, "models": models,
+                "error": "token rejected (401/403): run `claude setup-token` again"}
+    tier = next((t for t, _, needed in CLAUDE_TIERS if all(models[m]["ok"] for m in needed)), 0)
+    usable = next((needed for t, _, needed in CLAUDE_TIERS if t == tier), tuple(models))
+    util = max((u for m in usable for u in models[m]["util"].values()), default=0.0)
+    # When the best tier is lost, report when it comes back.
+    resets = [models[m]["reset"] for m in CLAUDE_TIERS[0][2] if models[m]["reset"]]
+    org = next((m["org"] for m in models.values() if m.get("org")), None)
+    return {"tier": tier, "util": util, "models": models, "email": claude_email(name, org),
+            "next_reset": min(resets) if resets else None}
+
+
+def claude_email(name: str, org: str | None) -> str | None:
+    """A stored label, else the interactive login's email when the organization matches."""
+    label = STATE / "claude/emails" / name
+    if label.is_file():
+        return label.read_text(encoding="utf-8").strip()
+    for config in (Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / ".claude.json",
+                   Path.home() / ".claude.json"):
+        try:
+            acct = json.loads(config.read_text(encoding="utf-8")).get("oauthAccount") or {}
+        except (OSError, ValueError):
+            continue
+        if org and acct.get("organizationUuid") == org:
+            return acct.get("emailAddress")
+    return None
+
+
+def jwt_claims(token: str) -> dict:
+    try:
+        payload = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError):
+        return {}
+
+
+def refresh_codex(auth_file: Path, auth: dict) -> tuple[str, dict]:
+    """Refresh a ChatGPT login as Codex does, so idle standby accounts stay usable."""
+    tokens = auth["tokens"]
+    claims = jwt_claims(tokens["access_token"])
+    body = json.dumps({"client_id": claims["client_id"], "grant_type": "refresh_token",
+                       "refresh_token": tokens["refresh_token"], "scope": "openid profile email"})
+    issuer = jwt_claims(tokens["id_token"]).get("iss", "https://auth.openai.com")
+    req = urllib.request.Request(f"{issuer}/oauth/token", data=body.encode(),
+                                 headers={"Content-Type": "application/json"})
+    code, _, raw = _http(req)
+    if code != 200:
+        raise ValueError(f"HTTP {code}; run `CODEX_HOME={auth_file.parent} codex login`")
+    fresh = json.loads(raw)
+    tokens.update({k: fresh[k] for k in ("id_token", "access_token", "refresh_token") if fresh.get(k)})
+    auth["last_refresh"] = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+    # Rewrite in place like Codex: reviewers bind-mount this inode, so os.replace would detach them.
+    with open(auth_file, "r+", encoding="utf-8") as fh:
+        fh.write(json.dumps(auth, indent=2) + "\n")
+        fh.truncate()
+    log(f"codex: refreshed {auth_file}")
+    return tokens["access_token"], tokens
+
+
+def codex_in_use(home: Path) -> bool:
+    """Whether a live codex process runs with this CODEX_HOME (default ~/.codex)."""
+    target = home.resolve()
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0")
+            if not any(Path(a.decode(errors="replace")).name == "codex" for a in argv[:2]):
+                continue
+            env = dict(v.split(b"=", 1) for v in (proc / "environ").read_bytes().split(b"\0") if b"=" in v)
+        except OSError:
+            continue
+        used = Path(env[b"CODEX_HOME"].decode()) if b"CODEX_HOME" in env else CODEX_MAIN
+        if used.resolve() == target:
+            return True
+    return False
+
+
+def check_codex(name: str) -> dict:
+    auth_file = codex_home(name) / "auth.json"
+    try:
+        auth = json.loads(auth_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"tier": -1, "error": f"no readable {auth_file}: run `CODEX_HOME={auth_file.parent} codex login`"}
+    tokens = auth.get("tokens") or {}
+    email = jwt_claims(tokens.get("id_token", "")).get("email")
+    access = tokens.get("access_token")
+    if not access:
+        return {"tier": -1, "email": email,
+                "error": "not a ChatGPT login (API key accounts have no plan limits)"}
+    # Only idle standby logins: running sessions keep their login fresh, and rotating the
+    # refresh token under a session would revoke that session's cached copy.
+    idle = name != active("codex") and not codex_in_use(codex_home(name))
+    if idle and jwt_claims(access).get("exp", 0) < now() + 86400:
+        try:
+            access, tokens = refresh_codex(auth_file, auth)
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, KeyError) as exc:
+            return {"tier": -1, "email": email, "error": f"token refresh failed: {exc}"}
+    req = urllib.request.Request("https://chatgpt.com/backend-api/wham/usage", headers={
+        "Authorization": f"Bearer {access}", "ChatGPT-Account-Id": tokens.get("account_id", ""),
+        "User-Agent": "codex_cli_rs",
+    })
+    try:
+        code, _, body = _http(req)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return {"tier": -1, "email": email, "error": f"network: {exc}"}
+    if code != 200:
+        return {"tier": -1, "email": email, "error": f"usage endpoint HTTP {code}"}
+    data = json.loads(body)
+    rl = data.get("rate_limit") or {}
+    windows = [w for w in (rl.get("primary_window"), rl.get("secondary_window")) if w]
+    util = max((w.get("used_percent", 0) / 100 for w in windows), default=0.0)
+    ok = bool(rl.get("allowed", True)) and not rl.get("limit_reached") and util < MARGIN
+    models = {m: bool(v.get("available")) for m, v in (data.get("model_usage") or {}).items()}
+    usable = [available for available in models.values() if available]
+    tier = 0 if not ok or (models and not usable) else (2 if all(models.values()) else 1)
+    resets = [w.get("reset_at") for w in windows if w.get("reset_at")]
+    return {"tier": tier, "util": util, "plan": data.get("plan_type"),
+            "email": data.get("email") or email,
+            "models": models, "next_reset": min(resets) if resets and not ok else None}
+
+
+def select(provider: str, results: dict[str, dict], current: str | None) -> str | None:
+    known = {n: r for n, r in results.items() if r["tier"] >= 0}
+    if not known:
+        return current
+    best = max(r["tier"] for r in known.values())
+    if current in known and known[current]["tier"] == best:
+        return current
+    if best == 0 and current in results:
+        return current  # nothing usable anywhere; do not churn
+    return min((n for n, r in known.items() if r["tier"] == best),
+               key=lambda n: known[n].get("util", 1.0))
+
+
+def check(quiet: bool = False) -> dict:
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with open(STATE / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        status = {"checked_at": now(), "providers": {}}
+        for provider in PROVIDERS:
+            names = accounts(provider)
+            if provider == "codex":
+                for n in names[1:] if names[:1] == ["main"] else names:
+                    sync_codex_home(codex_home(n))
+            probe = check_claude if provider == "claude" else check_codex
+            results = {n: probe(n) for n in names}
+            current = active(provider)
+            chosen = select(provider, results, current)
+            if chosen and chosen != current:
+                set_active(provider, chosen)
+                tiers = CLAUDE_TIER_NAMES if provider == "claude" else CODEX_TIER_NAMES
+                why = tiers[results[current]["tier"]] if current in results else "unset"
+                notify(f"{provider}: {current} ({why}) -> {chosen} ({tiers[results[chosen]['tier']]})")
+            elif chosen and not (STATE / provider / "active").is_file():
+                set_active(provider, chosen)
+            status["providers"][provider] = {"active": chosen, "accounts": results}
+        write_private(STATE / "status.json", json.dumps(status, indent=1) + "\n")
+    if not quiet:
+        print_status(status)
+    return status
+
+
+def print_status(status: dict) -> None:
+    print(f"checked {iso(status.get('checked_at'))}  (margin {MARGIN:.0%})")
+    for provider, info in status.get("providers", {}).items():
+        tiers = CLAUDE_TIER_NAMES if provider == "claude" else CODEX_TIER_NAMES
+        print(f"{provider}:")
+        if not info["accounts"]:
+            print("  (no accounts)")
+        for name, r in info["accounts"].items():
+            mark = "*" if name == info["active"] else " "
+            line = f" {mark}{name:<10} {r.get('email') or '?':<26} {tiers[r['tier']]:<11}"
+            if "util" in r:
+                line += f" max-used {r['util']:.0%}"
+            if r.get("next_reset"):
+                line += f"  resets {iso(r['next_reset'])}"
+            if r.get("error"):
+                line += f"  {r['error']}"
+            print(line)
+
+
+# ----------------------------------------------------------------- commands
+
+
+def cmd_add(provider: str, name: str) -> int:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name == "main":
+        sys.exit("ai-accounts: invalid account name")
+    if provider == "claude":
+        token = "".join(sys.stdin.read().split())
+        if not token.startswith("sk-ant-"):
+            sys.exit("ai-accounts: paste the token printed by `claude setup-token` on stdin")
+        write_private(STATE / "claude/tokens" / name, token + "\n")
+        print(f"stored claude account {name}; run `ai-accounts check`")
+        return 0
+    home = STATE / "codex/homes" / name
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    sync_codex_home(home)
+    print(f"created {home} (shares ~/.codex except its own auth.json)")
+    print(f"now log in with the other ChatGPT account:  CODEX_HOME={home} codex login")
+    return 0
+
+
+def cmd_exec(providers: str, argv: list[str]) -> int:
+    if not argv:
+        sys.exit("ai-accounts: missing command")
+    env = dict(os.environ)
+    for provider in providers.split(","):
+        env.update(account_env(provider))
+    os.execvpe(argv[0], argv, env)
+    return 127
+
+
+def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None) -> int:
+    """Run once; on a usage-limit failure re-probe and retry once if the account changed."""
+    for attempt in (1, 2):
+        before = {p: active(p) for p in providers.split(",")}
+        env = dict(os.environ)
+        for provider in before:
+            env.update(account_env(provider))
+        proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE)
+        seen: list[bytes] = []
+
+        def pump() -> None:
+            for chunk in iter(lambda: proc.stderr.read1(4096), b""):
+                sys.stderr.buffer.write(chunk)
+                sys.stderr.buffer.flush()
+                seen.append(chunk)
+
+        t = threading.Thread(target=pump, daemon=True)
+        t.start()
+        code = proc.wait()
+        t.join()
+        text = b"".join(seen).decode("utf-8", "replace")
+        retryable = code != 0 and (retry_exit is None or code in retry_exit)
+        if not retryable or attempt == 2 or not USAGE_LIMIT_RE.search(text):
+            return code
+        check(quiet=True)
+        after = {p: active(p) for p in before}
+        if after == before:
+            print("ai-accounts: usage limit reached and no better account is available", file=sys.stderr)
+            return code
+        changed = ", ".join(f"{p} {before[p]} -> {after[p]}" for p in before if before[p] != after[p])
+        print(f"ai-accounts: usage limit reached; switched {changed}; retrying once", file=sys.stderr)
+    return code
+
+
+def main(argv: list[str]) -> int:
+    cmd = argv[0] if argv else "status"
+    if cmd == "status":
+        f = STATE / "status.json"
+        status = json.loads(f.read_text()) if f.is_file() else check(quiet=True)
+        for provider, info in status.get("providers", {}).items():
+            info["active"] = active(provider)
+        if "--json" in argv:
+            print(json.dumps(status, indent=1))
+        else:
+            print_status(status)
+        return 0
+    if cmd == "check":
+        check(quiet="--quiet" in argv)
+        return 0
+    if cmd == "use" and len(argv) == 3 and argv[1] in PROVIDERS:
+        if argv[2] not in accounts(argv[1]):
+            sys.exit(f"ai-accounts: unknown {argv[1]} account {argv[2]!r}")
+        set_active(argv[1], argv[2])
+        log(f"{argv[1]}: manual -> {argv[2]}")
+        print(f"{argv[1]} active: {argv[2]}")
+        return 0
+    if cmd == "label" and len(argv) == 4 and argv[1] == "claude":
+        if argv[2] not in accounts("claude"):
+            sys.exit(f"ai-accounts: unknown claude account {argv[2]!r}")
+        write_private(STATE / "claude/emails" / argv[2], argv[3] + "\n")
+        print(f"claude {argv[2]}: {argv[3]}; run `ai-accounts check` to refresh status")
+        return 0
+    if cmd == "add" and len(argv) == 3 and argv[1] in PROVIDERS:
+        return cmd_add(argv[1], argv[2])
+    retry_exit = None
+    if cmd == "run" and len(argv) >= 4 and argv[2] == "--retry-exit":
+        retry_exit = {int(n) for n in argv[3].split(",")}
+        argv = argv[:2] + argv[4:]
+    if cmd in ("exec", "run") and len(argv) >= 3 and argv[2] == "--":
+        if any(p not in PROVIDERS for p in argv[1].split(",")):
+            sys.exit("ai-accounts: providers are claude, codex or claude,codex")
+        if cmd == "exec":
+            return cmd_exec(argv[1], argv[3:])
+        return cmd_run(argv[1], argv[3:], retry_exit)
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
