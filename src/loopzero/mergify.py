@@ -205,12 +205,13 @@ def _marker(kind: str, head: str, queue: str) -> str:
 
 
 def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
-    """(requested, confirmed) for head; an own explicit requeue after confirmation re-requests."""
-    login, requested, confirmed = github.login(), False, False
+    login, requested, confirmed = github.login(), False, False  # a later own requeue re-requests
     for item in github._paged(f"repos/{repo}/issues/{number}/comments"):
         if isinstance(item, dict) and (item.get("user") or {}).get("login") == login:
             lines = str(item.get("body") or "").splitlines()
-            requeue = bool(lines) and lines[0].startswith(("@mergifyio queue", "@mergifyio requeue"))
+            words = lines[0].split() if lines else []
+            requeue = (len(words) in (2, 3) and words[0].lower() in ("@mergify", "@mergifyio")
+                       and words[1].lower() in ("queue", "requeue") and words[2:] in ([], [queue]))
             requested = requested or _marker(REQUEST, head, queue) in lines or (requeue and confirmed)
             confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
     return requested, confirmed

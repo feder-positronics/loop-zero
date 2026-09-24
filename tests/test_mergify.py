@@ -166,12 +166,12 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
     head, marker = "a" * 40, f"<!-- loopzero:mergify-confirmed head={'a' * 40} queue=main -->"
     rows = [("trusted", "@mergifyio queue main"), ("attacker", marker),  # early queue: no request
             ("trusted", f"prefix {marker}"), ("trusted", marker), ("attacker", "@mergifyio requeue")]
-    comments = [{"body": body, "user": {"login": login}} for login, body in rows]
     monkeypatch.setattr(mergify.github, "login", lambda: "trusted")
-    monkeypatch.setattr(mergify.github, "_paged", lambda *_: comments)
-    assert mergify.markers("acme/widgets", 7, head, "main") == (False, True)
-    comments.append({"body": "@mergifyio requeue", "user": {"login": "trusted"}})
-    assert mergify.markers("acme/widgets", 7, head, "main") == (True, False)  # awaits admission
+    for later, requeued in [("", False), ("@mergifyio queued", False), ("@mergifyio requeued", False),
+            ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
+        comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
+        monkeypatch.setattr(mergify.github, "_paged", lambda *_, c=comments: c)
+        assert mergify.markers("acme/widgets", 7, head, "main") == (requeued, not requeued), later
 
 
 @pytest.mark.parametrize(("writer", "body"), [
