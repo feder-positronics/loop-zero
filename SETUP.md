@@ -192,6 +192,30 @@ Lock the vault and remove `BW_SESSION` before starting the agent. An existing
 nonempty but invalid `TYPESAFE_API_KEY` causes an authentication failure; fix or
 unset it rather than silently switching to the file.
 
+### Several subscription accounts (optional)
+
+`scripts/ai-accounts/` rotates Claude and Codex subscription accounts for both
+interactive sessions and unattended runs. Install it with
+`install -m 755 scripts/ai-accounts/{ai-accounts,claude-acct,codex-acct,lz} ~/.local/bin/`
+and enable the monitor by copying the two systemd units to `~/.config/systemd/user/`,
+then `systemctl --user enable --now ai-accounts.timer`.
+
+- Claude accounts are long-lived tokens: run `claude setup-token` per account and
+  pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
+  `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
+  then log in as it prints; the monitor refreshes standby Codex logins before they expire.
+- Every 5 minutes the monitor probes each account and keeps the best one active:
+  Claude prefers Fable and Opus, then Opus only; Codex prefers every model
+  available. At 95% of any limit an account counts as spent. `ai-accounts status`
+  shows accounts, emails, tiers and resets.
+- Start sessions through `claude-acct` / `codex-acct` (point an agent host's binary
+  path at them) and run `lz` instead of `loopzero`: it retries once on another
+  account when no reviewer could run because of `usage limit reached` (exit 4). A running session keeps
+  its account until resumed. Never put the token in `settings.json` `env`; that
+  pins every process to one account.
+- Token sessions lack claude.ai connectors. Changing an agent host's binary path
+  may restart its provider and interrupt running sessions.
+
 ## First run
 
 ```sh

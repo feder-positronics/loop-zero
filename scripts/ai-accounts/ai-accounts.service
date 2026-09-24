@@ -1,0 +1,6 @@
+[Unit]
+Description=Probe Claude/Codex account limits and switch the active account
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/ai-accounts check --quiet
