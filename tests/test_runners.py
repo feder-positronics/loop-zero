@@ -13,6 +13,7 @@ from loopzero.runners import (
     RunnerBadOutput,
     RunnerMissing,
     RunnerPromptTooLong,
+    RunnerUsageLimit,
     author_family,
     build_prompt,
     pick_reviewer,
@@ -356,11 +357,12 @@ def test_claude_auth_failure_terminal_reason(
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
-def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code: int) -> None:
-    _fake_claude(fake_bin, {"is_error": True, "api_error_status": 500,
+@pytest.mark.parametrize("status,match", [(500, "claude: (error|exited)"), (429, "usage limit reached")])
+def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code, status, match) -> None:
+    _fake_claude(fake_bin, {"is_error": True, "api_error_status": status,
                            "terminal_reason": "api_error", "result": "Internal server error"},
                  exit_code=exit_code)
-    with pytest.raises(RunnerBadOutput):
+    with pytest.raises(RunnerBadOutput, match=match):
         _review("claude", tmp_path)
 
 
@@ -411,22 +413,24 @@ def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize(
-    "family,phrase",
+    "family,phrase,error",
     [
-        ("claude", "Prompt is too long"),
-        ("claude", "prompt is too long"),
-        ("codex", "context_length_exceeded"),
-        ("codex", "maximum context length exceeded"),
+        ("claude", "Prompt is too long", RunnerPromptTooLong),
+        ("claude", "prompt is too long", RunnerPromptTooLong),
+        ("codex", "context_length_exceeded", RunnerPromptTooLong),
+        ("codex", "maximum context length exceeded", RunnerPromptTooLong),
+        ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
+        ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
     ],
 )
-def test_context_length_errors_are_typed(
-    fake_bin: Path, tmp_path: Path, family: str, phrase: str
+def test_provider_errors_are_typed(
+    fake_bin: Path, tmp_path: Path, family: str, phrase: str, error: type
 ) -> None:
     if family == "claude":
         _fake_claude(fake_bin, phrase, exit_code=1)
     else:
         _fake_codex(fake_bin, "", exit_code=1, stderr=phrase)
-    with pytest.raises(RunnerPromptTooLong):
+    with pytest.raises(error):
         _review(family, tmp_path)
 
 
