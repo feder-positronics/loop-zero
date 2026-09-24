@@ -297,6 +297,12 @@ supported Mergify API credential.
 
 ## Hosted review eligibility
 
+For local GitHub reads, PR body updates, and review comments, an optional executable
+`~/.config/loopzero/app-token` may print a fresh GitHub App installation token.
+Loop-zero caches it for 50 minutes and uses the operator's `gh` login when the
+helper is unavailable. Other GitHub writes and git push use the operator identity. Install the app on
+every repository loop-zero delivers: reads through the app do not fall back on 404.
+
 Set `[delivery].review_publishers` to the GitHub logins that publish model reviews.
 Local readiness reads that list from the base configuration (legacy installations
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
