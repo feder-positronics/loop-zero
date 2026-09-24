@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import stat
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -67,6 +69,9 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         raise MergifyError("Mergify API refused an HTTP redirect")
 
 
+_retry_sleep = time.sleep
+
+
 def _open(request: urllib.request.Request):
     return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
 
@@ -82,15 +87,19 @@ def api_get(repo: str, suffix: str) -> object | None:
         headers={"Accept": "application/json", "User-Agent": "loopzero",
                  "Authorization": f"Bearer {_credential()}"},
     )
-    try:
-        with _open(request) as response:
-            return json.load(response)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-    except (OSError, ValueError) as exc:
-        raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
+    for delay in (2.0, 5.0, None):  # reads retry server errors, throttling and dropped reads
+        try:
+            with _open(request) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return None
+            if delay is None or not (exc.code >= 500 or exc.code == 429):
+                raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
+        except (OSError, ValueError, http.client.IncompleteRead) as exc:
+            if delay is None:
+                raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
+        _retry_sleep(delay)
 
 
 def membership(repo: str, number: int, queue: str) -> Membership | None:

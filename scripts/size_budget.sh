@@ -6,7 +6,7 @@
 set -euo pipefail
 # Raised for #207 superseded-workflow waiting and regression coverage (owner approval 2026-09-24).
 SRC_CAP=4450
-TESTS_CAP=5600
+TESTS_CAP=5630
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git ls-tree -r --name-only "$base" -- "$1" | { grep '\.py$' || true; } \

@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -226,3 +227,26 @@ def test_hosted_import_does_not_load_yaml():
                              "assert callable(mergify.api_get)")],
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("failure", ["http503", "dropped_read", "truncated"])
+def test_api_get_retries_transient_reads(monkeypatch, failure):
+    calls = []
+
+    class Body(io.BytesIO):
+        def read(self, *args):
+            if len(calls) == 1 and failure != "http503":  # body read fails once
+                raise {"dropped_read": ConnectionResetError(), "truncated": mergify.http.client.IncompleteRead(b"{")}[failure]
+            return super().read(*args)
+
+    def fake_open(request):
+        calls.append(request.get_method())
+        if failure == "http503" and len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
+        return Body(b"{}")
+
+    monkeypatch.setattr(mergify, "_open", fake_open)
+    monkeypatch.setattr(mergify, "_retry_sleep", lambda _: None)
+    monkeypatch.setattr(mergify, "_credential", lambda: "k")
+    assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
+    assert calls == ["GET", "GET"]
