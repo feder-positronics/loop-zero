@@ -48,6 +48,31 @@ Measured in IntelFlo, 2026-09-23 23:55 → 2026-09-24 06:10 UTC, 18 merges.
    (eligibility computed before the review is posted) currently produce
    dequeues and failed gates. Each costs a manual retry and more load.
 
+### Evidence
+
+IntelFlo is private; links need repository access. Counts come from the
+Actions API (`actions/workflows/<file>/runs?created=<window>`, jobs per run,
+per-job minutes rounded up at Blacksmith list rates) and the Pulls API.
+
+- Candidate failures and cost: 42 `ci.yml` runs on `mergify/merge-queue/`
+  branches in the window, 23 failed; failed-run minutes priced at $2.11.
+- Skipped integration let regressions land: #4870's candidate
+  [run 35958087838](https://github.com/feder-positronics/intelflo/actions/runs/35958087838)
+  and #4950's candidate #4956
+  [run 35968380650](https://github.com/feder-positronics/intelflo/actions/runs/35968380650)
+  skipped `Full integration suite`; `git bisect` names #4870 for the RSS
+  budget failure (for example
+  [run 35962095494](https://github.com/feder-positronics/intelflo/actions/runs/35962095494))
+  and #4950 for `test_question_edit_supersedes_stale_plan_requirements_and_judgments`
+  ([run 35975878765](https://github.com/feder-positronics/intelflo/actions/runs/35975878765)).
+- Policy-workflow volume: 681 `eligibility.yml`, 472 `pr-lint.yml`,
+  149 `review-event.yml` runs; sampled billed minutes per run 0.70, 0.85, 1.0.
+- Transient errors as verdicts: `GitHub API request failed: HTTPError` in the
+  candidate policy dequeued #4824
+  ([run 35928549364](https://github.com/feder-positronics/intelflo/actions/runs/35928549364));
+  GraphQL exhaustion broke a queue-confirmation comment, which loop-zero
+  [#223](https://github.com/feder-positronics/loop-zero/pull/223) moved to REST.
+
 ## Principles
 
 | # | Principle | Meaning |
