@@ -74,14 +74,14 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
     seen = []
 
-    def open_(request):
+    def open_(request):  # a transient failure must not repeat the write
         seen.append(request)
-        return Response(b"")
+        raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
 
     monkeypatch.setattr(mergify, "_open", open_)
-    mergify.dequeue("acme/widgets", 7)
-    assert seen[0].method == "POST"
-    assert seen[0].full_url.endswith("/merge-queue/pull/7/dequeue")
+    with pytest.raises(mergify.MergifyError):
+        mergify.dequeue("acme/widgets", 7)
+    assert (len(seen), seen[0].method, seen[0].full_url.endswith("/pull/7/dequeue")) == (1, "POST", True)
 
 
 @pytest.fixture
