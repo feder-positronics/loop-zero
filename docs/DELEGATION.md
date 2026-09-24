@@ -9,8 +9,7 @@ no delegation quota, line-count threshold, or required exception record.
 ## Resolve the model before delegation
 
 Read the task repository's canonical routing source before choosing an
-executor: `models.toml` at its worktree root, or the equivalent its repository
-instructions name explicitly. Never import another repository's defaults,
+executor: `models.toml` at its worktree root. Never import another repository's defaults,
 including this checkout's, for a different project. If the file is missing or unclear,
 report that and follow explicit user choices rather than inventing defaults.
 

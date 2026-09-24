@@ -486,6 +486,13 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     assert any(a.startswith("query=") and "lastEditedAt" not in a and "author" not in a for a in argv)
 
 
+def test_markers_without_id_are_resolvable_by_thread_id(gh: FakeGh) -> None:
+    legacy = {**thread("<!-- loopzero:finding severity=important -->\nheadless"), "id": "T_1"}
+    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api graphql", threads_json(legacy))
+    assert [(m, t) for m, t, _ in github.open_findings(REPO, 7)] == [("T_1", "T_1")]
+
+
 @pytest.mark.parametrize("data", [
     {"data": {"repository": {"pullRequest": None}}},
     {"data": {"repository": None}},

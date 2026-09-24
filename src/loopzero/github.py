@@ -427,7 +427,7 @@ _RESOLVE_MUTATION = (
 def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
     return [
-        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or "", node["id"], f)
+        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or node["id"], node["id"], f)
         for node in _unresolved_threads(repo, number)
         if (f := _parse_thread(node, None))
     ]

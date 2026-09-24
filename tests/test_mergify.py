@@ -6,6 +6,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+import urllib.request
 
 import pytest
 
@@ -73,14 +74,14 @@ def test_dequeue_posts_to_documented_endpoint(monkeypatch):
     monkeypatch.setenv("MERGIFY_API_KEY", "secret")
     seen = []
 
-    def open_(request):
+    def open_(request):  # a transient failure must not repeat the write
         seen.append(request)
-        return Response(b"")
+        raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
 
     monkeypatch.setattr(mergify, "_open", open_)
-    mergify.dequeue("acme/widgets", 7)
-    assert seen[0].method == "POST"
-    assert seen[0].full_url.endswith("/merge-queue/pull/7/dequeue")
+    with pytest.raises(mergify.MergifyError):
+        mergify.dequeue("acme/widgets", 7)
+    assert (len(seen), seen[0].method, seen[0].full_url.endswith("/pull/7/dequeue")) == (1, "POST", True)
 
 
 @pytest.fixture
@@ -226,3 +227,26 @@ def test_hosted_import_does_not_load_yaml():
                              "assert callable(mergify.api_get)")],
                             capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("failure", ["http503", "dropped_read", "truncated"])
+def test_api_get_retries_transient_reads(monkeypatch, failure):
+    calls = []
+
+    class Body(io.BytesIO):
+        def read(self, *args):
+            if len(calls) == 1 and failure != "http503":  # body read fails once
+                raise {"dropped_read": ConnectionResetError(), "truncated": mergify.http.client.IncompleteRead(b"{")}[failure]
+            return super().read(*args)
+
+    def fake_open(request):
+        calls.append(request.get_method())
+        if failure == "http503" and len(calls) == 1:
+            raise urllib.error.HTTPError(request.full_url, 503, "x", {}, None)
+        return Body(b"{}")
+
+    monkeypatch.setattr(mergify, "_open", fake_open)
+    monkeypatch.setattr(mergify, "_retry_sleep", lambda _: None)
+    monkeypatch.setattr(mergify, "_credential", lambda: "k")
+    assert mergify.api_get("acme/widgets", "/merge-queue/status") == {}
+    assert calls == ["GET", "GET"]
