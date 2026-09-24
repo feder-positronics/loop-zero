@@ -52,9 +52,9 @@ artifact without rerunning the model.
 Wait commands observe immediately, then back off to 30, 60 and 120 second intervals
 (with up to 10% earlier jitter), bounded by the remaining wait timeout. Readiness
 still checks current reviews and findings on every observation. Mergify wait ticks
-use REST for both source-head guards and verified merge observation, avoiding
-recurring GraphQL PR reads. Queue-request and confirmation comments also use REST.
-Native GitHub queue membership still requires GraphQL.
+use REST for source-head guards, verified merge observation, queue comments,
+PR lookup, detail, and draft creation. Native GitHub queue membership and review
+threads still require GraphQL.
 With `ready --wait`, a failed or cancelled required GitHub Actions check may
 trigger a workflow-run lookup to see whether a newer run on the same head is
 still active. Fine-grained GitHub tokens need Actions read permission for that
@@ -65,6 +65,11 @@ A GitHub rate-limit error stops the command immediately instead of using transie
 period; loopzero does not schedule a retry. REST and GraphQL have separate primary
 budgets, and all sessions using the same user share that user's allowance. See
 [GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
+When a primary GraphQL limit is explicit, loopzero may make one bounded
+diagnostic query to report a verified reset time. It does not preflight every
+request or infer GraphQL capacity from the REST `/rate_limit` endpoint.
+Concurrent waiters and other clients still consume the shared allowance; run
+one waiter per PR and avoid manual `gh pr view`/`checks`/`list` polling.
 
 ## Adopt it in six steps
 

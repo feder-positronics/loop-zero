@@ -8,7 +8,9 @@ import re
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.types import Finding, ReviewResult
@@ -20,7 +22,6 @@ MARKER_RE = re.compile(
     r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
-PR_FIELDS = "number,url,headRefOid,baseRefName,isDraft,state,mergeable,mergeStateStatus,author,body"
 PAGE = 100
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -116,7 +117,8 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
-            raise GhError(argv, tail + "\nRate limited: retry after GitHub's reset or Retry-After; "
+            reset = _graphql_reset(args, tail, cwd or Path.cwd())
+            raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
                           "No automatic retry.")
         if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
             break
@@ -126,6 +128,45 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
             raise GhAuth(argv, f"{tail.rstrip()}\n{GH_AUTH_REMEDY}")
         raise GhError(argv, tail)
     return done.stdout
+
+
+def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path) -> str:
+    """Best-effort reset evidence for a primary GraphQL limit, never a preflight."""
+    if re.search(r"secondary|HTTP 429", tail, re.IGNORECASE):
+        return ""
+    graphql = args[:2] == ("api", "graphql") or (
+        args[:1] == ("pr",) and "graphql" in tail.casefold())
+    if not graphql or not re.search(r"rate limit (?:already )?exceeded", tail, re.IGNORECASE):
+        return ""
+    resource = re.search(r"(?im)^x-ratelimit-resource:\s*(\S+)", tail)
+    remaining = re.search(r"(?im)^x-ratelimit-remaining:\s*(\d+)", tail)
+    reset = re.search(r"(?im)^x-ratelimit-reset:\s*(\d+)", tail)
+    if resource and resource[1].casefold() == "graphql" and remaining and remaining[1] == "0" and reset:
+        try:
+            stamp = datetime.fromtimestamp(int(reset[1]), UTC)
+            if stamp.timestamp() > time.time():
+                return f"\nGraphQL quota resets at {stamp.isoformat()} (response header)."
+        except (OverflowError, OSError, ValueError):
+            pass
+    try:
+        query = "query { rateLimit { remaining resetAt } }"
+        result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
+                     env_allowlist=GH_ENV, timeout=10)
+        if result.exit_code:
+            return ""
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict) or data.get("errors"):
+            return ""
+        limit = data["data"]["rateLimit"]
+        if not isinstance(limit, dict) or not isinstance(limit.get("resetAt"), str):
+            return ""
+        stamp = datetime.fromisoformat(limit["resetAt"])
+        if (type(limit["remaining"]) is int and limit["remaining"] == 0
+                and stamp.tzinfo is not None and stamp.timestamp() > time.time()):
+            return f"\nGraphQL quota resets at {stamp.isoformat()} (diagnostic query)."
+    except (ToolMissing, ProcTimeout, KeyError, TypeError, ValueError, OverflowError, OSError):
+        pass
+    return ""
 
 
 def _gh_json(*args: str) -> object:
@@ -191,56 +232,92 @@ def _api(endpoint: str, payload: dict | None = None, method: str = "POST") -> ob
         path.unlink(missing_ok=True)
 
 
-def _pr_from_json(data: dict) -> PR:
+def _pr_from_rest(data: object) -> PR:
+    """Normalize one REST pull detail without treating absent merge evidence as clean."""
     try:
+        if not isinstance(data, dict):
+            raise TypeError("PR detail is not an object")
+        number = data["number"]
+        head, base = data["head"], data["base"]
+        url, head_sha, base_ref = data["html_url"], head["sha"], base["ref"]
+        state, merged, draft = data["state"], data["merged"], data["draft"]
+        mergeable = data["mergeable"]
+        merge_state = data["mergeable_state"]
+        if (type(number) is not int or number < 1 or state not in {"open", "closed"}
+                or type(merged) is not bool or type(draft) is not bool
+                or mergeable is not None and type(mergeable) is not bool
+                or merge_state is not None and not isinstance(merge_state, str)
+                or (merged and state != "closed")
+                or not isinstance(url, str) or not url.startswith("https://")
+                or not isinstance(base_ref, str) or not base_ref
+                or not isinstance(head_sha, str)
+                or not re.fullmatch(r"[0-9a-f]{40}", head_sha)):
+            raise ValueError("invalid PR state, mergeability, or head")
         return PR(
-            number=int(data["number"]),
-            url=data["url"],
-            head_sha=data["headRefOid"],
-            base_ref=data["baseRefName"],
-            is_draft=bool(data["isDraft"]),
-            state=data["state"],
-            mergeable=data.get("mergeable") or "UNKNOWN",
-            merge_state=data.get("mergeStateStatus") or "UNKNOWN",
-            author=str((data.get("author") or {}).get("login") or ""),
+            number=number, url=url, head_sha=head_sha,
+            base_ref=base_ref, is_draft=draft,
+            state="MERGED" if merged else state.upper(),
+            mergeable="UNKNOWN" if mergeable is None else
+                      ("MERGEABLE" if mergeable else "CONFLICTING"),
+            merge_state=merge_state.upper() if merge_state else "UNKNOWN",
+            author=str((data.get("user") or {}).get("login") or ""),
             body=str(data.get("body") or ""),
         )
-    except (KeyError, TypeError, ValueError) as exc:
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
         raise _not_found(number, exc) from exc
 
 
+def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
+    data = api_get(f"repos/{repo}/pulls/{number}")
+    pr = _pr_from_rest(data)
+    if pr.number != number:
+        raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}"),
+                      f"PR detail number {pr.number} differs from requested {number}")
+    return pr, data
+
+
 def pr_for_branch(repo: str, branch: str) -> PR | None:
     """Return the open PR for `branch`, else the most recent one, else None."""
-    data = _gh_json(
-        "pr", "list", "--repo", repo, "--head", branch, "--state", "all",
-        "--limit", "10", "--json", PR_FIELDS,
-    )
-    prs = [_pr_from_json(p) for p in (data or [])]
-    if not prs:
-        return None
-    return next((p for p in prs if p.state == "OPEN"), prs[0])
+    owner = repo.split("/", 1)[0]
+    head = quote(f"{owner}:{branch}", safe="")
+    for state in ("open", "closed"):
+        endpoint = (f"repos/{repo}/pulls?state={state}&head={head}"
+                    "&sort=created&direction=desc&per_page=1")
+        rows = api_get(endpoint)
+        if not isinstance(rows, list):
+            raise GhError(("gh", "api", endpoint), "invalid PR list response")
+        if rows:
+            number = rows[0].get("number") if isinstance(rows[0], dict) else None
+            if type(number) is not int or number < 1:
+                raise GhError(("gh", "api", endpoint), "invalid PR number in list")
+            pr, detail = _pr_detail(repo, number)
+            source = detail.get("head") or {}
+            source_repo = source.get("repo") or {}
+            source_name = source_repo.get("full_name") if isinstance(source_repo, dict) else None
+            if (source.get("ref") != branch or
+                    not isinstance(source_name, str) or source_name.casefold() != repo.casefold()
+                    or (pr.state == "OPEN") != (state == "open")):
+                raise GhError(("gh", "api", endpoint), "PR changed during branch lookup")
+            return pr
+    return None
 
 
 def pr_view(repo: str, number: int) -> PR:
-    data = _gh_json("pr", "view", str(number), "--repo", repo, "--json", PR_FIELDS)
-    if not isinstance(data, dict):
-        raise _not_found(number, ValueError(repr(data)))
-    return _pr_from_json(data)
+    return _pr_detail(repo, number)[0]
 
 
 def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) -> PR:
-    path = _with_file(body)
-    try:
-        _gh(
-            "pr", "create", "--repo", repo, "--head", branch, "--base", base,
-            "--title", title, "--body-file", str(path), "--draft",
-        )
-    finally:
-        path.unlink(missing_ok=True)
-    pr = pr_for_branch(repo, branch)
-    if pr is None:
-        raise GhError(("gh", "pr", "create"), f"PR for {branch} not visible after create")
+    detail = _api(
+        f"repos/{repo}/pulls", {"head": branch, "base": base, "title": title,
+                               "body": body, "draft": True})
+    pr = _pr_from_rest(detail)
+    source_repo = detail["head"].get("repo") or {}
+    if (pr.state != "OPEN" or not pr.is_draft or pr.base_ref != base
+            or detail["head"].get("ref") != branch
+            or not isinstance(source_repo, dict)
+            or str(source_repo.get("full_name") or "").casefold() != repo.casefold()):
+        raise GhError(("gh", "api", f"repos/{repo}/pulls"), "created PR differs from request")
     return pr
 
 

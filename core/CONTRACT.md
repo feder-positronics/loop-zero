@@ -128,3 +128,8 @@ end the command there and `cd` to the root it prints before running anything els
 Wait with `loopzero ready --wait` and `loopzero merge --wait`, never with a
 hand-written `gh` loop. Any other poll needs a deadline, visible progress,
 stderr kept, and a stop on command errors: a silent loop looks like running CI.
+Run one waiter per PR. Do not poll with `gh pr view`, `gh pr checks`, or
+`gh pr list`; their hidden GraphQL requests share the account's quota across
+sessions. For one-off PR reads or comments, use the relevant REST `gh api`
+endpoint. A quota error stops the command until a verified reset or
+`Retry-After`; REST `/rate_limit` does not establish GraphQL capacity.

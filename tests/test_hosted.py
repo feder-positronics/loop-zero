@@ -45,7 +45,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond(f"api repos/{REPO}/pulls/7", {
         "head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"},
     })
-    gh.respond("pr view", pr_json())
+    gh.respond_pr_view( pr_json())
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
     return gh
