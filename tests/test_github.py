@@ -30,7 +30,7 @@ import json, os, sys
 argv = sys.argv[1:]
 calls, scenario = {calls!r}, {scenario!r}
 key = " ".join(argv[:2])
-record = {{"argv": argv}}
+record = {{"argv": argv, "token": os.environ.get("GH_TOKEN")}}
 input_files = {{}}
 for flag in ("--input", "--body-file"):
     if flag in argv:
@@ -66,6 +66,8 @@ if strict is not None:
 else:
     def response_key(args):
         basic = " ".join(args[:2])
+        if basic == "api graphql" and any("viewer {{ login }}" in arg for arg in args):
+            basic += " viewer"
         method = args[args.index("--method") + 1] if "--method" in args else ""
         specific = basic + " --method " + method
         return specific if specific in plan.get("compat", {{}}) else basic
@@ -279,7 +281,7 @@ PR_FILES = [
 
 def arm_review(gh: FakeGh, files: list | None = None, author: str = "someone-else") -> None:
     gh.respond_pr_view( pr_json(author={"login": author}))
-    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     gh.respond(REVIEWS_KEY, {"id": 1})
     gh.respond(FILES_KEY, PR_FILES if files is None else files)
 
@@ -585,7 +587,7 @@ def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str)
     (payload,) = review_payloads(gh)
     assert payload["event"] == "COMMENT"
     assert [c["argv"][:2] for c in gh.calls[:2]] == [["api", f"repos/{REPO}/pulls/7"],
-                                                   ["api", "user"]]
+                                               ["api", "graphql"]]
     assert gh.argv(0) == ["api", f"repos/{REPO}/pulls/7"]
 
 
@@ -612,7 +614,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     versioned = github.finding_marker(
         "critical", HEAD, Finding("critical", "src/a.py", 3, "Null deref", "x may be None")
     )
-    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     gh.respond("api graphql", threads_json(
         thread(f"{versioned}\n**critical: Null deref**\n\nx may be None"),
         thread(f"{marker('important')}\nplain title", resolved=True),
@@ -638,7 +640,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
 
 def test_markers_without_id_are_resolvable_by_thread_id(gh: FakeGh) -> None:
     legacy = {**thread("<!-- loopzero:finding severity=important -->\nheadless"), "id": "T_1"}
-    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     gh.respond("api graphql", threads_json(legacy))
     assert [(m, t) for m, t, _ in github.open_findings(REPO, 7)] == [("T_1", "T_1")]
 
@@ -662,14 +664,71 @@ def test_pr_for_branch_missing_key_is_gh_error(gh: FakeGh) -> None:
 
 
 def test_api_get_and_login_helpers(gh: FakeGh) -> None:
-    gh.respond("api user", {"login": "bot-user"})
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     gh.respond("api repos/acme/widgets", {"default_branch": "main"})
     assert github.api_get("repos/acme/widgets") == {"default_branch": "main"}
     assert gh.argv(0) == ["api", "repos/acme/widgets"]
     assert github.login() == "bot-user"
-    gh.respond("api user", {})
+    gh.respond("api graphql viewer", {"data": {"viewer": {}}})
     with pytest.raises(github.GhError, match="no login"):
         github.login()
+
+
+def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-app-token\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    clock = [0.0]
+    monkeypatch.setattr(github.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    gh.respond("api repos/acme/widgets", {})
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
+    gh.respond("api graphql", {})
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    gh.respond("api repos/acme/widgets/issues/7/comments", {})
+    gh.respond("auth token", "operator-token")
+    github.api_get("repos/acme/widgets")
+    assert github.login() == "app[bot]"
+    github.update_body(REPO, 7, "body")
+    github._gh("api", "repos/acme/widgets/issues/7/comments", "--method", "POST")
+    github._gh("api", "graphql", "-f", "query=mutation { resolveReviewThread(input: {}) { clientMutationId } }")
+    assert github.auth_token() == "operator-token"
+    assert [c["token"] for c in gh.calls] == [
+        "synthetic-app-token", "synthetic-app-token", "synthetic-app-token",
+        "operator-token", "operator-token", "operator-token",
+    ]
+    assert counter.read_text().splitlines() == ["called"]
+    clock[0] = 3001.0
+    github.api_get("repos/acme/widgets")
+    assert counter.read_text().splitlines() == ["called", "called"]
+
+
+def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
+    helper = tmp_path / "app-token"
+    helper.write_text("#!/bin/sh\nexit 1\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    gh.respond("api repos/acme/widgets", {})
+    github.api_get("repos/acme/widgets")
+    assert gh.calls[0]["token"] == "operator-token"
+
+
+def test_app_review_is_comment_with_inline_findings(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
+    helper = tmp_path / "app-token"
+    helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    gh.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 3})
+    github.post_review(REPO, 7, HEAD, review(verdict="approve", findings=FINDINGS[:1]),
+                       pr=github.PR(7, "url", HEAD, "main", True, "OPEN", "UNKNOWN"))
+    posted = gh.calls[-1]
+    assert posted["token"] == "synthetic-app-token"
+    payload = json.loads(posted["--input"])
+    assert payload["event"] == "COMMENT" and payload["comments"]
 
 
 def test_marker_parser_accepts_old_and_v1_forms() -> None:

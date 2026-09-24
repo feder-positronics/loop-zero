@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import cli, mergify
+from loopzero import cli, github, mergify
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
 from tests.test_github import FakeGh, merge_json, pr_json, pr_list_key, rest_pr_json, threads_json
@@ -52,7 +52,7 @@ def repo(git_repo: Path, tmp_path: Path, fake_tool, fake_bin: Path) -> Path:
 @pytest.fixture
 def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     fake = FakeGh(fake_bin, tmp_path)
-    fake.respond("api user", {"login": LOGIN})
+    fake.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
     fake.respond(f"api repos/{REPO}/pulls/7/files",
                  [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
     return fake
@@ -957,6 +957,30 @@ def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, ca
     assert not (fake_bin / "claude.stdin").exists()
 
 
+@pytest.mark.parametrize("publisher, allowed", [("app[bot]", True), (LOGIN, False)])
+def test_review_publisher_check_uses_app_identity(
+    wt: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys,
+    publisher: str, allowed: bool,
+) -> None:
+    helper = tmp_path / "app-token"
+    helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-qm", "configure publisher")
+    git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+    arm_pr(gh, head_of(wt))
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
+    gh.respond(reviews_key(), [])
+    gh.respond(post_key(), {"id": 3})
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    code, _, err = run(capsys, "review")
+    assert code == (0 if allowed else 1)
+    if not allowed:
+        assert "not a configured review publisher" in err
+
+
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n')
@@ -1425,7 +1449,7 @@ def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys) -> None:
     arm_readiness(gh, head, wt)
     code, out, _ = run(capsys, "ready")
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
-    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "user"]) == 1
+    assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 2
 
 
 def test_review_treats_forged_marker_as_fresh_lineage(wt: Path, gh: FakeGh, fake_bin,
@@ -1925,7 +1949,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     from loopzero import eligibility
     head = head_of(wt)
     gh.respond_pr_view( pr_json(headRefOid=head, mergeStateStatus="BEHIND"))
-    gh.respond("api user", {"login": "ci-service"})
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "ci-service"}}})
     gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state, verdict=verdict)])
     gh.respond("api graphql", threads_json())
     assert eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is expected
@@ -2009,7 +2033,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "timeout":
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 2
-        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
+        assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged"}:
         assert code == 0 and "e" * 40 in out and not wt.exists()

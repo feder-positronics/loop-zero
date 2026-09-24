@@ -21,7 +21,8 @@ network = false
 merge = "mergify"
 mergify_queue = "main"
 reviewers = ["claude", "codex"]
-review_publishers = ["eowca"]
+# eowca stays trusted during the one-week switch to the loopzero GitHub App (owner approval 2026-09-24).
+review_publishers = ["eowca", "loopzero-feder-positronics[bot]"]
 
 # Owner policy (2026-09-19): Opus at medium; use high exceptionally, with a concrete
 # reason in the PR; max is forbidden (the Luna exception is not enabled here because the

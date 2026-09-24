@@ -37,7 +37,7 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     fake.respond_pr_create(pr_json(), branch="lz/x")
     fake.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     fake.append(f"api repos/{REPO}/pulls/7", merged)
-    fake.respond("api user", {"login": "bot-user"})
+    fake.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     fake.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
     fake.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 1})
     fake.respond("api graphql", threads_json())

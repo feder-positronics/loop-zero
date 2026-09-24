@@ -5,8 +5,8 @@
 # Usage: scripts/size_budget.sh [BASE]   (default: merge-base with origin/main)
 set -euo pipefail
 # Raised for REST quota repair and regression coverage (owner approval 2026-09-24).
-SRC_CAP=4500
-TESTS_CAP=5850
+SRC_CAP=4550
+TESTS_CAP=5960
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git ls-tree -r --name-only "$base" -- "$1" | { grep '\.py$' || true; } \

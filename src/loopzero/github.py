@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import tempfile
 import time
@@ -16,6 +17,8 @@ from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.types import Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
+APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
+_app_token_cache = ("", 0.0)
 BLOCKING = frozenset({"critical", "important"})
 MARKER_RE = re.compile(
     r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
@@ -103,11 +106,32 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return args[:2] in {("pr", "view"), ("pr", "list"), ("pr", "checks")}
 
 
-def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
+def _app_token() -> str:
+    global _app_token_cache
+    token, expires = _app_token_cache
+    if token and time.monotonic() < expires:
+        return token
+    if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
+        return ""
+    try:
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path.cwd(), env_allowlist=GH_ENV, timeout=10)
+    except (ToolMissing, ProcTimeout, OSError):
+        return ""
+    if result.exit_code or not result.stdout.strip():
+        return ""
+    token = result.stdout.strip()
+    _app_token_cache = (token, time.monotonic() + 3000)
+    return token
+
+
+def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
+        token: str | None = None) -> str:
     argv = ("gh", *args)
+    selected = token if token is not None else (_app_token() if _read_only(args) else "")
     for delay in (*RETRY_DELAYS, None):
         try:
-            done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV, timeout=timeout)
+            done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV,
+                       extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout:
@@ -117,7 +141,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
-            reset = _graphql_reset(args, tail, cwd or Path.cwd())
+            reset = _graphql_reset(args, tail, cwd or Path.cwd(), selected)
             raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
                           "No automatic retry.")
         if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
@@ -130,7 +154,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120) -> str:
     return done.stdout
 
 
-def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path) -> str:
+def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
     """Best-effort reset evidence for a primary GraphQL limit, never a preflight."""
     if re.search(r"secondary|HTTP 429", tail, re.IGNORECASE):
         return ""
@@ -151,7 +175,8 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path) -> str:
     try:
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
-                     env_allowlist=GH_ENV, timeout=10)
+                     env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
+                     timeout=10)
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -169,8 +194,8 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path) -> str:
     return ""
 
 
-def _gh_json(*args: str) -> object:
-    out = _gh(*args)
+def _gh_json(*args: str, token: str | None = None) -> object:
+    out = _gh(*args, token=token)
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
@@ -209,12 +234,14 @@ def auth_token() -> str:
     return _gh("auth", "token", "--hostname", "github.com").strip()
 
 
-def login() -> str:
-    """Login of the user the `gh` token belongs to."""
-    data = api_get("user")
-    name = data.get("login") if isinstance(data, dict) else None
+def login(token: str | None = None) -> str:
+    """Login of the identity used for GitHub reads and review publishing."""
+    data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token)
+    content = data.get("data") if isinstance(data, dict) else None
+    viewer = content.get("viewer") if isinstance(content, dict) else None
+    name = viewer.get("login") if isinstance(viewer, dict) else None
     if not name:
-        raise GhError(("gh", "api", "user"), f"no login in response: {data!r}")
+        raise GhError(("gh", "api", "graphql"), "no login in viewer response")
     return str(name)
 
 
@@ -222,12 +249,13 @@ def _not_found(number: int, exc: Exception) -> GhError:
     return GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})")
 
 
-def _api(endpoint: str, payload: dict | None = None, method: str = "POST") -> object:
+def _api(endpoint: str, payload: dict | None = None, method: str = "POST",
+         token: str | None = None) -> object:
     if payload is None:
         return api_get(endpoint)
     path = _with_file(json.dumps(payload))
     try:
-        return _gh_json("api", endpoint, "--method", method, "--input", str(path))
+        return _gh_json("api", endpoint, "--method", method, "--input", str(path), token=token)
     finally:
         path.unlink(missing_ok=True)
 
@@ -322,7 +350,7 @@ def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) ->
 
 
 def update_body(repo: str, number: int, body: str) -> None:
-    _api(f"repos/{repo}/pulls/{number}", {"body": body}, method="PATCH")
+    _api(f"repos/{repo}/pulls/{number}", {"body": body}, method="PATCH", token=_app_token())
 
 
 def finding_id(head_sha: str, path: str | None, line: int | None, title: str) -> str:
@@ -428,7 +456,8 @@ def post_review(
     changed file with a hunk, so every blocking finding creates a review thread.
     """
     author = (pr or pr_view(repo, number)).author
-    if author and author == login():
+    token = _app_token()
+    if token or author and author == login(token=token):
         event = "COMMENT"
     else:
         event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
@@ -455,11 +484,11 @@ def post_review(
     }
     endpoint = f"repos/{repo}/pulls/{number}/reviews"
     try:
-        _api(endpoint, payload)
+        _api(endpoint, payload, token=token)
     except GhError as exc:
         if event == "COMMENT" or not _SELF_REVIEW.search(exc.tail):
             raise
-        _api(endpoint, {**payload, "event": "COMMENT"})
+        _api(endpoint, {**payload, "event": "COMMENT"}, token=token)
 
 
 def _title_of(text: str) -> str:
