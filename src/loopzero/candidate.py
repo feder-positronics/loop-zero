@@ -285,7 +285,7 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
         def git(*args: str) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
-                    ["prlimit", "--as=1073741824", f"--fsize={_TREE_BYTES}", "--",
+                    ["prlimit", f"--fsize={_TREE_BYTES}", "--",
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                      "-c", "maintenance.auto=false", *args], cwd=root, env=env,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
