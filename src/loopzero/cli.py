@@ -626,6 +626,8 @@ def _run_review(
             if isinstance(exc, runners.RunnerAuthFailed):
                 login = "claude auth login" if family == "claude" else "codex login"
                 detail += f"\nFix: run `{login}`."
+            elif isinstance(exc, runners.RunnerUsageLimit):
+                detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
             elif isinstance(exc, runners.RunnerMissing):
                 package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
                 detail += f"\nFix: install it with `npm install -g {package}`."
