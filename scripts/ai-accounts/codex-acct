@@ -1,0 +1,3 @@
+#!/bin/sh
+# Codex on the account chosen by ai-accounts (e.g. T3 Code's Codex binaryPath).
+exec "$(dirname "$0")/ai-accounts" exec codex -- codex "$@"

@@ -1,0 +1,4 @@
+#!/bin/sh
+# loopzero on the accounts chosen by ai-accounts. Exit 4 (no reviewer could run) caused by a
+# usage limit is re-checked and retried once; completed reviews (0, 5) are never retried.
+exec "$(dirname "$0")/ai-accounts" run claude,codex --retry-exit 4 -- loopzero "$@"
