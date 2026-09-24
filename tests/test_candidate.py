@@ -276,6 +276,7 @@ def tree_candidate(tmp_path, monkeypatch):
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
+        assert not any(arg.startswith("--as") for arg in argv)  # arm64 Git exceeds RLIMIT_AS
         if "fetch" in argv:
             assert "https://github.com/owner/repo.git" in argv
             assert "secret-token" not in " ".join(argv)
