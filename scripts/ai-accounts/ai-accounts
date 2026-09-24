@@ -278,18 +278,30 @@ def refresh_codex(auth_file: Path, auth: dict) -> tuple[str, dict]:
 
 
 def codex_in_use(home: Path) -> bool:
-    """Whether a live codex process runs with this CODEX_HOME (default ~/.codex)."""
+    """Whether a live codex process may use this CODEX_HOME (default ~/.codex).
+
+    A process whose account cannot be attributed (unreadable environment, or a private HOME
+    without CODEX_HOME, as in loop-zero's reviewer sandbox that binds only auth.json) counts
+    as using every account, which only defers a refresh to a later check.
+    """
     target = home.resolve()
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue
         try:
+            if proc.stat().st_uid != os.getuid():
+                continue
             argv = (proc / "cmdline").read_bytes().split(b"\0")
             if not any(Path(a.decode(errors="replace")).name == "codex" for a in argv[:2]):
                 continue
-            env = dict(v.split(b"=", 1) for v in (proc / "environ").read_bytes().split(b"\0") if b"=" in v)
         except OSError:
             continue
+        try:
+            env = dict(v.split(b"=", 1) for v in (proc / "environ").read_bytes().split(b"\0") if b"=" in v)
+        except OSError:
+            return True
+        if b"CODEX_HOME" not in env and env.get(b"HOME", b"").decode() != str(Path.home()):
+            return True
         used = Path(env[b"CODEX_HOME"].decode()) if b"CODEX_HOME" in env else CODEX_MAIN
         if used.resolve() == target:
             return True
@@ -404,7 +416,7 @@ def print_status(status: dict) -> None:
 
 
 def cmd_add(provider: str, name: str) -> int:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or name == "main":
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", name) or name == "main":
         sys.exit("ai-accounts: invalid account name")
     if provider == "claude":
         token = "".join(sys.stdin.read().split())
