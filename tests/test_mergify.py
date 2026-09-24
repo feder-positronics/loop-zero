@@ -163,15 +163,15 @@ def test_legacy_false_does_not_license_single_check_source_updates(queue_api, mo
 
 
 def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
-    head = "a" * 40
-    marker = f"<!-- loopzero:mergify-confirmed head={head} queue=main -->"
+    head, marker = "a" * 40, f"<!-- loopzero:mergify-confirmed head={'a' * 40} queue=main -->"
+    rows = [("trusted", "@mergifyio queue main"), ("attacker", marker),  # early queue: no request
+            ("trusted", f"prefix {marker}"), ("trusted", marker), ("attacker", "@mergifyio requeue")]
+    comments = [{"body": body, "user": {"login": login}} for login, body in rows]
     monkeypatch.setattr(mergify.github, "login", lambda: "trusted")
-    monkeypatch.setattr(mergify.github, "_paged", lambda *_: [
-        {"body": marker, "user": {"login": "attacker"}},
-        {"body": f"prefix {marker}", "user": {"login": "trusted"}},
-        {"body": marker, "user": {"login": "trusted"}},
-    ])
+    monkeypatch.setattr(mergify.github, "_paged", lambda *_: comments)
     assert mergify.markers("acme/widgets", 7, head, "main") == (False, True)
+    comments.append({"body": "@mergifyio requeue", "user": {"login": "trusted"}})
+    assert mergify.markers("acme/widgets", 7, head, "main") == (True, False)  # awaits admission
 
 
 @pytest.mark.parametrize(("writer", "body"), [
