@@ -17,6 +17,9 @@ Start with the top-level files; this directory only holds the contributor spec.
   rules for anyone changing `src/`.
 - [design/2026-09-18-feature-plan.md](design/2026-09-18-feature-plan.md) —
   post-rewrite feature plan with one design note per selected change.
+- [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
+  system view of feedback placement, state writes, identity and failure
+  handling, with principles, owners and delivery metrics.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.
