@@ -15,6 +15,10 @@ Store: ~/.local/state/ai-accounts (0700). Never prints secrets.
                                          like exec; on a usage-limit failure (any nonzero exit, or
                                          only exits N) re-check and retry once if the account changed
 
+Installed as `claude`, `codex` or `loopzero` (symlinks in a directory ahead of the real CLIs
+on PATH), it runs the real CLI on the active account(s); `loopzero` also retries once when no
+reviewer could run because of a usage limit (exit 4). Credentials the caller set itself win.
+
 Claude tiers: 2 = Fable + Opus usable, 1 = Opus only, 0 = none. Codex tiers: 2 = every
 model usable, 1 = some models restricted, 0 = none. -1 = unknown (probe failed).
 An account is usable below AI_ACCOUNTS_MARGIN (default 0.95) of every limit window.
@@ -52,6 +56,7 @@ USAGE_LIMIT_RE = re.compile(
     r"usage limit reached|reached your [\w .-]*limit|hit your (?:usage )?limit|usage_limit_reached",
     re.IGNORECASE)
 PROVIDERS = ("claude", "codex")
+SHIMS = {"claude": "claude", "codex": "codex", "loopzero": "claude,codex"}
 
 
 def now() -> float:
@@ -166,6 +171,24 @@ def account_env(provider: str) -> dict[str, str]:
     if name != "main":
         sync_codex_home(codex_home(name))
     return {"CODEX_HOME": str(codex_home(name))}
+
+
+def with_accounts(providers: str, base: dict[str, str]) -> dict[str, str]:
+    """Return ``base`` with each provider's active account, unless the caller chose its own.
+
+    Claude Code strips its token from the commands it runs, so a token present was set by the
+    caller. CODEX_HOME is inherited by a Codex session's shells; AI_ACCOUNTS_CODEX_HOME records
+    the value a shim set, so only that inherited value is replaced by the current account.
+    """
+    env = dict(base)
+    for provider in providers.split(","):
+        if provider == "claude":
+            if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+                env.update(account_env(provider))
+        elif env.get("CODEX_HOME", "") == env.get("AI_ACCOUNTS_CODEX_HOME", ""):
+            env.update(account_env(provider))
+            env["AI_ACCOUNTS_CODEX_HOME"] = env.get("CODEX_HOME", "")
+    return env
 
 
 # ----------------------------------------------------------------- probes
@@ -393,15 +416,6 @@ def check(quiet: bool = False) -> dict:
     return status
 
 
-def claude_login_expiry() -> float | None:
-    """Expiry of the interactive `/login` token, which agent shells and loopzero reviews fall back to."""
-    path = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / ".credentials.json"
-    try:
-        return json.loads(path.read_text())["claudeAiOauth"]["expiresAt"] / 1000
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
 def print_status(status: dict) -> None:
     print(f"checked {iso(status.get('checked_at'))}  (margin {MARGIN:.0%})")
     for provider, info in status.get("providers", {}).items():
@@ -419,10 +433,6 @@ def print_status(status: dict) -> None:
             if r.get("error"):
                 line += f"  {r['error']}"
             print(line)
-        expiry = claude_login_expiry() if provider == "claude" else None
-        if expiry is not None and expiry < now():
-            print(f"  warning: /login token expired {iso(expiry)}; a bare `claude` or `loopzero review`"
-                  " from an agent shell will fail (use `lz` or `claude-acct`, or log in again)")
 
 
 # ----------------------------------------------------------------- commands
@@ -449,20 +459,16 @@ def cmd_add(provider: str, name: str) -> int:
 def cmd_exec(providers: str, argv: list[str]) -> int:
     if not argv:
         sys.exit("ai-accounts: missing command")
-    env = dict(os.environ)
-    for provider in providers.split(","):
-        env.update(account_env(provider))
-    os.execvpe(argv[0], argv, env)
+    os.execvpe(argv[0], argv, with_accounts(providers, dict(os.environ)))
     return 127
 
 
-def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None) -> int:
+def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
+            base: dict[str, str] | None = None) -> int:
     """Run once; on a usage-limit failure re-probe and retry once if the account changed."""
     for attempt in (1, 2):
         before = {p: active(p) for p in providers.split(",")}
-        env = dict(os.environ)
-        for provider in before:
-            env.update(account_env(provider))
+        env = with_accounts(providers, dict(os.environ) if base is None else base)
         proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE)
         seen: list[bytes] = []
 
@@ -488,6 +494,30 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None)
         changed = ", ".join(f"{p} {before[p]} -> {after[p]}" for p in before if before[p] != after[p])
         print(f"ai-accounts: usage limit reached; switched {changed}; retrying once", file=sys.stderr)
     return code
+
+
+def is_shim_dir(directory: str) -> bool:
+    me = Path(__file__).resolve()
+    return any((Path(directory or ".") / name).resolve() == me for name in SHIMS)
+
+
+def cmd_shim(name: str, args: list[str]) -> int:
+    """Run the real ``name`` found on PATH after the shim directory, on the active account(s)."""
+    dirs = os.environ.get("PATH", "").split(os.pathsep)
+    shim_dirs = [d for d in dirs if is_shim_dir(d)]
+    rest = [d for d in dirs if d not in shim_dirs]
+    real = next((str(c) for d in rest if (c := Path(d or ".") / name).is_file()
+                 and os.access(c, os.X_OK)), None)
+    if real is None:
+        sys.exit(f"ai-accounts: no real {name} on PATH")
+    if name == "loopzero":
+        # loopzero resolves claude/codex on PATH and runs them in its sandbox: hide the shims.
+        base = {**os.environ, "PATH": os.pathsep.join(rest)}
+        return cmd_run(SHIMS[name], [real, *args], {4}, base)
+    # Put the shims first for the session's own shells, so their commands switch accounts too.
+    base = {**os.environ, "PATH": os.pathsep.join([str(Path(sys.argv[0]).absolute().parent), *rest])}
+    os.execve(real, [real, *args], with_accounts(SHIMS[name], base))
+    return 127
 
 
 def main(argv: list[str]) -> int:
@@ -535,4 +565,5 @@ def main(argv: list[str]) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    shim = Path(sys.argv[0]).name
+    sys.exit(cmd_shim(shim, sys.argv[1:]) if shim in SHIMS else main(sys.argv[1:]))
