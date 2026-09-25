@@ -868,6 +868,12 @@ def arm_readiness(gh: FakeGh, *, threads=(), runs=None) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
 
+def arm_workflow_check(gh: FakeGh, check: dict, statuses: list[dict] | None = None) -> None:
+    gh.respond("api graphql", threads_json())
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [check]})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", statuses or [])
+
+
 def test_readiness_ready(gh: FakeGh) -> None:
     arm_readiness(gh)
     pr = github._pr_from_rest(rest_pr_json(pr_json()))
@@ -938,13 +944,11 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
 
 @pytest.mark.parametrize("failure", ["failure", "cancelled"])
 def test_readiness_waits_for_newer_active_producing_workflow(gh: FakeGh, failure: str) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "id": 100, "name": "checks", "status": "completed", "conclusion": failure,
         "check_suite": {"id": 10}, "started_at": "2026-09-23T21:53:00Z",
         "completed_at": "2026-09-23T21:54:41Z",
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
         {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
          "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
@@ -962,13 +966,11 @@ def test_readiness_waits_for_newer_active_producing_workflow(gh: FakeGh, failure
 
 @pytest.mark.parametrize("change", ["workflow", "head", "completed", "older"])
 def test_readiness_does_not_wait_for_unrelated_or_finished_run(gh: FakeGh, change: str) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10}, "started_at": "2026-09-23T21:53:00Z",
         "completed_at": "2026-09-23T21:54:41Z",
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
     replacement = {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": HEAD,
                    "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"}
     if change == "workflow":
@@ -992,12 +994,10 @@ def test_readiness_does_not_wait_for_unrelated_or_finished_run(gh: FakeGh, chang
 
 
 def test_readiness_newer_run_in_same_second_waits(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10},
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
         {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
          "status": "completed", "created_at": "2026-09-23T21:54:21Z"},
@@ -1012,13 +1012,10 @@ def test_readiness_newer_run_in_same_second_waits(gh: FakeGh) -> None:
 
 
 def test_readiness_keeps_failing_commit_status_blocker(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10},
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [
-        {"context": "checks", "state": "failure"}])
+    }, [{"context": "checks", "state": "failure"}])
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [
         {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
          "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
@@ -1053,12 +1050,10 @@ def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
 def test_readiness_wait_does_not_lookup_nonfailure_conclusion(
     gh: FakeGh, conclusion: str
 ) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "name": "checks", "status": "completed", "conclusion": conclusion,
         "check_suite": {"id": 10},
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
 
     result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks",), HEAD,
                               workflow_wait=True)
@@ -1069,12 +1064,10 @@ def test_readiness_wait_does_not_lookup_nonfailure_conclusion(
 
 
 def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10},
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
     filler = [{"id": i + 100, "check_suite_id": i + 100, "workflow_id": 99,
                "head_sha": HEAD, "status": "completed"} for i in range(100)]
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
@@ -1095,12 +1088,10 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
 
 
 def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10},
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
                {"stdout": "", "stderr": "HTTP 403: Actions read denied", "exit_code": 1})
 
@@ -1115,12 +1106,10 @@ def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
 def test_readiness_rerun_attempt_requires_start_after_old_failure(
     gh: FakeGh, started: str, waitable: bool
 ) -> None:
-    gh.respond("api graphql", threads_json())
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": [{
+    arm_workflow_check(gh, {
         "id": 100, "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10}, "completed_at": "2026-09-23T21:54:41Z",
-    }]})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+    })
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", {"workflow_runs": [{
         "id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": HEAD,
         "status": "in_progress", "created_at": "2026-09-23T21:53:00Z",
@@ -1262,11 +1251,12 @@ def test_gh_retries_only_transient_reads(monkeypatch, args, attempts):
 
 
 @pytest.mark.parametrize("error", ["API rate limit exceeded", "API rate limit already exceeded",
-                                  "secondary rate limit", "HTTP 429 Too Many Requests"])
-def test_rate_limit_is_not_retried(gh, monkeypatch, error):
+                                  "secondary rate limit", "HTTP 429 Too Many Requests",
+                                  "GraphQL: API rate limit exceeded"])
+def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, error):
     gh.fail(pr_list_key("lz/x"), error)
     monkeypatch.setattr(github, "_retry_sleep", lambda _: pytest.fail("retried rate limit"))
-    with pytest.raises(github.GhError, match="rate limit|429"):
+    with pytest.raises(github.GhError, match="Rate limited"):
         github.pr_for_branch(REPO, "lz/x")
     assert len(gh.calls) == 1
 
@@ -1299,17 +1289,6 @@ def test_bad_graphql_reset_evidence_preserves_original_error(gh: FakeGh, diagnos
     assert "quota resets at" not in str(info.value)
     assert info.value.command[-1] == "query={viewer{login}}"
     assert len(gh.calls) == 2
-
-
-@pytest.mark.parametrize("message", ["secondary rate limit", "HTTP 429 Too Many Requests",
-                                     "GraphQL: API rate limit exceeded"])
-def test_rest_or_secondary_limit_never_probes_graphql(gh: FakeGh, message: str) -> None:
-    gh.fail(pr_list_key("lz/x"), message)
-
-    with pytest.raises(github.GhError, match="Rate limited"):
-        github.pr_for_branch(REPO, "lz/x")
-
-    assert len(gh.calls) == 1
 
 
 def test_graphql_limit_prefers_failing_response_reset_header(gh: FakeGh) -> None:

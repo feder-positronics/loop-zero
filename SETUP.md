@@ -213,6 +213,10 @@ then `systemctl --user enable --now ai-accounts.timer`.
   account when no reviewer could run because of `usage limit reached` (exit 4). A running session keeps
   its account until resumed. Never put the token in `settings.json` `env`; that
   pins every process to one account.
+- Claude Code does not pass its account token to the shell commands it runs, so
+  an agent's own `loopzero review` falls back to the `/login` credential file,
+  which goes stale when the live login sits in a keyring. Agents run `lz` too;
+  `ai-accounts status` warns when that file has expired.
 - Token sessions lack claude.ai connectors. Changing an agent host's binary path
   may restart its provider and interrupt running sessions.
 

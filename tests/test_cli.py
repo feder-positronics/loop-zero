@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -500,6 +502,22 @@ def test_pr_refuses_missing_context_problem_or_goal(
 
     assert code == 1 and out == "" and f"- **{name}:**" in err
     assert gh.calls == []
+
+
+def test_pr_accepts_angle_brackets_inside_filled_text(wt: Path) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(task.read_text().replace("prints its greeting.", "maps <PMID> via `Pick<T>`."))
+    cli._require_pr_details(wt)
+
+
+def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path) -> None:
+    script = ("import argparse, sys\nfrom loopzero import cli\np = argparse.ArgumentParser()\n"
+              "def wait(args):\n    print('waiting')\n    raise cli.CliError('dequeued')\n"
+              "p.set_defaults(func=wait, command='merge')\ncli.build_parser = lambda: p\n"
+              "sys.exit(cli.main([]))\n")
+    with (tmp_path / "log").open("w") as log:
+        subprocess.run([sys.executable, "-c", script], stdout=log, stderr=subprocess.STDOUT, check=False)
+    assert (tmp_path / "log").read_text().splitlines() == ["waiting", "loopzero merge: dequeued"]
 
 
 def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:

@@ -81,8 +81,9 @@ Before launch:
 - give each writing delegate its own `loopzero start` worktree.
 
 For example, a writing delegate with the brief in a file (briefs contain
-quotes, so do not inline them). State the sandbox mode; never rely on the CLI
-default. Use `read-only` for investigation:
+quotes, so do not inline them; use an absolute path, because a relative one
+read after a `cd … &` expands to an empty prompt). State the sandbox mode; never
+rely on the CLI default. Use `read-only` for investigation:
 
 ```sh
 codex exec --model <model> -c model_reasoning_effort=<effort> \
@@ -96,13 +97,13 @@ Use a self-contained brief:
 
 ```text
 Objective: <one bounded outcome>
-Source/context: <issue, decisions, and files to read>
+Source/context: <issue text and decisions pasted in, files to read; sandboxed delegates usually have no network or `gh`>
 Allowed paths: <paths the delegate may change>
 Acceptance evidence: <observable evidence required for each criterion>
 Model/effort: <selection resolved from models.toml>
 Effort policy: Children inherit this policy; do not raise effort or launch a stronger model without returning to the parent.
-Delegate verification: <commands runnable in the delegate sandbox>
-Parent verification: <checks the parent will run instead>
+Delegate verification: <focused tests for the changed behavior, runnable in the delegate sandbox; wait on long commands with a blocking call, not second-by-second polls>
+Parent verification: <broad suites and `loopzero check`, which the parent runs once; the delegate does not repeat them or start its own reviewers>
 Return conditions: <when to stop and return an unresolved question>; a progress summary is not a stop: continue until the acceptance evidence exists or a named blocker needs the parent
 Final report: <changed files, evidence, check results, deviations, open questions>
 ```
@@ -132,6 +133,14 @@ can interfere.
 A linked worktree may have its shared Git directory outside the delegate's
 writable sandbox; leave commits to the parent when that directory is not
 writable. Retarget stacked PRs before deleting their base branch.
+
+The parent coordinates; it does not become the implementer. Delegate review
+repairs like other implementation, wait for background-task completion
+notifications rather than reading their output files, and, when a resolved route
+is unavailable (for example a provider at its usage limit), tell the requester
+which substitute runs. Start a fresh parent session with a short handoff at a
+delivery milestone or once its context passes roughly 300k tokens; do not reuse
+a finished delivery session for monitoring or unrelated follow-ups.
 
 The parent reads the returned diff or evidence and verifies acceptance. Worker
 claims of success are not proof. Before accepting a writing delegate's result,

@@ -120,10 +120,13 @@ Keep that property when chaining commands: never pipe a `loopzero` command
 into `tail`, `grep` or `head` (the filter's exit status replaces the verdict);
 redirect output to a file, chain with `&&` under `set -o pipefail`, and treat
 exit 3 (waiting) and 5 (changes requested) as outcomes, not crashes. The last
-line of output states the verdict.
+line of output states the verdict. Report a `loopzero` outcome with its exit code
+and that last line; never infer queue or merge state from an earlier progress line.
 
-A successful `loopzero merge` deletes the worktree the shell may be standing in:
-end the command there and `cd` to the root it prints before running anything else.
+A successful `loopzero merge` deletes its worktree. Run it from the repository
+root in a subshell, `(cd <worktree> && loopzero merge --wait)`: an agent shell
+left standing in the deleted directory fails its next command with a `getcwd`
+error that looks like a failed merge.
 
 Wait with `loopzero ready --wait` and `loopzero merge --wait`, never with a
 hand-written `gh` loop. Any other poll needs a deadline, visible progress,
