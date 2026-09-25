@@ -395,15 +395,15 @@ AUTH_WORDS = {
 }
 
 
-def test_claude_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, _claude_envelope(AUTH_WORDS))
-    result = _review("claude", tmp_path)
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path,
+                                                     family: str) -> None:
+    if family == "claude":
+        _fake_claude(fake_bin, _claude_envelope(AUTH_WORDS))
+    else:
+        _fake_codex(fake_bin, json.dumps(AUTH_WORDS), stderr="warning: not authenticated to telemetry")
+    result = _review(family, tmp_path)
     assert result.verdict == "approve" and result.findings[0].title == "Handle 401 Unauthorized"
-
-
-def test_codex_success_with_auth_words_is_not_auth_failure(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, json.dumps(AUTH_WORDS), stderr="warning: not authenticated to telemetry")
-    assert _review("codex", tmp_path).verdict == "approve"
 
 
 def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> None:
@@ -435,12 +435,13 @@ def test_provider_errors_are_typed(
         _review(family, tmp_path)
 
 
-def test_claude_missing_binary(
-    fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_missing_binary(
+    fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch, family: str
 ) -> None:
     monkeypatch.setenv("PATH", str(fake_bin))  # nothing else on PATH
     with pytest.raises(RunnerMissing):
-        _review("claude", git_repo)
+        _review(family, git_repo)
 
 
 def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
@@ -567,14 +568,6 @@ def test_codex_auth_failure_text(fake_bin: Path, tmp_path: Path) -> None:
     _fake_codex(fake_bin, "", exit_code=1, stderr="Error: Not logged in. Run codex login first.")
     with pytest.raises(RunnerAuthFailed):
         _review("codex", tmp_path)
-
-
-def test_codex_missing_binary(
-    fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("PATH", str(fake_bin))
-    with pytest.raises(RunnerMissing):
-        _review("codex", git_repo)
 
 
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
