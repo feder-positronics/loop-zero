@@ -194,11 +194,21 @@ unset it rather than silently switching to the file.
 
 ### Several subscription accounts (optional)
 
-`scripts/ai-accounts/` rotates Claude and Codex subscription accounts for both
-interactive sessions and unattended runs. Install it with
-`install -m 755 scripts/ai-accounts/{ai-accounts,claude-acct,codex-acct,lz} ~/.local/bin/`
-and enable the monitor by copying the two systemd units to `~/.config/systemd/user/`,
-then `systemctl --user enable --now ai-accounts.timer`.
+`scripts/ai-accounts/` rotates Claude and Codex subscription accounts behind the plain
+`claude`, `codex` and `loopzero` commands. Install the monitor and its three shims:
+
+```sh
+install -m 755 scripts/ai-accounts/ai-accounts ~/.local/bin/
+mkdir -p ~/.local/lib/ai-accounts/bin
+for n in claude codex loopzero; do ln -sf ~/.local/bin/ai-accounts ~/.local/lib/ai-accounts/bin/$n; done
+```
+
+Put the shims first on PATH by making this the last line of `~/.profile` and
+`~/.bashrc`, after anything that prepends `~/.local/bin`:
+`export PATH="$HOME/.local/lib/ai-accounts/bin:$PATH"`. Point an agent host's binary
+path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Enable the monitor by copying
+the two systemd units to `~/.config/systemd/user/`, then
+`systemctl --user enable --now ai-accounts.timer`.
 
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
@@ -208,15 +218,12 @@ then `systemctl --user enable --now ai-accounts.timer`.
   Claude prefers Fable and Opus, then Opus only; Codex prefers every model
   available. At 95% of any limit an account counts as spent. `ai-accounts status`
   shows accounts, emails, tiers and resets.
-- Start sessions through `claude-acct` / `codex-acct` (point an agent host's binary
-  path at them) and run `lz` instead of `loopzero`: it retries once on another
-  account when no reviewer could run because of `usage limit reached` (exit 4). A running session keeps
-  its account until resumed. Never put the token in `settings.json` `env`; that
-  pins every process to one account.
-- Claude Code does not pass its account token to the shell commands it runs, so
-  an agent's own `loopzero review` falls back to the `/login` credential file,
-  which goes stale when the live login sits in a keyring. Agents run `lz` too;
-  `ai-accounts status` warns when that file has expired.
+- Each shim starts the real CLI on the active account and keeps the shims first on
+  its PATH, so the session's own shells switch too. `loopzero` retries once on another
+  account when no reviewer could run because of `usage limit reached` (exit 4). A
+  running session keeps its account until resumed. A token or `CODEX_HOME` the caller
+  set itself is kept. Never put the token in `settings.json` `env`; that pins every
+  process to one account.
 - Token sessions lack claude.ai connectors. Changing an agent host's binary path
   may restart its provider and interrupt running sessions.
 
