@@ -174,15 +174,20 @@ def account_env(provider: str) -> dict[str, str]:
 
 
 def with_accounts(providers: str, base: dict[str, str]) -> dict[str, str]:
-    """Return ``base`` with each provider's active account, unless the caller chose its own."""
+    """Return ``base`` with each provider's active account, unless the caller chose its own.
+
+    Claude Code strips its token from the commands it runs, so a token present was set by the
+    caller. CODEX_HOME is inherited by a Codex session's shells; AI_ACCOUNTS_CODEX_HOME records
+    the value a shim set, so only that inherited value is replaced by the current account.
+    """
     env = dict(base)
     for provider in providers.split(","):
         if provider == "claude":
-            var, ours = "CLAUDE_CODE_OAUTH_TOKEN", {claude_token(n) for n in accounts(provider)}
-        else:
-            var, ours = "CODEX_HOME", {str(codex_home(n)) for n in accounts(provider)}
-        if not env.get(var) or env[var] in ours:
+            if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+                env.update(account_env(provider))
+        elif env.get("CODEX_HOME", "") == env.get("AI_ACCOUNTS_CODEX_HOME", ""):
             env.update(account_env(provider))
+            env["AI_ACCOUNTS_CODEX_HOME"] = env.get("CODEX_HOME", "")
     return env
 
 
