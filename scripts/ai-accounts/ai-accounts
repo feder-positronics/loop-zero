@@ -393,6 +393,15 @@ def check(quiet: bool = False) -> dict:
     return status
 
 
+def claude_login_expiry() -> float | None:
+    """Expiry of the interactive `/login` token, which agent shells and loopzero reviews fall back to."""
+    path = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")) / ".credentials.json"
+    try:
+        return json.loads(path.read_text())["claudeAiOauth"]["expiresAt"] / 1000
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
 def print_status(status: dict) -> None:
     print(f"checked {iso(status.get('checked_at'))}  (margin {MARGIN:.0%})")
     for provider, info in status.get("providers", {}).items():
@@ -410,6 +419,10 @@ def print_status(status: dict) -> None:
             if r.get("error"):
                 line += f"  {r['error']}"
             print(line)
+        expiry = claude_login_expiry() if provider == "claude" else None
+        if expiry is not None and expiry < now():
+            print(f"  warning: /login token expired {iso(expiry)}; a bare `claude` or `loopzero review`"
+                  " from an agent shell will fail (use `lz` or `claude-acct`, or log in again)")
 
 
 # ----------------------------------------------------------------- commands

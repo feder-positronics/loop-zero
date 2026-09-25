@@ -67,6 +67,7 @@ one.
   whole class (every caller, reader, transition) with the `deep` profile, fix it
   in one repair, and only then request review. After three `request_changes`
   primaries on one PR, split the PR or return to `plan`; tell the requester why.
+  Squashing or rewriting commits to obtain another primary does not reset that count.
 
 ## Exit
 

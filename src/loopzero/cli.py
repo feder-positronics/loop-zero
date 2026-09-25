@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib.metadata
+import io
 import json
 import random
 import re
@@ -381,7 +382,7 @@ def _require_pr_details(wt: Path) -> None:
     for name in _REQUIRED_TASK_LINES:
         match = re.search(rf"^- \*\*{name}:\*\*[ \t]*([^\r\n]*)$", task, re.MULTILINE)
         value = match.group(1).strip() if match else ""
-        if not value or re.search(r"<[^>]+>", value):
+        if not value or re.fullmatch(r"<[^<>]*>", value):
             raise CliError(f"fill '- **{name}:**' in {worktree.task_file(wt)}")
 
 
@@ -1083,6 +1084,9 @@ def _version() -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Progress lines must precede the stderr verdict when both go to one file.
+    if isinstance(sys.stdout, io.TextIOWrapper):
+        sys.stdout.reconfigure(line_buffering=True)
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

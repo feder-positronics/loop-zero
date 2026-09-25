@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -500,6 +502,40 @@ def test_pr_refuses_missing_context_problem_or_goal(
 
     assert code == 1 and out == "" and f"- **{name}:**" in err
     assert gh.calls == []
+
+
+@pytest.mark.parametrize("value", [
+    "Narrow `Pick<ReturnType<typeof load>>` to the fields the page reads.",
+    "Resolve each <PMID> to one catalog record.",
+])
+def test_pr_accepts_angle_brackets_inside_filled_text(wt: Path, value: str) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(re.sub(r"^- \*\*Goal:\*\*.*$", f"- **Goal:** {value}", task.read_text(),
+                           flags=re.MULTILINE))
+
+    cli._require_pr_details(wt)
+
+
+def test_progress_output_precedes_the_stderr_verdict_in_one_file(tmp_path: Path) -> None:
+    script = (
+        "import argparse, sys\n"
+        "from loopzero import cli\n"
+        "def wait(args):\n"
+        "    print('confirmed in queue; waiting')\n"
+        "    raise cli.CliError('left queue unmerged')\n"
+        "parser = argparse.ArgumentParser()\n"
+        "parser.set_defaults(func=wait, command='merge')\n"
+        "cli.build_parser = lambda: parser\n"
+        "sys.exit(cli.main([]))\n"
+    )
+    log = tmp_path / "merge.log"
+    with log.open("w") as out:
+        done = subprocess.run([sys.executable, "-c", script], stdout=out, stderr=subprocess.STDOUT,
+                              cwd=Path(__file__).resolve().parents[1], check=False)
+
+    assert done.returncode == 1
+    assert log.read_text().splitlines() == [
+        "confirmed in queue; waiting", "loopzero merge: left queue unmerged"]
 
 
 def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:
