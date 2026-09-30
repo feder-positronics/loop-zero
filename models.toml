@@ -1,6 +1,7 @@
 # Selected model profiles and suggested task routes.
 # Owner-selected defaults (2026-09-19; Sol 6.1 and Sonnet 5.5 routes 2026-09-30).
-# Profile names describe task shape; they do not claim a measured ranking of model prices or speeds.
+# Profile names describe task shape; they do not claim a measured ranking of
+# model prices or speeds.
 # Agents read this file before delegation, check runtime support, and explicitly
 # pass the selected model and effort. This file does not launch models by itself.
 version = 1
