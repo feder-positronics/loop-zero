@@ -16,7 +16,6 @@ from loopzero.runners import (
     RunnerUsageLimit,
     author_family,
     build_prompt,
-    pick_reviewer,
     review_with,
     split_diff,
 )
@@ -652,13 +651,3 @@ def test_author_family(git_repo: Path, trailer: str, expected: str | None) -> No
 def test_author_family_bad_ref(git_repo: Path) -> None:
     with pytest.raises(RunnerBadOutput):
         author_family(git_repo, "no-such-ref")
-
-
-def test_pick_reviewer() -> None:
-    assert pick_reviewer(("claude", "codex"), "claude") == "codex"
-    assert pick_reviewer(("claude", "codex"), "codex") == "claude"
-    assert pick_reviewer(("claude", "codex"), None) == "claude"
-    with pytest.raises(ValueError, match="no independent reviewer"):
-        pick_reviewer(("claude",), "claude")
-    with pytest.raises(ValueError):
-        pick_reviewer((), None)

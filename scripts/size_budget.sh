@@ -9,13 +9,13 @@ SRC_CAP=4550
 TESTS_CAP=5960
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
-  git ls-tree -r --name-only "$base" -- "$1" | { grep '\.py$' || true; } \
-    | while read -r f; do git show "$base:$f"; done | wc -l
+  git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \
+    | xargs -0 -r -I{} git show "$base:{}" | wc -l
 }
 # The candidate is the working tree, so uncommitted and new files count too.
 count_tree() {
-  git ls-files -co --exclude-standard -- "$1" | { grep '\.py$' || true; } \
-    | while read -r f; do if [ -f "$f" ]; then cat "$f"; fi; done | wc -l
+  git -c core.quotepath=off ls-files -zco --exclude-standard -- "$1" | { grep -z '\.py$' || true; } \
+    | xargs -0 -r sh -ec 'for f; do if [ -f "$f" ]; then cat -- "$f"; fi; done' _ | wc -l
 }
 status=0
 report() { # name dir cap
