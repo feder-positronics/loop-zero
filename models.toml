@@ -1,6 +1,6 @@
 # Selected model profiles and suggested task routes.
-# Owner-selected defaults (2026-09-19). Profile names describe task shape;
-# they do not claim a measured ranking of model prices or speeds.
+# Owner-selected defaults (2026-09-19; Sol 6.1 and Sonnet 5.5 routes 2026-09-30).
+# Profile names describe task shape; they do not claim a measured ranking of model prices or speeds.
 # Agents read this file before delegation, check runtime support, and explicitly
 # pass the selected model and effort. This file does not launch models by itself.
 version = 1
@@ -10,9 +10,14 @@ provider = "openai"
 model = "gpt-6-luna"
 effort = "xhigh"
 
+[[profiles.fast.alternatives]]
+provider = "anthropic"
+model = "claude-sonnet-5-5"
+effort = "low"
+
 [profiles.standard]
 provider = "openai"
-model = "gpt-6-sol"
+model = "gpt-6.1-sol"
 effort = "medium"
 
 # Model IDs and efforts pass through unchanged; runtime aliases
@@ -20,8 +25,10 @@ effort = "medium"
 # not automatic retries or replacements for an explicitly requested model.
 [[profiles.standard.alternatives]]
 provider = "anthropic"
-model = "claude-opus-5-5"
+model = "claude-sonnet-5-5"
 effort = "medium"
+# Sonnet 5.5 reroutes high-risk security prompts to Sonnet 5; choose another route
+# for security-sensitive work. Avoid Sonnet max and Sol ultra: both fan out to subagents.
 
 [profiles.deep]
 provider = "openai"
