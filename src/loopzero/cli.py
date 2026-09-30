@@ -378,10 +378,10 @@ _REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
 
 
 def _require_pr_details(wt: Path) -> None:
-    """Refuse an unfilled Context/Problem/Goal line before the branch is pushed."""
+    """Refuse an unfilled Context/Problem/Goal line (text or indented sub-list) before push."""
     task = worktree.task_text(wt)
     for name in _REQUIRED_TASK_LINES:
-        match = re.search(rf"^- \*\*{name}:\*\*[ \t]*([^\r\n]*)$", task, re.MULTILINE)
+        match = re.search(rf"^- \*\*{name}:\*\*[ \t]*(.*(?:\n[ \t]+\S.*)*)", task, re.MULTILINE)
         value = match.group(1).strip() if match else ""
         if not value or re.fullmatch(r"<[^<>]*>", value):
             raise CliError(f"fill '- **{name}:**' in {worktree.task_file(wt)}")
