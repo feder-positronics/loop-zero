@@ -361,12 +361,29 @@ def check_codex(name: str) -> dict:
         return {"tier": -1, "email": email, "error": f"network: {exc}"}
     if code != 200:
         return {"tier": -1, "email": email, "error": f"usage endpoint HTTP {code}"}
-    data = json.loads(body)
-    rl = data.get("rate_limit") or {}
+    try:
+        data = json.loads(body)
+    except (TypeError, ValueError) as exc:
+        return {"tier": -1, "email": email, "error": f"invalid usage response: {exc}"}
+    if not isinstance(data, dict):
+        return {"tier": -1, "email": email, "error": "usage response is not an object"}
+    rl = data.get("rate_limit")
+    if not isinstance(rl, dict):
+        return {"tier": -1, "email": email, "error": "usage response has no rate-limit windows"}
     windows = [w for w in (rl.get("primary_window"), rl.get("secondary_window")) if w]
+    if not windows or any(not isinstance(w, dict) or
+                          not isinstance(w.get("used_percent"), (int, float)) or
+                          isinstance(w.get("used_percent"), bool) for w in windows):
+        return {"tier": -1, "email": email, "error": "usage response has no usable rate-limit windows"}
     util = max((w.get("used_percent", 0) / 100 for w in windows), default=0.0)
     ok = bool(rl.get("allowed", True)) and not rl.get("limit_reached") and util < MARGIN
-    models = {m: bool(v.get("available")) for m, v in (data.get("model_usage") or {}).items()}
+    model_usage = data.get("model_usage")
+    if not isinstance(model_usage, dict) or not model_usage:
+        return {"tier": -1, "email": email, "error": "usage response has no model usage"}
+    if any(not isinstance(v, dict) or not isinstance(v.get("available"), bool)
+           for v in model_usage.values()):
+        return {"tier": -1, "email": email, "error": "usage response has incomplete model usage"}
+    models = {m: v["available"] for m, v in model_usage.items()}
     usable = [available for available in models.values() if available]
     tier = 0 if not ok or (models and not usable) else (2 if all(models.values()) else 1)
     resets = [w.get("reset_at") for w in windows if w.get("reset_at")]
@@ -413,6 +430,11 @@ def check(quiet: bool = False) -> dict:
         write_private(STATE / "status.json", json.dumps(status, indent=1) + "\n")
     if not quiet:
         print_status(status)
+    else:
+        for provider, info in status["providers"].items():
+            for name, result in info["accounts"].items():
+                if result["tier"] == -1 and result.get("error"):
+                    print(f"ai-accounts: {provider} {name}: {result['error']}", file=sys.stderr)
     return status
 
 
@@ -533,8 +555,12 @@ def main(argv: list[str]) -> int:
             print_status(status)
         return 0
     if cmd == "check":
-        check(quiet="--quiet" in argv)
-        return 0
+        quiet = "--quiet" in argv
+        status = check(quiet=quiet)
+        failed = any(info["accounts"] and all(result["tier"] == -1
+                                               for result in info["accounts"].values())
+                     for info in status["providers"].values())
+        return int(quiet and failed)
     if cmd == "use" and len(argv) == 3 and argv[1] in PROVIDERS:
         if argv[2] not in accounts(argv[1]):
             sys.exit(f"ai-accounts: unknown {argv[1]} account {argv[2]!r}")
