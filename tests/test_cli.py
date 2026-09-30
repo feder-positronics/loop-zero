@@ -1322,7 +1322,8 @@ def test_ready_wait_active_replacement_times_out(wt: Path, gh: FakeGh, capsys) -
 @pytest.mark.parametrize("name", ["checks", "Loop-zero Eligibility"])
 @pytest.mark.parametrize("pending,age,new_failure,expected,waited", [
     (True, 180, False, 0, True), (False, 30, False, 0, True),
-    (True, 30, True, 1, False), (False, 120, False, 1, False),
+    (True, 30, True, 1, True), (False, 30, True, 0, True),
+    (False, 120, False, 1, False),
     (False, 119, False, 1, True),
 ])
 def test_ready_wait_review_failure_freshness(

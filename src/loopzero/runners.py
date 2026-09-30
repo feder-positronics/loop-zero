@@ -281,6 +281,17 @@ def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
     return (raw if raw.is_absolute() else cwd / raw).resolve()
 
 
+def _review_binary(family: str) -> Path:
+    """Bypass ai-accounts shims while retaining versioned CLI symlinks."""
+    for directory in os.get_exec_path():
+        candidate = Path(directory or os.curdir) / family
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            binary = candidate.resolve()
+            if binary.name != "ai-accounts":
+                return binary
+    raise RunnerMissing(f"{family}: no executable {family!r} on PATH outside ai-accounts shims")
+
+
 def _sandbox_prefix(
     family: str,
     cwd: Path,
@@ -288,10 +299,7 @@ def _sandbox_prefix(
     ro_paths: tuple[str, ...],
     auth_binds: tuple[tuple[Path, Path], ...],
 ) -> tuple[list[str], Config, Path]:
-    binary_name = shutil.which(family)
-    if binary_name is None:
-        raise RunnerMissing(f"{family}: {family!r} not found on PATH")
-    binary = Path(binary_name).resolve()
+    binary = _review_binary(family)
     config = _review_config(family, binary, ro_paths)
     if shutil.which("bwrap") is None:
         raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
