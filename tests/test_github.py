@@ -913,15 +913,19 @@ def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(
     )
 
 
-def test_readiness_missing_and_failed_checks(gh: FakeGh) -> None:
-    arm_readiness(gh, runs={"checks": "failure"})
+@pytest.mark.parametrize("failure", ["failure", "error", "cancelled", "timed_out"])
+@pytest.mark.parametrize("wait,grace", [(False, True), (True, False), (True, True)])
+def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -> None:
+    arm_readiness(gh, runs={"checks": failure})
     r = github.readiness(
-        REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD
+        REPO, github._pr_from_rest(rest_pr_json(pr_json())), "main", ("checks", "e2e"), HEAD, workflow_wait=wait, review_grace=grace
     )
     assert r.reasons == (
-        "required check 'checks' is failure",
+        f"required check 'checks' is {failure}",
         f"required check 'e2e' missing on {HEAD[:12]}",
     )
+    assert not r.ready
+    assert r.waitable_failures == ((f"required check 'checks' is {failure}",) if wait and grace else ())
 
 
 @pytest.mark.parametrize("failure", ["failure", "cancelled"])

@@ -307,50 +307,34 @@ def test_claude_bad_severity(fake_bin: Path, tmp_path: Path) -> None:
         _review("claude", tmp_path)
 
 
-def test_claude_auth_failure_text(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, "Not logged in. Please run /login", exit_code=1)
-    with pytest.raises(RunnerAuthFailed):
-        _review("claude", tmp_path)
-
-
-def test_claude_auth_failure_in_error_envelope(fake_bin: Path, tmp_path: Path) -> None:
-    env = {"type": "result", "subtype": "error", "is_error": True,
-           "result": "Invalid API key · Please run /login"}
-    _fake_claude(fake_bin, env)
+@pytest.mark.parametrize("payload,exit_code", [
+    ("Not logged in. Please run /login", 1),
+    ({"type": "result", "subtype": "error", "is_error": True,
+      "result": "Invalid API key · Please run /login"}, 0),
+])
+def test_claude_auth_failure_text_or_error_envelope(fake_bin: Path, tmp_path: Path, payload, exit_code) -> None:
+    _fake_claude(fake_bin, payload, exit_code=exit_code)
     with pytest.raises(RunnerAuthFailed):
         _review("claude", tmp_path)
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
 def test_claude_expired_oauth_envelope(fake_bin: Path, tmp_path: Path, exit_code: int) -> None:
-    envelope = {
-        "is_error": True,
-        "api_error_status": 401,
-        "terminal_reason": "api_error",
-        "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. "
-                  "Re-authenticate to continue.",
-    }
+    envelope = {"is_error": True, "api_error_status": 401, "terminal_reason": "api_error",
+                "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. "
+                          "Re-authenticate to continue."}
     _fake_claude(fake_bin, envelope, exit_code=exit_code)
     with pytest.raises(RunnerAuthFailed, match="claude: CLI is not authenticated"):
         _review("claude", tmp_path)
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
-@pytest.mark.parametrize("status", [401, 403])
-def test_claude_auth_failure_api_status(
-    fake_bin: Path, tmp_path: Path, exit_code: int, status: int,
-) -> None:
-    _fake_claude(fake_bin, {"api_error_status": status, "result": "Denied"}, exit_code=exit_code)
-    with pytest.raises(RunnerAuthFailed):
-        _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("exit_code", [0, 1])
-@pytest.mark.parametrize("result", ["Cannot authenticate", "OAuth failure", "Session expired", "401"])
-def test_claude_auth_failure_terminal_reason(
-    fake_bin: Path, tmp_path: Path, exit_code: int, result: str,
-) -> None:
-    _fake_claude(fake_bin, {"terminal_reason": "api_error", "result": result}, exit_code=exit_code)
+@pytest.mark.parametrize("envelope", [
+    {"api_error_status": status, "result": "Denied"} for status in (401, 403)
+] + [{"terminal_reason": "api_error", "result": result}
+     for result in ("Cannot authenticate", "OAuth failure", "Session expired", "401")])
+def test_claude_auth_failure_envelope(fake_bin: Path, tmp_path: Path, exit_code, envelope) -> None:
+    _fake_claude(fake_bin, envelope, exit_code=exit_code)
     with pytest.raises(RunnerAuthFailed):
         _review("claude", tmp_path)
 
@@ -373,9 +357,7 @@ def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code, st
     ("codex", "Please run codex login"),
 ])
 @pytest.mark.parametrize("exit_code", [0, 1])
-def test_auth_phrases_only_fail_on_nonzero_exit(
-    fake_bin: Path, tmp_path: Path, family: str, message: str, exit_code: int,
-) -> None:
+def test_auth_phrases_only_fail_on_nonzero_exit(fake_bin: Path, tmp_path: Path, family, message, exit_code) -> None:
     if family == "claude":
         _fake_claude(fake_bin, _claude_envelope(APPROVE, result=message), exit_code=exit_code)
     else:
@@ -411,21 +393,16 @@ def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> No
         _review("claude", tmp_path)
 
 
-@pytest.mark.parametrize(
-    "family,phrase,error",
-    [
-        ("claude", "Prompt is too long", RunnerPromptTooLong),
-        ("claude", "prompt is too long", RunnerPromptTooLong),
-        ("codex", "context_length_exceeded", RunnerPromptTooLong),
-        ("codex", "maximum context length exceeded", RunnerPromptTooLong),
-        ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong),
-        ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
-        ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
-    ],
-)
-def test_provider_errors_are_typed(
-    fake_bin: Path, tmp_path: Path, family: str, phrase: str, error: type
-) -> None:
+@pytest.mark.parametrize("family,phrase,error", [
+    ("claude", "Prompt is too long", RunnerPromptTooLong),
+    ("claude", "prompt is too long", RunnerPromptTooLong),
+    ("codex", "context_length_exceeded", RunnerPromptTooLong),
+    ("codex", "maximum context length exceeded", RunnerPromptTooLong),
+    ("codex", 'data: {"input_error_code":"input_too_large"}', RunnerPromptTooLong),
+    ("claude", "You've reached your Fable limit. Switch to another model", RunnerUsageLimit),
+    ("codex", "You've hit your usage limit. Try again at 3:05 PM.", RunnerUsageLimit),
+])
+def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phrase, error) -> None:
     if family == "claude":
         _fake_claude(fake_bin, phrase, exit_code=1)
     else:
@@ -435,12 +412,35 @@ def test_provider_errors_are_typed(
 
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
-def test_missing_binary(
-    fake_bin: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch, family: str
-) -> None:
-    monkeypatch.setenv("PATH", str(fake_bin))  # nothing else on PATH
-    with pytest.raises(RunnerMissing):
-        _review(family, git_repo)
+@pytest.mark.parametrize("mode", ["missing", "nonexecutable", "shim-only", "shim-first", "ordinary"])
+def test_reviewer_binary_selection(fake_bin: Path, git_repo: Path, monkeypatch, family, mode) -> None:
+    shim = _script(fake_bin, "ai-accounts", "exit 99")
+    if mode.startswith("shim"):
+        (fake_bin / family).symlink_to(shim)
+    elif mode == "nonexecutable":
+        _script(fake_bin, family, "exit 99").chmod(0o644)
+    real_dir = fake_bin / "versions"
+    real_dir.mkdir()
+    (fake_bin / "git").symlink_to("/usr/bin/git")
+    if mode in {"shim-first", "ordinary"}:
+        real = (_fake_claude(real_dir, _claude_envelope(APPROVE)) if family == "claude"
+                else _fake_codex(real_dir, json.dumps(APPROVE)))
+        real.rename(real_dir / "2.1.286")
+        real.symlink_to(real_dir / "2.1.286")
+        if mode == "ordinary":
+            (fake_bin / family).symlink_to(real_dir / "2.1.286")
+            real.unlink()
+            _script(real_dir, family, "exit 99")
+    monkeypatch.setenv("PATH", f"{fake_bin}:{real_dir}:/usr/bin:/bin" if mode in {"shim-first", "ordinary"} else str(fake_bin))
+    def guard(config, *args):  # Reject shim selection before any executable can run.
+        assert mode in {"shim-first", "ordinary"}
+        assert config.sandbox_ro == (str(real_dir),)
+    monkeypatch.setattr("loopzero.runners.sandbox.probe", guard)
+    if mode in {"shim-first", "ordinary"}:
+        assert _review(family, git_repo).verdict == "approve"
+    else:
+        with pytest.raises(RunnerMissing):
+            _review(family, git_repo)
 
 
 def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
@@ -466,9 +466,7 @@ def test_secrets_never_appear_in_bwrap_argv(
     assert "--clearenv" not in argv
 
 
-def test_reviewer_ro_paths_replace_binary_default(
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path
-) -> None:
+def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path, fake_bwrap: Path) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     allowed = tmp_path / "runtime"
     allowed.mkdir()
@@ -483,9 +481,7 @@ def test_reviewer_ro_paths_replace_binary_default(
     assert str(fake_bin) not in [path for pair in _pairs(argv, "--ro-bind-try") for path in pair]
 
 
-def test_missing_bwrap_fails_closed(
-    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     (fake_bin / "bwrap").unlink()
     monkeypatch.setattr(
