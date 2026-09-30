@@ -36,8 +36,9 @@ quality needs more detail.
 Run the focused test while developing. For a bug fix or behavior change, watch
 it fail on the pre-fix code for the intended regression and record that failing
 line in `.loopzero/task.md`. Coverage-only tests may pass on existing code.
-Then run the narrow neighboring suite and `loopzero check`. Keep fixtures
-minimal and deterministic and preserve the runner's exit status.
+Then run the narrow neighboring suite, commit, and run `loopzero check` on the
+clean head. Keep fixtures minimal and deterministic and preserve the runner's
+exit status.
 
 Exit when every added test protects a named contract, regression tests fail
 for the intended behavior rather than infrastructure, relevant checks pass, and
