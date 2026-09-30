@@ -38,7 +38,8 @@ when splitting work or choosing an executor.
    Failure section).
 6. Run `loopzero pr`.
 7. After `loopzero review`, fix every `critical` and `important` finding in
-   its thread, push, and rerun `loopzero check`. Every pushed head needs review, so put
+   its thread, commit, rerun `loopzero check`, and push with `loopzero pr`.
+   Every pushed head needs review, so put
    mechanical format, lint, or rename repairs in the same push as the substantive
    repairs and spend the one delta review on that head. Reply with what changed using
    `loopzero resolve <id> "<fix commit and what changed>"`; do not resolve a

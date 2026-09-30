@@ -135,9 +135,10 @@ line of output states the verdict. Report a `loopzero` outcome with its exit cod
 and that last line; never infer queue or merge state from an earlier progress line.
 
 Once the merge lands, `loopzero merge` deletes its worktree; enqueueing without
-`--wait` returns 0 without cleanup. Run it from the repository root in a subshell, `(cd <worktree> && loopzero merge --wait)`: an agent shell
-left standing in the deleted directory fails its next command with a `getcwd`
-error that looks like a failed merge.
+`--wait` returns 0 without cleanup. Run it from the repository root in a
+subshell, `(cd <worktree> && loopzero merge --wait)`: an agent shell left
+standing in the deleted directory fails its next command with a `getcwd` error
+that looks like a failed merge.
 
 Wait with `loopzero ready --wait` and `loopzero merge --wait`, never with a
 hand-written `gh` loop. Any other poll needs a deadline, visible progress,

@@ -114,7 +114,7 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 | `checks.writable` | Absolute host paths mounted read-write into the sandbox, such as a shared `~/.cache/uv`; this is a trust decision and the forbidden-path rules from `checks.ro_paths` apply. |
 | `checks.scratch` | Worktree-relative directories given a fresh writable mount per run; defaults to `.venv`, `.ruff_cache`, `.pytest_cache` and `node_modules/.cache`. |
 | `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |
-| `checks.limits` | Per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space), `processes = 512`, `file_mb = 2048` (file size); overrides must be positive integers. |
+| `checks.limits` | Per-check resource limits applied with `prlimit`, capped at the inherited hard limits: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size); overrides must be positive integers. |
 | `checks.network` | Allow network inside the sandbox; default `false`. |
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
 | `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; use `merge --wait` to enqueue and verify in one run. |

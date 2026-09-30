@@ -54,9 +54,9 @@ one.
 
 ## Review Budget
 
-- One primary review covers a head lineage. After fixes, rerun `loopzero check`,
-  reply with the fix commit in each thread, push, and request at most one delta
-  review with `loopzero review`.
+- One primary review covers a head lineage. Commit the fixes, rerun `loopzero
+  check`, push with `loopzero pr`, reply with the fix commit in each thread, and
+  request at most one delta review with `loopzero review`.
 - A delta review reads only the diff since the reviewed commit. Unresolved
   blocking threads still count unless outdated on a different head.
 - Mechanical format, lint, or rename fixes ride in the same push as the repairs;
