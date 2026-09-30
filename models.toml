@@ -4,6 +4,7 @@
 # model prices or speeds.
 # Agents read this file before delegation, check runtime support, and explicitly
 # pass the selected model and effort. This file does not launch models by itself.
+# Effort: avoid max and ultra; use xhigh only where it measurably helps.
 version = 1
 
 [profiles.fast]
@@ -14,7 +15,7 @@ effort = "xhigh"
 [[profiles.fast.alternatives]]
 provider = "anthropic"
 model = "claude-sonnet-5-5"
-effort = "low"
+effort = "medium"
 
 [profiles.standard]
 provider = "openai"
@@ -29,7 +30,7 @@ provider = "anthropic"
 model = "claude-sonnet-5-5"
 effort = "medium"
 # Sonnet 5.5 reroutes high-risk security prompts to Sonnet 5; choose another route
-# for security-sensitive work. Avoid Sonnet max and Sol ultra: both fan out to subagents.
+# for security-sensitive work.
 
 [profiles.deep]
 provider = "openai"
@@ -40,6 +41,17 @@ effort = "medium"
 provider = "anthropic"
 model = "claude-fable-5-1"
 effort = "low"
+
+# Exhaustive search for defects or gaps: thorough but noisy.
+[profiles.audit]
+provider = "openai"
+model = "gpt-6.1-sol"
+effort = "high"
+
+[[profiles.audit.alternatives]]
+provider = "openai"
+model = "gpt-6-astra"
+effort = "medium"
 
 # UI and UX design, including frontend work whose main decisions are layout,
 # interaction or visual design.
@@ -68,5 +80,5 @@ investigation = "standard"
 planning = "deep"
 architecture = "deep"
 review = "deep"
-audit = "deep" # Exhaustive search for defects or gaps; OpenAI only.
+audit = "audit" # OpenAI only.
 ui_design = "design" # Anthropic only.

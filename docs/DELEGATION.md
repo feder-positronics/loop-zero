@@ -60,7 +60,8 @@ security change may need deep reasoning; a large mechanical migration may use
 fast execution after its design is settled. Smaller models may investigate or
 summarize bounded source material when the parent can check the evidence.
 
-When scope grows or a result is unreliable, reassess the route. Fix tool and
+When scope grows or a result is unreliable, reassess the route. Check audit
+findings with the other provider before acting on them. Fix tool and
 environment failures before spending on a stronger model. Escalate substantive
 difficulty directly to a suitable profile without requiring intermediate
 attempts. Do not repeat successful work for reassurance or blindly retry failed
