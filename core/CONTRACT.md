@@ -8,7 +8,7 @@ hold all state. Nothing is recorded anywhere else.
 1. `loopzero start <task-slug>` — create a worktree and branch off the current
    base. Write `.loopzero/task.md` from the [handoff template](HANDOFF.md):
    context, problem, goal, acceptance, base SHA.
-2. Implement, then `loopzero check` — run the commands declared in
+2. Implement and commit, then `loopzero check` — run the commands declared in
    `workflow.toml` `[checks].commands` inside the sandbox described below.
    The exit code is the verdict. Nothing is signed or archived.
 3. `loopzero pr` — push and open a **draft** PR. The body is
@@ -45,8 +45,10 @@ A PR is ready when none of these hold:
 
 - A required check exited nonzero on the current head.
 - An open review thread on the PR carries an unresolved `critical` or
-  `important` finding.
+  `important` finding, unless GitHub marks the thread outdated and its marker
+  head differs from the current head.
 - The head moved after the last review.
+- The PR targets a branch other than configured `repo.base`.
 - GitHub reports the branch as `BEHIND`, unless configured Mergify mode has
   verified source-preserving integration. Mergify validates a separate integration
   candidate against the base, so base movement alone does not invalidate review
@@ -80,9 +82,11 @@ or resolve threads; branch protection and CI remain the enforced gates.
 - One primary review per head lineage, by a model family different from the
   author's when the author is known.
 - At most one delta review after fixes; it reads only the diff since the
-  reviewed commit and inherits the primary's open threads.
-- Fixes after the delta review require a fresh lineage: new commits, new
-  primary review.
+  reviewed commit. The primary's unresolved blocking threads still count unless
+  outdated on a different head.
+- Fixes after the delta review exhaust the budget. Audit the defect class, then
+  squash/amend so neither reviewed commit remains an ancestor of HEAD; the next
+  primary reviews from HEAD's merge-base with the configured base.
 - Every committed head change needs renewed review within this budget, because
   readiness requires the reviewed head to be the PR head. Batch mechanical fixes
   (format, lint, rename) into the commit the delta review will read.
@@ -103,18 +107,25 @@ Every command in `[checks].commands` runs with:
 - Environment reduced to the allowlist (`PATH HOME LANG LC_ALL TERM` default).
 
 If `bwrap` cannot run, `loopzero check` fails with `SandboxUnavailable`; it
-never runs checks unsandboxed.
+never runs checks unsandboxed. Checks and reviews recheck HEAD and dirtiness
+after running; changes during the run invalidate the result.
 
 Reviews also require `bwrap` and never fall back to the host. They receive a
-read-only worktree and Git directories, a private HOME containing only the
-selected reviewer's copied credential file, explicitly configured reviewer
-runtime paths, and network access. The sandbox bounds readable data; it cannot
-prevent the reviewer from sending readable data over the required network.
+read-only worktree and Git directories, a private HOME, reviewer runtime paths,
+and network access. Live credentials are bound read-write so OAuth refresh
+persists: Claude's config directory (`~/.claude` or `CLAUDE_CONFIG_DIR`) and
+`~/.claude.json`; Codex's `auth.json` only, under `CODEX_HOME` or `~/.codex`.
+The sandbox bounds readable data; it cannot prevent exfiltration over the
+required network.
 
 ## Failure
 
 Every command fails closed and loud: a missing tool or a nonzero exit prints
-the command and the tail of its output and stops. Nothing retries on its own.
+the command and the tail of its output and stops. GitHub reads retry transient
+failures up to three times (5/20/60 seconds), excluding rate limits; Mergify reads
+retry server errors, throttling and failed reads up to twice (2/5 seconds). The
+optional ai-accounts shim retries `loopzero` once after a usage-limit exit (4);
+everything else fails once and loud.
 
 Keep that property when chaining commands: never pipe a `loopzero` command
 into `tail`, `grep` or `head` (the filter's exit status replaces the verdict);
@@ -123,10 +134,11 @@ exit 3 (waiting) and 5 (changes requested) as outcomes, not crashes. The last
 line of output states the verdict. Report a `loopzero` outcome with its exit code
 and that last line; never infer queue or merge state from an earlier progress line.
 
-A successful `loopzero merge` deletes its worktree. Run it from the repository
-root in a subshell, `(cd <worktree> && loopzero merge --wait)`: an agent shell
-left standing in the deleted directory fails its next command with a `getcwd`
-error that looks like a failed merge.
+Once the merge lands, `loopzero merge` deletes its worktree; enqueueing without
+`--wait` returns 0 without cleanup. Run it from the repository root in a
+subshell, `(cd <worktree> && loopzero merge --wait)`: an agent shell left
+standing in the deleted directory fails its next command with a `getcwd` error
+that looks like a failed merge.
 
 Wait with `loopzero ready --wait` and `loopzero merge --wait`, never with a
 hand-written `gh` loop. Any other poll needs a deadline, visible progress,

@@ -54,14 +54,17 @@ one.
 
 ## Review Budget
 
-- One primary review covers a head lineage. After fixes, rerun `loopzero check`,
-  reply with the fix commit in each thread, push, and request at most one delta
-  review with `loopzero review`.
-- A delta review reads only the diff since the reviewed commit plus open threads.
+- One primary review covers a head lineage. Commit the fixes, rerun `loopzero
+  check`, push with `loopzero pr`, reply with the fix commit in each thread, and
+  request at most one delta review with `loopzero review`.
+- A delta review reads only the diff since the reviewed commit. Unresolved
+  blocking threads still count unless outdated on a different head.
 - Mechanical format, lint, or rename fixes ride in the same push as the repairs;
   readiness accepts only a reviewed head, so they cannot land after the review.
-- A non-mechanical fix after the delta starts a fresh lineage and primary review;
-  do not improvise extra review rounds.
+- Any fix after the delta exhausts the budget. Audit the class, then squash/amend
+  so neither reviewed commit remains an ancestor of HEAD. The next primary
+  reviews from HEAD's merge-base with the configured base; appending commits
+  does not reset the budget.
 - A fresh lineage resets the budget, not the problem. When a second review flags
   the same file or defect class again, stop patching single findings: audit the
   whole class (every caller, reader, transition) with the `deep` profile, fix it

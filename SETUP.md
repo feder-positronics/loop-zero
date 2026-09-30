@@ -80,7 +80,9 @@ the key from the Bitwarden app at the hidden setup prompt.
 ## Configure
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root and set `[repo] name`. Then:
+repository root and set `[repo] name`. `loopzero check` uses the base branch's
+`[checks]` when present: edited commands take effect after merging; `--config`
+unpins them. Then:
 
 - `[checks] commands` — must exit zero before a PR opens; for uv projects
   `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
@@ -88,9 +90,10 @@ repository root and set `[repo] name`. Then:
 - `[checks] ro_paths` — `/home` is hidden; list toolchain paths under it in
   full (`/home/<you>/.local/bin`, `/home/<you>/.local/share/uv`).
 - `[checks] writable` — the worktree is read-only except per-run scratch over
-  `[checks] scratch` (default `.venv`, `.ruff_cache`, `.pytest_cache`, created
-  as empty git-invisible dirs). List a shared cache like `~/.cache/uv` here; a
-  check can then write to it (trust). uv projects must commit `uv.lock`.
+  `[checks] scratch` (default `.venv`, `.ruff_cache`, `.pytest_cache`,
+  `node_modules/.cache`, created as empty git-invisible dirs). List a shared
+  cache like `~/.cache/uv` here; a check can then write to it (trust). uv projects
+  must commit `uv.lock`.
 - `[checks] env` — e.g. `{ UV_CACHE_DIR = "/home/<you>/.cache/uv" }`; wins over
   sandbox defaults and host variables. `PATH` and `HOME` cannot be overridden.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime
@@ -233,13 +236,18 @@ the two systemd units to `~/.config/systemd/user/`, then
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
 $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
 # ...make a small change and add a test...
+git add . && git commit -m "Describe the change"
 loopzero check                        # exit 0, or FAIL; renders the PR Validation section when open
 loopzero pr                           # draft PR opens; URL printed
 loopzero review                       # model review posted on the PR
-loopzero check && loopzero review     # after fixing blocking threads: delta review
+
+# If blocking threads need fixes, apply them, then:
+git add . && git commit -m "Fix review findings"
+loopzero check && loopzero pr && loopzero review  # push fixes, then delta review
 loopzero ready --wait                 # waits for required CI, then marks the PR ready
-loopzero merge --wait                 # merges (following a merge queue), deletes branch and worktree
-loopzero status                       # at any point: next step and why
+loopzero status                       # next step and why
+cd <repository-root>
+(cd <worktree> && loopzero merge --wait)  # landed merge deletes branch and worktree
 ```
 
 ## Merging under a merge queue
@@ -250,7 +258,9 @@ exits after printing that it is queued, and a later `loopzero merge` verifies th
 merge commit, deletes the remote branch and removes the worktree. The
 repository must allow auto-merge (Settings, General, "Allow auto-merge"),
 otherwise `gh pr merge` fails with "Auto merge is not allowed". Set
-`delivery.merge = "queue"` so the queue owns the merge method.
+`delivery.merge = "queue"` so the queue owns the merge method. On an already
+merged PR, rerunning `merge` attempts remote branch and worktree cleanup again;
+cleanup failures print warnings.
 
 ### Mergify
 

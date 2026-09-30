@@ -33,14 +33,15 @@ quality needs more detail.
 
 ## Validate And Exit
 
-Run the focused test while developing and watch it fail on the pre-fix code
-for the intended bad behavior; record that failing line in `.loopzero/task.md`.
-A test never seen failing is not yet proof. Then run the narrow neighboring suite and
-`loopzero check`. Keep fixtures minimal and deterministic and preserve the
-runner's exit status.
+Run the focused test while developing. For a bug fix or behavior change, watch
+it fail on the pre-fix code for the intended regression and record that failing
+line in `.loopzero/task.md`. Coverage-only tests may pass on existing code.
+Then run the narrow neighboring suite, commit, and run `loopzero check` on the
+clean head. Keep fixtures minimal and deterministic and preserve the runner's
+exit status.
 
-Exit when every added test protects a named contract, fails for the intended
-regression rather than infrastructure, relevant checks pass, and the added
-brittleness is lower than the risk protected. Record commands and results in
-`.loopzero/task.md`; use [implement](../implement/SKILL.md) if production
-behavior must change.
+Exit when every added test protects a named contract, regression tests fail
+for the intended behavior rather than infrastructure, relevant checks pass, and
+the added brittleness is lower than the risk protected. Record commands and
+results in `.loopzero/task.md`; use [implement](../implement/SKILL.md) if
+production behavior must change.

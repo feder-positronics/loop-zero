@@ -10,8 +10,7 @@ findings. Do not edit the reviewed tree.
 
 Read [the contract](../../CONTRACT.md), the PR body, the full diff, and enough
 surrounding code to judge the change. Confirm the exact head before reviewing.
-For a delta review, read only the diff since the reviewed commit plus its open
-threads.
+For a delta review, read only the diff since the reviewed commit.
 
 ## Judge
 

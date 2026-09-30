@@ -1,6 +1,6 @@
 # Docs
 
-Start with the top-level files; this directory only holds the contributor spec.
+Start with the top-level files for delivery and setup.
 
 - [../README.md](../README.md) — what loop-zero is, the six commands, adoption.
 - [../SETUP.md](../SETUP.md) — prerequisites, install from a SHA, connect agent
@@ -13,10 +13,7 @@ Start with the top-level files; this directory only holds the contributor spec.
 - [../core/skills/](../core/skills) — 19 core skills; start with `plan`,
   `implement`, `work-issue`, or `write-design-doc`.
 - [../integrations/](../integrations/) — optional vendor integration skills.
-- [REWRITE-SPEC.md](REWRITE-SPEC.md) — module map, shared types, budgets, and
-  rules for anyone changing `src/`.
-- [design/2026-09-18-feature-plan.md](design/2026-09-18-feature-plan.md) —
-  post-rewrite feature plan with one design note per selected change.
+- [REWRITE-SPEC.md](REWRITE-SPEC.md) — module map and live contributor references.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
   system view of feedback placement, state writes, identity and failure
   handling, with principles, owners and delivery metrics.
