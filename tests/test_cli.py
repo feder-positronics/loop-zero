@@ -505,9 +505,9 @@ def test_pr_refuses_missing_context_problem_or_goal(
     assert gh.calls == []
 
 
-def test_pr_accepts_angle_brackets_inside_filled_text(wt: Path) -> None:
+def test_pr_accepts_angle_brackets_and_sublists_as_filled_text(wt: Path) -> None:
     task = wt / ".loopzero" / "task.md"
-    task.write_text(task.read_text().replace("prints its greeting.", "maps <PMID> via `Pick<T>`."))
+    task.write_text(task.read_text().replace("The feature", "\n  - maps <PMID> via `Pick<T>`, then"))
     cli._require_pr_details(wt)
 
 
