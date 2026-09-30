@@ -25,7 +25,9 @@ not parse it, and it does not change the running parent model or configure
    configured alternative when the user asks for that provider/model or the
    runtime requires it. Alternatives are explicit choices, not automatic
    retries. If several entries match, identify the intended model as well as
-   its provider; do not silently pick the first match.
+   its provider; do not silently pick the first match. Provider preferences
+   commented in `models.toml` limit that choice; follow them unless the user
+   explicitly asks otherwise.
 3. Check model and effort support against the runtime's actual capabilities.
    `openai` and `anthropic` identify providers, not executable names. Native
    subagents or supported provider CLIs are execution mechanisms; a tool's
