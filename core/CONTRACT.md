@@ -80,7 +80,9 @@ or resolve threads; branch protection and CI remain the enforced gates.
 ## Review budget
 
 - One primary review per head lineage, by a model family different from the
-  author's when the author is known.
+  author's when the author is known. Every AI-authored head commit, including
+  repairs and squash/amend replacements, keeps a truthful `Co-Authored-By`
+  trailer naming the authoring model; without it the author is unknown.
 - At most one delta review after fixes; it reads only the diff since the
   reviewed commit. The primary's unresolved blocking threads still count unless
   outdated on a different head.

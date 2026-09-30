@@ -105,7 +105,7 @@ Allowed paths: <paths the delegate may change>
 Acceptance evidence: <observable evidence required for each criterion>
 Model/effort: <selection resolved from models.toml>
 Effort policy: Children inherit this policy; do not raise effort or launch a stronger model without returning to the parent.
-Delegate verification: <focused tests for the changed behavior, runnable in the delegate sandbox; wait on long commands with a blocking call, not second-by-second polls>
+Delegate verification: <focused tests for the changed behavior, runnable in the delegate sandbox; wait on long commands with a blocking call (Codex: yield at least 30 s), not second-by-second polls>
 Parent verification: <broad suites and `loopzero check`, which the parent runs once; the delegate does not repeat them or start its own reviewers>
 Return conditions: <when to stop and return an unresolved question>; a progress summary is not a stop: continue until the acceptance evidence exists or a named blocker needs the parent
 Final report: <changed files, evidence, check results, deviations, open questions>
@@ -119,9 +119,11 @@ Bound size in the plan, not the brief: split oversized scope into separate tasks
 up front rather than telling a delegate to stop at a line count. Continue an
 unfinished delegate by resuming its session (for example `codex exec resume`)
 rather than starting a fresh one that re-reads everything. Delegate verification
-matches what CI will run, coverage gates included, against a freshly fetched
-base; when the sandbox leaves a tool cache read-only, the brief points it at
-scratch (for example `UV_CACHE_DIR=/tmp/uv-cache`).
+runs the focused owning tests and applicable coverage checks specified in the
+brief; the parent runs required broad verification once against the delivery
+base. When a delegate needs a shared tool cache, grant exactly that directory
+(`--add-dir ~/.cache/uv`); never point caches at shared `/tmp`, whose inodes
+fill and stop every session on the host.
 
 A subagent's own background agents may report to the top-level session instead
 of that subagent. Have subagents run their reviewers in the foreground, or
@@ -146,10 +148,11 @@ delivery milestone or once its context passes roughly 300k tokens; do not reuse
 a finished delivery session for monitoring or unrelated follow-ups.
 
 The parent reads the returned diff or evidence and verifies acceptance. Worker
-claims of success are not proof. Before accepting a writing delegate's result,
-run the suite once with a bare `PATH` that excludes reviewer binaries to catch
-accidental dependencies on host tools. Only the sandboxed `loopzero check` report
-counts as delivery proof; continue through the [contract](../core/CONTRACT.md).
+claims of success are not proof. The parent runs `loopzero check` once; if its
+declared checks do not isolate the change from host tools, run a focused
+restricted-PATH probe and report that limitation. Only the sandboxed `loopzero
+check` report counts as delivery proof; continue through the
+[contract](../core/CONTRACT.md).
 The review profile does not replace independent-review requirements.
 `loopzero review` continues to own formal delivery review and its review budget.
 A model upgrade never changes tool permissions, isolation, checks, or merge
