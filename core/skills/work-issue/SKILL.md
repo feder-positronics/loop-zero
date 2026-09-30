@@ -30,12 +30,13 @@ when splitting work or choosing an executor.
 
 ## Deliver
 
-4. Implement only the accepted scope, add proof for its behavior, and run
-   `loopzero check`. Fix failures without weakening the configured checks. Read
-   [the delivery safeguards](reference.md) for conditional API, fresh-stack,
-   documentation, blueprint, re-entry, and closeout requirements.
-5. Commit the bounded change, then run `loopzero pr` to push and open the draft
-   PR. Before publication, repeat the duplicate check; stop and reconcile if a
+4. Implement only the accepted scope, add proof for its behavior, and commit
+   the bounded change. Read [the delivery safeguards](reference.md) for
+   conditional API, fresh-stack, documentation, blueprint, re-entry, and
+   closeout requirements.
+5. Run `loopzero check` on the clean committed head; fix failures without
+   weakening the configured checks. Then run `loopzero pr` to push and open the
+   draft PR. Before publication, repeat the duplicate check; reconcile if a
    competing delivery appeared.
 6. Run `loopzero review` for the independent primary review. Address every open
    `critical` and `important` thread, reply with the fix commit, rerun

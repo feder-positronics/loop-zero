@@ -38,14 +38,16 @@ Validation section. Human validation notes and review summaries survive refreshe
 Check timings remain in terminal output, so duration changes alone do not rewrite
 the PR and retrigger policy CI. Keep human evidence outside the checks markers.
 
-Running `pr` again explicitly publishes task.md's title and narrative sections.
+Running `pr` again publishes task.md's narrative sections; the PR title stays
+unchanged.
 The live PR owns Validation and Review, and sections absent from task.md are kept.
 Edit validation evidence on GitHub after creation; keep acceptance changes in
 both task.md (the reviewer's task context) and the PR by rerunning `pr`.
 
-GitHub reviews include at most the last 30,000 UTF-8 bytes of raw reviewer output,
-with a truncation notice for longer transcripts. Verdicts and findings remain
-complete. The full transcript stays in the saved local
+Review headers record the model and duration; saved artifacts preserve them for
+`--repost`. GitHub reviews include at most the last 30,000 UTF-8 bytes of raw
+reviewer output, with a truncation notice for longer transcripts. Verdicts and
+findings remain complete. The full transcript stays in the saved local
 `.loopzero/review-<head>-<kind>.json` artifact; `loopzero review --repost` uses that
 artifact without rerunning the model.
 
@@ -112,10 +114,12 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 | `checks.writable` | Absolute host paths mounted read-write into the sandbox, such as a shared `~/.cache/uv`; this is a trust decision and the forbidden-path rules from `checks.ro_paths` apply. |
 | `checks.scratch` | Worktree-relative directories given a fresh writable mount per run; defaults to `.venv`, `.ruff_cache`, `.pytest_cache` and `node_modules/.cache`. |
 | `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |
+| `checks.limits` | Per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space), `processes = 512`, `file_mb = 2048` (file size); overrides must be positive integers. |
 | `checks.network` | Allow network inside the sandbox; default `false`. |
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
 | `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; use `merge --wait` to enqueue and verify in one run. |
 | `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`); when the author family is known, `review` only uses a different family. |
+| `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
 | `delivery.reviewer_ro_paths` | Absolute reviewer CLI/runtime paths mounted read-only. Defaults to the resolved directory of the selected reviewer binary; list an npm or bun prefix for Claude when needed. |
 
 ## What it deliberately does not do
@@ -133,13 +137,12 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 
 ## Layout
 
-- [core/CONTRACT.md](core/CONTRACT.md) — the rules, under 80 lines.
+- [core/CONTRACT.md](core/CONTRACT.md) — the delivery rules.
 - [core/HANDOFF.md](core/HANDOFF.md) — the task file and PR body template.
 - [core/skills/](core/skills) — core agent skills and their routing.
 - [integrations/](integrations/) — optional vendor integration skills.
 - [SETUP.md](SETUP.md) — install, configure, first run.
-- [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — module map and shared types
-  for contributors.
+- [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — module map and links for contributors.
 
 ## License
 

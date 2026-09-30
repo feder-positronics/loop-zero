@@ -18,7 +18,7 @@ commands = ["uv run --group dev ruff check .", "uv run --group dev pytest -q"]
 # This is the default list; checks cannot write anywhere else in the tree.
 # Entries are pre-created as empty directories in the worktree (git-invisible).
 # uv projects need a committed uv.lock, since uv cannot write one in there.
-scratch = [".venv", ".ruff_cache", ".pytest_cache"]
+scratch = [".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache"]
 
 # Environment variables set inside the sandbox. Entries win over sandbox
 # defaults and host variables; PATH and HOME cannot be overridden.

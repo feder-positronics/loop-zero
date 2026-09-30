@@ -26,17 +26,17 @@ when splitting work or choosing an executor.
    internal steps used by the code. A regression test counts only after you
    watched it fail on the pre-fix code; record that failing output line in
    `.loopzero/task.md` Notes. A test that passes without the fix proves nothing.
-4. Run focused checks while iterating, then `loopzero check` before pushing.
-   Fix nonzero exits; do not edit the
-   check list to make them pass. Running the test command directly is for
-   iteration only: the sandbox hides host tools that CI also lacks, so only
+4. Run focused checks while iterating. Commit in small steps with messages that
+   state what changed; keep the diff free of unrelated formatting churn. Fill
+   `.loopzero/task.md` Notes with trade-offs and deliberately skipped work
+   before committing.
+5. Run `loopzero check` on the clean committed head before pushing. Fix
+   nonzero exits; do not edit the check list to make them pass. Running the
+   test command directly is for iteration only: the sandbox hides host tools that CI also lacks, so only
    the `loopzero check` report counts as proof. Never filter a `loopzero`
    command through a pipe; its exit code is the verdict (see the contract's
    Failure section).
-5. Commit in small steps with messages that state what changed. Keep the
-   diff free of unrelated formatting churn.
-6. Fill Notes in `.loopzero/task.md` with trade-offs and deliberately skipped
-   work, then run `loopzero pr`.
+6. Run `loopzero pr`.
 7. After `loopzero review`, fix every `critical` and `important` finding in
    its thread, push, and rerun `loopzero check`. Every pushed head needs review, so put
    mechanical format, lint, or rename repairs in the same push as the substantive

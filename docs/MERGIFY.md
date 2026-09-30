@@ -104,8 +104,7 @@ lineages retain the existing behavior. Squashed parents can pass; unavailable li
 predecessors behind a missing batch and unrelated main advances may still reject.
 The fallback requires Linux `prlimit` and Git with `merge-tree --write-tree`; it
 is bounded to 32 sources, 100,000 reachable objects, 256 MiB on disk, 8 MiB command
-output, 1 GiB address space per Git process, history depth 200 and 120 seconds of
-Git work.
+output, history depth 200 and 120 seconds of Git work.
 
 ## Reviewed protection proposal
 
