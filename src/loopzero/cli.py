@@ -247,7 +247,8 @@ def _readiness(
         workflow_wait=workflow_wait,
     )
     report = _load_report(wt)
-    if report is None or report.head != head or report.dirty or not report.ok:
+    if (report is None or report.head != head or report.dirty or not report.ok
+            or tuple(result.command for result in report.results) != config.checks):
         result = github.Readiness(
             ready=False, reasons=(*result.reasons, "run loopzero check at this head")
         )
@@ -600,28 +601,29 @@ def _run_review(
     for family in candidates:
         selected_model, selected_effort = selected[family]
         try:
-            result = runners.review_with(
-                family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task,
-                reviewer_ro_paths=config.reviewer_ro_paths,
-                model=selected_model, effort=selected_effort,
-            )
-            break
-        except runners.RunnerPromptTooLong:
-            chunks = runners.split_diff(diff, config.review_chunk_bytes)
-            print(
-                f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
-                file=sys.stderr,
-            )
-            chunk_results = [
-                runners.review_with(
-                    family, cwd=wt, head=head, kind=kind, diff=chunk, task_text=task,
+            try:
+                result = runners.review_with(
+                    family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task,
                     reviewer_ro_paths=config.reviewer_ro_paths,
                     model=selected_model, effort=selected_effort,
                 )
-                for chunk in chunks
-            ]
-            result = runners.merge_reviews(chunk_results)
-            break
+                break
+            except runners.RunnerPromptTooLong:
+                chunks = runners.split_diff(diff, config.review_chunk_bytes)
+                print(
+                    f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
+                    file=sys.stderr,
+                )
+                chunk_results = [
+                    runners.review_with(
+                        family, cwd=wt, head=head, kind=kind, diff=chunk, task_text=task,
+                        reviewer_ro_paths=config.reviewer_ro_paths,
+                        model=selected_model, effort=selected_effort,
+                    )
+                    for chunk in chunks
+                ]
+                result = runners.merge_reviews(chunk_results)
+                break
         except RUNNER_FAILURES as exc:
             reason = str(exc).splitlines()[0]
             detail = "\n".join(str(exc).splitlines()[:3])
@@ -837,6 +839,7 @@ def _wait_for_mergify(
     started = time.monotonic()
     queue = config.mergify_queue
     assert queue is not None
+    print(f"PR #{pr.number} in Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
@@ -925,9 +928,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
-        print(sha)
         _delete_remote_branch(config, branch)
         _cleanup(wt)
+        print(sha)
         return 0
     if config.merge_strategy == "mergify":
         sha = _merge_with_mergify(wt, config, branch, pr, readiness, args.wait)
@@ -936,9 +939,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 print(f"timed out waiting for Mergify to land PR #{pr.number}")
                 return 3
             return 0
-        print(sha)
         _delete_remote_branch(config, branch)
         _cleanup(wt)
+        print(sha)
         return 0
     if not readiness.ready:
         hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness) else ""
@@ -955,9 +958,9 @@ def cmd_merge(args: argparse.Namespace) -> int:
             "next: loopzero merge --wait follows the queue, verifies and cleans up"
         )
         return 0
-    print(sha)
     _delete_remote_branch(config, branch)
     _cleanup(wt)
+    print(sha)
     return 0
 
 

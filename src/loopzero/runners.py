@@ -817,13 +817,3 @@ def author_family(cwd: Path, head: str) -> str | None:
         if family:
             return family
     return None
-
-
-def pick_reviewer(preferences: tuple[str, ...], author: str | None) -> str:
-    """Pick the first preferred family that differs from ``author``."""
-    if not preferences:
-        raise ValueError("no reviewer preferences configured")
-    for family in preferences:
-        if family != author:
-            return family
-    raise ValueError(f"no independent reviewer configured for author family {author}")

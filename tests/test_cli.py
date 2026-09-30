@@ -123,7 +123,8 @@ def arm_readiness(
         {"name": "checks", "status": "completed", "conclusion": conclusion}]})
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
     cli._save_report(
-        wt, CheckReport(head, dirty, (CheckResult("echo ok", local_exit, 0.1, ""),))
+        wt, CheckReport(head, dirty, tuple(
+            CheckResult(command, local_exit, 0.1, "") for command in ("echo ok", "test -f README.md")))
     )
 
 
@@ -848,21 +849,23 @@ def test_repost_refuses_hand_written_review(wt: Path, gh: FakeGh, capsys) -> Non
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
 
 
+@pytest.mark.parametrize("chunk_auth", [False, True])
 def test_review_chunks_oversized_diff_with_same_family(
-    wt: Path, gh: FakeGh, fake_tool, capsys
+    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth
 ) -> None:
     workflow = (wt / "workflow.toml").read_text().replace(
         'reviewers = ["claude", "codex"]',
-        'reviewers = ["claude", "codex"]\nreview_chunk_bytes = 160',
+        'reviewers = ["claude", "codex"]\nreview_chunk_bytes = 4096',
     )
     (wt / "workflow.toml").write_text(workflow)
     for name in ("large_a.py", "large_b.py"):
-        (wt / name).write_text("x = 1\n" * 30)
+        (wt / name).write_text("x = 1\n" * 900)
     git(wt, "add", "workflow.toml", "large_a.py", "large_b.py")
     git(wt, "commit", "-q", "-m", "large review")
     head = head_of(wt)
     arm_empty_primary_review_post(gh, head, 8)
     envelope = json.dumps(_claude_envelope(APPROVE))
+    _fake_codex(fake_bin, json.dumps(APPROVE))
     fake_tool("claude", f"""
         input=$(mktemp)
         cat > "$input"
@@ -870,12 +873,16 @@ def test_review_chunks_oversized_diff_with_same_family(
             echo 'Prompt is too long' >&2
             exit 1
         fi
+        {"echo 'not authenticated' >&2; exit 1" if chunk_auth else ""}
         echo '{envelope}'
     """)
 
     code, out, err = run(capsys, "review")
 
-    assert code == 0 and "review by claude" in out
+    assert code == 0 and f"review by {'codex' if chunk_auth else 'claude'}" in out
+    if chunk_auth:
+        assert "trying next" in err and "CLI is not authenticated" in err
+        return
     assert "reviewing" in err and "chunks" in err
     payload = json.loads(next(
         c["--input"] for c in reversed(gh.calls)
@@ -1451,7 +1458,7 @@ def test_ready_non_draft_with_skipped_required_check_refuses(
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty"])
+@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands"])
 def test_ready_requires_clean_successful_local_report_at_head(
     wt: Path, gh: FakeGh, capsys, condition: str
 ) -> None:
@@ -1465,9 +1472,12 @@ def test_ready_requires_clean_successful_local_report_at_head(
     report_path = wt / ".loopzero" / "checks.json"
     if condition == "missing":
         report_path.unlink()
-    elif condition == "wrong-head":
+    elif condition in {"wrong-head", "wrong-commands"}:
         report = json.loads(report_path.read_text())
-        report["head"] = "0" * 40
+        if condition == "wrong-head":
+            report["head"] = "0" * 40
+        else:
+            report["results"][0]["command"] = "true"
         report_path.write_text(json.dumps(report))
     code, out, _ = run(capsys, "ready")
     assert code == 1
@@ -1537,7 +1547,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
         assert code == 1 and "head changed" in err and wt.exists()
         assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
         return
-    assert (code, out, err) == (0, f"{'c' * 40}\ncd {repo}\n", "")
+    assert (code, out, err) == (0, f"cd {repo}\n{'c' * 40}\n", "")
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
     assert "--squash" in merge and merge[merge.index("--match-head-commit") + 1] == head
     assert not wt.exists()
@@ -1570,7 +1580,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     if state == "wrong_primary":
         assert code == 1 and "does not own this linked worktree" in err
     else:
-        assert code == 0 and out.endswith(f"cd {primary}\n"), (out, err)
+        assert code == 0 and out.endswith(f"cd {primary}\n{'c' * 40}\n"), (out, err)
         assert ("worktree is dirty" in err) if state == "dirty" else not err
     assert linked.exists() is (state != "clean")
     assert bool(git(primary, "branch", "--list", "lz/bare")) is (state != "clean")
@@ -1586,7 +1596,7 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("worktree is dirty")))
     code, out, err = run(capsys, "merge")
-    assert code == 0 and out.splitlines()[0] == "d" * 40
+    assert code == 0 and out.splitlines()[-1] == "d" * 40
     assert err.startswith("warning: merged but worktree cleanup failed")
 
 
@@ -1730,7 +1740,7 @@ def test_merge_of_externally_merged_pr_verifies_sha_and_cleans_up(
         assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
         return
     assert (code, err) == (0, "")
-    assert out.splitlines()[-1] == f"cd {repo}"
+    assert out.splitlines()[-1] == "e" * 40
     assert f"PR #7 was already merged as {'e' * 12}" in out and "e" * 40 in out
     assert not wt.exists()
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
@@ -1835,7 +1845,7 @@ def test_merge_waits_for_queue_then_cleans_up(
     code, out, err = run(capsys, "merge", "--wait")
 
     assert (code, err) == (0, "") and "e" * 40 in out
-    assert "PR #7 is queued for merge into main; waiting" in out and out.splitlines()[-1] == f"cd {repo}"
+    assert "PR #7 is queued for merge into main; waiting" in out and out.splitlines()[-1] == "e" * 40
     assert not wt.exists()
 
 
@@ -2066,6 +2076,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     monkeypatch.setattr(cli, "_sleep", sleeps.append)
     code, out, err = run(capsys, "merge", "--wait=250" if outcome == "timeout" else "--wait=0")
     if outcome == "timeout":
+        assert f"Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 2
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
