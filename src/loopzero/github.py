@@ -721,7 +721,13 @@ def readiness(
             reasons.append(f"required check '{name}' is {conclusion}")
     return Readiness(ready=not reasons, reasons=tuple(reasons),
                      waitable_failures=tuple(f"required check '{name}' is {checks[name]}"
-                                             for name in required_ci if name in stale))
+                                             for name in required_ci
+                                             if name in stale or (
+                                                 workflow_wait and review_grace
+                                                 and checks.get(name) in {
+                                                     "failure", "error", "cancelled", "timed_out"
+                                                 }
+                                             )))
 
 
 def mark_ready(repo: str, number: int) -> None:
