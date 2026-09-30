@@ -19,7 +19,7 @@ ro_paths = ["/nonexistent/cache", "/tmp/whatever/../cache"]
 writable = ["/home/me/.cache/uv"]
 scratch = [".venv"]
 env = { UV_CACHE_DIR = "/home/me/.cache/uv", UV_PYTHON_DOWNLOADS = "never" }
-limits = { memory_mb = 1024, processes = 64, file_mb = 512 }
+limits = { memory_mb = 1024, file_mb = 512 }
 
 [delivery]
 merge = "rebase"
@@ -57,7 +57,7 @@ def test_load_full_config(tmp_path):
         writable=("/home/me/.cache/uv",),
         scratch=(".venv",),
         env=(("UV_CACHE_DIR", "/home/me/.cache/uv"), ("UV_PYTHON_DOWNLOADS", "never")),
-        limits=ResourceLimits(memory_mb=1024, processes=64, file_mb=512),
+        limits=ResourceLimits(memory_mb=1024, file_mb=512),
     )
 
 
@@ -76,7 +76,7 @@ def test_load_applies_defaults(tmp_path):
     assert loaded.sandbox_ro == () and loaded.writable == ()
     assert loaded.reviewer_ro_paths == ()
     assert loaded.scratch == (".venv", ".ruff_cache", ".pytest_cache", "node_modules/.cache")
-    assert loaded.limits == ResourceLimits(memory_mb=4096, processes=512, file_mb=2048)
+    assert loaded.limits == ResourceLimits(memory_mb=4096, file_mb=2048)
 
 
 def test_mergify_delivery_requires_and_loads_queue(tmp_path):
@@ -121,7 +121,8 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\nbase = ""\n', "repo.base must not be empty"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewers = []\n', "at least one reviewer"),
         ('[repo]\nname = "o/n"\n[delivery]\nreviewer_ro_paths = ["relative"]\n', "must be absolute"),
-        ('[repo]\nname = "o/n"\n[delivery]\nreview_chunk_bytes = 0\n', "positive int"),
+        *[(f'[repo]\nname = "o/n"\n[delivery]\nreview_chunk_bytes = {value}\n', "int >= 4096")
+          for value in (0, 1, 4095)],
         ('[repo]\nname = "o/n"\n[delivery.review.codex]\nmode = "x"\n',
          "unknown key\\(s\\) in \\[delivery.review.codex\\]: mode"),
         ('[repo]\nname = "o/n"\n[delivery.review.codex]\nallowed_efforts = [1]\n',
@@ -140,8 +141,6 @@ def test_invalid_toml(tmp_path):
         ('[repo]\nname = "o/n"\n[checks]\nlimits = 1\n', "checks.limits must be a dict"),
         ('[repo]\nname = "o/n"\n[checks]\nlimits = { memory_mb = 0 }\n',
          "checks.limits.memory_mb must be a positive int"),
-        ('[repo]\nname = "o/n"\n[checks]\nlimits = { processes = true }\n',
-         "checks.limits.processes must be a positive int"),
         ('[repo]\nname = "o/n"\n[checks]\nlimits = { cpu = 1 }\n',
          "unknown key\\(s\\) in checks.limits: cpu"),
     ],

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import shlex
+import resource
 import shutil
 import tempfile
 from contextlib import ExitStack
@@ -124,21 +124,21 @@ def _validate_scratch(
                 raise SandboxUnavailable(f"scratch destination has symlink component: {entry!r}")
 
 
+def _cap_limit(requested: int, resource_limit: int) -> int:
+    hard = resource.getrlimit(resource_limit)[1]
+    return requested if hard == resource.RLIM_INFINITY else min(requested, hard)
+
+
 def _run_one(
     config: Config, worktree: Path, prefix: list[str], command: str, timeout: float
 ) -> CheckResult:
     try:
         limits = config.limits
-        limited = "; ".join(
-            (
-                f"ulimit -v {limits.memory_mb * 1024}",
-                f"ulimit -u {limits.processes} 2>/dev/null",
-                f"ulimit -f {limits.file_mb * 1024}",
-                f"exec /bin/sh -c {shlex.quote(command)}",
-            )
-        )
         done = _proc.run(
-            [*prefix, "/bin/sh", "-c", limited],
+            [*prefix, "prlimit",
+             f"--as={_cap_limit(limits.memory_mb * 1024 * 1024, resource.RLIMIT_AS)}",
+             f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
+             "--", "/bin/sh", "-c", command],
             cwd=worktree,
             env_allowlist=config.env_allowlist,
             timeout=timeout,

@@ -153,8 +153,8 @@ def _build(data: dict[str, Any]) -> Config:
                 f"delivery.reviewers entries must be in {REVIEWER_FAMILIES}, got {reviewer!r}"
             )
     review_chunk_bytes = delivery.get("review_chunk_bytes", 200_000)
-    if isinstance(review_chunk_bytes, bool) or review_chunk_bytes <= 0:
-        raise ConfigError("delivery.review_chunk_bytes must be a positive int")
+    if isinstance(review_chunk_bytes, bool) or review_chunk_bytes < 4096:
+        raise ConfigError("delivery.review_chunk_bytes must be an int >= 4096")
     review: dict[str, ReviewConfig] = {}
     for family, table in delivery.get("review", {}).items():
         if family not in REVIEWER_FAMILIES:

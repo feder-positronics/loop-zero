@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import os
+import resource
 import shutil
 import subprocess
 import tempfile
@@ -124,8 +125,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert ("--dev", "/dev") in windows and ("--proc", "/proc") in windows
     assert head[head.index("--chdir") + 1] == str(git_repo)
     setenv = dict(_pairs(head, "--setenv"))
-    assert setenv["PATH"] == os.environ["PATH"]
-    assert setenv["LZ_KEEP"] == "kept"
+    assert setenv["PATH"] == os.environ["PATH"] and setenv["LZ_KEEP"] == "kept"
     assert "LZ_DROP" not in setenv
     assert setenv["HOME"] == sandbox.SANDBOX_HOME
     assert setenv["UV_CACHE_DIR"] == "/tmp/uv-cache" and setenv["PYTHONDONTWRITEBYTECODE"] == "1"
@@ -143,11 +143,9 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert sandbox.run_checks(make_config(), git_repo).dirty is False
     # /tmp tmpfs comes before the worktree bind so a worktree under /tmp stays visible.
     assert head.index("--tmpfs") < head.index(str(git_repo))
-    assert tail[:2] == ["/bin/sh", "-c"]
-    assert tail[2] == (
-        "ulimit -v 4194304; ulimit -u 512 2>/dev/null; ulimit -f 2097152; "
-        "exec /bin/sh -c 'echo hello'"
-    )
+    assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
+                    f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
+                    "--", "/bin/sh", "-c", "echo hello"]
 
 
 def test_probe_uses_real_flags(git_repo, bwrap_log):
@@ -208,13 +206,15 @@ def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
     assert "timed out" in first.tail and not report.ok
 
 
-def test_configured_resource_limits_are_converted_to_shell_units(git_repo, bwrap_log):
-    limits = ResourceLimits(memory_mb=64, processes=7, file_mb=3)
+def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
+    limits = ResourceLimits(memory_mb=64, file_mb=3)
+    monkeypatch.setattr(resource, "getrlimit", lambda _: (0, 32 * 1024 * 1024))
     sandbox.run_checks(make_config(limits=limits), git_repo)
-    command = argv_of(bwrap_log)[-1]
-    assert "ulimit -v 65536" in command
-    assert "ulimit -u 7" in command
-    assert "ulimit -f 3072" in command
+    argv = argv_of(bwrap_log)
+    assert argv[argv.index("--") + 1:] == [
+        "prlimit", "--as=33554432", "--fsize=3145728",
+        "--", "/bin/sh", "-c", "echo hello",
+    ]
 
 
 def test_linked_worktree_binds_common_git_dir(git_repo, bwrap_log, tmp_path):

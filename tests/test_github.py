@@ -174,24 +174,6 @@ class FakeGh:
         plan.pop("compat", None)
         self.scenario_file.write_text(json.dumps(plan))
 
-    def load_scenario(
-        self, scenario: str, replacements: dict[str, str] | None = None
-    ) -> None:
-        """Load one redacted recorder fixture as the next strict interaction."""
-        fixture = Path(__file__).parent / "fixtures" / "gh" / f"{scenario}.json"
-        text = fixture.read_text()
-        for old, new in (replacements or {}).items():
-            text = text.replace(old, new)
-        data = json.loads(text)
-        argv = ["<temp-file>" if arg.startswith("<TEMP_FILE") else arg
-                for arg in data["argv"]]
-        self.expect(
-            argv,
-            {"stdout": data["stdout"], "stderr": data["stderr"],
-             "exit_code": data["exit_code"]},
-            input_files=data.get("input_files", {}),
-        )
-
     def assert_complete(self) -> None:
         plan = json.loads(self.scenario_file.read_text())
         expected = len(plan.get("strict", []))
