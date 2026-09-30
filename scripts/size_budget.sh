@@ -15,7 +15,7 @@ count_base() {
 # The candidate is the working tree, so uncommitted and new files count too.
 count_tree() {
   git -c core.quotepath=off ls-files -zco --exclude-standard -- "$1" | { grep -z '\.py$' || true; } \
-    | xargs -0 -r cat -- | wc -l
+    | xargs -0 -r sh -ec 'for f; do if [ -f "$f" ]; then cat -- "$f"; fi; done' _ | wc -l
 }
 status=0
 report() { # name dir cap
