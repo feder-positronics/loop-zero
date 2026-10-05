@@ -64,8 +64,9 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
         "untrusted": {"user": {"login": "attacker"}}, "stale": {"commit_id": "b" * 40},
         "malformed": {"body": "<!-- loopzero:review invalid -->\n**approve**"}, "revoked": {"state": "DISMISSED"},
     }.get(case, {})
-    reviews = [] if case == "absent" else ([review | {"state": "APPROVED"}]
-                                          if case == "revoked" else []) + [review | changed]
+    reviews = [] if case == "absent" else [review | changed]
+    if case == "revoked":
+        reviews.insert(0, review | {"state": "APPROVED"})
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
     if blocker == "conflict":
         publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json(mergeable="CONFLICTING")))

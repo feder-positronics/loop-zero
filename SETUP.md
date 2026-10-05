@@ -338,6 +338,9 @@ python -m loopzero.eligibility --config workflow.toml --pr 123 --head <full-sour
 Give that process pull-request read and commit-status write access.
 It posts `Loop-zero Eligibility` as pending before reading live reviews/threads,
 then success or failure on the specified source SHA. An API failure leaves pending.
+The hosted Actions entry point succeeds with a pending status when its sole blocker
+is missing trusted current-head review. The manual command above retains a failure
+status and nonzero exit for that blocker; both paths keep merging blocked.
 Do not check out or execute candidate code with this credential. Serialize all
 refreshes for a PR, including manual refreshes; use trusted base configuration, never
 PR configuration. A source push needs a status on its new SHA; base-only movement
