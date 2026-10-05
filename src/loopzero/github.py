@@ -19,6 +19,7 @@ from loopzero.types import Finding, ReviewResult
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
+MISSING_REVIEW_REASON = "no review recorded for the current head"
 BLOCKING = frozenset({"critical", "important"})
 MARKER_RE = re.compile(
     r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
@@ -704,7 +705,7 @@ def readiness(
     if pr.merge_state == "BEHIND" and not allow_behind:
         reasons.append(f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks")
     if not reviewed_head:
-        reasons.append("no review recorded for the current head")
+        reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
     for f in open_blocking_findings(repo, pr.number, pr.head_sha):

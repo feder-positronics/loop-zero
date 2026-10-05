@@ -74,6 +74,11 @@ def main() -> int:
         ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
     if github.pr_view(cfg.repo, number).head_sha != head:
         raise LoopZeroError("head changed before publication; refresh eligibility")
+    if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
+        message = "Awaiting trusted review of current source head"
+        publish("pending", message)
+        print(message)
+        return 0
     publish("success" if ready else "failure", message)
     print(message)
     return 0 if ready else 1
