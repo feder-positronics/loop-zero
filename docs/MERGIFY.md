@@ -157,6 +157,11 @@ merge = "mergify"
 mergify_queue = "main"
 ```
 
+A hosted source refresh succeeds while its sole blocker is missing trusted
+current-head review, leaving `Loop-zero Eligibility` pending. Pending still blocks
+merge and local readiness. Mixed blockers, findings, conflicts and refresh errors
+remain nonzero; candidate attestation still requires reviewed sources.
+
 Keep the local required-check list, Mergify `queue_conditions`, and the effective
 GitHub ruleset on exactly those context names. Validate the consumer configuration
 before admission so `loopzero merge` waits for source eligibility before posting the
