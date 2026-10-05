@@ -43,6 +43,12 @@ Read the relevant section when its condition applies.
 
 ## Late Evidence
 
+- If a partial delivery automatically closes its issue, inspect the issue event
+  and delivery evidence first. When a closing reference caused the premature
+  close and acceptance remains, remove the reference from editable PR text, keep
+  it out of subsequent commit messages, reopen the issue within the existing
+  task authorization, and verify it remains open. Do not rewrite merged history
+  solely to remove a commit reference.
 - Reply to each blocking thread with its fix commit before resolving it.
 - A late finding after merge gets a fresh follow-up branch and PR. Reopen the
   issue only when a previously satisfied acceptance criterion has regressed.
