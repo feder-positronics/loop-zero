@@ -50,11 +50,10 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
 3. `pr` pushes the branch and creates or refreshes a draft PR. The local task
    supplies narrative; the live PR owns validation and review after creation.
 4. `review` runs an independent reviewer against the exact authored SHA and
-   publishes one GitHub review with findings. The intended attribution rule
-   excludes every contributing family across the authored PR lineage. At this
-   guide's base revision, the runtime detects HEAD trailers only; the companion
-   authorship change must land before lineage-wide exclusion is a shipped
-   guarantee. Keep one authoring family
+   publishes one GitHub review with findings. Review selection excludes every
+   recognized contributing family from the configured-base merge-base through
+   HEAD, including repairs and all trailers on each commit. Delta reviews and
+   reposts enforce the same lineage-wide exclusion. Keep one authoring family
    per PR, including repairs; the other family may offer read-only advice or
    formal review. Imported and squashed work must retain actual child attribution,
    which cannot be inferred from the controller. Omitted trailers leave
