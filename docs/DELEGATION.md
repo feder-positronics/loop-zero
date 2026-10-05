@@ -67,6 +67,30 @@ difficulty directly to a suitable profile without requiring intermediate
 attempts. Do not repeat successful work for reassurance or blindly retry failed
 runs. Parent-directed reassessment does not add automatic CLI retries.
 
+## Author lineage and independent review
+
+Keep one authoring model family per PR, including writing delegates and repair
+work. Reserve the opposite family for read-only advice and formal review; a
+read-only adviser must return advice for the authoring family to implement.
+Before committing accepted delegate work, the parent records the actual writing
+model in `Co-Authored-By` trailers. Committing or integrating a child's patch
+does not make the parent its sole author. Preserve truthful attribution for all
+actual contributors through squash and amend. An omitted child cannot be
+recovered mechanically from a parent-only trailer; do not invent attribution.
+
+`loopzero review` excludes all recognized contributor families in the PR lineage
+from its configured-base merge-base to HEAD, including earlier child patches,
+repairs, and multiple HEAD trailers. The delta's narrower diff does not narrow
+author exclusion, and reposting cannot reuse a saved contributor's review. If
+both configured families wrote the PR, formal review fails closed; do not
+silently change the independence policy.
+
+Preserve the final approved head instead of applying optional suggestions.
+Necessary changes use the remaining delta and renewed checks; once that budget
+is exhausted, audit the defect class and squash/amend as required by the
+[contract](../core/CONTRACT.md) before another primary. These instructions govern
+attribution and delivery; they do not intercept Git commits.
+
 ## Briefs and ownership
 
 Give the delegate the objective, relevant source or context, allowed paths,

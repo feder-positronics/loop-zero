@@ -79,16 +79,31 @@ or resolve threads; branch protection and CI remain the enforced gates.
 
 ## Review budget
 
-- One primary review per head lineage, by a model family different from the
-  author's when the author is known. Every AI-authored head commit, including
-  repairs and squash/amend replacements, keeps a truthful `Co-Authored-By`
-  trailer naming the authoring model; without it the author is unknown.
+- One primary review per head lineage, by a model family that did not contribute
+  to the PR. Review selection excludes every recognized `Co-Authored-By` family
+  in commits from the configured-base merge-base through HEAD, including repairs
+  and all trailers on each commit. Delta reviews use the same author lineage;
+  their narrower diff does not restore a contributor's independence. Reposting
+  also requires the saved reviewer's family to be independent. If all configured
+  families contributed, review fails closed; do not silently relax the policy.
+- Keep one authoring model family per PR, including delegated implementation and
+  repairs. The opposite family may give read-only advice and formal review.
+  Before committing imported work, record the actual writing delegate in truthful
+  `Co-Authored-By` trailers; the parent committing a patch does not replace its
+  author's family. Preserve every actual contributor's attribution when squashing
+  or amending. Missing attribution stays unknown: trailers cannot mechanically
+  recover an omitted author, and agents must not invent one.
 - At most one delta review after fixes; it reads only the diff since the
   reviewed commit. The primary's unresolved blocking threads still count unless
   outdated on a different head.
 - Fixes after the delta review exhaust the budget. Audit the defect class, then
   squash/amend so neither reviewed commit remains an ancestor of HEAD; the next
   primary reviews from HEAD's merge-base with the configured base.
+- Preserve the final approved head. Do not apply optional suggestions after
+  approval. A necessary change requires renewed checks and review: use the
+  remaining delta, or, if it is exhausted, audit the defect class and follow the
+  squash/amend rule above before a new primary. This is delivery discipline,
+  not interception of Git commits.
 - Every committed head change needs renewed review within this budget, because
   readiness requires the reviewed head to be the PR head. Batch mechanical fixes
   (format, lint, rename) into the commit the delta review will read.

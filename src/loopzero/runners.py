@@ -810,18 +810,19 @@ def family_from_trailer(value: str) -> str | None:
     return None
 
 
-def author_family(cwd: Path, head: str) -> str | None:
-    """Return the model family named in ``head``'s ``Co-Authored-By`` trailers."""
+def author_families(cwd: Path, head: str, base: str) -> set[str]:
+    """Return every recognized contributor family in the PR's ``base..head`` lineage.
+
+    Unknown or omitted trailers do not establish a model family. Callers must
+    use the PR merge-base, including for delta reviews of a narrower diff.
+    """
+    revision = f"{base}..{head}"
     done = _proc.run(
-        ["git", "log", "-1", "--format=%(trailers:key=Co-Authored-By,valueonly)", head],
+        ["git", "log", "--format=%(trailers:key=Co-Authored-By,valueonly)", revision],
         cwd=cwd,
         env_allowlist=_ALLOWLIST,
         timeout=30,
     )
     if done.exit_code != 0:
-        raise RunnerBadOutput(f"git log {head} exited {done.exit_code}", _tail(done.stderr))
-    for line in done.stdout.splitlines():
-        family = family_from_trailer(line)
-        if family:
-            return family
-    return None
+        raise RunnerBadOutput(f"git log {revision} exited {done.exit_code}", _tail(done.stderr))
+    return {family for line in done.stdout.splitlines() if (family := family_from_trailer(line))}

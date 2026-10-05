@@ -1975,3 +1975,76 @@ def test_mergify_cancel_does_not_require_healthy_queue_or_review(wt, gh, capsys,
     monkeypatch.setattr(mergify, "dequeue", lambda *args: removals.append(args))
     code, _out, err = run(capsys, "merge", "--cancel")
     assert (code, err) == (0, "") and removals == [(REPO, 7)] and wt.exists()
+
+
+@pytest.mark.parametrize("lineage", ["two-head-trailers", "earlier-child", "delta"])
+def test_review_excludes_all_contributing_families(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, lineage: str
+) -> None:
+    git(wt, "commit", "--amend", "-q", "-m",
+        "child patch\n\nCo-Authored-By: Codex <codex@openai.com>")
+    first = head_of(wt)
+    if lineage == "two-head-trailers":
+        git(wt, "commit", "--amend", "-q", "-m",
+            "patch\n\nCo-Authored-By: Codex <codex@openai.com>\n"
+            "Co-Authored-By: Claude <noreply@anthropic.com>")
+    else:
+        git(wt, "commit", "--allow-empty", "-q", "-m",
+            "repair\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    head = head_of(wt)
+    arm_empty_primary_review_post(gh, head)
+    if lineage == "delta":
+        gh.respond(reviews_key(), [rev(first, "primary", state="CHANGES_REQUESTED",
+                                      verdict="request_changes")])
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+
+    code, out, err = run(capsys, "review")
+
+    assert code == 4 and out == "", err
+    assert "excluded families: claude, codex" in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert not (fake_bin / "codex.stdin").exists()
+    assert not any(call["argv"][1] == post_key()[4:] for call in gh.calls)
+
+
+def test_repost_rejects_saved_contributor_review(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    from loopzero import runners
+
+    git(wt, "commit", "--amend", "-q", "-m",
+        "patch\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    head = head_of(wt)
+    arm_empty_primary_review_post(gh, head)
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    result = runners.review_with("claude", cwd=wt, head=head, kind="primary",
+                                 diff="", task_text="")
+    cli._save_review(wt, result)
+    (fake_bin / "claude.stdin").unlink()
+
+    code, out, err = run(capsys, "review", "--repost")
+
+    assert code == 4 and out == "", err
+    assert "saved reviewer family claude" in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert not any(call["argv"][1] == post_key()[4:] for call in gh.calls)
+
+
+@pytest.mark.parametrize("author,expected", [("Claude", "codex"), ("Jane", "claude")])
+def test_review_uses_lineage_author_after_unattributed_repair(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, author: str, expected: str
+) -> None:
+    git(wt, "commit", "--amend", "-q", "-m",
+        f"child patch\n\nCo-Authored-By: {author} <bot@example.com>")
+    git(wt, "commit", "--allow-empty", "-q", "-m", "unattributed repair")
+    head = head_of(wt)
+    arm_empty_primary_review_post(gh, head)
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+
+    code, out, err = run(capsys, "review")
+
+    assert code == 0 and out.startswith(f"primary review by {expected}"), err
+    other = "claude" if expected == "codex" else "codex"
+    assert not (fake_bin / f"{other}.stdin").exists()
