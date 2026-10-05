@@ -668,11 +668,11 @@ def arm_approved_ready_pr(gh: FakeGh, head: str, wt: Path, **pr_overrides) -> No
 
 def arm_approved_pr_with_check_result(
     gh: FakeGh, head: str, wt: Path, conclusion: str, *, review_login: str = LOGIN,
-    **pr_overrides,
+    reviews=None, readiness=None, **pr_overrides,
 ) -> None:
     arm_pr(gh, head, **pr_overrides)
-    gh.respond(reviews_key(), [rev(head, "primary", login=review_login)])
-    arm_readiness(gh, head, wt, conclusion=conclusion)
+    gh.respond(reviews_key(), reviews if reviews is not None else [rev(head, "primary", login=review_login)])
+    arm_readiness(gh, head, wt, conclusion=conclusion, **(readiness or {}))
 
 
 def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None:
@@ -1097,9 +1097,7 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head) -> None:
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [])
-    arm_readiness(gh, head, wt, conclusion="failure")
+    arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=[])
     arm_check_runs(gh, head, [{
         "name": "checks", "status": "completed", "conclusion": "failure",
         "check_suite": {"id": 10}}])
@@ -1255,9 +1253,7 @@ def test_ready_wait_review_failure_freshness(
     wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, expected, waited, head
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}])
-    arm_readiness(gh, head, wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}], isDraft=False)
     clock = [1790164800 + age]  # 2026-09-23T12:00:00Z plus review age
     monkeypatch.setattr(cli.time, "time", lambda: clock[0])
     failed_at = "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:00:00Z"
@@ -1347,15 +1343,13 @@ def test_ready_wait_tolerates_a_late_required_job_of_a_running_workflow(
 def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     wt: Path, gh: FakeGh, capsys, head
 ) -> None:
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary")])
     finding = {
         "isResolved": False, "path": "feature.py", "line": 1,
         "comments": {"nodes": [{"body":
             f"<!-- loopzero:finding severity=important head={head} -->\n"
             "**important: Fix this**"}]},
     }
-    arm_readiness(gh, head, wt, threads=(finding,), conclusion="skipped")
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", readiness={"threads": (finding,)})
 
     code, out, err = run(capsys, "ready")
 
@@ -1368,12 +1362,7 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
 def test_ready_requires_clean_successful_local_report_at_head(
     wt: Path, gh: FakeGh, capsys, condition: str, head
 ) -> None:
-    arm_pr(gh, head, isDraft=False)
-    gh.respond(reviews_key(), [rev(head, "primary")])
-    arm_readiness(
-        gh, head, wt, local_exit=1 if condition == "failed" else 0,
-        dirty=condition == "dirty",
-    )
+    arm_approved_pr_with_check_result(gh, head, wt, "success", readiness={"local_exit": 1 if condition == "failed" else 0, "dirty": condition == "dirty"}, isDraft=False)
     report_path = wt / ".loopzero" / "checks.json"
     if condition == "missing":
         report_path.unlink()
@@ -1390,12 +1379,7 @@ def test_ready_requires_clean_successful_local_report_at_head(
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [
-        rev(head, "primary", login="stranger"),          # not the token's account
-        rev(head, "primary", commit="1" * 40),           # commit_id does not match marker
-    ])
-    arm_readiness(gh, head, wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary", login="stranger"), rev(head, "primary", commit="1" * 40)])
     code, out, _ = run(capsys, "ready")
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 2
@@ -1403,10 +1387,8 @@ def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> Non
 
 @pytest.mark.parametrize("state", ["DISMISSED", "PENDING", "COMMENTED"])
 def test_ready_respects_latest_review_state(wt: Path, gh: FakeGh, capsys, state, head) -> None:
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), [rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")])
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")])
     gh.respond("pr ready", "")
-    arm_readiness(gh, head, wt)
     code, out, _ = run(capsys, "ready")
     assert (code, out) == ((0, f"ready: {URL}\n") if state == "COMMENTED" else
                            (1, "not ready: no review recorded for the current head\n"))
@@ -1825,10 +1807,8 @@ def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, capsys) -> Non
 
 
 def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_pr(gh, head)
-    gh.respond(reviews_key(1), [rev("f" * 40, "primary", login="x")] * 100)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev("f" * 40, "primary", login="x")] * 100)
     gh.respond(reviews_key(2), [rev(head, "primary")])
-    arm_readiness(gh, head, wt)
     gh.respond("pr ready", "")
     code, out, _ = run(capsys, "ready")
     assert code == 0 and out == f"ready: {URL}\n"
