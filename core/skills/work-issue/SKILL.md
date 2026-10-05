@@ -25,15 +25,17 @@ when splitting work or choosing an executor.
    relying on any user-reported production state.
 3. Run `loopzero start issue-<number>-<slug>`. In `.loopzero/task.md`, translate
    the issue into observable Acceptance lines and keep the issue link in Notes.
-   Put `Closes #N` in Notes only when this PR completes the issue; use `Refs #N`
-   for a partial umbrella-issue delivery.
+   Use `Refs #N` for a partial delivery; use a closing keyword only when this PR
+   completes all issue acceptance. GitHub matches closing references in the
+   rendered PR description and commit messages even in negated prose, so inspect
+   both before publication and again before merge.
 
 ## Deliver
 
 4. Implement only the accepted scope, add proof for its behavior, and commit
    the bounded change. Read [the delivery safeguards](reference.md) for
-   conditional API, fresh-stack, documentation, blueprint, re-entry, and
-   closeout requirements.
+   conditional API, fresh-stack, documentation, blueprint, re-entry,
+   issue-reference correction, and closeout requirements.
 5. Run `loopzero check` on the clean committed head; fix failures without
    weakening the configured checks. Then run `loopzero pr` to push and open the
    draft PR. Before publication, repeat the duplicate check; reconcile if a
