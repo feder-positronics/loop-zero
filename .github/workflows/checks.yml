@@ -13,6 +13,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.28"
@@ -25,11 +26,16 @@ jobs:
         run: uv run --python 3.14 --group dev ruff check src tests
       - name: Tests
         run: uv run --python 3.14 --group dev pytest -q
-      - name: Size budget
+      - name: Architecture docs and size budget
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
           git fetch -q --depth=1 origin "$BASE_SHA"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            python3 scripts/check_architecture_docs.py --links-only
+          else
+            python3 scripts/check_architecture_docs.py "$BASE_SHA"
+          fi
           scripts/size_budget.sh "$BASE_SHA"
       - name: Wheel builds and CLI runs
         run: |
