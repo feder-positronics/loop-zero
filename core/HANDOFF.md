@@ -5,7 +5,7 @@
 - **Problem:** <what is wrong or missing, observable>
 - **Goal:** <what will be true when done>
 
-Closes #<issue number, or remove this line>
+Refs #<issue number, or remove this line>
 
 ## Acceptance
 - <verifiable criterion>
