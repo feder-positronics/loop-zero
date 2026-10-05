@@ -11,8 +11,9 @@ import random
 import re
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
@@ -531,11 +532,16 @@ def cmd_review(args: argparse.Namespace) -> int:
         _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head, config.review_publishers), head
     )
     if args.repost:
-        author = runners.author_family(wt, head)
-        excluded = [family for family in config.reviewers if family == author]
-        if not any(family != author for family in config.reviewers):
-            raise IndependentReviewerUnavailable(_independence_message(author, excluded, []))
+        authors = runners.author_families(wt, head, _primary_base(wt, config))
+        excluded = [family for family in config.reviewers if family in authors]
+        if not any(family not in authors for family in config.reviewers):
+            raise IndependentReviewerUnavailable(_independence_message(authors, excluded, []))
         result = _load_review(wt, head, kind)
+        if result.family in authors:
+            raise IndependentReviewerUnavailable(
+                f"saved reviewer family {result.family} contributed to this PR lineage; "
+                "run without --repost to obtain an independent review"
+            )
         sessions = result.provenance["session_ids"]
         prefix = review_marker(head, kind, "repost") + "\n" + (
             "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
@@ -578,17 +584,17 @@ def _run_review(
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
     model: str | None = None, effort: str | None = None,
 ) -> ReviewResult:
-    since = reviewed if kind == "delta" else _primary_base(wt, config)
+    lineage_base = _primary_base(wt, config)
+    since = reviewed if kind == "delta" else lineage_base
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
-    author = runners.author_family(wt, head)
-    candidates = [family for family in config.reviewers if family != author]
+    authors = runners.author_families(wt, head, lineage_base)
+    candidates = [family for family in config.reviewers if family not in authors]
     failures: list[str] = []
-    result = None
-    excluded = [family for family in config.reviewers if family == author]
+    excluded = [family for family in config.reviewers if family in authors]
     if not candidates:
-        raise IndependentReviewerUnavailable(_independence_message(author, excluded, failures))
-    selected: dict[str, tuple[str | None, str | None]] = {}
+        raise IndependentReviewerUnavailable(_independence_message(authors, excluded, failures))
+    selected: dict[str, Callable[..., ReviewResult]] = {}
     for family in candidates:  # validate every candidate before launching any reviewer
         settings = config.review.get(family)
         chosen = effort or (settings.effort if settings else None)
@@ -597,16 +603,15 @@ def _run_review(
                 f"effort {chosen!r} is not allowed for {family}; "
                 f"expected one of {settings.allowed_efforts}"
             )
-        selected[family] = (model or (settings.model if settings else None), chosen)
+        selected[family] = partial(
+            runners.review_with, family, cwd=wt, head=head, kind=kind, task_text=task,
+            reviewer_ro_paths=config.reviewer_ro_paths,
+            model=model or (settings.model if settings else None), effort=chosen,
+        )
     for family in candidates:
-        selected_model, selected_effort = selected[family]
         try:
             try:
-                result = runners.review_with(
-                    family, cwd=wt, head=head, kind=kind, diff=diff, task_text=task,
-                    reviewer_ro_paths=config.reviewer_ro_paths,
-                    model=selected_model, effort=selected_effort,
-                )
+                result = selected[family](diff=diff)
                 break
             except runners.RunnerPromptTooLong:
                 chunks = runners.split_diff(diff, config.review_chunk_bytes)
@@ -614,14 +619,7 @@ def _run_review(
                     f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
                     file=sys.stderr,
                 )
-                chunk_results = [
-                    runners.review_with(
-                        family, cwd=wt, head=head, kind=kind, diff=chunk, task_text=task,
-                        reviewer_ro_paths=config.reviewer_ro_paths,
-                        model=selected_model, effort=selected_effort,
-                    )
-                    for chunk in chunks
-                ]
+                chunk_results = [selected[family](diff=chunk) for chunk in chunks]
                 result = runners.merge_reviews(chunk_results)
                 break
         except RUNNER_FAILURES as exc:
@@ -637,13 +635,13 @@ def _run_review(
                 detail += f"\nFix: install it with `npm install -g {package}`."
             failures.append(detail)
             print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
-    if result is None:
-        raise IndependentReviewerUnavailable(_independence_message(author, excluded, failures))
+    else:
+        raise IndependentReviewerUnavailable(_independence_message(authors, excluded, failures))
     return result
 
 
-def _independence_message(author: str | None, excluded: list[str], failures: list[str]) -> str:
-    identity = author or "unknown"
+def _independence_message(authors: set[str], excluded: list[str], failures: list[str]) -> str:
+    identity = ", ".join(sorted(authors)) or "unknown"
     excluded_text = ", ".join(excluded) if excluded else "none"
     detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
     return (

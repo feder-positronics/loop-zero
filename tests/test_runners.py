@@ -14,7 +14,7 @@ from loopzero.runners import (
     RunnerMissing,
     RunnerPromptTooLong,
     RunnerUsageLimit,
-    author_family,
+    author_families,
     build_prompt,
     review_with,
     split_diff,
@@ -638,12 +638,23 @@ def _commit(repo: Path, message: str) -> str:
         ("", None),
     ],
 )
-def test_author_family(git_repo: Path, trailer: str, expected: str | None) -> None:
+def test_author_families(git_repo: Path, trailer: str, expected: str | None) -> None:
+    base = git(git_repo, "rev-parse", "HEAD").strip()
     head = _commit(git_repo, f"feat: x\n\n{trailer}" if trailer else "feat: x")
-    assert author_family(git_repo, head) == expected
-    assert author_family(git_repo, "HEAD") == expected
+    assert author_families(git_repo, head, base) == ({expected} if expected else set())
+    assert author_families(git_repo, "HEAD", base) == ({expected} if expected else set())
 
 
-def test_author_family_bad_ref(git_repo: Path) -> None:
+def test_author_families_bad_ref(git_repo: Path) -> None:
     with pytest.raises(RunnerBadOutput):
-        author_family(git_repo, "no-such-ref")
+        author_families(git_repo, "no-such-ref", "HEAD")
+
+
+def test_author_families_excludes_base_and_includes_all_lineage_trailers(git_repo: Path) -> None:
+    base = _commit(git_repo, "base\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
+    _commit(git_repo, "child\n\nCo-Authored-By: Codex <codex@openai.com>")
+    head = _commit(git_repo, "human repair\n\nCo-Authored-By: Jane <jane@example.com>")
+    assert author_families(git_repo, head, base) == {"codex"}
+    head = _commit(git_repo, "repair\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
+                   "Co-Authored-By: GPT <gpt@openai.com>")
+    assert author_families(git_repo, head, base) == {"claude", "codex"}
