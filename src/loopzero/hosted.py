@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import suppress
 from pathlib import Path
 
-from loopzero import config, eligibility, github
+from loopzero import candidate as candidate_mod
+from loopzero import config, eligibility, github, mergify
 from loopzero.types import LoopZeroError
 
 
@@ -34,10 +36,8 @@ def main() -> int:
     number = event_number(event)
     pr = github.api_get(f"repos/{cfg.repo}/pulls/{number}")
     head = pr["head"]["sha"]
-    candidate = (
-        pr["head"]["ref"].startswith("mergify/merge-queue/")
-        or pr["user"]["login"] == "mergify[bot]"
-    )
+    candidate = (pr["head"]["ref"].startswith("mergify/merge-queue/")
+                 or pr["user"]["login"] == "mergify[bot]")
     if candidate:
         event_pr = event.get("pull_request")
         if not isinstance(event_pr, dict):
@@ -53,35 +53,38 @@ def main() -> int:
     def publish(state: str, message: str) -> None:
         github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
     publish("pending", "Refreshing live source review evidence")
-    if candidate:
-        from loopzero.candidate import attest_candidate
-        from loopzero.mergify import api_get
-        def policy(source_number: int, source: dict) -> None:
-            result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
-                                          cfg.base_branch, cfg.review_publishers)
-            if not result.ready:
-                raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
-        attest_candidate(
-            event,
-            github_get=lambda path: github.api_get(path.lstrip("/")),
-            mergify_status=lambda owner, repo, branch: api_get(
-                f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
-            source_policy=policy,
-        )
-        ready, message = True, "All attested candidate sources are reviewed"
-    else:
-        result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers)
-        ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
-    if github.pr_view(cfg.repo, number).head_sha != head:
-        raise LoopZeroError("head changed before publication; refresh eligibility")
-    if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
-        message = "Awaiting trusted review of current source head"
-        publish("pending", message)
+    try:
+        if candidate:
+            def policy(source_number: int, source: dict) -> None:
+                result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
+                                              cfg.base_branch, cfg.review_publishers)
+                if not result.ready:
+                    raise LoopZeroError(f"source #{source_number}: " + "; ".join(result.reasons))
+            candidate_mod.attest_candidate(
+                event,
+                github_get=lambda path: github.api_get(path.lstrip("/")),
+                mergify_status=lambda owner, repo, branch: mergify.api_get(
+                    f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
+                source_policy=policy,
+            )
+            ready, message = True, "All attested candidate sources are reviewed"
+        else:
+            result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers)
+            ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
+        if github.pr_view(cfg.repo, number).head_sha != head:
+            raise LoopZeroError("head changed before publication; refresh eligibility")
+        state = "success" if ready else "failure"
+        if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
+            message = "Awaiting trusted review of current source head"
+            state = "pending"
+        publish(state, message)
         print(message)
-        return 0
-    publish("success" if ready else "failure", message)
-    print(message)
-    return 0 if ready else 1
+        return 0 if ready or state == "pending" else 1
+    except Exception:
+        with suppress(Exception):
+            publish("failure", "Eligibility refresh failed; inspect workflow logs")
+        raise
+
 
 
 if __name__ == "__main__":

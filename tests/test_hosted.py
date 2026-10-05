@@ -97,12 +97,31 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
     with pytest.raises((github.GhError, hosted.LoopZeroError)):
         hosted.main()
     statuses = [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
-    assert statuses == ([] if error == "config" else ["pending", "pending"]
-                        if error == "publication" else ["pending"])
+    assert statuses == ([] if error == "config" else ["pending", "pending", "failure"]
+                        if error == "publication" else ["pending", "failure"])
 
 
-def candidate_publisher(tmp_path, monkeypatch, event, values=None):
-    values = values or candidate_payloads(event)
+
+@pytest.mark.parametrize("case,error,message", [
+    ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
+    ("merged", CandidateError, "not open"), ("malformed", CandidateError, "invalid payload"),
+    ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
+    ("interrupt", KeyboardInterrupt, ""),
+    ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
+    ("stale", hosted.LoopZeroError, "head is no longer current"),
+    ("untrusted", CandidateError, "head event was not sent"),
+])
+def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, error, message):
+    event = candidate_event()
+    if case == "metadata":
+        event["action"] = "edited"
+    if case == "untrusted":
+        event["sender"]["id"] = 1
+    values = candidate_payloads(event)
+    if case == "stale":
+        values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
+    if case == "malformed":
+        values["/repos/owner/repo/pulls/101"] = []
     (event_path := tmp_path / "event.json").write_text(json.dumps(event))
     (tmp_path / "workflow.toml").write_text('[repo]\nname="owner/repo"\nbase="main"\n[delivery]\nreview_publishers=["trusted-publisher"]\n')
     monkeypatch.chdir(tmp_path)
@@ -111,57 +130,46 @@ def candidate_publisher(tmp_path, monkeypatch, event, values=None):
     monkeypatch.setattr(github, "api_get", lambda path: event["repository"]
                         if path == "repos/owner/repo" else values["/" + path])
     published = []
-    monkeypatch.setattr(github, "commit_status", lambda *args: published.append(args))
-    return published
 
-
-@pytest.mark.parametrize("ready", [True, False])
-def test_candidate_publishes_aggregate_source_eligibility(tmp_path, monkeypatch, ready):
-    published = candidate_publisher(tmp_path, monkeypatch, candidate_event())
+    if case == "manual":
+        (tmp_path / "event.json").write_text(json.dumps({"inputs": {"pr": "900"}}))
+    def publish(*args):
+        published.append(args)
+        if args[3] == "pending" and case in {"merged", "publisher"}:
+            values["/repos/owner/repo/pulls/101"]["state"] = "closed"
+        if args[3] == "failure" and case == "publisher":
+            raise RuntimeError("publication details must not replace attestation error")
+    monkeypatch.setattr(github, "commit_status", publish)
     evaluated = []
     def evaluate(repo, number, head, base, publishers):
         evaluated.append((repo, number, head, base, publishers))
-        return github.Readiness(ready, () if ready else (github.MISSING_REVIEW_REASON,))
-    monkeypatch.setattr(github, "pr_view", lambda *_args: SimpleNamespace(head_sha="c" * 40))
+        if case == "interrupt":
+            raise KeyboardInterrupt()
+        reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
+        return github.Readiness(not reasons, reasons)
+    monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
                         if (repo, suffix) == ("owner/repo", "/merge-queue/status?branch=main") else None)
-    if not ready:
-        with pytest.raises(hosted.LoopZeroError, match="no review recorded"):
-            hosted.main()
-        assert [call[3] for call in published] == ["pending"]
-        return
-    assert hosted.main() == 0
-    assert evaluated == [("owner/repo", 101, "1" * 40, "main", ("trusted-publisher",)),
-                         ("owner/repo", 102, "2" * 40, "main", ("trusted-publisher",))]
-    assert published == [("owner/repo", "c" * 40, "Loop-zero Eligibility", "pending",
-                          "Refreshing live source review evidence"),
-                         ("owner/repo", "c" * 40, "Loop-zero Eligibility", "success",
-                          "All attested candidate sources are reviewed")]
-
-
-@pytest.mark.parametrize("case,error,message,states", [
-    ("manual", hosted.LoopZeroError, "pull_request_target creation", []),
-    ("metadata", None, "", []),
-    ("stale", hosted.LoopZeroError, "head is no longer current", []),
-    ("untrusted", CandidateError, "head event was not sent", ["pending"]),
-])
-def test_candidate_event_controls(tmp_path, monkeypatch, case, error, message, states):
-    candidate = candidate_event()
-    candidate["action"] = "edited" if case == "metadata" else candidate["action"]
-    candidate["sender"]["id"] = 1 if case == "untrusted" else candidate["sender"]["id"]
-    live = candidate_payloads(candidate)
-    if case == "stale":
-        live["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
-    published = candidate_publisher(tmp_path, monkeypatch, candidate, live)
-    if case == "manual":
-        (tmp_path / "event.json").write_text(json.dumps({"inputs": {"pr": "900"}}))
     if error:
-        with pytest.raises(error, match=message):
+        with pytest.raises(error, match=message or None):
             hosted.main()
     else:
         assert hosted.main() == 0
-    assert [call[3] for call in published] == states
+    terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
+    expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
+    if case == "valid":
+        assert evaluated == [("owner/repo", 101, "1" * 40, "main", ("trusted-publisher",)),
+                             ("owner/repo", 102, "2" * 40, "main", ("trusted-publisher",))]
+        assert published == [("owner/repo", "c" * 40, "Loop-zero Eligibility", "pending",
+                              "Refreshing live source review evidence"),
+                             ("owner/repo", "c" * 40, "Loop-zero Eligibility", "success",
+                              "All attested candidate sources are reviewed")]
+    else:
+        assert [call[3] for call in published] == expected
+        assert all(call[1] == "c" * 40 for call in published)
+        if terminal:
+            assert published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
 
 
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
