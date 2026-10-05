@@ -1,6 +1,8 @@
 # Docs
 
-Start with the top-level files for delivery and setup.
+Start with [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture,
+ownership and documentation upkeep routine, then the top-level files for delivery
+and setup.
 
 - [../README.md](../README.md) — what loop-zero is, the six commands, adoption.
 - [../SETUP.md](../SETUP.md) — prerequisites, install from a SHA, connect agent
@@ -15,8 +17,8 @@ Start with the top-level files for delivery and setup.
 - [../integrations/](../integrations/) — optional vendor integration skills.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — module map and live contributor references.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
-  system view of feedback placement, state writes, identity and failure
-  handling, with principles, owners and delivery metrics.
+  dated consumer evidence and accepted principles; its gaps and measurements
+  describe September 24, not the current backlog.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.
