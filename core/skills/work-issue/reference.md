@@ -50,8 +50,9 @@ Read the relevant section when its condition applies.
   task authorization, and verify it remains open. Do not rewrite merged history
   solely to remove a commit reference.
 - Reply to each blocking thread with its fix commit before resolving it.
-- A late finding after merge gets a fresh follow-up branch and PR. Reopen the
-  issue only when a previously satisfied acceptance criterion has regressed.
+- For an issue whose acceptance was completed, a late finding after merge gets
+  a fresh follow-up branch and PR. Reopen it only when a previously satisfied
+  acceptance criterion has regressed.
 - Ordinary monitoring after shipped acceptance is separate work. Later evidence
   gets a new, explicitly requested review or issue; do not create reminder issues.
 - Deferred work does not extend this delivery. Take it up only as a separately
