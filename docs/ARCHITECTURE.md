@@ -47,6 +47,12 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
 2. Implementation proves the owning behavior at the narrowest public seam.
    Focused tests start early; `check` runs the repository's deterministic checks
    in a read-only source sandbox before the change enters hosted delivery.
+   Before long checks, a narrow simple-command preflight catches missing local
+   scripts and prepares recognized uv dependency groups offline in that same
+   sandbox. It prints progress before each command. Trusted-base commands remain
+   authoritative; stale task trees need integration only when prerequisites are
+   missing, preserving source-preserving queue eligibility for behind branches.
+   [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. `pr` pushes the branch and creates or refreshes a draft PR. The local task
    supplies narrative; the live PR owns validation and review after creation.
 4. `review` runs an independent reviewer against the exact authored SHA and

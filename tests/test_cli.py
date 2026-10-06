@@ -172,8 +172,8 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     lines = out.splitlines()
     assert code == 0 and lines[-1] == "PASS"
     assert lines[0].startswith("checks pinned to origin/main@")
-    assert lines[1].startswith("exit 0") and lines[1].endswith("  echo ok")
-    assert lines[2].endswith("  test -f README.md")
+    assert lines[1:3] == ["running: echo ok", "running: test -f README.md"]
+    assert lines[3].startswith("exit 0") and lines[3].endswith("  echo ok")
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
     assert report["dirty"] is False
@@ -324,49 +324,55 @@ def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None
     assert gh.calls == []
 
 
-def test_check_fail_exits_one(wt: Path, capsys) -> None:
-    (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok"', '"echo no; exit 3"'))
+@pytest.mark.parametrize("command,exit_code,tail", [
+    ("echo no; exit 3", 3, "no\n"),
+    ("seq 1 50; exit 1", 1, "".join(f"{i}\n" for i in range(11, 51)))])
+def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit_code, tail):
+    (wt / "workflow.toml").write_text(WORKFLOW.replace(
+        '["echo ok", "test -f README.md"]', json.dumps([command, "test -f README.md"])))
     code, out, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
-    assert code == 1 and out.splitlines()[-1] == "FAIL"
-    assert out.splitlines()[0] == "checks are unpinned because --config was provided"
-    assert out.splitlines()[1].startswith("exit 3")
-    assert "README.md" not in out
-    assert err == "--- echo no; exit 3 (exit 3) ---\nno\n", "failing tail goes to stderr"
-    report = json.loads((wt / ".loopzero" / "checks.json").read_text())
-    assert [result["command"] for result in report["results"]] == ["echo no; exit 3"]
+    assert code == 1 and out.endswith("FAIL\n")
+    assert out.startswith("checks are unpinned because --config was provided\n")
+    assert f"exit {exit_code}" in out and "README.md" not in out
+    assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
+    report = json.loads((wt / ".loopzero/checks.json").read_text())
+    assert [result["command"] for result in report["results"]] == [command]
 
 
-def test_check_failure_tail_is_capped_at_40_lines(wt: Path, capsys) -> None:
-    cmd = "seq 1 50; exit 1"
-    (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', f'"{cmd}"'))
-    code, _, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
-    lines = err.splitlines()
-    assert code == 1 and lines[0] == f"--- {cmd} (exit 1) ---"
-    assert lines[1:] == [str(i) for i in range(11, 51)]
-
-
-def test_check_offline_fetch_failure_explains_cache_remedy(
-    wt: Path, repo: Path, capsys
-) -> None:
-    workflow = WORKFLOW.replace(
-        'commands = ["echo ok", "test -f README.md"]',
-        'commands = ["echo uv: Failed to fetch package; exit 1"]',
-    ).replace("[delivery]", '[checks.env]\nUV_CACHE_DIR = "/host/cache/uv"\n\n[delivery]')
-    (repo / "workflow.toml").write_text(workflow)
-    git(repo, "add", "workflow.toml")
-    git(repo, "commit", "-q", "-m", "offline check")
+def advance_checks(repo, commands):
+    (repo / "workflow.toml").write_text(WORKFLOW.replace(
+        '["echo ok", "test -f README.md"]', json.dumps(commands)))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "trusted checks")
     git(repo, "push", "-q", "origin", "main")
 
-    code, _, err = run(capsys, "check")
 
-    assert code == 1
-    tail, hint = err.split("\n\n", 1)
-    assert tail.endswith("uv: Failed to fetch package")
-    assert "`[checks] network = false`" in hint
-    assert "effective UV_CACHE_DIR inside the sandbox is /host/cache/uv" in hint
-    assert "`[checks] writable` is warm" in hint
-    assert "set `[checks] env` UV_CACHE_DIR" in hint
-    assert "network = true" not in hint
+@pytest.mark.parametrize("command,missing", [
+    ("python3 scripts/gate.py", True), ("scripts/gate.py", True), ("python3 feature.py", False),
+    ("test ! -f scripts/absent.py && echo fine", False), (".venv/bin/tool", False), ("VAR=./x echo fine", False)])
+def test_check_preflights_missing_trusted_script(wt, repo, capsys, command, missing):
+    advance_checks(repo, ["mkdir -p .venv/bin && cp /bin/true .venv/bin/tool; echo expensive-check", command, "rm -rf .venv/bin"])
+    code, out, err = run(capsys, "check")
+    assert code == int(missing) and out.endswith("FAIL\n" if missing else "PASS\n"), err
+    assert ("expensive-check" in out) != missing
+    if missing:
+        assert "scripts/gate.py" in err and "integrate" in err and "trusted" in err
+
+@pytest.mark.parametrize("uv,failed", [(True, True), (True, False), (False, True)])
+def test_check_offline_cache_preflight(wt, repo, fake_tool, capsys, uv, failed):
+    (repo / "pyproject.toml").write_text('[project]\nname = "sample"\nversion = "0"\n')
+    command = "uv run --group dev pytest -q" if uv else "echo Failed to fetch package; exit 1"
+    advance_checks(repo, ["echo expensive-check", command])
+    git(wt, "merge", "-q", "origin/main")
+    fake_tool("uv", 'echo "hatchling not found in cache"; exit 1' if failed else "exit 0")
+    code, out, err = run(capsys, "check")
+    assert code == int(failed) and out.endswith("FAIL\n" if failed else "PASS\n")
+    assert ("expensive-check" in out) == (not uv or not failed) and ("uv sync --offline --locked --group dev" in out) == uv
+    assert failed or [r["command"] for r in json.loads((wt / ".loopzero/checks.json").read_text())["results"]] == ["echo expensive-check", command]
+    if failed:
+        assert "effective UV_CACHE_DIR inside the sandbox is /tmp/uv-cache" in err and "uv sync --group dev" in err
+        assert "`[checks] network = false`" in err
+        assert "`[checks] writable` is warm" in err and "network = true" not in err
 
 
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
@@ -385,12 +391,8 @@ def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys) -> None:
 
 
 def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -> None:
-    (wt / "workflow.toml").write_text(
-        WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"')
-    )
-
+    (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
     code, out, err = run(capsys, "check")
-
     assert code == 0 and err == ""
     assert "  echo ok" in out and "  test -f README.md" in out
     assert "  true" not in out

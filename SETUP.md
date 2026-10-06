@@ -99,10 +99,24 @@ unpins them. Then:
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime
   paths. The default is the selected binary's resolved directory; Claude may
   need its npm or bun prefix listed.
-- The first `check` in a fresh worktree needs `network = true` or a warm uv
-  cache in `writable`: warm it once by running your check commands on the
-  host (for uv, `uv sync --group dev`), which also fetches build backends. `PYTHONDONTWRITEBYTECODE`, `RUFF_CACHE_DIR`,
+- For offline checks, warm the configured writable uv cache on the host with
+  `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
+  checks require). This also fetches build backends such as hatchling.
+  `check` prepares dependencies with `uv sync --offline --locked` in the same
+  sandbox before checks when commands use the simple unquoted form
+  `uv run [--group NAME ...] TOOL [ARGS ...]`. A committed `uv.lock` is required.
+  Compound commands, other uv options and quoted arguments are executed normally
+  without dependency preflight. `PYTHONDONTWRITEBYTECODE`, `RUFF_CACHE_DIR`,
   `UV_CACHE_DIR`, `PYTEST_ADDOPTS` are preset in the sandbox.
+- Before running checks, simple unquoted direct `python[3[.VERSION]] PATH [ARGS]`
+  and `PATH [ARGS]` commands with relative paths containing `/` are checked for
+  missing files. Arguments are limited to letters, digits and `_./=-`; shell
+  syntax is not interpreted. Assignment-prefixed commands and paths supplied by
+  scratch or writable locations are skipped because earlier checks may create them.
+  If trusted-base configuration introduced a script
+  absent from an older task tree, integrate the current configured base into
+  the task branch, resolve conflicts and rerun. Being behind alone is allowed.
+  Progress is flushed before dependency preparation and each check.
 
 ## API keys for local agents
 
