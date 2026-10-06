@@ -111,7 +111,9 @@ unpins them. Then:
 - Before running checks, simple unquoted direct `python[3[.VERSION]] PATH [ARGS]`
   and `PATH [ARGS]` commands with relative paths containing `/` are checked for
   missing files. Arguments are limited to letters, digits and `_./=-`; shell
-  syntax is not interpreted. If trusted-base configuration introduced a script
+  syntax is not interpreted. Assignment-prefixed commands and paths supplied by
+  scratch or writable locations are skipped because earlier checks may create them.
+  If trusted-base configuration introduced a script
   absent from an older task tree, integrate the current configured base into
   the task branch, resolve conflicts and rerun. Being behind alone is allowed.
   Progress is flushed before dependency preparation and each check.

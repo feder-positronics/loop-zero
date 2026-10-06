@@ -349,11 +349,11 @@ def advance_checks(repo, commands):
 
 @pytest.mark.parametrize("command,missing", [
     ("python3 scripts/gate.py", True), ("scripts/gate.py", True), ("python3 feature.py", False),
-    ("test ! -f scripts/absent.py && echo fine", False)])
+    ("test ! -f scripts/absent.py && echo fine", False), (".venv/bin/tool", False), ("VAR=./x echo fine", False)])
 def test_check_preflights_missing_trusted_script(wt, repo, capsys, command, missing):
-    advance_checks(repo, ["echo expensive-check", command])
+    advance_checks(repo, ["mkdir -p .venv/bin && cp /bin/true .venv/bin/tool; echo expensive-check", command, "rm -rf .venv/bin"])
     code, out, err = run(capsys, "check")
-    assert code == int(missing) and out.endswith("FAIL\n" if missing else "PASS\n")
+    assert code == int(missing) and out.endswith("FAIL\n" if missing else "PASS\n"), err
     assert ("expensive-check" in out) != missing
     if missing:
         assert "scripts/gate.py" in err and "integrate" in err and "trusted" in err

@@ -99,7 +99,10 @@ def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tupl
         words = command.split()
         script = words[1] if re.fullmatch(r"python(?:3(?:\.\d+)?)?", words[0]) and len(words) > 1 else words[0]
         path = Path(script)
+        if "=" in words[0] or any(path.is_relative_to(Path(entry)) for entry in config.scratch):
+            continue
         if (not path.is_absolute() and "/" in script and ".." not in path.parts
+                and not any((worktree / path).resolve().is_relative_to(Path(root)) for root in config.writable)
                 and not (worktree / path).is_file()):
             return CheckResult(command, 1, 0.0,
                     f"Check preflight: repo-local file {script!r} is absent from this task tree. "
@@ -109,11 +112,10 @@ def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tupl
         match = re.fullmatch(r"uv run((?: --group [A-Za-z0-9_-]+)*) [A-Za-z0-9_./][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./=-]+)*", command)
         if match:
             groups = [*(groups or []), *match[1].split()[1::2]]
-    preparations = ()
-    if groups is not None and not config.network and (worktree / "pyproject.toml").is_file():
-        flags = "".join(f" --group {group}" for group in dict.fromkeys(groups))
-        preparations = (f"uv sync --offline --locked{flags}",)
-    return None, preparations
+    flags = "".join(f" --group {group}" for group in dict.fromkeys(groups or []))
+    return None, ((f"uv sync --offline --locked{flags}",)
+                  if groups is not None and not config.network and (worktree / "pyproject.toml").is_file()
+                  else ())
 
 
 def _validate_scratch(
