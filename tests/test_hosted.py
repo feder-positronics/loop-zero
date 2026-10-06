@@ -30,6 +30,7 @@ def test_event_selection(event, number):
     else:
         assert hosted.event_number(event) == number
 
+
 @pytest.fixture
 def publisher(tmp_path, fake_bin, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -46,6 +47,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
     return gh
+
 
 @pytest.mark.parametrize("case,blocker,status", [
     ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
@@ -77,10 +79,12 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if status == "pending":
         assert statuses[-1]["description"] == "Awaiting trusted review of current source head"
 
+
 def test_merged_source_refresh_publishes_nothing(publisher):
     publisher.respond(f"api repos/{REPO}/pulls/7", {"head": {"sha": HEAD, "ref": "lz/task"},
                                                     "user": {"login": "author"}, "merged": True})
     assert hosted.main() == 0 and not [c for c in publisher.calls if "--input" in c]
+
 
 @pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
 def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, error):
@@ -106,7 +110,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
 @pytest.mark.parametrize("case,error,message", [
     ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
     ("merged", CandidateError, "not open"),
-    ("race", CandidateRaceError, "metadata changed"), ("malformed", CandidateError, "invalid payload"),
+    ("race", CandidateRaceError, "metadata changed"),
+    ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
     ("interrupt", KeyboardInterrupt, ""),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
@@ -128,6 +133,7 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
     attempts, sleeps = [], []
+
     def api_get(path):
         if path == "apps/mergify":
             attempts.append(path)
@@ -139,6 +145,7 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
     published = []
     if case == "manual":
         (tmp_path / "event.json").write_text(json.dumps({"inputs": {"pr": "900"}}))
+
     def publish(*args):
         published.append(args)
         if args[3] == "pending" and case in {"merged", "publisher"}:
@@ -147,6 +154,7 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
             raise RuntimeError("publication details must not replace attestation error")
     monkeypatch.setattr(github, "commit_status", publish)
     evaluated = []
+
     def evaluate(repo, number, head, base, publishers):
         evaluated.append((repo, number, head, base, publishers))
         if case == "interrupt":
@@ -176,6 +184,7 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
         assert [call[3] for call in published] == expected
         assert all(call[1] == "c" * 40 for call in published)
         assert not terminal or published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
+
 
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     workflow = (Path(__file__).parents[1] / ".github/workflows/eligibility.yml").read_text()
