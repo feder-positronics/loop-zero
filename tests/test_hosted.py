@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero import github, hosted
-from loopzero.candidate import CandidateError
+from loopzero.candidate import CandidateError, CandidateRaceError
 from tests import test_github as fixtures
 from tests.test_candidate import event as candidate_event
 from tests.test_candidate import payloads as candidate_payloads
@@ -30,7 +30,6 @@ def test_event_selection(event, number):
     else:
         assert hosted.event_number(event) == number
 
-
 @pytest.fixture
 def publisher(tmp_path, fake_bin, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -47,7 +46,6 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
     return gh
-
 
 @pytest.mark.parametrize("case,blocker,status", [
     ("COMMENTED", "", "success"), ("APPROVED", "", "success"),
@@ -79,7 +77,6 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if status == "pending":
         assert statuses[-1]["description"] == "Awaiting trusted review of current source head"
 
-
 @pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
 def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, error):
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
@@ -101,10 +98,10 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
                         if error == "publication" else ["pending", "failure"])
 
 
-
 @pytest.mark.parametrize("case,error,message", [
     ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
-    ("merged", CandidateError, "not open"), ("malformed", CandidateError, "invalid payload"),
+    ("merged", CandidateError, "not open"),
+    ("race", CandidateRaceError, "metadata changed"), ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
     ("interrupt", KeyboardInterrupt, ""),
     ("manual", hosted.LoopZeroError, "pull_request_target creation"), ("metadata", None, ""),
@@ -127,10 +124,16 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GITHUB_REPOSITORY", "owner/repo")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
-    monkeypatch.setattr(github, "api_get", lambda path: event["repository"]
-                        if path == "repos/owner/repo" else values["/" + path])
+    attempts, sleeps = [], []
+    def api_get(path):
+        if path == "apps/mergify":
+            attempts.append(path)
+        if case == "race" and path == "repos/owner/repo/pulls/101":
+            values["/" + path]["body"] += " changed"
+        return event["repository"] if path == "repos/owner/repo" else values["/" + path]
+    monkeypatch.setattr(github, "api_get", api_get)
+    monkeypatch.setattr("loopzero.candidate._retry_sleep", sleeps.append)
     published = []
-
     if case == "manual":
         (tmp_path / "event.json").write_text(json.dumps({"inputs": {"pr": "900"}}))
     def publish(*args):
@@ -158,6 +161,9 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
         assert hosted.main() == 0
     terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
     expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
+    if case == "race":
+        assert len(attempts) == 3 and sleeps == [2, 2]
+        assert len(evaluated) == 6
     if case == "valid":
         assert evaluated == [("owner/repo", 101, "1" * 40, "main", ("trusted-publisher",)),
                              ("owner/repo", 102, "2" * 40, "main", ("trusted-publisher",))]
@@ -171,7 +177,6 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
         if terminal:
             assert published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
 
-
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     workflow = (Path(__file__).parents[1] / ".github/workflows/eligibility.yml").read_text()
     assert "pull_request_target:" in workflow
@@ -182,7 +187,6 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     assert "PYTHONPATH: src" in workflow
     assert "python -m loopzero.hosted" in workflow
     assert "github.event.pull_request.head" not in workflow
-
     ruleset = json.loads(
         (Path(__file__).parents[1] / ".github/rulesets/main.json").read_text()
     )

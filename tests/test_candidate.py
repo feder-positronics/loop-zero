@@ -3,155 +3,81 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from itertools import cycle
 
 import pytest
 
-from loopzero.candidate import CandidateError, attest_candidate
+from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
+from loopzero.types import LoopZeroError
 
+
+@pytest.fixture(autouse=True)
+def no_retry_delay(monkeypatch):
+    monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda _: None)
 
 def event() -> dict:
-    value = {
-        "action": "synchronize",
-        "repository": {"id": 7, "full_name": "owner/repo"},
-        "pull_request": {
-            "number": 900,
-            "state": "open",
-            "draft": True,
-            "user": {
-                "id": 37929162,
-                "login": "mergify[bot]",
-                "type": "Bot",
-                "html_url": "https://github.com/apps/mergify",
-            },
-            "head": {
-                "sha": "c" * 40,
-                "ref": "mergify/merge-queue/batch",
-                "repo": {"id": 7, "full_name": "owner/repo"},
-            },
-            "base": {
-                "sha": "b" * 40,
-                "ref": "main",
-                "repo": {"id": 7, "full_name": "owner/repo"},
-            },
-        },
-    }
-    value["sender"] = deepcopy(value["pull_request"]["user"])
-    return value
-
+    repo = {"id": 7, "full_name": "owner/repo"}
+    bot = {"id": 37929162, "login": "mergify[bot]", "type": "Bot",
+           "html_url": "https://github.com/apps/mergify"}
+    return {"action": "synchronize", "repository": repo, "sender": deepcopy(bot),
+            "pull_request": {"number": 900, "state": "open", "draft": True, "user": bot,
+                             "head": {"sha": "c" * 40, "ref": "mergify/merge-queue/batch",
+                                      "repo": deepcopy(repo)},
+                             "base": {"sha": "b" * 40, "ref": "main", "repo": deepcopy(repo)}}}
 
 def status() -> dict:
-    return {
-        "batches": [
-            {
-                "id": "parent",
-                "parent_ids": [],
-                "queue_pull_request_number": 899,
-                "pull_requests": [{"number": 101}],
-                "sub_batches": None,
-            },
-            {
-                "id": "outer",
-                "parent_ids": [],
-                "queue_pull_request_number": None,
-                "pull_requests": [],
-                "sub_batches": [
-                    {
-                        "id": "candidate",
-                        "parent_ids": ["parent"],
-                        "queue_pull_request_number": 900,
-                        "pull_requests": [{"number": 102}],
-                        "sub_batches": [],
-                    }
-                ],
-            },
-        ]
-    }
-
+    parent = {"id": "parent", "parent_ids": [], "queue_pull_request_number": 899,
+              "pull_requests": [{"number": 101}], "sub_batches": None}
+    candidate = {"id": "candidate", "parent_ids": ["parent"], "queue_pull_request_number": 900,
+                 "pull_requests": [{"number": 102}], "sub_batches": []}
+    return {"batches": [parent, {"id": "outer", "parent_ids": [],
+                                "queue_pull_request_number": None, "pull_requests": [],
+                                "sub_batches": [candidate]}]}
 
 def pull(number: int, sha: str) -> dict:
-    return {
-        "number": number,
-        "state": "open",
-        "draft": False,
-        "body": f"source {number}",
-        "head": {"sha": sha},
-        "base": {"ref": "main", "repo": {"id": 7, "full_name": "owner/repo"}},
-    }
-
+    return {"number": number, "state": "open", "draft": False, "body": f"source {number}",
+            "head": {"sha": sha},
+            "base": {"ref": "main", "repo": {"id": 7, "full_name": "owner/repo"}}}
 
 def payloads(candidate_event: dict) -> dict[str, object]:
     candidate = deepcopy(candidate_event["pull_request"])
     candidate["number"] = 900
-    return {
-        "/apps/mergify": {
-            "id": 10562,
-            "slug": "mergify",
-            "owner": {"login": "Mergifyio"},
-        },
-        "/users/mergify%5Bbot%5D": deepcopy(candidate["user"]),
-        "/repos/owner/repo/pulls/900": candidate,
-        "/repos/owner/repo/pulls/101": pull(101, "1" * 40),
-        "/repos/owner/repo/pulls/102": pull(102, "2" * 40),
-        "/repos/owner/repo/compare/" + "1" * 40 + "..." + "c" * 40: {
-            "status": "ahead",
-            "merge_base_commit": {"sha": "1" * 40},
-        },
-        "/repos/owner/repo/compare/" + "2" * 40 + "..." + "c" * 40: {
-            "status": "ahead",
-            "merge_base_commit": {"sha": "2" * 40},
-        },
-    }
-
+    values = {"/apps/mergify": {"id": 10562, "slug": "mergify", "owner": {"login": "Mergifyio"}},
+              "/users/mergify%5Bbot%5D": deepcopy(candidate["user"]),
+              "/repos/owner/repo/pulls/900": candidate}
+    for number, sha in [(101, "1" * 40), (102, "2" * 40)]:
+        values[f"/repos/owner/repo/pulls/{number}"] = pull(number, sha)
+        values[f"/repos/owner/repo/compare/{sha}...{'c' * 40}"] = {"status": "ahead", "merge_base_commit": {"sha": sha}}
+    return values
 
 def run_attestation(
-    *,
-    candidate_event: dict | None = None,
-    status_reads: list[dict] | None = None,
-    github_payloads: dict[str, object] | None = None,
-    source_policy=lambda _number, _source: None,
+    *, candidate_event: dict | None = None, status_reads: list[dict] | None = None,
+    github_payloads: dict[str, object] | None = None, source_policy=lambda _number, _source: None,
 ):
     candidate_event = candidate_event or event()
-    reads = iter(status_reads or [status(), status()])
-    values = github_payloads or payloads(candidate_event)
-    return attest_candidate(
-        candidate_event,
-        github_get=lambda path: deepcopy(values[path]),
-        mergify_status=lambda _owner, _repo, _base: deepcopy(next(reads)),
-        source_policy=source_policy,
-    )
-
+    reads, values = cycle(status_reads or [status(), status()]), github_payloads or payloads(candidate_event)
+    return attest_candidate(candidate_event, github_get=lambda path: deepcopy(values[path]),
+                            mergify_status=lambda *_: deepcopy(next(reads)),
+                            source_policy=source_policy)
 
 def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     seen: list[int] = []
     assert run_attestation(source_policy=lambda number, _source: seen.append(number)) == [
-        {"number": 101, "head_sha": "1" * 40},
-        {"number": 102, "head_sha": "2" * 40},
-    ]
+        {"number": 101, "head_sha": "1" * 40}, {"number": 102, "head_sha": "2" * 40}]
     assert seen == [101, 102]
 
-
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
+@pytest.mark.parametrize("mutation,message", [
         (lambda value: value["pull_request"]["user"].update(id=1), "Mergify GitHub App"),
         (lambda value: value["sender"].update(id=1), "head event was not sent"),
         (lambda value: value.update(action="edited"), "creation or head-update event"),
-        (
-            lambda value: value["pull_request"]["head"].update(ref="feature/forged"),
-            "unexpected head ref",
-        ),
-    ],
-)
+        (lambda value: value["pull_request"]["head"].update(ref="feature/forged"), "unexpected head ref"),
+])
 def test_rejects_forged_bot_or_prefix(mutation, message: str) -> None:
     candidate_event = event()
     original_payloads = payloads(candidate_event)
     mutation(candidate_event)
     with pytest.raises(CandidateError, match=message):
-        run_attestation(
-            candidate_event=candidate_event,
-            github_payloads=original_payloads,
-        )
-
+        run_attestation(candidate_event=candidate_event, github_payloads=original_payloads)
 
 def test_rejects_candidate_absent_from_live_status() -> None:
     first = status()
@@ -159,39 +85,23 @@ def test_rejects_candidate_absent_from_live_status() -> None:
     with pytest.raises(CandidateError, match="live Mergify batch"):
         run_attestation(status_reads=[first])
 
-
 def test_rejects_missing_live_status_as_candidate_error() -> None:
     with pytest.raises(CandidateError, match="status is not an object"):
         run_attestation(status_reads=[None])
 
-
 def test_rejects_source_head_missing_from_candidate_history() -> None:
     values = payloads(event())
     values["/repos/owner/repo/compare/" + "2" * 40 + "..." + "c" * 40] = {
-        "status": "diverged",
-        "merge_base_commit": {"sha": "0" * 40},
-    }
+        "status": "diverged", "merge_base_commit": {"sha": "0" * 40}}
     with pytest.raises(CandidateError, match="not an ancestor"):
         run_attestation(github_payloads=values)
 
-
-def test_rejects_membership_change_during_attestation() -> None:
-    changed = status()
-    changed["batches"][1]["sub_batches"][0]["pull_requests"] = [{"number": 103}]
-    with pytest.raises(CandidateError, match="membership changed"):
-        run_attestation(status_reads=[status(), changed])
-
-
-@pytest.mark.parametrize(
-    ("pr_number", "diagnostic"),
-    [(101, "head changed"), (900, "Candidate head changed")],
-    ids=["source-head", "candidate-head"],
-)
+@pytest.mark.parametrize("pr_number,diagnostic", [(101, "head changed"), (900, "Candidate head changed")],
+                         ids=["source-head", "candidate-head"])
 def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str) -> None:
     candidate_event = event()
     values = payloads(candidate_event)
     calls = 0
-
     def github_get(path: str):
         nonlocal calls
         result = deepcopy(values[path])
@@ -200,66 +110,38 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
             if calls == 2:
                 result["head"]["sha"] = "9" * 40
         return result
-
     reads = iter([status(), status()])
     with pytest.raises(CandidateError, match=diagnostic):
-        attest_candidate(
-            candidate_event,
-            github_get=github_get,
-            mergify_status=lambda _owner, _repo, _base: deepcopy(next(reads)),
-            source_policy=lambda _number, _source: None,
-        )
-
+        attest_candidate(candidate_event, github_get=github_get,
+                         mergify_status=lambda *_: deepcopy(next(reads)), source_policy=lambda *_: None)
 
 def test_same_head_still_obeys_source_policy() -> None:
     values = payloads(event())
     values["/repos/owner/repo/pulls/102"]["head"]["sha"] = "c" * 40
     values["/repos/owner/repo/compare/" + "c" * 40 + "..." + "c" * 40] = {
-        "status": "identical",
-        "merge_base_commit": {"sha": "c" * 40},
-    }
-
+        "status": "identical", "merge_base_commit": {"sha": "c" * 40}}
     def block(number: int, _source: dict) -> None:
         if number == 102:
             raise CandidateError("source policy blocked same-head source")
-
     with pytest.raises(CandidateError, match="source policy blocked"):
         run_attestation(github_payloads=values, source_policy=block)
-
-
-def test_source_policy_rejection_blocks_candidate_immediately() -> None:
-    seen: list[int] = []
-
-    def reject(number: int, _source: dict) -> None:
-        seen.append(number)
-        raise CandidateError("ineligible source")
-
-    with pytest.raises(CandidateError, match="ineligible source"):
-        run_attestation(source_policy=reject)
-    assert seen == [101]
-
 
 @pytest.fixture
 def tree_candidate(tmp_path, monkeypatch):
     import subprocess
-
     remote = tmp_path / "remote"
     remote.mkdir()
-
     def git(*args):
         return subprocess.run(["git", *args], cwd=remote, check=True, capture_output=True,
                               text=True).stdout.strip()
-
     git("init", "-b", "main")
     git("config", "user.name", "Test")
     git("config", "user.email", "test@example.org")
-
     def commit(name, content):
         (remote / name).write_text(content)
         git("add", ".")
         git("commit", "-m", name)
         return git("rev-parse", "HEAD")
-
     base = commit("base", "base\n")
     git("checkout", "-b", "parent")
     parent = commit("parent", "H1\n")
@@ -274,7 +156,6 @@ def tree_candidate(tmp_path, monkeypatch):
     git("commit", "-m", "squashed parent")
     main = git("rev-parse", "HEAD")
     popen = subprocess.Popen
-
     def isolated_fetch(argv, **kwargs):
         assert not any(arg.startswith("--as") for arg in argv)  # arm64 Git exceeds RLIMIT_AS
         if "fetch" in argv:
@@ -284,47 +165,33 @@ def tree_candidate(tmp_path, monkeypatch):
             argv = [str(remote) if arg == "https://github.com/owner/repo.git" else arg
                     for arg in argv]
         return popen(argv, **kwargs)
-
     monkeypatch.setenv("GH_TOKEN", "secret-token")
     monkeypatch.setattr(subprocess, "Popen", isolated_fetch)
-
-    def attest(*, head=candidate_sha, main_head=main, policy=lambda _n, _s: None,
-               main_after=None, extra_source=None):
+    def attest(*, head=candidate_sha, main_head=main, policy=lambda _n, _s: None, main_after=None, extra_source=None):
         candidate_event = event()
         candidate_event["pull_request"]["head"]["sha"] = head
         values = payloads(candidate_event)
         values["/repos/owner/repo/pulls/102"] = pull(102, source)
-        values[f"/repos/owner/repo/compare/{source}...{head}"] = {
-            "status": "ahead", "merge_base_commit": {"sha": source},
-        }
+        values[f"/repos/owner/repo/compare/{source}...{head}"] = {"status": "ahead", "merge_base_commit": {"sha": source}}
         vanished = status()
         vanished["batches"].pop(0)
         if extra_source:
             values["/repos/owner/repo/pulls/101"] = pull(101, extra_source)
-            values[f"/repos/owner/repo/compare/{extra_source}...{head}"] = {
-                "status": "ahead", "merge_base_commit": {"sha": extra_source},
-            }
+            values[f"/repos/owner/repo/compare/{extra_source}...{head}"] = {"status": "ahead", "merge_base_commit": {"sha": extra_source}}
             vanished["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
-        reads = iter([main_head, main_after or main_head])
-
+        reads = cycle([main_head, main_after or main_head])
         def get(path):
             if path.endswith("/git/ref/heads/main"):
                 return {"object": {"sha": next(reads)}}
             return deepcopy(values[path])
-
         return attest_candidate(candidate_event, github_get=get,
                                 mergify_status=lambda *_: deepcopy(vanished), source_policy=policy)
-
     return attest, git, commit, base, parent, source, candidate_sha
-
-
 def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate):
     attest, _, _, _, _, source, _ = tree_candidate
     seen = []
     assert attest(policy=lambda n, _: seen.append(n)) == [{"number": 102, "head_sha": source}]
     assert seen == [102]
-
-
 @pytest.mark.parametrize("mutation", ["replaced", "withdrawn", "extra", "tampered", "missing"])
 def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
     attest, git, commit, base, _, _, candidate_sha = tree_candidate
@@ -348,20 +215,18 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
                        "(tree mismatch|objects unavailable)"):
         attest(**kwargs)
 
-
 @pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
     from loopzero import candidate
-
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
     with pytest.raises(CandidateError, match="Missing Mergify parent batches parent:.*bound"):
         tree_candidate[0]()
 
-
 def test_vanished_parent_rejects_main_change(tree_candidate):
-    with pytest.raises(CandidateError, match="parent: main changed"):
-        tree_candidate[0](main_after=tree_candidate[3])
-
+    seen = []
+    with pytest.raises(CandidateRaceError, match="main changed"):
+        tree_candidate[0](main_after=tree_candidate[3], policy=lambda n, _: seen.append(n))
+    assert seen == [102, 102, 102]
 
 def test_vanished_parent_rejects_ambiguous_topology(tree_candidate):
     attest, git, _, base, parent, source, candidate_sha = tree_candidate
@@ -370,7 +235,6 @@ def test_vanished_parent_rejects_ambiguous_topology(tree_candidate):
     with pytest.raises(CandidateError, match="parent: ambiguous"):
         attest(head=head)
 
-
 def test_vanished_parent_orders_live_sources_by_topology(tree_candidate):
     attest, git, commit, _, _, source, _ = tree_candidate
     git("checkout", "-b", "second", source)
@@ -378,12 +242,144 @@ def test_vanished_parent_orders_live_sources_by_topology(tree_candidate):
     git("checkout", "candidate")
     git("merge", "--no-ff", second, "-m", "second integration")
     assert attest(head=git("rev-parse", "HEAD"), extra_source=second) == [
-        {"number": 101, "head_sha": second}, {"number": 102, "head_sha": source},
-    ]
-
+        {"number": 101, "head_sha": second}, {"number": 102, "head_sha": source}]
 
 def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
     attest, _, commit, *_ = tree_candidate
     main = commit("source", "conflicting main content\n")
     with pytest.raises(CandidateError, match="parent:.*integration conflict"):
         attest(main_head=main)
+
+@pytest.mark.parametrize("timing", ["metadata", "policy", "initial"])
+def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monkeypatch, timing):
+    from loopzero import candidate
+    _, git, _, _, parent, source, head = tree_candidate
+    candidate_event = event()
+    candidate_event["pull_request"]["head"]["sha"] = head
+    values = payloads(candidate_event)
+    for number, sha in [(101, parent), (102, source)]:
+        values[f"/repos/owner/repo/pulls/{number}"] = pull(number, sha)
+        values[f"/repos/owner/repo/compare/{sha}...{head}"] = {"status": "ahead", "merge_base_commit": {"sha": sha}}
+    main, vanished = git("rev-parse", "main"), status()
+    vanished["batches"].pop(0)
+    reads = iter(([status(), status()] if timing == "metadata" else [status()]) + [vanished, vanished])
+    source_reads = candidate_reads = status_reads = 0
+    seen, verified, sleeps, verify = [], [], [], candidate._verify_tree
+    def get(path):
+        nonlocal source_reads, candidate_reads
+        if path.endswith("/git/ref/heads/main"):
+            return {"object": {"sha": main}}
+        result = deepcopy(values[path])
+        candidate_reads += path.endswith("/pulls/900")
+        if path.endswith("/pulls/101"):
+            source_reads += 1
+            assert status_reads > 0  # lineage precedes the landing REST/policy race
+            if timing == "initial" or source_reads == 2:
+                result.update(state="closed", merged=True)
+        return result
+    def lineage(*_):
+        nonlocal status_reads
+        status_reads += 1
+        return deepcopy(next(reads))
+    def policy(number, snapshot):
+        seen.append(number)
+        if timing == "policy" and number == 101:
+            assert snapshot["state"] == "open" and source_reads == 1 and status_reads == 1
+            raise LoopZeroError("source #101: PR #101 is MERGED, not open")
+    def verify_tree(repo, main_sha, candidate_sha, sources):
+        verified.append((main_sha, candidate_sha, sources))
+        verify(repo, main_sha, candidate_sha, sources)
+    monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
+    monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
+    assert attest_candidate(candidate_event, github_get=get, mergify_status=lineage,
+                            source_policy=policy) == [{"number": 102, "head_sha": source}]
+    assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
+    assert candidate_reads == (4 if timing == "metadata" else 3)
+    assert verified == [(main, head, [source])] and sleeps == [2]
+@pytest.mark.parametrize("field,value", [("body", "new policy evidence"), ("draft", True)])
+def test_metadata_retry_evaluates_fresh_policy(field, value):
+    values, snapshots, reads = payloads(event()), [], 0
+    def get(path):
+        nonlocal reads
+        if path.endswith("/pulls/101"):
+            reads += 1
+            if reads == 2:
+                values[path][field] = value
+        return deepcopy(values[path])
+    def policy(number, source):
+        if number == 101:
+            snapshots.append((source["body"], source["draft"]))
+            if source[field] == value:
+                raise CandidateError("fresh policy rejects drift")
+    with pytest.raises(CandidateError, match="fresh policy rejects drift"):
+        attest_candidate(event(), github_get=get, mergify_status=lambda *_: status(),
+                         source_policy=policy)
+    assert snapshots == [("source 101", False), (value if field == "body" else "source 101", field == "draft")]
+    assert reads == 4
+@pytest.mark.parametrize("failure,reread", [(f, None) for f in ["closed", "tree", "identity"]] +
+                         [("policy", v) for v in [pull(101, "1" * 40),
+                          {"merged": True, "head": {"sha": "9" * 40}}, OSError("lookup failed"),
+                          [], {"merged": True, "head": None},
+                          {"merged": 1, "head": {"sha": "1" * 40}}]])
+def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
+    from loopzero import candidate
+    values, live = payloads(event()), status()
+    sleeps, attempts, source_reads = [], [], []
+    expected = LoopZeroError("source #101: missing required review")
+    if failure == "closed":
+        values["/repos/owner/repo/pulls/101"].update(state="closed", merged=False)
+    if failure == "identity":
+        values["/repos/owner/repo/pulls/900"]["user"]["id"] = 1
+    if failure == "tree":
+        live["batches"].pop(0)
+        values["/repos/owner/repo/git/ref/heads/main"] = {"object": {"sha": "b" * 40}}
+        def mismatch(*_):
+            raise CandidateError("candidate tree mismatch")
+        monkeypatch.setattr(candidate, "_verify_tree", mismatch)
+    def get(path):
+        if path == "/apps/mergify":
+            attempts.append(path)
+        result = deepcopy(values[path])
+        if path.endswith("/pulls/101"):
+            source_reads.append(path)
+            if len(source_reads) == 2 and failure == "policy":
+                if isinstance(reread, Exception):
+                    raise reread
+                return deepcopy(reread)
+        return result
+    def policy(*_):
+        if failure == "policy":
+            raise expected
+    monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
+    with pytest.raises((CandidateError, LoopZeroError)) as caught:
+        attest_candidate(event(), github_get=get, mergify_status=lambda *_: deepcopy(live),
+                         source_policy=policy)
+    assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
+    if failure == "policy":
+        assert caught.value is expected and len(source_reads) == 2
+@pytest.mark.parametrize("elapsed,oversleep,attempt_count", [(0, 0, 3), (29, 0, 1), (0, 30, 1)])
+def test_persistent_race_preserves_last_error_and_bounds_retry(monkeypatch, elapsed, oversleep, attempt_count):
+    from loopzero import candidate
+    attempts, sleeps, clock = [], [], [0]
+    def race(*_, **__):
+        error = CandidateRaceError("Mergify candidate membership changed during attestation")
+        attempts.append(error)
+        clock[0] += elapsed
+        raise error
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds + oversleep
+    monkeypatch.setattr(candidate, "_attest_candidate_once", race)
+    monkeypatch.setattr(candidate.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(candidate, "_retry_sleep", sleep)
+    with pytest.raises(CandidateRaceError, match="membership changed") as caught:
+        attest_candidate(event(), github_get=lambda _: None, mergify_status=lambda *_: None,
+                         source_policy=lambda *_: None)
+    assert len(attempts) == attempt_count and caught.value is attempts[-1]
+    assert sum(sleeps) <= 4
+
+def test_membership_drift_is_a_retryable_race():
+    changed = status()
+    changed["batches"][1]["sub_batches"][0]["pull_requests"] = [{"number": 103}]
+    with pytest.raises(CandidateRaceError, match="membership changed"):
+        run_attestation(status_reads=[status(), changed])
