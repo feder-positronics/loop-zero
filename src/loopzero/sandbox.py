@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import resource
 import shutil
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from os.path import commonpath
 from pathlib import Path
@@ -16,15 +18,11 @@ GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
 SANDBOX_HOME = "/tmp/home"
-# Host directories exposed read-only by default. Nothing else from the host is visible:
-# /home, /root, /run, /var/run, /proc/1 and every Unix socket stay outside. Tool caches
-# under the user's home (~/.local/bin, ~/.local/share/uv, ~/.cache/uv, ...) must be listed
-# explicitly in `[checks] ro_paths` (Config.sandbox_ro).
+# Only these system directories are exposed read-only by default; home tool paths
+# require explicit `[checks] ro_paths`. Host homes, sockets and processes stay hidden.
 SYSTEM_RO = ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt")
-# `Config.writable` paths are bound read-write. That is a deliberate trust decision by the
-# consumer (e.g. a shared ~/.cache/uv so checks work offline); a check can poison that cache.
-# `Config.scratch` entries are per-run empty tmp dirs bound over <worktree>/<entry> so tools
-# can create venvs and caches without the tree itself being writable.
+# Writable binds are consumer-trusted shared caches (checks can poison them).
+# Scratch binds are per-run empty directories for venvs/caches, preserving read-only source.
 # Precedence inside the sandbox: SANDBOX_ENV defaults < allowlisted host vars < Config.env.
 SANDBOX_ENV = {
     "PYTHONDONTWRITEBYTECODE": "1",
@@ -38,17 +36,9 @@ class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
 
 
-def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT) -> CheckReport:
-    """Run `config.checks` in order until one fails, inside the sandbox, and report results.
-
-    The sandbox sees only `SYSTEM_RO`, `config.sandbox_ro`, the worktree and its Git
-    directories (all read-only), `config.writable` read-write, per-run scratch dirs over
-    `config.scratch`, fresh tmpfs at /tmp, /run and /var/run, a private HOME at /tmp/home,
-    no network unless `config.network`, and `SANDBOX_ENV` overlaid by `config.env_allowlist`
-    host values and then `config.env`. Each command's exit code is recorded; a timeout is
-    recorded as exit `TIMEOUT_EXIT` with the partial output. Nothing raises for a failing check,
-    and commands after the first failure are not run or recorded.
-    """
+def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
+               progress: Callable[[str], None] | None = None) -> CheckReport:
+    """Preflight and run checks in the same sandbox, stopping at the first failure."""
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
         raise SandboxUnavailable(
@@ -61,7 +51,6 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    results = []
     with ExitStack() as stack:
         home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))
         scratch_root = Path(
@@ -76,32 +65,55 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         scratch = {entry: scratch_root / entry for entry in config.scratch}
         for entry, source in scratch.items():
             source.mkdir(parents=True)
-            # bwrap cannot create mount points inside a read-only bind, so the (empty,
-            # git-invisible) directory must exist in the worktree before we start.
+            # Mount points must exist before bwrap binds the source read-only.
             (worktree / entry).mkdir(parents=True, exist_ok=True)
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
         probe(config, worktree, prefix)
-        for command in config.checks:
+        missing, preparations = _preflight(config, worktree)
+        results = [missing] if missing else []
+        for index, command in enumerate(() if missing else (*preparations, *config.checks)):
+            if progress:
+                progress(command)
             result = _run_one(config, worktree, prefix, command, timeout)
-            results.append(result)
+            if index >= len(preparations) or result.exit_code:
+                results.append(result)
             if result.exit_code != 0:
                 break
     final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
     final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
     if (final_head, final_dirty) != (head, dirty):
-        results.append(
-            CheckResult(
-                command="<worktree changed during run>",
-                exit_code=1,
-                duration_s=0.0,
-                tail=(
+        results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
                     f"HEAD before: {head}; HEAD after: {final_head}; "
                     f"dirty before: {dirty}; dirty after: {final_dirty}"
-                ),
-            )
-        )
+        )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
+
+
+def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
+    # Recognize a deliberately small argv grammar, never interpret shell syntax.
+    groups = None
+    for command in config.checks:
+        if not re.fullmatch(r"[A-Za-z0-9_./=-]+(?: +[A-Za-z0-9_./=-]+)*", command):
+            continue
+        words = command.split()
+        script = words[1] if re.fullmatch(r"python(?:3(?:\.\d+)?)?", words[0]) and len(words) > 1 else words[0]
+        path = Path(script)
+        if (not path.is_absolute() and "/" in script and ".." not in path.parts
+                and not (worktree / path).is_file()):
+            return CheckResult(command, 1, 0.0,
+                    f"Check preflight: repo-local file {script!r} is absent from this task tree. "
+                    "If trusted-base checks advanced, integrate the current configured base "
+                    "into this task branch (resolve conflicts), then rerun loopzero check; "
+                    "otherwise restore the required file."), ()
+        match = re.fullmatch(r"uv run((?: --group [A-Za-z0-9_-]+)*) [A-Za-z0-9_./][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./=-]+)*", command)
+        if match:
+            groups = [*(groups or []), *match[1].split()[1::2]]
+    preparations = ()
+    if groups is not None and not config.network and (worktree / "pyproject.toml").is_file():
+        flags = "".join(f" --group {group}" for group in dict.fromkeys(groups))
+        preparations = (f"uv sync --offline --locked{flags}",)
+    return None, preparations
 
 
 def _validate_scratch(
@@ -145,18 +157,9 @@ def _run_one(
             merge_output=True,
         )
     except _proc.ProcTimeout as exc:
-        return CheckResult(
-            command=command,
-            exit_code=TIMEOUT_EXIT,
-            duration_s=timeout,
-            tail=_proc.tail(exc.output + f"\n[loopzero] timed out after {timeout:g}s"),
-        )
-    return CheckResult(
-        command=command,
-        exit_code=done.exit_code,
-        duration_s=done.duration_s,
-        tail=_proc.tail(done.stdout),
-    )
+        return CheckResult(command, TIMEOUT_EXIT, timeout,
+                           _proc.tail(exc.output + f"\n[loopzero] timed out after {timeout:g}s"))
+    return CheckResult(command, done.exit_code, done.duration_s, _proc.tail(done.stdout))
 
 
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
@@ -199,13 +202,9 @@ def bwrap_argv(
     ``writable_binds`` overlays specific paths inside the otherwise private HOME.
     """
     argv = [
-        "bwrap",
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-all",
+        "bwrap", "--die-with-parent", "--new-session", "--unshare-all",
         *(["--share-net"] if config.network else []),
-        "--cap-drop",
-        "ALL",
+        "--cap-drop", "ALL",
     ]
     for path in SYSTEM_RO:
         if Path(path).exists():
@@ -213,9 +212,7 @@ def bwrap_argv(
     argv += ["--dev", "/dev", "--proc", "/proc"]
     for path in ("/tmp", "/run", "/var/run"):
         argv += ["--tmpfs", path]
-    # /etc/resolv.conf commonly points into /run, which the tmpfs above masks.
-    # A bind onto the dangling symlink fails, so restore its resolved parent in
-    # that case. Otherwise overlay /etc/resolv.conf with the resolved host file.
+    # Restore resolv.conf (or its parent for masked symlinks) over the private tmpfs.
     if config.network:
         resolv_conf = Path("/etc/resolv.conf")
         resolved = resolv_conf.resolve()
@@ -232,8 +229,7 @@ def bwrap_argv(
     argv += ["--bind", str(home), SANDBOX_HOME]
     for source, destination in writable_binds:
         argv += ["--bind", str(source), str(destination)]
-    # Bind the worktree and every Git directory read-only *after* the /tmp tmpfs so
-    # they stay visible even when they live under /tmp, and are never writable.
+    # Read-only tree/Git binds follow tmpfs so paths under /tmp stay visible.
     binds = [worktree]
     for path in (common_dir, git_dir):
         if not any(path == seen or path.is_relative_to(seen) for seen in binds):

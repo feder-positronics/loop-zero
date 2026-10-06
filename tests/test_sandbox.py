@@ -365,14 +365,15 @@ def test_real_sandbox_uv_run_offline(git_repo):
     git(git_repo, "add", "-A")
     git(git_repo, "commit", "-q", "-m", "uv project")
     cfg = make_config(
-        checks=("uv run --group dev python -c 1 && test -e .venv/bin/python && test ! -w .",),
+        checks=("uv run --group dev python -c 1", "test -e .venv/bin/python && test ! -w ."),
         env=(("UV_CACHE_DIR", f"{home}/.cache/uv"),
              ("UV_PYTHON_INSTALL_DIR", f"{home}/.local/share/uv/python")),
         sandbox_ro=(str(home / ".local/bin"), str(home / ".local/share/uv")),
         writable=(str(home / ".cache/uv"),),
     )
-    (result,) = sandbox.run_checks(cfg, git_repo).results
-    assert result.exit_code == 0, result.tail
+    report = sandbox.run_checks(cfg, git_repo)
+    assert report.ok, report
+    assert [r.command for r in report.results] == list(cfg.checks)
     assert not (git_repo / ".venv/bin").exists()  # venv lived in the scratch dir
 
 

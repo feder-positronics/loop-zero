@@ -446,7 +446,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     try:
-        report = sandbox.run_checks(config, wt)
+        report = sandbox.run_checks(config, wt, progress=lambda command: print(
+            f"running: {command}", flush=True))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
@@ -457,7 +458,8 @@ def cmd_check(args: argparse.Namespace) -> int:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
             print(tail, file=sys.stderr)
-            if not config.network and OFFLINE_FAILURE_RE.search(tail):
+            if not config.network and (result.command.startswith("uv sync --offline --locked")
+                                       or OFFLINE_FAILURE_RE.search(tail)):
                 env = {
                     **sandbox.SANDBOX_ENV,
                     **_proc.build_env(config.env_allowlist),
@@ -466,7 +468,8 @@ def cmd_check(args: argparse.Namespace) -> int:
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "To prepare offline, run the same commands once on the host so the cache "
+                    "To prepare offline, run UV_CACHE_DIR=<effective-cache> uv sync --group dev "
+                    "(use the groups your checks require) on the host, or the same commands, so the cache "
                     "under `[checks] writable` is warm, or set `[checks] env` UV_CACHE_DIR to "
                     "that cache.",
                     file=sys.stderr,
