@@ -1211,21 +1211,21 @@ def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     assert gh.calls == []
 
 
-@pytest.mark.parametrize("args, attempts", [
-    (("api", "repos/acme/widgets/pulls/1"), 2),
-    (("api", "repos/acme/widgets/commits/x/check-runs", "--method", "GET", "-F", "per_page=100"), 2),
-    (("api", "graphql", "-f", "query=query { viewer { login } }"), 2),
-    (("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x"), 1),
-    (("api", "graphql", "-f", "query=mutation { resolve }"), 1),
+@pytest.mark.parametrize("args, attempts, error", [
+    (("api", "repos/acme/widgets/pulls/1"), 2, ""),
+    (("api", "repos/acme/widgets/commits/x/check-runs", "--method", "GET", "-F", "per_page=100"), 2, "dial tcp 140.82.121.5:443: i/o timeout"),
+    (("api", "graphql", "-f", "query=query { viewer { login } }"), 2, "net/http: TLS handshake timeout"),
+    (("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x"), 1, "HTTP 503"),
+    (("api", "graphql", "-f", "query=mutation { resolve }"), 1, "HTTP 503"),
 ])
-def test_gh_retries_only_transient_reads(monkeypatch, args, attempts):
+def test_gh_retries_only_transient_reads(monkeypatch, args, attempts, error):
     seen: list[list[str]] = []
     def run(argv, **_):
         seen.append(argv)
         failed = len(seen) == 1
         if failed and "pulls/1" in argv[-1]:
             raise github.ProcTimeout("gh api timed out")
-        return type("Done", (), {"exit_code": int(failed), "stdout": "ok", "stderr": "HTTP 503" * failed})
+        return type("Done", (), {"exit_code": int(failed), "stdout": "ok", "stderr": error * failed})
     monkeypatch.setattr(github, "run", run)
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
     if attempts == 2:
