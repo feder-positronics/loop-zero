@@ -874,6 +874,25 @@ def test_review_chunks_oversized_diff_with_same_family(
     assert len(saved["provenance"]["session_ids"]) == saved["chunk_count"]
 
 
+def test_review_with_every_supported_family_authoring_names_no_false_remedy(
+    wt: Path, gh: FakeGh, capsys
+) -> None:
+    git(
+        wt, "commit", "-q", "--allow-empty", "-m",
+        "mixed-family\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
+        "Co-authored-by: Codex gpt-6.1-sol <noreply@openai.com>",
+    )
+    arm_empty_primary_review_history(gh, head_of(wt))
+
+    code, out, err = run(capsys, "review")
+
+    assert code == 4 and out == ""
+    assert "excluded families: claude, codex" in err
+    assert "no native independent review route exists yet (see loop-zero#264)" in err
+    assert "Do not remove truthful Co-authored-by attribution." in err
+    assert "delivery.reviewers" not in err and "exception" not in err
+
+
 def test_review_without_independent_family_exits_four_and_repost_cannot_bypass(
     wt: Path, gh: FakeGh, capsys
 ) -> None:
@@ -893,7 +912,8 @@ def test_review_without_independent_family_exits_four_and_repost_cannot_bypass(
 
     assert code == 4 and out == ""
     assert "author family: claude" in err and "excluded families: claude" in err
-    assert "configure another family, log in" in err
+    assert "add codex to delivery.reviewers in workflow.toml" in err
+    assert "exception" not in err and "loop-zero#264" not in err
 
     code, out, err = run(capsys, "review", "--repost")
     assert code == 4 and out == "" and "--repost does not apply" in err
@@ -1051,7 +1071,8 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert code == 4 and out == ""
     assert "no independent reviewer can run" in err
     assert "author family: unknown" in err and "excluded families: none" in err
-    assert "configure another family, log in" in err
+    assert "fix the reviewer failures below and rerun" in err
+    assert "delivery.reviewers" not in err and "exception" not in err
     assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
     assert "not printed" not in err
     assert "Fix: run `claude auth login`." in err

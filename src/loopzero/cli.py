@@ -545,7 +545,9 @@ def cmd_review(args: argparse.Namespace) -> int:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
         if not any(family not in authors for family in config.reviewers):
-            raise IndependentReviewerUnavailable(_independence_message(authors, excluded, []))
+            raise IndependentReviewerUnavailable(
+                _independence_message(authors, excluded, [], config.reviewers)
+            )
         result = _load_review(wt, head, kind)
         if result.family in authors:
             raise IndependentReviewerUnavailable(
@@ -603,7 +605,9 @@ def _run_review(
     failures: list[str] = []
     excluded = [family for family in config.reviewers if family in authors]
     if not candidates:
-        raise IndependentReviewerUnavailable(_independence_message(authors, excluded, failures))
+        raise IndependentReviewerUnavailable(
+            _independence_message(authors, excluded, failures, config.reviewers)
+        )
     selected: dict[str, Callable[..., ReviewResult]] = {}
     for family in candidates:  # validate every candidate before launching any reviewer
         settings = config.review.get(family)
@@ -646,19 +650,36 @@ def _run_review(
             failures.append(detail)
             print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
     else:
-        raise IndependentReviewerUnavailable(_independence_message(authors, excluded, failures))
+        raise IndependentReviewerUnavailable(
+            _independence_message(authors, excluded, failures, config.reviewers)
+        )
     return result
 
 
-def _independence_message(authors: set[str], excluded: list[str], failures: list[str]) -> str:
+def _independence_message(
+    authors: set[str], excluded: list[str], failures: list[str], configured: tuple[str, ...]
+) -> str:
     identity = ", ".join(sorted(authors)) or "unknown"
     excluded_text = ", ".join(excluded) if excluded else "none"
     detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
+    # Name only remedies that exist: an unconfigured independent family, or fixable failures.
+    addable = [f for f in config_mod.REVIEWER_FAMILIES if f not in authors and f not in configured]
+    remedies = []
+    if addable:
+        remedies.append(f"add {' or '.join(addable)} to delivery.reviewers in workflow.toml")
+    if failures:
+        remedies.append("fix the reviewer failures below and rerun")
+    if remedies:
+        options = "Owner options: " + "; ".join(remedies) + "."
+    else:
+        options = (
+            "Every supported reviewer family contributed to this lineage, so no native "
+            "independent review route exists yet (see loop-zero#264). Do not remove truthful "
+            "Co-authored-by attribution."
+        )
     return (
         f"no independent reviewer can run (author family: {identity}; excluded families: "
-        f"{excluded_text}). Owner options: configure another family, log in, or record an "
-        "explicit owner-approved exception in the PR by a human. Delivery remains blocked; "
-        f"--repost does not apply.{detail}"
+        f"{excluded_text}). {options} Delivery remains blocked; --repost does not apply.{detail}"
     )
 
 
