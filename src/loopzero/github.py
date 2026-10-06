@@ -90,8 +90,8 @@ class Readiness:
     stale_verdicts: tuple[str, ...] = ()
 
 
-TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|connection reset|no server is currently",
-                          re.IGNORECASE)
+TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
+                          r"connection reset|no server is currently", re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
 
