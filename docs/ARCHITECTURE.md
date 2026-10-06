@@ -123,7 +123,8 @@ already running tree verification (its own 120-second bound) are not preempted.
 Other failures stop immediately, including source-head drift. Exhaustion raises
 the last race error unchanged, and hosted eligibility publishes terminal failure;
 success requires one complete successful attestation. Source-PR eligibility uses
-its existing path without these retries.
+its existing path without these retries; a merged source PR publishes nothing, so a
+late refresh cannot turn its landed head red.
 
 
 Agent sessions and T3 runs own interaction, execution and workspace management.
