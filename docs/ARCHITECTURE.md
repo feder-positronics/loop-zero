@@ -108,6 +108,23 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
+Candidate attestation retries typed concurrent source metadata, Mergify membership
+and main-ref drift, and landed sources still listed in lineage, up to three complete
+attempts with two-second pauses. A policy exception becomes a landing race only
+when a fresh REST read confirms `merged is True` at the same snapshotted head;
+failed reads or other evidence preserve the original exception. A non-open source
+is a race only when its REST payload confirms `merged is True`; it never passes
+source attestation. Each attempt resolves identity and lineage again, snapshots
+and evaluates current source policy again, and performs the existing tree verification when
+parent batches are missing. No evidence or approval survives a failed attempt.
+A monotonic 30-second window bounds admission of retries, with at most four
+seconds of deliberate delay; caller-owned synchronous API/policy calls and an
+already running tree verification (its own 120-second bound) are not preempted.
+Other failures stop immediately, including source-head drift. Exhaustion raises
+the last race error unchanged, and hosted eligibility publishes terminal failure;
+success requires one complete successful attestation. Source-PR eligibility uses
+its existing path without these retries.
+
 
 Agent sessions and T3 runs own interaction, execution and workspace management.
 They can invoke loop-zero and use its skills; their successful run or private
