@@ -1,7 +1,7 @@
 name: review eligibility
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, closed]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
   workflow_run:
     workflows: [review event]
     types: [completed]
@@ -17,6 +17,14 @@ concurrency:
   cancel-in-progress: false
 jobs:
   eligibility:
+    # Skip events that cannot change the verdict before a runner is allocated: title/body
+    # edits (the status tracks head, base and reviews) and candidate metadata events that
+    # loopzero.hosted ignores. The head's existing status stays authoritative.
+    if: >-
+      github.event_name != 'pull_request_target' || (
+        (github.event.action != 'edited' || github.event.changes.base != null) &&
+        (github.event.pull_request.user.login != 'mergify[bot]' ||
+          github.event.action == 'opened' || github.event.action == 'synchronize'))
     runs-on: ubuntu-24.04
     environment:
       name: mergify-metadata

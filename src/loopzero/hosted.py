@@ -38,12 +38,13 @@ def main() -> int:
     head = pr["head"]["sha"]
     candidate = (pr["head"]["ref"].startswith("mergify/merge-queue/")
                  or pr["user"]["login"] == "mergify[bot]")
+    if not candidate and pr.get("merged") is True:
+        return 0  # A landed source needs no new verdict; a late refresh must not turn it red.
     if candidate:
         event_pr = event.get("pull_request")
         if not isinstance(event_pr, dict):
-            raise LoopZeroError(
-                "candidate eligibility requires a pull_request_target creation or head-update event"
-            )
+            raise LoopZeroError("candidate eligibility requires a pull_request_target "
+                                "creation or head-update event")
         if event.get("action") not in {"opened", "synchronize"}:
             print("ignored candidate metadata event")
             return 0
@@ -84,7 +85,6 @@ def main() -> int:
         with suppress(Exception):
             publish("failure", "Eligibility refresh failed; inspect workflow logs")
         raise
-
 
 
 if __name__ == "__main__":

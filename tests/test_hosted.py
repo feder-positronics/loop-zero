@@ -77,6 +77,11 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
     if status == "pending":
         assert statuses[-1]["description"] == "Awaiting trusted review of current source head"
 
+def test_merged_source_refresh_publishes_nothing(publisher):
+    publisher.respond(f"api repos/{REPO}/pulls/7", {"head": {"sha": HEAD, "ref": "lz/task"},
+                                                    "user": {"login": "author"}, "merged": True})
+    assert hosted.main() == 0 and not [c for c in publisher.calls if "--input" in c]
+
 @pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
 def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, error):
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
@@ -110,10 +115,8 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
 ])
 def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, error, message):
     event = candidate_event()
-    if case == "metadata":
-        event["action"] = "edited"
-    if case == "untrusted":
-        event["sender"]["id"] = 1
+    event["action"] = "edited" if case == "metadata" else event["action"]
+    event["sender"]["id"] = 1 if case == "untrusted" else event["sender"]["id"]
     values = candidate_payloads(event)
     if case == "stale":
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
@@ -161,9 +164,7 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
         assert hosted.main() == 0
     terminal = [] if case in {"manual", "metadata", "stale", "interrupt"} else ["failure"]
     expected = [] if case in {"manual", "metadata", "stale"} else ["pending", *terminal]
-    if case == "race":
-        assert len(attempts) == 3 and sleeps == [2, 2]
-        assert len(evaluated) == 6
+    assert case != "race" or (len(attempts) == 3 and sleeps == [2, 2] and len(evaluated) == 6)
     if case == "valid":
         assert evaluated == [("owner/repo", 101, "1" * 40, "main", ("trusted-publisher",)),
                              ("owner/repo", 102, "2" * 40, "main", ("trusted-publisher",))]
@@ -174,8 +175,7 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
     else:
         assert [call[3] for call in published] == expected
         assert all(call[1] == "c" * 40 for call in published)
-        if terminal:
-            assert published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
+        assert not terminal or published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
 
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     workflow = (Path(__file__).parents[1] / ".github/workflows/eligibility.yml").read_text()
