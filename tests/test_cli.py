@@ -2087,3 +2087,54 @@ def test_review_uses_lineage_author_after_unattributed_repair(
     assert code == 0 and out.startswith(f"primary review by {expected}"), err
     other = "claude" if expected == "codex" else "codex"
     assert not (fake_bin / f"{other}.stdin").exists()
+
+
+@pytest.mark.parametrize("third_author", [False, True])
+def test_gemini_independent_selection(wt, gh, fake_bin, capsys, third_author):
+    from tests.test_runners import _fake_gemini, _gemini_envelope
+    workflow = wt / "workflow.toml"
+    workflow.write_text(WORKFLOW.replace('["claude", "codex"]', '["claude", "codex", "gemini"]'))
+    git(wt, "add", "workflow.toml")
+    trailers = "Co-Authored-By: Claude <noreply@anthropic.com>\nCo-Authored-By: Codex <codex@openai.com>"
+    if third_author:
+        trailers += "\nCo-Authored-By: Gemini <noreply@google.com>"
+    git(wt, "commit", "-qm", "config\n\n" + trailers)
+    arm_empty_primary_review_post(gh, head_of(wt))
+    _fake_gemini(fake_bin, _gemini_envelope())
+    code, _out, err = run(capsys, "review")
+    assert code == (4 if third_author else 0), err
+    if third_author:
+        assert "excluded families: claude, codex, gemini" in err
+        assert not (fake_bin / "agy.argv").exists()
+    else:
+        assert "gemini" in posted_review(gh)["body"]
+        assert json.loads(cli._review_file(wt, head_of(wt), "primary").read_text())["model"] == "gemini-3.1-pro-high"
+
+
+@pytest.mark.parametrize("check_exit", [0, 7])
+def test_check_mixed_family_warning_is_nonblocking(wt, capsys, monkeypatch, check_exit):
+    git(wt, "commit", "--allow-empty", "-qm", "mixed\n\nCo-Authored-By: Claude <a@anthropic.com>\n"
+        "Co-Authored-By: Gemini <noreply@google.com>")
+    monkeypatch.setattr(cli.sandbox, "run_checks", lambda *_a, **_k: CheckReport(
+        head=head_of(wt), dirty=False, results=(CheckResult("test", check_exit, 0, ""),)))
+    monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: None)
+    code, _out, err = run(capsys, "check")
+    assert code == (0 if check_exit == 0 else 1)
+    assert "warning: PR lineage credits multiple model families (claude, gemini)" in err
+    assert "independent review may become impossible" in err
+
+
+@pytest.mark.parametrize("failure,hint", [(cli.runners.RunnerMissing, "install the Antigravity CLI (`agy`)"),
+                                         (cli.runners.RunnerAuthFailed, "run `agy`")])
+def test_gemini_cli_failure_is_loud(wt, gh, capsys, monkeypatch, failure, hint):
+    workflow = wt / "workflow.toml"
+    workflow.write_text(WORKFLOW.replace('["claude", "codex"]', '["gemini"]'))
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-qm", "opt in")
+    arm_empty_primary_review_post(gh, head_of(wt))
+    def unavailable(*_a, **_k):
+        raise failure("gemini: unavailable")
+    monkeypatch.setattr(cli.runners, "review_with", unavailable)
+    code, _out, err = run(capsys, "review")
+    assert code == 4 and hint in err
+    assert not any(call["argv"][1] == post_key()[4:] for call in gh.calls)

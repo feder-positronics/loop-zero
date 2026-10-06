@@ -453,6 +453,15 @@ def cmd_start(args: argparse.Namespace) -> int:
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     try:
+        authors = runners.author_families(wt, worktree.head(wt), _primary_base(wt, config))
+    except (LoopZeroError, worktree.WorktreeError, OSError) as exc:
+        print(f"warning: unable to inspect author families: {exc}", file=sys.stderr)
+        authors = set()
+    if len(authors) > 1:
+        print(f"warning: PR lineage credits multiple model families ({', '.join(sorted(authors))}); "
+              "independent review may become impossible. Keep one authoring model family per PR.",
+              file=sys.stderr)
+    try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True))
     except sandbox.SandboxUnavailable as exc:
@@ -624,7 +633,8 @@ def _run_review(
                 result = selected[family](diff=diff)
                 break
             except runners.RunnerPromptTooLong:
-                chunks = runners.split_diff(diff, config.review_chunk_bytes)
+                budget = min(config.review_chunk_bytes, 100_000) if family == "gemini" else config.review_chunk_bytes
+                chunks = runners.split_diff(diff, budget)
                 print(
                     f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
                     file=sys.stderr,
@@ -636,10 +646,12 @@ def _run_review(
             reason = str(exc).splitlines()[0]
             detail = "\n".join(str(exc).splitlines()[:3])
             if isinstance(exc, runners.RunnerAuthFailed):
-                login = "claude auth login" if family == "claude" else "codex login"
+                login = {"claude": "claude auth login", "codex": "codex login", "gemini": "agy"}[family]
                 detail += f"\nFix: run `{login}`."
             elif isinstance(exc, runners.RunnerUsageLimit):
                 detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
+            elif isinstance(exc, runners.RunnerMissing) and family == "gemini":
+                detail += "\nFix: install the Antigravity CLI (`agy`) and run `agy` to log in."
             elif isinstance(exc, runners.RunnerMissing):
                 package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
                 detail += f"\nFix: install it with `npm install -g {package}`."

@@ -55,6 +55,8 @@ merge = "squash"
 # Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
 # review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
+# Opt in to a third independent family (requires logged-in Antigravity CLI `agy`):
+# reviewers = ["claude", "codex", "gemini"]
 # Optional absolute paths for reviewer binaries and runtimes. When omitted,
 # loop-zero mounts the resolved directory of the selected reviewer binary.
 # Claude installations may need their npm or bun prefix listed here.
@@ -71,3 +73,8 @@ reviewers = ["claude", "codex"]
 # model = "gpt-6-luna"
 # effort = "medium"
 # allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+
+# [delivery.review.gemini]
+# model = "gemini-3.1-pro-high" # default; only gemini- IDs are accepted
+# effort = "high"
+# allowed_efforts = ["low", "medium", "high"]

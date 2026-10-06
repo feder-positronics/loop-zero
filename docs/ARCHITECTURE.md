@@ -60,7 +60,7 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    recognized contributing family from the configured-base merge-base through
    HEAD, including repairs and all trailers on each commit. Delta reviews and
    reposts enforce the same lineage-wide exclusion. Keep one authoring family
-   per PR, including repairs; the other family may offer read-only advice or
+   per PR, including repairs; independent families may offer read-only advice or
    formal review. Imported and squashed work must retain actual child attribution,
    which cannot be inferred from the controller. Omitted trailers leave
    attribution unknown. There is one primary and at most one delta review per lineage; every changed head needs renewed review.
@@ -103,6 +103,22 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
+The supported reviewer families are Claude, Codex and Gemini. Defaults remain
+`["claude", "codex"]`; consumers opt in to Gemini in `delivery.reviewers`.
+Gemini uses Antigravity's multi-vendor `agy` CLI with an explicit model whose ID
+must start with `gemini-`, enforced in configuration and again before execution.
+All runners use the shared verdict schema and parser. Gemini requires a SUCCESS
+structured result without denied tool actions; failures never become approvals.
+Its provenance records the requested model and effort (the CLI does not echo the
+model), conversation ID and usage, including every session for chunked reviews.
+Saved-result validation checks that evidence before reposting. Reviewer sandboxes
+bind the repo and Git directories read-only with a private HOME. Live auth binds
+allow refresh: Claude's config/state, Codex's `auth.json`, or only `~/.gemini` for
+Gemini. Gemini receives the task and diff in its prompt without automatic tool
+permission approval. `check` warns, without changing its verdict, when lineage
+trailers credit multiple recognized families: independent review may become
+impossible. Independence still excludes every credited family.
+
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.

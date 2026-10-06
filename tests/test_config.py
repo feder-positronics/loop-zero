@@ -166,3 +166,23 @@ def test_ro_paths_reject_host_secrets(tmp_path, path):
 def test_ro_paths_accept_explicit_subpaths(tmp_path, path):
     text = f'[repo]\nname = "o/n"\n[checks]\nro_paths = ["{path}"]\n'
     assert config.load(write(tmp_path, text)).sandbox_ro == (path,)
+
+
+@pytest.mark.parametrize("model", ["gemini-3.1-pro-high", "claude-opus-5-5-high"])
+def test_gemini_config(tmp_path, model):
+    text = f'''[repo]
+name = "o/n"
+[delivery]
+reviewers = ["claude", "codex", "gemini"]
+[delivery.review.gemini]
+model = "{model}"
+effort = "high"
+allowed_efforts = ["high"]
+'''
+    if model.startswith("gemini-"):
+        loaded = config.load(write(tmp_path, text))
+        assert loaded.reviewers == ("claude", "codex", "gemini")
+        assert loaded.review["gemini"] == ReviewConfig(model, "high", ("high",))
+    else:
+        with pytest.raises(config.ConfigError, match="must start with gemini-"):
+            config.load(write(tmp_path, text))

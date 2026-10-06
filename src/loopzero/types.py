@@ -75,7 +75,7 @@ class Finding:
 
 @dataclass(frozen=True)
 class ReviewResult:
-    family: str  # "claude" | "codex"
+    family: str  # "claude" | "codex" | "gemini"
     head: str
     kind: str  # "primary" | "delta"
     verdict: str  # "approve" | "request_changes"

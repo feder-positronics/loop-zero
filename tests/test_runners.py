@@ -567,7 +567,7 @@ def test_codex_auth_failure_text(fake_bin: Path, tmp_path: Path) -> None:
 
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
-        _review("gemini", tmp_path)
+        _review("unknown", tmp_path)
     with pytest.raises(ValueError):
         review_with("claude", cwd=tmp_path, head="h", kind="full", diff="", task_text="")
 
@@ -658,3 +658,101 @@ def test_author_families_excludes_base_and_includes_all_lineage_trailers(git_rep
     head = _commit(git_repo, "repair\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
                    "Co-Authored-By: GPT <gpt@openai.com>")
     assert author_families(git_repo, head, base) == {"claude", "codex"}
+
+
+def _gemini_envelope(payload=APPROVE, **extra):
+    return {"status": "SUCCESS", "conversation_id": "gemini-session", "usage": {
+        "input_tokens": 20, "output_tokens": 10, "thinking_tokens": 5},
+        "structured_output": payload, **extra}
+
+
+def _fake_gemini(bin_dir, envelope, exit_code=0):
+    return _script(bin_dir, "agy", f"""
+        printf '%s\\0' "$@" > '{bin_dir}/agy.argv'
+        cat <<'JSON'
+        {json.dumps(envelope)}
+        JSON
+        exit {exit_code}
+    """)
+
+
+def test_gemini_review_and_saved_chunks(fake_bin, tmp_path, fake_bwrap, monkeypatch):
+    from loopzero.runners import merge_reviews, validate_runner_result
+    host = tmp_path / "host"
+    for name in (".gemini", ".claude", ".codex"):
+        (host / name).mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(host))
+    _fake_gemini(fake_bin, _gemini_envelope(CHANGES))
+    result = _review("gemini", tmp_path, model="gemini-3.1-pro-low", effort="low")
+    assert result.family == "gemini" and result.verdict == "request_changes"
+    assert result.findings[0].title == "Bug" and result.head == "abc123"
+    assert result.model == result.provenance["model"] == "gemini-3.1-pro-low"
+    assert result.effort == result.provenance["effort"] == "low"
+    assert result.provenance["session_id"] == "gemini-session"
+    assert result.provenance["usage"]["thinking_tokens"] == 5
+    assert validate_runner_result(result) and validate_runner_result(merge_reviews([result, result]))
+    assert validate_runner_result(merge_reviews([result]))
+    argv = _argv(fake_bin, "agy")
+    assert argv[argv.index("--model") + 1] == result.model
+    assert argv[argv.index("--effort") + 1] == "low"
+    assert "Do the thing" in argv[argv.index("-p") + 1]
+    assert "+x" in argv[argv.index("-p") + 1]
+    assert "--dangerously-skip-permissions" not in argv
+    assert json.loads(argv[argv.index("--json-schema") + 1])["required"] == ["verdict", "findings"]
+    binds = _pairs(_bwrap_argv(fake_bwrap), "--bind")
+    assert (str(host / ".gemini"), SANDBOX_HOME + "/.gemini") in binds
+    assert not any(".claude" in a or ".codex" in a for a, _ in binds)
+    assert (str(tmp_path), str(tmp_path)) in _pairs(_bwrap_argv(fake_bwrap), "--ro-bind")
+    result.provenance["model"] = "claude-opus-5-5-high"
+    assert not validate_runner_result(result)
+
+
+@pytest.mark.parametrize("envelope,exit_code,error", [
+    (_gemini_envelope(None, denied_actions=["read"]), 0, RunnerBadOutput),
+    (_gemini_envelope(APPROVE, denied_actions=["read"]), 0, RunnerBadOutput),
+    (_gemini_envelope(None), 0, RunnerBadOutput),
+    (_gemini_envelope({"verdict": "approve"}), 0, RunnerBadOutput),
+    (_gemini_envelope(status="FAILED"), 0, RunnerBadOutput),
+    ({"error": "Error: authentication required. Run 'agy' to log in."}, 1, RunnerAuthFailed),
+    ({"error": "Print mode: not logged in and no controlling terminal; cannot complete interactive login"}, 1, RunnerAuthFailed),
+    ({"status": "ERROR", "error": "quota exceeded"}, 0, RunnerUsageLimit),
+    ({"error": "RESOURCE_EXHAUSTED: 429"}, 1, RunnerUsageLimit),
+    ({"error": "UNAUTHENTICATED: invalid credentials"}, 1, RunnerAuthFailed),
+    ({"error": "prompt is too long"}, 1, RunnerPromptTooLong),
+])
+def test_gemini_failures(fake_bin, tmp_path, monkeypatch, envelope, exit_code, error):
+    # Empty HOME reproduces the unauthenticated runner boundary without live agy/network.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _fake_gemini(fake_bin, envelope, exit_code)
+    with pytest.raises(error):
+        _review("gemini", tmp_path)
+
+
+def test_gemini_rejects_other_vendor_before_launch(fake_bin, tmp_path):
+    _fake_gemini(fake_bin, _gemini_envelope())
+    with pytest.raises(RunnerBadOutput, match="model must start with gemini-"):
+        _review("gemini", tmp_path, model="claude-opus-5-5-high")
+    assert not (fake_bin / "agy.argv").exists()
+
+
+def test_gemini_missing_binary(tmp_path, monkeypatch):
+    from loopzero import runners
+    git(tmp_path, "init", "-q")
+    monkeypatch.setattr(runners.os, "get_exec_path", lambda: [str(tmp_path)])
+    with pytest.raises(RunnerMissing, match="agy"):
+        _review("gemini", tmp_path)
+
+
+@pytest.mark.parametrize("trailer", ["Gemini <noreply@google.com>", "gemini-3.1-pro-high <ai@example.com>",
+                                     "Bot <noreply@google.com>", "Antigravity <ai@example.com>"])
+def test_gemini_authorship(git_repo, trailer):
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "commit", "--allow-empty", "-qm", f"patch\n\nCo-Authored-By: {trailer}")
+    assert author_families(git_repo, "HEAD", base) == {"gemini"}
+
+
+def test_gemini_oversized_prompt_fails_before_launch(fake_bin, tmp_path):
+    _fake_gemini(fake_bin, _gemini_envelope())
+    with pytest.raises(RunnerPromptTooLong):
+        _review("gemini", tmp_path, diff="x" * 120_001)
+    assert not (fake_bin / "agy.argv").exists()

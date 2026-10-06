@@ -121,7 +121,7 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 | `checks.network` | Allow network inside the sandbox; default `false`. |
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
 | `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; use `merge --wait` to enqueue and verify in one run. |
-| `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`). Review selection excludes every recognized contributing family from the configured-base merge-base through HEAD, including repairs and all trailers on each commit. Delta reviews and reposts enforce the same exclusion. If no independent configured family remains, review is blocked. |
+| `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`, `gemini`; defaults: `claude`, `codex`). Gemini is opt-in and uses logged-in `agy` with an explicit `gemini-` model. Review selection excludes every recognized contributing family from the configured-base merge-base through HEAD, including repairs and all trailers on each commit. Delta reviews and reposts enforce the same exclusion. If no independent configured family remains, review is blocked. |
 | `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
 | `delivery.reviewer_ro_paths` | Absolute reviewer CLI/runtime paths mounted read-only. Defaults to the resolved directory of the selected reviewer binary; list an npm or bun prefix for Claude when needed. |
 

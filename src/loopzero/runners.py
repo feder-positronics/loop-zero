@@ -1,4 +1,4 @@
-"""Model review adapters: thin subprocess wrappers around ``claude -p`` and ``codex exec``.
+"""Model review adapters: thin subprocess wrappers around ``claude``, ``codex`` and ``agy``.
 
 Host authentication is bound read-write into the sandbox HOME so OAuth refreshes persist.
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 from loopzero import _proc, sandbox
 from loopzero.types import Config, Finding, LoopZeroError, ReviewResult
 
-FAMILIES = ("claude", "codex")
+FAMILIES = ("claude", "codex", "gemini")
 SEVERITIES = ("critical", "important", "suggestion")
 BLOCKING = ("critical", "important")
 TAIL_CHARS = 2000
@@ -35,7 +35,7 @@ _AUTH_PATTERNS = (
     re.compile(r"authentication[_ ]error", re.IGNORECASE),
     re.compile(r"OAuth access token has expired|Failed to authenticate|token expired", re.IGNORECASE),
     re.compile(r"\b401\b.*unauthori[sz]ed|unauthori[sz]ed.*\b401\b", re.IGNORECASE),
-    re.compile(r"login required|not authenticated|missing credentials", re.IGNORECASE),
+    re.compile(r"login required|not authenticated|missing credentials|authentication required|not logged into|unauthenticated|invalid credentials", re.IGNORECASE),
 )
 
 REVIEW_SCHEMA: dict[str, object] = {
@@ -104,7 +104,7 @@ _TOO_LONG_PATTERNS = (
 
 
 def build_prompt(*, kind: str, head: str, task_text: str, diff: str) -> str:
-    """Return the shared review prompt for either family."""
+    """Return the shared review prompt for every family."""
     scope = (
         "This is the primary review of the whole change."
         if kind == "primary"
@@ -244,7 +244,9 @@ def _run(
                 pass
         if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
             raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
-        if _USAGE_LIMIT.search(combined):
+        if _USAGE_LIMIT.search(combined) or (family == "gemini" and re.search(
+            r"quota|resource_exhausted|rate.?limit|\b429\b", combined, re.IGNORECASE
+        )):
             raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(combined))
         if _looks_too_long(combined):
             raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(combined))
@@ -283,13 +285,14 @@ def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
 
 def _review_binary(family: str) -> Path:
     """Bypass ai-accounts shims while retaining versioned CLI symlinks."""
+    executable = "agy" if family == "gemini" else family
     for directory in os.get_exec_path():
-        candidate = Path(directory or os.curdir) / family
+        candidate = Path(directory or os.curdir) / executable
         if candidate.is_file() and os.access(candidate, os.X_OK):
             binary = candidate.resolve()
             if binary.name != "ai-accounts":
                 return binary
-    raise RunnerMissing(f"{family}: no executable {family!r} on PATH outside ai-accounts shims")
+    raise RunnerMissing(f"{family}: no executable {executable!r} on PATH outside ai-accounts shims")
 
 
 def _sandbox_prefix(
@@ -335,6 +338,11 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
         if state_file.is_file():
             (home / ".claude.json").touch()
             binds.append((state_file, Path(sandbox.SANDBOX_HOME) / ".claude.json"))
+    elif family == "gemini":
+        source_dir = (Path.home() / ".gemini").resolve()
+        if source_dir.is_dir():
+            (home / ".gemini").mkdir()
+            binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".gemini"))
     else:
         # Only auth.json: codex rewrites it in place on refresh, and the reviewer's
         # shell runs unsandboxed inside bwrap, so the rest of CODEX_HOME stays private.
@@ -582,6 +590,57 @@ def _review_codex(
     )
 
 
+def _gemini_provenance(envelope: dict, model: str, effort: str | None, raw: str) -> dict:
+    session, usage = envelope.get("conversation_id"), envelope.get("usage")
+    if not isinstance(session, str) or not session or not isinstance(usage, dict):
+        raise RunnerBadOutput("gemini: result envelope lacks session/usage provenance", _tail(raw))
+    return {"family": "gemini", "model": model, "effort": effort,
+            "session_id": session, "session_ids": [session], "usage": usage}
+
+
+def _review_gemini(
+    prompt: str, *, cwd: Path, head: str, kind: str, timeout: int,
+    ro_paths: tuple[str, ...], model: str | None, effort: str | None,
+) -> ReviewResult:
+    model = model or "gemini-3.1-pro-high"
+    if not model.startswith("gemini-"):
+        raise RunnerBadOutput("gemini: model must start with gemini-")
+    # Linux bounds each argv string to 128 KiB; classify before spawning agy.
+    if len(prompt.encode()) > 120_000:
+        raise RunnerPromptTooLong("gemini: prompt is too long for agy -p")
+    with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
+        home = Path(tmp)
+        prefix, config, binary = _sandbox_prefix(
+            "gemini", cwd, home, ro_paths, _auth_binds("gemini", home))
+        argv = [str(binary), "-p", prompt, "--model", model,
+                *(["--effort", effort] if effort else []), "--disable-slash-commands",
+                "--output-format", "json", "--json-schema", json.dumps(REVIEW_SCHEMA)]
+        done = _run([*prefix, *argv], cwd=cwd, prompt="", extra_env={},
+                    env_allowlist=config.env_allowlist, timeout=timeout, family="gemini")
+    raw = done.stdout
+    try:
+        envelope = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RunnerBadOutput("gemini: stdout is not JSON", _tail(raw)) from exc
+    if not isinstance(envelope, dict):
+        raise RunnerBadOutput("gemini: result envelope is not an object", _tail(raw))
+    if envelope.get("status") != "SUCCESS":
+        text = raw + done.stderr
+        if _looks_like_auth_failure(text):
+            raise RunnerAuthFailed(f"gemini: CLI is not authenticated\n{_tail(text)}")
+        if re.search(r"quota|resource_exhausted|rate.?limit|\b429\b", text, re.IGNORECASE):
+            raise RunnerUsageLimit("gemini: usage limit reached", _tail(text))
+        if _looks_too_long(text):
+            raise RunnerPromptTooLong("gemini: prompt is too long", _tail(text))
+        raise RunnerBadOutput("gemini: non-SUCCESS status", _tail(text))
+    if envelope.get("denied_actions"):
+        raise RunnerBadOutput("gemini: tool actions denied", _tail(raw))
+    provenance = _gemini_provenance(envelope, model, effort, raw)
+    return replace(parse_review(envelope.get("structured_output"), family="gemini",
+                                head=head, kind=kind, raw=raw),
+                   model=model, effort=effort, duration_s=done.duration_s, provenance=provenance)
+
+
 def review_with(
     family: str,
     *,
@@ -601,7 +660,7 @@ def review_with(
     if kind not in ("primary", "delta"):
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
     prompt = build_prompt(kind=kind, head=head, task_text=task_text, diff=diff)
-    adapter = _review_claude if family == "claude" else _review_codex
+    adapter = {"claude": _review_claude, "codex": _review_codex, "gemini": _review_gemini}[family]
     return adapter(
         prompt, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
         ro_paths=reviewer_ro_paths, model=model, effort=effort,
@@ -630,6 +689,10 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
             total_cost_usd=sum(float(result.provenance["total_cost_usd"]) for result in results),
             duration_api_ms=sum(float(result.provenance["duration_api_ms"]) for result in results),
         )
+    elif first.family == "gemini":
+        provenance.update(model=first.model, effort=first.effort,
+                          usage=(first.provenance["usage"] if len(results) == 1 else
+                                 [result.provenance["usage"] for result in results]))
     else:
         provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
     return ReviewResult(
@@ -777,6 +840,19 @@ def validate_runner_result(result: ReviewResult) -> bool:
             payloads = [_extract_json_object(str(item["final_message"])) for item in envelopes]
         except (KeyError, json.JSONDecodeError, ValueError):
             return False
+    elif result.family == "gemini":
+        usages = [item.get("usage") for item in envelopes]
+        provenance_ok = (
+            [item.get("conversation_id") for item in envelopes] == sessions
+            and all(item.get("status") == "SUCCESS" and not item.get("denied_actions")
+                    for item in envelopes)
+            and all(isinstance(item, dict) for item in usages)
+            and provenance.get("usage") == (usages[0] if len(usages) == 1 else usages)
+            and isinstance(result.model, str) and result.model.startswith("gemini-")
+            and provenance.get("model") == result.model
+            and provenance.get("effort") == result.effort
+        )
+        payloads = [item.get("structured_output") for item in envelopes]
     else:
         return False
     if not provenance_ok:
@@ -807,6 +883,8 @@ def family_from_trailer(value: str) -> str | None:
         return "claude"
     if any(word in lowered for word in ("codex", "gpt", "openai")):
         return "codex"
+    if any(word in lowered for word in ("gemini", "noreply@google.com", "antigravity")):
+        return "gemini"
     return None
 
 

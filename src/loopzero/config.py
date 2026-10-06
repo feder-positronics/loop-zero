@@ -12,7 +12,7 @@ from . import worktree as worktree_mod
 from .types import Config, LoopZeroError, ResourceLimits, ReviewConfig
 
 MERGE_STRATEGIES = ("squash", "merge", "rebase", "queue", "mergify")
-REVIEWER_FAMILIES = ("claude", "codex")
+REVIEWER_FAMILIES = ("claude", "codex", "gemini")
 # Host locations that must never be exposed to the sandbox, even read-only, because they
 # hold credentials or live sockets (docker, ssh-agent, gpg-agent, dbus). Subpaths of /home
 # are allowed so tool caches such as ~/.local/bin can be listed explicitly.
@@ -144,7 +144,7 @@ def _build(data: dict[str, Any]) -> Config:
         raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
     if mergify_queue is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", mergify_queue):
         raise ConfigError("delivery.mergify_queue must be a non-empty command-safe name")
-    reviewers = _strings("delivery.reviewers", delivery.get("reviewers", list(REVIEWER_FAMILIES)))
+    reviewers = _strings("delivery.reviewers", delivery.get("reviewers", ["claude", "codex"]))
     if not reviewers:
         raise ConfigError("delivery.reviewers must list at least one reviewer")
     for reviewer in reviewers:
@@ -167,6 +167,8 @@ def _build(data: dict[str, Any]) -> Config:
         for key in ("model", "effort"):
             if key in table and (not isinstance(table[key], str) or not table[key]):
                 raise ConfigError(f"delivery.review.{family}.{key} must be a non-empty str")
+        if family == "gemini" and "model" in table and not table["model"].startswith("gemini-"):
+            raise ConfigError("delivery.review.gemini.model must start with gemini-")
         if "allowed_efforts" in table and not isinstance(table["allowed_efforts"], list):
             raise ConfigError(f"delivery.review.{family}.allowed_efforts must be a list")
         allowed = _strings(

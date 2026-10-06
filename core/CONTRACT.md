@@ -87,7 +87,7 @@ or resolve threads; branch protection and CI remain the enforced gates.
   also requires the saved reviewer's family to be independent. If all configured
   families contributed, review fails closed; do not silently relax the policy.
 - Keep one authoring model family per PR, including delegated implementation and
-  repairs. The opposite family may give read-only advice and formal review.
+  repairs. An independent family may give read-only advice and formal review.
   Before committing imported work, record the actual writing delegate in truthful
   `Co-Authored-By` trailers; the parent committing a patch does not replace its
   author's family. Preserve every actual contributor's attribution when squashing
@@ -131,7 +131,9 @@ Reviews also require `bwrap` and never fall back to the host. They receive a
 read-only worktree and Git directories, a private HOME, reviewer runtime paths,
 and network access. Live credentials are bound read-write so OAuth refresh
 persists: Claude's config directory (`~/.claude` or `CLAUDE_CONFIG_DIR`) and
-`~/.claude.json`; Codex's `auth.json` only, under `CODEX_HOME` or `~/.codex`.
+`~/.claude.json`; Codex's `auth.json` only, under `CODEX_HOME` or `~/.codex`;
+Gemini's `~/.gemini` only. Gemini is opt-in and uses `agy` with an explicit
+`gemini-` model; other vendor models are refused.
 The sandbox bounds readable data; it cannot prevent exfiltration over the
 required network.
 

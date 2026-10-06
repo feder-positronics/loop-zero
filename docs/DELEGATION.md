@@ -70,7 +70,7 @@ runs. Parent-directed reassessment does not add automatic CLI retries.
 ## Author lineage and independent review
 
 Keep one authoring model family per PR, including writing delegates and repair
-work. Reserve the opposite family for read-only advice and formal review; a
+work. Reserve independent families for read-only advice and formal review; a
 read-only adviser must return advice for the authoring family to implement.
 Before committing accepted delegate work, the parent records the actual writing
 model in `Co-Authored-By` trailers. Committing or integrating a child's patch
@@ -82,7 +82,7 @@ recovered mechanically from a parent-only trailer; do not invent attribution.
 from its configured-base merge-base to HEAD, including earlier child patches,
 repairs, and multiple HEAD trailers. The delta's narrower diff does not narrow
 author exclusion, and reposting cannot reuse a saved contributor's review. If
-both configured families wrote the PR, formal review fails closed; do not
+all configured families wrote the PR, formal review fails closed; do not
 silently change the independence policy.
 
 Preserve the final approved head instead of applying optional suggestions.
