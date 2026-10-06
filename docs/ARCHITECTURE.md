@@ -68,6 +68,15 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    the contract, not an unlimited review loop.
 5. `ready` derives readiness from the unchanged head, review, blocking findings,
    target branch and required CI. Its bounded waiter observes that same head.
+   When every non-success signal of a required check strictly predates the eligible
+   review, `ready --wait` allows up to 15 minutes from that review for a refresh,
+   including time before GitHub publishes pending. Past the ordinary two-minute
+   review grace it identifies the old verdict and awaited refresh. The check still
+   blocks readiness throughout; at 15 minutes it becomes a final failure again
+   unless existing pending/replacement evidence independently permits waiting.
+   Failures at or after the review receive no extended grace. The two-minute
+   grace for missing runs and generic failures, and calls without `--wait`, retain
+   their existing behavior. The command's own timeout can end waiting sooner.
 6. `merge` recomputes readiness, merges or enters the configured queue, verifies
    the landed SHA and then cleans up the task branch and worktree.
 

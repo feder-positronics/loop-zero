@@ -87,6 +87,7 @@ class Readiness:
     ready: bool
     reasons: tuple[str, ...]
     waitable_failures: tuple[str, ...] = ()
+    stale_verdicts: tuple[str, ...] = ()
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|connection reset|no server is currently",
@@ -601,8 +602,8 @@ def check_runs(repo: str, head_sha: str) -> dict[str, str]:
 
 
 def _check_signals(repo: str, head_sha: str, review_at: str | None = None, review_grace: bool = False,
-                   required_ci: tuple[str, ...] = ()
-                   ) -> tuple[dict[str, str], tuple[str, ...]]:
+                   required_ci: tuple[str, ...] = (), stale_verdict_grace: bool = False
+                   ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]:
     signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
     for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
@@ -610,16 +611,13 @@ def _check_signals(repo: str, head_sha: str, review_at: str | None = None, revie
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
     for name, cr in latest_runs.items():
-        signals[name] = [(cr.get("conclusion") or cr.get("status") or "unknown",
-                          cr.get("completed_at") or cr.get("started_at"))]
+        signals[name] = [(cr.get("conclusion") or cr.get("status") or "unknown", cr.get("completed_at") or cr.get("started_at"))]
     latest_status: dict[str, dict] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
-        signals.setdefault(name, []).append((status.get("state") or "unknown",
-                                               status.get("created_at")))
-    states = {name: _aggregate_signal([state for state, _ in values])
-              for name, values in signals.items()}
+        signals.setdefault(name, []).append((status.get("state") or "unknown", status.get("created_at")))
+    states = {name: _aggregate_signal([state for state, _ in values]) for name, values in signals.items()}
     pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
     stale = tuple(name for name, values in signals.items() if review_at
                   and states[name] not in pending and states[name] != "success"
@@ -627,6 +625,10 @@ def _check_signals(repo: str, head_sha: str, review_at: str | None = None, revie
                           if state != "success" and state not in pending)
                   and (review_grace or any(at and at >= review_at
                                            for state, at in values if state in pending)))
+    stale_verdicts = tuple(name for name, values in signals.items() if review_at and stale_verdict_grace
+                           and name not in stale and states[name] in {"failure", "error", "cancelled", "timed_out"}
+                           and all(at and at < review_at for state, at in values if state != "success"))
+    stale = (*stale, *stale_verdicts)
     superseded: list[str] = []
     workflows: list[dict] | None = None
     for name in required_ci:
@@ -640,7 +642,7 @@ def _check_signals(repo: str, head_sha: str, review_at: str | None = None, revie
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(cr, workflows, head_sha):
             superseded.append(name)
-    return states, (*stale, *superseded)
+    return states, (*stale, *superseded), stale_verdicts
 
 
 def _has_active_replacement(check: dict, workflows: list[dict], head_sha: str) -> bool:
@@ -684,15 +686,12 @@ def _aggregate_signal(states: list[str]) -> str:
 
 
 def readiness(
-    repo: str,
-    pr: PR,
-    base_branch: str,
-    required_ci: tuple[str, ...],
-    reviewed_head: str | None,
+    repo: str, pr: PR, base_branch: str, required_ci: tuple[str, ...], reviewed_head: str | None,
     *, allow_behind: bool = False,
     review_at: str | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
+    stale_verdict_grace: bool = False,
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -711,9 +710,10 @@ def readiness(
     for f in open_blocking_findings(repo, pr.number, pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
-    checks, stale = (_check_signals(repo, pr.head_sha, review_at, review_grace,
-                                   required_ci if workflow_wait else ())
-                     if required_ci else ({}, ()))
+    checks, stale, stale_verdicts = (_check_signals(
+        repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
+        workflow_wait and stale_verdict_grace
+    ) if required_ci else ({}, (), ()))
     for name in required_ci:
         conclusion = checks.get(name)
         if conclusion is None:
@@ -721,14 +721,12 @@ def readiness(
         elif conclusion != "success":
             reasons.append(f"required check '{name}' is {conclusion}")
     return Readiness(ready=not reasons, reasons=tuple(reasons),
-                     waitable_failures=tuple(f"required check '{name}' is {checks[name]}"
-                                             for name in required_ci
-                                             if name in stale or (
-                                                 workflow_wait and review_grace
-                                                 and checks.get(name) in {
-                                                     "failure", "error", "cancelled", "timed_out"
-                                                 }
-                                             )))
+                     waitable_failures=tuple(
+                         f"required check '{name}' is {checks[name]}" for name in required_ci
+                         if name in stale or workflow_wait and review_grace and checks.get(name) in {
+                             "failure", "error", "cancelled", "timed_out"
+                         }),
+                     stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts))
 
 
 def mark_ready(repo: str, number: int) -> None:

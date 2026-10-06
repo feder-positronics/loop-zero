@@ -1245,24 +1245,25 @@ def test_ready_wait_tracks_the_replacement_workflow(
 
 
 @pytest.mark.parametrize("name", ["checks", "Loop-zero Eligibility"])
-@pytest.mark.parametrize("pending,age,new_failure,expected,waited", [
-    (True, 180, False, 0, True), (False, 30, False, 0, True),
-    (True, 30, True, 1, True), (False, 30, True, 0, True),
-    (False, 120, False, 1, False),
-    (False, 119, False, 1, True),
+@pytest.mark.parametrize("pending,age,new_failure,wait,expected,waited", [
+    (True, 180, False, True, 0, True), (False, 30, False, True, 0, True),
+    (True, 30, True, True, 1, True), (False, 30, True, True, 0, True),
+    (False, 120, False, True, 0, True), (False, 119, False, True, 0, True),
+    (False, 300, False, True, 0, True), (False, 899, False, True, 0, True),
+    (False, 900, False, True, 1, False), (False, 901, False, True, 1, False),
+    (False, 300, True, True, 1, False), (True, 300, True, True, 1, False), (False, 300, "tie", True, 1, False),
+    (False, 300, False, False, 1, False), (False, 300, "missing", True, 1, False),
 ])
 def test_ready_wait_review_failure_freshness(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, expected, waited, head
+    wt: Path, gh: FakeGh, capsys, monkeypatch, name, pending, age, new_failure, wait, expected, waited, head
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}], isDraft=False)
     clock = [1790164800 + age]  # 2026-09-23T12:00:00Z plus review age
     monkeypatch.setattr(cli.time, "time", lambda: clock[0])
-    failed_at = "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:00:00Z"
+    failed_at = {"tie": "2026-09-23T12:00:00Z", "missing": None}.get(new_failure, "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:00:00Z")
     runs = [{"name": name, "status": "completed", "conclusion": "failure",
-             "completed_at": failed_at}] if name == "checks" else [
-        {"name": name, "status": "in_progress", "started_at": "2026-09-23T12:00:20Z"}
-    ] if pending else []
+             "completed_at": failed_at}] if name == "checks" else [{"name": name, "status": "in_progress", "started_at": "2026-09-23T12:00:20Z"}] if pending else []
     statuses = [{"context": name, "state": "failure", "created_at": failed_at}] if name != "checks" else [
         {"context": name, "state": "pending", "created_at": "2026-09-23T12:00:20Z"}
     ] if pending else []
@@ -1272,18 +1273,17 @@ def test_ready_wait_review_failure_freshness(
     def advance(seconds):
         sleeps.append(seconds)
         clock[0] += seconds
-        if expected == 0:
+        if expected == 0 and (age != 300 or len(sleeps) > 1):
             arm_check_runs(gh, head, [{"name": name, "conclusion": "success"}])
             gh.respond(f"api repos/{REPO}/commits/{head}/statuses",
                        [{"context": name, "state": "success"}])
     monkeypatch.setattr(cli, "_sleep", advance)
-
-    code, out, err = run(capsys, "--config", "workflow.toml", "ready", "--wait")
-
+    code, out, err = run(capsys, "--config", "workflow.toml", "ready", *(["--wait"] if wait else []))
     assert (code, err, bool(sleeps)) == (expected, "", waited)
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check '{name}' is failure\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
+    assert out.count("predates the review; awaiting refresh") == int(waited and age >= 120 and not pending)
 
 
 def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys, head) -> None:

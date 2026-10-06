@@ -31,6 +31,7 @@ PAGE = 100
 # missing before GitHub is assumed to have dropped the event for this head.
 # Each poll costs several GitHub API calls from a quota shared by every session.
 WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 30.0, 1800.0, 120.0
+STALE_VERDICT_GRACE = 900.0
 PUSH_TIMEOUT = 600.0  # consumer pre-push hooks (lint, tests) routinely exceed GIT_TIMEOUT
 NEXT_WAIT = "next: loopzero ready --wait"  # named at the moment of need; agents hand-roll polls otherwise
 _sleep = time.sleep
@@ -242,17 +243,15 @@ def _readiness(
     review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
                   .replace(tzinfo=UTC).timestamp()) if review_at else None
     result = github.readiness(
-        config.repo, pr, config.base_branch, config.required_ci,
-        head if review else None, review_at=review_at,
+        config.repo, pr, config.base_branch, config.required_ci, head if review else None, review_at=review_at,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
+        stale_verdict_grace=workflow_wait and review_age is not None and 0 <= review_age < STALE_VERDICT_GRACE,
     )
     report = _load_report(wt)
     if (report is None or report.head != head or report.dirty or not report.ok
             or tuple(result.command for result in report.results) != config.checks):
-        result = github.Readiness(
-            ready=False, reasons=(*result.reasons, "run loopzero check at this head")
-        )
+        result = github.Readiness(ready=False, reasons=(*result.reasons, "run loopzero check at this head"))
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
         behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
         reasons = result.reasons
@@ -260,7 +259,7 @@ def _readiness(
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
-        result = github.Readiness(not reasons, reasons, result.waitable_failures)
+        result = github.Readiness(not reasons, reasons, result.waitable_failures, result.stale_verdicts)
     return result
 
 
@@ -784,7 +783,7 @@ def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
-    started, shown = time.monotonic(), None
+    started, shown, stale_notice = time.monotonic(), None, False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
@@ -804,6 +803,9 @@ def _wait_for_checks(
             print("waiting: " + "; ".join(pending))
             shown = pending
         elapsed = time.monotonic() - started
+        if readiness.stale_verdicts and not stale_notice:
+            print("waiting: required check verdict predates the review; awaiting refresh: " + ", ".join(readiness.stale_verdicts))
+            stale_notice = True
         # Missing check runs do not prove that no workflow was scheduled. Diagnose only
         # when no visible pending check explains why the required jobs have not appeared.
         if (
