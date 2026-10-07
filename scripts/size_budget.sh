@@ -11,9 +11,9 @@ set -euo pipefail
 # Completed-task publication guard adds typed bounded REST history and owning
 # refusal/compatibility proofs (parent-authorized 2026-10-07, measured 4873/6611).
 # Ready-wait post-transition revalidation and public CLI boundary proofs
-# (parent-authorized 2026-10-07, measured 4883/6719); all check commands remain.
-SRC_CAP=4883
-TESTS_CAP=6719
+# (parent-authorized 2026-10-07, measured 4884/6753); all check commands remain.
+SRC_CAP=4884
+TESTS_CAP=6753
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \
