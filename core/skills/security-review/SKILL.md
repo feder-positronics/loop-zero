@@ -16,7 +16,9 @@ primitives, serialization, or dependencies.
 ## Ground
 
 From the diff, name the actors, the assets, the trust boundary crossed and
-every attacker-controlled input. Judge lines only after that.
+every attacker-controlled input. Judge lines only after that. Keep
+code-review's skeptical stance: treat an input as attacker-controlled and a
+control as absent until the code shows otherwise.
 
 ## Check
 

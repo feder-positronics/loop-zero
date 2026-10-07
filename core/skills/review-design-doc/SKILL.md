@@ -16,6 +16,10 @@ decisions, repository guidance, and only the implementation needed to verify
 current-state claims. Identify its type, audience, status, next actor, scope,
 and settled versus open decisions before judging it.
 
+Question the artifact's premises and current-state claims rather than
+accepting them: trace each material decision to its evidence, probe edge cases,
+failure modes, and migration paths, and flag internal inconsistencies.
+
 Read [the review reference](reference.md) and apply only the checks material to
 the artifact. Respect ratified decisions unless current evidence contradicts
 their premise. Do not manufacture options or penalize an artifact for detail

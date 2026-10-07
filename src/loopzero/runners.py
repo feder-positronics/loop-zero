@@ -131,6 +131,9 @@ def build_prompt(*, kind: str, head: str, task_text: str, diff: str) -> str:
             + '"line": integer|null, "title": string, "body": string}]}',
             "verdict MUST be \"request_changes\" if any finding is critical or important.",
             'Use "suggestion" for non-blocking remarks. Report only what you can justify.',
+            "Be skeptical: treat the task's claims and passing tests as hypotheses; trace changed logic "
+            + "through callers, edge cases and failure paths, and flag inconsistencies.",
+            "Make each finding precise and constructive: its failure condition, impact and smallest fix.",
             "When a finding is one instance of a defect class (a missed caller, reader, state "
             + "transition or retry path), name every other instance in this diff in the same review.",
         )
