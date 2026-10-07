@@ -162,21 +162,21 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _pr_reviews(repo: str, number: int) -> list[dict]:
-    """All reviews on the PR, oldest first, following pages until a short one."""
-    reviews: list[dict] = []
-    page = 1
-    while True:
-        endpoint = f"repos/{repo}/pulls/{number}/reviews?per_page={PAGE}&page={page}"
-        batch = github.api_get(endpoint)
+def _rest_rows(endpoint: str, what: str) -> list[dict]:
+    """Every row of a REST list, oldest first, following pages until a short one."""
+    rows: list[dict] = []
+    for page in range(1, 101):
+        batch = github.api_get(f"{endpoint}?per_page={PAGE}&page={page}")
         if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
-            raise CliError("invalid GitHub reviews response")
-        reviews += batch
+            raise CliError(f"invalid GitHub {what} response")
+        rows += batch
         if len(batch) < PAGE:
-            return reviews
-        page += 1
-        if page > 100:
-            raise CliError("GitHub reviews pagination limit exceeded")
+            return rows
+    raise CliError(f"GitHub {what} pagination limit exceeded")
+
+
+def _pr_reviews(repo: str, number: int) -> list[dict]:
+    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -673,19 +673,8 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                 or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
             raise CliError("conflicting or ambiguous review publication")
-        comments, page = [], 1
-        while True:
-            endpoint = (f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments"
-                        f"?per_page={PAGE}&page={page}")
-            batch = github.api_get(endpoint)
-            if not isinstance(batch, list) or not all(isinstance(c, dict) for c in batch):
-                raise CliError("invalid GitHub review comments response")
-            comments.extend(batch)
-            if len(batch) < PAGE:
-                break
-            page += 1
-            if page > 100:
-                raise CliError("GitHub review comments pagination limit exceeded")
+        comments = _rest_rows(
+            f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
         fields = ("path", "line", "side", "body")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
