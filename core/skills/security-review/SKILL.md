@@ -17,8 +17,8 @@ primitives, serialization, or dependencies.
 
 From the diff, name the actors, the assets, the trust boundary crossed and
 every attacker-controlled input. Judge lines only after that. Keep
-code-review's skeptical stance: treat an input as attacker-controlled and a
-control as absent until the code shows otherwise.
+code-review's skeptical stance: do not assume an input is trusted or a control
+exists until the code shows it, and report only failures with a reachable path.
 
 ## Check
 

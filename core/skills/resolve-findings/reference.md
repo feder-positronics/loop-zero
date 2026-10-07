@@ -12,8 +12,8 @@ Before trusting a finding after the PR head moves:
    evidence.
 4. Classify the thread as still reproducible, already fixed by a named commit, or
    no longer supported by the current code.
-5. Reply in the thread with that evidence. Resolve it only after the fix or
-   reason is visible there.
+5. Record that evidence for the proposed thread reply. The thread is resolved
+   only after the fix or reason is visible there.
 
 For a delta review, inspect only the diff since the reviewed commit and the open
 threads inherited from the primary review. Do not reopen unrelated parts of the

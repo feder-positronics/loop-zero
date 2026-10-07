@@ -20,7 +20,7 @@ For each candidate record:
 ## Quarantine Boundary
 
 A quarantine is one recoverable Git diff containing only candidate removals.
-The base or a dedicated pre-removal commit is the rollback point. Keep batches
+The commit immediately before the removal is the rollback point. Keep batches
 small enough that a failed check can be attributed without investigating a
 mixture of removals and refactors.
 

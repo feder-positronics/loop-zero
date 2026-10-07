@@ -30,9 +30,9 @@ describes required judgment, not a preferred model or executor.
 - Native sub-issues are stronger parent evidence than prose checklists.
 - An exact registered worktree or matching branch is collision evidence. A
   merely similar slug is a prompt to inspect, not proof.
-- Required CI and open blocking PR threads determine delivery readiness; do not
-  reinterpret them from labels alone.
-- A reminder without concrete work is not a new backlog item. Keep a dated
+- The [contract's blockers](../../CONTRACT.md#blockers) determine delivery
+  readiness; do not reinterpret them from labels alone.
+- A reminder without concrete work is not a new backlog item. Recommend a dated
   review in the issue or design decision that owns it.
 
 ## Output

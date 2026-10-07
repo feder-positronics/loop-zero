@@ -40,8 +40,9 @@ Then run the narrow neighboring suite, commit, and run `loopzero check` on the
 clean head. Keep fixtures minimal and deterministic and preserve the runner's
 exit status.
 
-Exit when every added test protects a named contract, regression tests fail
-for the intended behavior rather than infrastructure, relevant checks pass, and
+Exit when every added test protects a named contract, regression tests were
+seen failing on the pre-fix code for the intended behavior rather than
+infrastructure, relevant checks pass, and
 the added brittleness is lower than the risk protected. Record commands and
 results in `.loopzero/task.md`; use [implement](../implement/SKILL.md) if
 production behavior must change.

@@ -35,8 +35,9 @@ compare them; do not create variants merely to satisfy a process.
   relevant, keyboard flow, focus, contrast, and consequential interactions.
   Record any tooling or inspection limit that affects design judgment.
 
-When the mockup is part of a loop-zero task, run `loopzero check` and put its
-path plus material design assumptions in `.loopzero/task.md` Notes.
+When the mockup is part of a loop-zero task, put its path plus material design
+assumptions in `.loopzero/task.md` Notes, and run `loopzero check` after the
+delivery owner commits the mockup.
 
 ## Translation Handoff
 

@@ -60,7 +60,8 @@ one.
 - A delta review reads only the diff since the reviewed commit. Unresolved
   blocking threads still count unless outdated on a different head.
 - Mechanical format, lint, or rename fixes ride in the same push as the repairs;
-  readiness accepts only a reviewed head, so they cannot land after the review.
+  readiness accepts only a reviewed head, so they cannot land without review of
+  the resulting head.
 - Any fix after the delta exhausts the budget. Audit the class, then squash/amend
   so neither reviewed commit remains an ancestor of HEAD. The next primary
   reviews from HEAD's merge-base with the configured base; appending commits
@@ -74,7 +75,7 @@ one.
 
 ## Exit
 
-Exit when every open blocking thread has either a bounded fix with validation or
-a reasoned thread reply, and no requester-only decision is inferred. Hand the
-fix list and proposed replies to implementation; after the response is applied,
-the PR review threads remain the authoritative record.
+Exit when every supplied open blocking thread has either a bounded fix with
+validation or a reasoned thread reply, and no requester-only decision is
+inferred. Hand the fix list and proposed replies to implementation; after the
+response is applied, the PR review threads remain the authoritative record.

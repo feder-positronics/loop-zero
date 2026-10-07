@@ -16,9 +16,9 @@ smallest repair and validation contract. Stop before implementation.
    defect and would pass after repair. Do not report local or staging state as
    production.
 2. Check whether a missing tool, network, sandbox, or stale dependency could
-   explain the failure. Running the reproduction through `loopzero check` shows
-   whether it reproduces in that sandbox; it does not rule out environmental
-   causes elsewhere.
+   explain the failure. If a configured check exercises the reproduction,
+   `loopzero check` shows whether it reproduces in that sandbox; it does not
+   rule out environmental causes elsewhere.
 3. If several explanations remain, rank hypotheses with evidence for and
    against each. Choose an experiment that separates the leading explanations,
    then rerank after each result. Confirm the cause by predicting and observing

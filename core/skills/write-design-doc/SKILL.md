@@ -18,8 +18,8 @@ re-deriving intent or architecture. Do not implement the design.
   assumption remains vetoable, and a deferred decision becomes an open question.
 - When the document is a repository change, work in the task worktree created
   by `loopzero start`.
-- Skip the artifact when the request is clear, small, and safely implementable
-  as one bounded change.
+- Unless the requester explicitly asked for the artifact, skip it when the
+  change is clear, small, and safely implementable as one bounded change.
 
 Read [the design-doc reference](reference.md) before choosing the artifact and
 drafting its contract.
@@ -41,8 +41,8 @@ coding steps.
 
 - Remove placeholders and verify links, frontmatter, premises, and the documented
   procedure where the artifact is a guide.
-- Run `loopzero check` when the document is part of a loop-zero task; fix any
-  failure before handoff.
+- When the document is part of a loop-zero task, run `loopzero check` after the
+  delivery owner commits it; fix any failure before handoff.
 - If material ambiguity remains, revise the artifact or leave an explicit
   blocker; do not label it implementation-ready merely because drafting ended.
 - Exit with a commit-ready document whose acceptance and open questions are

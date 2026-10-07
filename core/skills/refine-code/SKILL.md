@@ -32,7 +32,7 @@ the outer task's worktree.
 
 Describe the concrete clarity gain and any edit that could appear behavioral.
 Run focused tests for success and relevant failure or cancellation paths, then
-`loopzero check`. Exit when observable and public contracts are unchanged,
-checks pass, and no unrelated cleanup or compatibility layer was introduced.
-Record the validation in `.loopzero/task.md` and leave review to
-[code-review](../code-review/SKILL.md).
+commit and run `loopzero check` on the clean head. Exit when observable and
+public contracts are unchanged, checks pass, and no unrelated cleanup or
+compatibility layer was introduced. Record the validation in `.loopzero/task.md`
+and leave formal review to `loopzero review`.
