@@ -497,7 +497,12 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_task_branch(config, branch)
     _require_clean(wt)
     _require_pr_details(wt)
-    pr = github.pr_for_branch(config.repo, branch)
+    pr = github.merged_pr_for_branch(config.repo, branch) or github.pr_for_branch(config.repo, branch)
+    if pr is not None and pr.state == "MERGED":
+        raise CliError(
+            f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
+            "run `loopzero start <new-task-slug>` for a new task"
+        )
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
     if force_lease:

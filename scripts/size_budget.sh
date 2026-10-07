@@ -8,8 +8,10 @@ set -euo pipefail
 # Raised to restore readability after #259/#260 compaction (owner approval 2026-10-06).
 # Recovery preserves exact publication identity, a shared read deadline and boundary
 # proofs (parent-authorized 2026-10-07); no checks or review gates are removed.
-SRC_CAP=4850
-TESTS_CAP=6500
+# Completed-task publication guard adds typed bounded REST history and owning
+# refusal/compatibility proofs (parent-authorized 2026-10-07, measured 4873/6611).
+SRC_CAP=4880
+TESTS_CAP=6620
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

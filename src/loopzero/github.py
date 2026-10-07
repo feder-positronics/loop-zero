@@ -362,6 +362,48 @@ def pr_for_branch(repo: str, branch: str) -> PR | None:
     return None
 
 
+def merged_pr_for_branch(repo: str, branch: str) -> PR | None:
+    """Prove completion, or read the complete closed history before publication."""
+    head = quote(f"{repo.split('/', 1)[0]}:{branch}", safe="")
+    seen: set[int] = set()
+    for page in range(1, 101):
+        endpoint = (f"repos/{repo}/pulls?state=closed&head={head}"
+                    f"&sort=created&direction=desc&per_page={PAGE}&page={page}")
+        rows = api_get(endpoint)
+        if not isinstance(rows, list) or len(rows) > PAGE:
+            raise GhError(("gh", "api", endpoint), "invalid closed PR history page")
+        for row in rows:
+            try:
+                number, merged_at = row["number"], row["merged_at"]
+                source = row["head"]
+                source_name = source["repo"]["full_name"]
+                if (type(number) is not int or number < 1 or number in seen
+                        or row["state"] != "closed" or source["ref"] != branch
+                        or not isinstance(source_name, str)
+                        or source_name.casefold() != repo.casefold()):
+                    raise ValueError("invalid or repeated closed PR")
+                if merged_at is not None:
+                    if not isinstance(merged_at, str):
+                        raise ValueError("invalid merged_at")
+                    if datetime.fromisoformat(merged_at).tzinfo is None:
+                        raise ValueError("merged_at lacks timezone")
+            except (KeyError, TypeError, ValueError) as exc:
+                raise GhError(("gh", "api", endpoint), "invalid or repeated closed PR history") from exc
+            seen.add(number)
+            if merged_at is not None:
+                pr, detail = _pr_detail(repo, number)
+                source = detail["head"]
+                source_repo = source.get("repo")
+                if (pr.state != "MERGED" or source.get("ref") != branch
+                        or not isinstance(source_repo, dict)
+                        or str(source_repo.get("full_name", "")).casefold() != repo.casefold()):
+                    raise GhError(("gh", "api", endpoint), "PR changed during completion lookup")
+                return pr
+        if len(rows) < PAGE:
+            return None
+    raise GhError(("gh", "api", endpoint), "closed PR history exceeds 100-page publication limit")
+
+
 def pr_view(repo: str, number: int) -> PR:
     return _pr_detail(repo, number)[0]
 
