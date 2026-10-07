@@ -19,6 +19,8 @@ and setup.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
   dated consumer evidence and accepted principles; its gaps and measurements
   describe September 24, not the current backlog.
+- [design/2026-10-07-deterministic-delivery-design-assumptions.md](design/2026-10-07-deterministic-delivery-design-assumptions.md) —
+  design rationale, dated reviewer evidence and native compatibility limits.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.

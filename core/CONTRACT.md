@@ -203,6 +203,19 @@ persists: Claude's config directory (`~/.claude` or `CLAUDE_CONFIG_DIR`) and
 The sandbox bounds readable data; it cannot prevent exfiltration over the
 required network.
 
+At native review launch, checks, publishers and `delivery.reviewer_ro_paths`
+are read from one verified remote PR-base revision. A missing remote ref or base
+workflow refuses native launch; bootstrap workflows need explicit `--config`.
+That operator choice is printed and still receives protected-state validation.
+Reposts and `check`, `ready`, `merge` and `status` retain their fallback behavior.
+Normal mounts may not overlap private reviewer state or standard/custom native
+auth/state roots, including source/Git and system mounts. Existing live auth
+binds remain intentional exceptions; they do not establish history isolation.
+An implicit runtime inside a state directory mounts only the selected executable
+file read-only at its resolved path. An explicit runtime path gets no exception;
+bundles needing protected sibling assets require an installation outside state.
+This protects known native state paths, not every possible host secret.
+
 ## Failure
 
 Every command fails closed and loud: a missing tool or a nonzero exit prints

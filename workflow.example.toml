@@ -55,8 +55,12 @@ merge = "squash"
 # Hosted eligibility requires explicit GitHub publisher logins from trusted base config.
 # review_publishers = ["your-github-login"]
 reviewers = ["claude", "codex"]
-# Optional absolute paths for reviewer binaries and runtimes. When omitted,
-# loop-zero mounts the resolved directory of the selected reviewer binary.
+# Optional absolute paths for reviewer binaries and runtimes, pinned from the
+# remote PR base at native launch unless --config is explicitly supplied.
+# A non-empty list replaces the default and must include the selected runtime.
+# When omitted, loop-zero mounts the selected binary's resolved directory;
+# inside native state roots, only the executable file is mounted instead.
+# Explicit paths must not overlap native auth/state or private reviewer state.
 # Claude installations may need their npm or bun prefix listed here.
 # reviewer_ro_paths = ["/home/<you>/.local/share/npm", "/home/<you>/.bun"]
 

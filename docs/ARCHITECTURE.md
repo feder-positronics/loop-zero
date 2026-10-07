@@ -14,6 +14,11 @@ belong to the [example workflow](../workflow.example.toml), their validated
 own model selection. Follow those sources when a detail changes rather than
 copying their tables here.
 
+The [deterministic delivery design assumptions](design/2026-10-07-deterministic-delivery-design-assumptions.md)
+record the rationale, dated reviewer evidence and version-specific native
+compatibility investigation. Their proposed changes retain their recorded status;
+this guide and the delivery contract describe current behavior.
+
 ## Philosophy and authority
 
 The smallest useful unit is one task, one branch and one draft PR. A deterministic
@@ -131,6 +136,16 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
+At native review launch the CLI pins checks, publishers and runtime paths to one
+remote PR-base revision, refusing a missing remote ref/workflow unless the operator
+supplies explicit configuration. Reposts and other commands retain their fallback
+policy. Runners validate the complete mount plan against private review state and
+known standard/custom native state roots. Existing live auth mounts remain explicit
+exceptions; broad Claude state is still exposed through its auth bind. An implicit
+runtime inside state receives only the selected executable's exact read-only file
+mount, while explicit runtime paths have no exception. This preserves standalone
+CLI startup without exposing neighboring state; bundles needing protected siblings
+require installation outside state. The contract owns this boundary and its limits.
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.

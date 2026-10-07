@@ -86,9 +86,10 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     return _base_source(worktree, base_branch)[1]
 
 
-def load_base(worktree: Path, base_branch: str, section: str = "checks") -> dict[str, Any] | None:
+def load_base(worktree: Path, base_branch: str, section: str = "checks", *,
+              revision: str | None = None) -> dict[str, Any] | None:
     """Read a base revision section, or None when it has no workflow file."""
-    base, revision = _base_source(worktree, base_branch)
+    base, revision = (revision, revision) if revision else _base_source(worktree, base_branch)
     shown = _proc.run(
         ["git", "show", f"{base}:workflow.toml"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
