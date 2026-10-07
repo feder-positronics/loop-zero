@@ -16,13 +16,12 @@ from pathlib import Path
 from urllib.parse import quote
 
 from loopzero._proc import ProcTimeout, ToolMissing, run
-from loopzero.types import Finding, ReviewResult
+from loopzero.types import BLOCKING, Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
-BLOCKING = frozenset({"critical", "important"})
 MARKER_RE = re.compile(
     r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
     r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"

@@ -14,11 +14,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from loopzero import _proc, sandbox
-from loopzero.types import Config, Finding, LoopZeroError, ReviewResult
+from loopzero.config import REVIEWER_FAMILIES
+from loopzero.types import BLOCKING, Config, Finding, LoopZeroError, ReviewResult
 
-FAMILIES = ("claude", "codex")
 SEVERITIES = ("critical", "important", "suggestion")
-BLOCKING = ("critical", "important")
 TAIL_CHARS = 2000
 
 # Extra environment each CLI needs to authenticate; forwarded only if present.
@@ -596,8 +595,8 @@ def review_with(
     effort: str | None = None,
 ) -> ReviewResult:
     """Run one review of ``diff`` at ``head`` with the given model family."""
-    if family not in FAMILIES:
-        raise ValueError(f"unknown reviewer family {family!r}; expected one of {FAMILIES}")
+    if family not in REVIEWER_FAMILIES:
+        raise ValueError(f"unknown reviewer family {family!r}; expected one of {REVIEWER_FAMILIES}")
     if kind not in ("primary", "delta"):
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
     prompt = build_prompt(kind=kind, head=head, task_text=task_text, diff=diff)
