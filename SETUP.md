@@ -257,8 +257,10 @@ loopzero review                       # model review posted on the PR
 
 # If blocking threads need fixes, apply them, then:
 git add . && git commit -m "Fix review findings"
-loopzero check && loopzero pr && loopzero review  # push fixes, then delta review
-loopzero ready --wait                 # waits for required CI, then marks the PR ready
+loopzero check && loopzero pr         # push the fixes
+loopzero resolve <id> "<fix commit and what changed>"  # once per repaired blocking thread
+loopzero review                       # delta review of the fixes
+loopzero ready --wait                 # marks the PR ready and waits for required CI
 loopzero status                       # next step and why
 cd <repository-root>
 (cd <worktree> && loopzero merge --wait)  # landed merge deletes branch and worktree

@@ -8,10 +8,10 @@ review output are disposable working artifacts; the PR remains the delivery
 record.
 
 It exists for people and coding agents who ship many small PRs and want the
-same discipline on every one of them: checks run in a sandbox that cannot touch
-Git or the network, a reviewer reads the exact head (from a different family by
-default, subject to the contract's bounded owner-approved contributor-review
-exception), and a PR merges only when the head is unchanged since review, no
+same discipline on every one of them: checks run in a sandbox with read-only
+Git metadata and no network by default, a reviewer reads the exact head (from a
+different family by default, subject to the contract's bounded owner-approved
+contributor-review exception), and a PR merges only when the head is unchanged since review, no
 blocking finding is open and required CI is green. The full rules fit in
 [core/CONTRACT.md](core/CONTRACT.md).
 
@@ -114,7 +114,7 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 | `repo.name` | GitHub repository as `owner/name`; used for every `gh` call. |
 | `repo.base` | Branch that `start` branches from and `merge` merges into. |
 | `checks.commands` | Shell commands `check` runs in order inside the sandbox; the first nonzero exit fails the run. |
-| `checks.required_ci` | Exact GitHub check-run or commit-status names required on the head before `ready` and `merge`; every signal with a required name must succeed. |
+| `checks.required_ci` | Exact GitHub check-run or commit-status names required on the head before `ready` and `merge`; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.ro_paths` | Absolute host paths mounted read-only into the sandbox. `/home` is hidden, so list every toolchain path under it (for example `~/.local/bin` and `~/.local/share/uv`, spelled out); put writable caches in `checks.writable`. |
 | `checks.writable` | Absolute host paths mounted read-write into the sandbox, such as a shared `~/.cache/uv`; this is a trust decision and the forbidden-path rules from `checks.ro_paths` apply. |
 | `checks.scratch` | Worktree-relative directories given a fresh writable mount per run; defaults to `.venv`, `.ruff_cache`, `.pytest_cache` and `node_modules/.cache`. |
