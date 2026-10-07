@@ -22,8 +22,12 @@ hold all state. Nothing is recorded anywhere else.
 5. `loopzero ready` — compute readiness (below). If ready, mark the PR ready
    for review. If a draft is blocked only by missing or skipped required
    checks, mark it ready to trigger CI and exit 3. With `--wait[=SECONDS]`
-   (default 1800) it polls the required checks of that unchanged head instead:
-   exit 0 ready, 1 blocked, 3 timed out. If required checks remain missing after
+   (default 1800) it polls the required checks of that unchanged head:
+   exit 0 ready, 1 blocked, 3 timed out. After this invocation marks a draft ready,
+   it observes readiness again on the same head, within the original wait budget.
+   This is best effort: an immediate green observation can precede asynchronous
+   CI scheduling; it does not guarantee atomic readiness across the event.
+   If required checks remain missing after
    two minutes with no visible pending checks, inspect workflow scheduling,
    triggers and permissions for that head, then retry after correcting the cause. Do not gate on `gh pr checks --watch`: it ignores checks that do
    not exist yet.

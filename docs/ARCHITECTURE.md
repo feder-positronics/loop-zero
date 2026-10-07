@@ -110,6 +110,15 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    ancestry before the next primary. The exception does not grant a fresh budget.
 5. `ready` derives readiness from the unchanged head, review, blocking findings,
    target branch and required CI. Its bounded waiter observes that same head.
+   After its own draft-to-ready write, `ready --wait` revalidates visible readiness
+   through that waiter with the original deadline, preserving all existing gates
+   and replacement evidence. Missing-run diagnosis retains its two-minute observation
+   grace after activation; that grace does not extend the overall wait deadline.
+   An immediate green read may still precede asynchronous
+   CI scheduling: this is best-effort observation, with no unconditional delay or
+   wait for a new run that might never be scheduled. Merge admission still checks
+   readiness again and fails closed on later blockers. Plain `ready` and already
+   non-draft PRs retain their behavior.
    When every non-success signal of a required check strictly predates the eligible
    review, `ready --wait` allows up to 15 minutes from that review for a refresh,
    including time before GitHub publishes pending. Past the ordinary two-minute
