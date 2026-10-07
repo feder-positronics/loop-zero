@@ -153,6 +153,21 @@ mount, while explicit runtime paths have no exception. This preserves standalone
 CLI startup without exposing neighboring state; bundles needing protected siblings
 require installation outside state. The contract owns this boundary and its limits.
 
+The offline R3 candidate separates fixed reviewer policy from supplied material
+inside the existing runner adapters. A fixed ASCII paragraph and validated scope
+enter Claude's append-system-prompt or Codex's developer_instructions override;
+commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
+that header, a newline and the exact raw diff without trimming task or diff text.
+The selected Codex binary's version probe accepts only source-reviewed 0.160.1 and
+0.161.0; refusal uses RunnerBadOutput and existing family fallback before model
+input. Unsupported Claude options follow existing native failure handling.
+Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
+remain enabled. Repository instructions remain a native authority surface, so
+structural transport tests do not prove injection immunity or reviewer quality.
+No native comparison has run for this candidate and it has not been adopted.
+The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md)
+owns versioned source evidence and the frozen comparison gate before adoption.
+
 Reviewer settings are optional reporting in the existing provenance container.
 Adapters retain per-call requests; publication derives CLI claims from each retained
 native envelope, ignoring unqualified compatibility fields and optional reported

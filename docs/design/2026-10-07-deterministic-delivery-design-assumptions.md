@@ -755,3 +755,65 @@ Claude Opus 5.5; effort was requested medium but not independently reported.
 This proves ordinary private-state startup for that route, not universal native
 compatibility or reviewer quality. API-only and both-present precedence have
 source and namespace evidence only; no live-key proof is claimed.
+
+
+## R3 offline instruction candidate — October 7, 2026
+
+The candidate routes one fixed ASCII policy paragraph plus validated primary/delta
+scope through Claude's append-system-prompt and Codex's developer_instructions.
+Commit identity, exact task text and UTF-8 diff length are a JSON header on stdin,
+followed by a newline and the exact raw diff. JSON uses ensure_ascii=False; neither
+task whitespace nor trailing diff newlines are stripped. Native review explicitly
+uses UTF-8 even when the parent locale is ASCII. The public review_with interface,
+read-only tools, schema, severity, caller/failure tracing and class-wide finding
+rules remain unchanged. Native default prompts and AGENTS.md/CLAUDE.md processing
+remain enabled, with the repository instruction surface explicitly unresolved.
+
+Astra verified annotated release tag rust-v0.160.1 (tag object
+`c3e23d4c4385619ecec78408766e46b7fa7dd9ad`) peeled to source commit
+`d27764b82f7118f674371e6d6e76271d9d606edb`, and rust-v0.161.0
+(tag object `7e21416b38834816c224ea0dfd135c3de94b2f15`) to source commit
+`979011409de0a60b52f179721948e65531d26144`, using git ls-remote and pinned
+source. The selected installed CLI updated to 0.161.0 during preparation; its
+preflight SHA256 was
+`9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c`.
+That hash is research evidence, not a platform-specific runtime gate or backend
+attestation. Both source-reviewed versions are accepted by the selected
+executable's --version probe. Probe failure, malformed output or another version
+raises RunnerBadOutput before model stdin, allowing existing family fallback.
+Successful generic -c parsing alone is insufficient evidence of recognized keys.
+
+For 0.161.0 the source path is:
+
+- [Recognized developer_instructions field](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/config/src/config_toml.rs#L252)
+  and [configuration resolution](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/config/mod.rs#L4015).
+- [Session copies instructions](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/session/mod.rs#L851),
+  [renders context](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/session/mod.rs#L4218)
+  and [emits instructions](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/session/mod.rs#L4386)
+  with [explicit developer role](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/context/developer_instructions.rs#L22).
+- [Exec configuration overrides](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L617)
+  reach [the app-server builder](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L732)
+  independently of [JSON output](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L891)
+  and [ephemeral configuration](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L611).
+- [Unknown CLI keys are validated only in strict mode](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/config/src/loader/mod.rs#L651).
+  The candidate does not add strict-config, which would alter unrelated config
+  acceptance. The native 0.161.0 release disables Daybreak for ephemeral threads.
+
+The same path in 0.160.1 was independently verified at configuration field line
+250, resolution line 4005, session copy/render/emission lines 840/4323/4490, and
+exec override/app-server/JSON lines 602/713/855 at the pinned source above.
+
+Offline proof covers argv/stdin bytes, independent TOML decoding, typed version
+refusal, actual ASCII-parent subprocess encoding and CLI chunk/fallback behavior.
+It does not establish semantic instruction immunity, restored defect detection or
+backend identity. Native comparison has NOT run and this candidate is NOT adopted.
+The existing acceptance gate remains: freeze revisions, 16 cases, balanced schedule
+and oracle before at most 96 paired calls (32 matched permission trials, independent
+assessment, then 64 suite calls). Use identical accepted R2 routes in both arms,
+with Codex's retained auth-file limitation. Retain all consumed attempts; no retry,
+rotation or replacement. Independently read all retained outputs. Require all four
+candidate defective-override trials to find the concrete bug, preserved control
+and paired-baseline defect detection, and no unsupported valid-case blockers.
+Protocol/runtime/context failure or material regression stops the experiment;
+injection-only objections do not count and inconclusive results reject adoption.
+Formal review, required checks, readiness and merge follow only after that gate.
