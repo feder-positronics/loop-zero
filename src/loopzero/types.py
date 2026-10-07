@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+BLOCKING = ("critical", "important")  # finding severities that block readiness
+
 
 class LoopZeroError(Exception):
     """Base class for typed loopzero failures; the message is user-facing."""
