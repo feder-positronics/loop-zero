@@ -16,6 +16,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from loopzero._proc import ProcTimeout, ToolMissing, run
+from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
@@ -442,22 +443,34 @@ def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
     return text
 
 
-def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "") -> str:
+def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,
+                 legacy_settings: bool = False) -> str:
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in
               ("critical", "important", "suggestion")}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
-    effort = f" (effort {result.effort})" if result.effort else ""
+    settings = ""
+    if legacy_settings:  # Exact historical rendering, for recovery only.
+        effort = f" (effort {result.effort})" if result.effort else ""
+        settings = f"model {result.model or 'unknown'}{effort}, "
     lines = [prefix.rstrip("\n")] if prefix else []
     lines += [
         (
             f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-            f"model {result.model or 'unknown'}{effort}, {duration}: "
+            f"{settings}{duration}: "
             f"**{result.verdict}** ({summary})"
         ),
     ]
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
+    if not legacy_settings:
+        lines.append("\nSettings per native call (CLI claims, not backend attestation):")
+        for index, call in enumerate(review_settings(result), 1):
+            request, reported = call["requested"], call["reported"]
+            lines.append(f"- Call {index}: requested model {request['model'] or 'unknown'} "
+                         f"(effort {request['effort'] or 'unknown'}); "
+                         f"CLI-reported model {reported['model'] or 'unknown'} "
+                         f"(effort {reported['effort'] or 'unknown'})")
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
@@ -509,7 +522,7 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
 
 
 def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
-                   body_prefix: str) -> dict:
+                   body_prefix: str, *, legacy_settings: bool = False) -> dict:
     """Regenerate the publication content from the runner result and current PR diff."""
     commentable, anchor = _diff_map(repo, number)
     comments: list[dict] = []
@@ -528,7 +541,7 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
     return {
         "commit_id": head_sha,
-        "body": _review_body(result, loose, body_prefix),
+        "body": _review_body(result, loose, body_prefix, legacy_settings=legacy_settings),
         "comments": comments,
     }
 

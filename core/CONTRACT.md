@@ -132,6 +132,13 @@ A review file not produced by a runner is never a review. If neither an
 independent reviewer nor a reviewer within the valid owner exception below can
 run, delivery waits for the owner.
 
+Published settings distinguish requested model/effort from CLI-reported claims
+for every native call, including chunks. Missing evidence remains unknown;
+CLI claims are not backend attestation. Optional reporting metadata never grants
+or rejects review eligibility. Legacy artifacts stay loadable, and recovery can
+recognize their exact historical publication without changing identity, finding
+or deadline checks. New publication and repost always use qualified wording.
+
 ### Owner-approved contributor-review exception
 
 This alignment is recorded on October 7, 2026, from the owner's

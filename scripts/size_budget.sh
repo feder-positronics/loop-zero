@@ -14,8 +14,10 @@ set -euo pipefail
 # (parent-authorized 2026-10-07, measured 4884/6753); all check commands remain.
 # Review-only runtime authority and complete mount-boundary proofs
 # (owner approval 2026-10-07, caps 4950/6950); all check commands remain.
-SRC_CAP=4950
-TESTS_CAP=6950
+# Remaining R2-R4 accepted improvements, owning proofs and formal-review repairs
+# (owner approval 2026-10-07, caps 5250/7600); all check commands remain.
+SRC_CAP=5250
+TESTS_CAP=7600
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

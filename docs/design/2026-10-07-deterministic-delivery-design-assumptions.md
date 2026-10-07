@@ -694,3 +694,29 @@ broadening, protected-source exposure and real sibling-marker visibility. At thi
 checkpoint formal delivery is pending. The owner approved caps of 4,950 source
 and 6,950 test lines on October 7 for this slice and its review repairs;
 this preparation does not establish deployed isolation or semantic reviewer quality.
+
+## Delivery continuation — October 7, 2026
+
+R1 passed sandboxed and hosted checks, received independent native approval with
+no blocking findings, and merged in [PR #281](https://github.com/feder-positronics/loop-zero/pull/281)
+as da68b26a. The owner subsequently authorized implementing and merging the remaining
+accepted improvements. Deferred proposals still require their own acceptance/owner.
+
+R4's bounded implementation separates optional per-call requests from raw-derived
+CLI claims and preserves exact historical primary/repost recovery, including chunks
+and truncated raw output. Malformed optional settings remain non-gating, while
+presence of the new field prevents using the legacy renderer. Fable/Astra reviewed
+this concrete plan; all conditional requirements were integrated. The current
+candidate uses 4,980 source / 7,083 test lines after a source-backed matcher repair.
+The owner approved caps of 5,250 source / 7,600 test lines for remaining R2-R4 proofs
+and repairs; full delivery remains pending at this checkpoint.
+
+R2 investigation confirms an existing explicit environment-auth route can omit
+Claude host-state binds without selecting a different auth/billing route. Native
+private-state initialization still needs acceptance. File-backed Claude isolation
+remains conditional: individual lock mounts obstruct mkdir/rmdir acquisition,
+private locks lose host coordination, and credential file mounts pin an inode.
+No inspected ordinary selective-bind design preserves all of those requirements
+and arbitrary sibling/mixed-state privacy. Partial environment-route progress
+must not be described as completing file-backed isolation.
+The owner retained the full file-backed requirement; this limitation is not waived.

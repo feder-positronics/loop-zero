@@ -687,7 +687,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     if (publisher.casefold() not in {name.casefold() for name in trusted}
             or eligibility.eligible_review(reviews, result.head, trusted) is None):
         raise CliError("publication is revoked, pending or untrusted")
-    payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix)
+    payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
+                                      legacy_settings=legacy)
+                for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
                 for prefix in (review_marker(result.head, result.kind), _repost_prefix(result))]
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:

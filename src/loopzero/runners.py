@@ -25,6 +25,10 @@ CLAUDE_AUTH_ENV = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
 CODEX_AUTH_ENV = ("OPENAI_API_KEY",)
 BASE_ENV = ("PATH", "LANG", "LC_ALL", "TERM")
 _CODEX_MODEL_RE = re.compile(r"^\s*model\s*:\s*(\S.*?)\s*$", re.IGNORECASE | re.MULTILINE)
+_CODEX_REPORTED_MODEL_RE = re.compile(r"^[ \t]*model[ \t]*:[ \t]*([^\r\n]+)$",
+                                      re.IGNORECASE | re.MULTILINE)
+_CODEX_EFFORT_RE = re.compile(r"^[ \t]*reasoning effort[ \t]*:[ \t]*([^\r\n]+)$",
+                              re.IGNORECASE | re.MULTILINE)
 
 _AUTH_PATTERNS = (
     re.compile(r"not logged in", re.IGNORECASE),
@@ -436,6 +440,39 @@ def _json_lines(text: str) -> list[dict]:
     return events
 
 
+def _setting(value: object) -> str | None:
+    return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_./:-]{1,128}", value) else None
+
+
+def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None]]]:
+    """Derive ordered CLI claims from evidence; optional requests never grant eligibility."""
+    try:
+        decoded = json.loads(result.raw)
+        envelopes = decoded if isinstance(decoded, list) else [decoded]
+    except (TypeError, ValueError):
+        envelopes = []
+    if len(envelopes) != result.chunk_count:
+        envelopes = [{}] * result.chunk_count
+    requested = result.provenance.get("requested_settings", [])
+    requested = requested if isinstance(requested, list) else []
+    settings = []
+    for index, envelope in enumerate(envelopes):
+        envelope = envelope if isinstance(envelope, dict) else {}
+        request = requested[index] if index < len(requested) else {}
+        request = request if isinstance(request, dict) else {}
+        if result.family == "claude":
+            usage = envelope.get("modelUsage")
+            models = [key for key in usage if _setting(key)] if isinstance(usage, dict) else []
+            reported = {"model": ", ".join(models[:8]) or None, "effort": None}
+        else:
+            evidence = envelope.get("reported_settings")
+            evidence = evidence if isinstance(evidence, dict) else {}
+            reported = {key: _setting(evidence.get(key)) for key in ("model", "effort")}
+        settings.append({"requested": {key: _setting(request.get(key)) for key in ("model", "effort")},
+                         "reported": reported})
+    return settings
+
+
 def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str, object], str]:
     events = _json_lines(stdout)
     session_id = next(
@@ -469,12 +506,18 @@ def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str,
         raise RunnerBadOutput(
             "codex: execution output lacks session/token provenance", _tail(stdout + stderr)
         )
+    clean_stderr = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
+    claims = {key: _setting(match.group(1).strip()) if match else None for key, match in (
+        ("model", _CODEX_REPORTED_MODEL_RE.search(clean_stderr)),
+        ("effort", _CODEX_EFFORT_RE.search(clean_stderr)),
+    )}
     envelope = {
         "type": "codex_exec_result",
         "session_id": session_id,
         "token_usage": usage,
         "final_message": message,
         "events": events,
+        "reported_settings": claims,
     }
     provenance = {
         "family": "codex",
@@ -550,6 +593,7 @@ def _review_claude(
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
     provenance = _claude_provenance(envelope, raw)
+    provenance["requested_settings"] = [{"model": model, "effort": effort}]
     return replace(
         parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
         model=reported_model or model, effort=effort,
@@ -606,6 +650,7 @@ def _review_codex(
     except (json.JSONDecodeError, ValueError) as exc:
         raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
     provenance, raw = _codex_provenance(done.stdout, done.stderr, message)
+    provenance["requested_settings"] = [{"model": model, "effort": effort}]
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     return replace(
         parse_review(payload, family="codex", head=head, kind=kind, raw=raw),
@@ -656,6 +701,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         "family": first.family,
         "session_id": sessions[0],
         "session_ids": sessions,
+        "requested_settings": [call["requested"] for result in results for call in review_settings(result)],
     }
     if first.family == "claude":
         provenance.update(
