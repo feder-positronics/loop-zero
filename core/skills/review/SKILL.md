@@ -14,6 +14,10 @@ Route a code diff or PR to [code-review](../code-review/SKILL.md), adding
 [security-review](../security-review/SKILL.md) when a trust boundary changes.
 For other targets, read enough source material and surrounding context to
 understand purpose, constraints, callers or consumers, and acceptance.
+Approach the target with professional skepticism: question its stated premises
+and assumptions, trace each material claim to its source, probe edge cases and
+failure modes, and note inconsistencies with its sources. Keep each concern
+constructive: its evidence, consequence, and a concrete direction.
 
 Use an opinion pass for directional requests: a concise assessment, the few
 highest-value concerns, and a recommended direction. Use a findings review only

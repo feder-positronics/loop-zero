@@ -158,7 +158,7 @@ def test_prompt_contains_task_diff_and_json_contract() -> None:
     assert "Objective" in prompt and "+line" in prompt and "deadbeef" in prompt
     assert '"verdict": "approve"|"request_changes"' in prompt
     assert "critical" in prompt and "important" in prompt and "suggestion" in prompt
-    assert "delta review" in prompt
+    assert "delta review" in prompt and "Be skeptical" in prompt
 
 
 # ----------------------------------------------------------------- claude
