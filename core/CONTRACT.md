@@ -118,6 +118,12 @@ or resolve threads; branch protection and CI remain the enforced gates.
 - A reviewer run that yields no verdict (missing tool, authentication failure,
   unparseable output) does not consume the budget; `loopzero review` moves to
   the next configured family and exits nonzero with each reason if all fail.
+- A lost review POST reply is reconciled through exact live GitHub evidence under
+  one 30-second read-back deadline; failed reads are not retried in that window.
+  Confirmation returns the saved runner verdict without another write or model
+  run. `review --repost` performs the same reconciliation before budget rejection.
+  Missing evidence never causes an automatic POST retry; an explicit repost may
+  retry an unposted result only after complete reads and the normal budget checks.
 A review file not produced by a runner is never a review. If neither an
 independent reviewer nor a reviewer within the valid owner exception below can
 run, delivery waits for the owner.

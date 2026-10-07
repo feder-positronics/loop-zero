@@ -168,11 +168,15 @@ def _pr_reviews(repo: str, number: int) -> list[dict]:
     page = 1
     while True:
         endpoint = f"repos/{repo}/pulls/{number}/reviews?per_page={PAGE}&page={page}"
-        batch = list(github.api_get(endpoint) or [])
+        batch = github.api_get(endpoint)
+        if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
+            raise CliError("invalid GitHub reviews response")
         reviews += batch
         if len(batch) < PAGE:
             return reviews
         page += 1
+        if page > 100:
+            raise CliError("GitHub reviews pagination limit exceeded")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -534,13 +538,25 @@ def cmd_review(args: argparse.Namespace) -> int:
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
     token = github.app_token()  # one identity for the publisher check and the post
-    if config.review_publishers and github.login(token=token).casefold() not in {
+    publisher = github.login(token=token)
+    if config.review_publishers and publisher.casefold() not in {
         login.casefold() for login in config.review_publishers
     }:
         raise CliError("current GitHub login is not a configured review publisher")
-    kind, reviewed = _decide_kind(
-        _lineage_markers(wt, _pr_reviews(config.repo, pr.number), head, config.review_publishers), head
-    )
+    reviews = [] if args.repost else _pr_reviews(config.repo, pr.number)
+    if args.repost:
+        saved = [kind for kind in ("primary", "delta") if _review_file(wt, head, kind).exists()]
+        if len(saved) > 1:
+            raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
+        if not saved:
+            reviews = _pr_reviews(config.repo, pr.number)
+        kind = saved[0] if saved else _decide_kind(
+            _lineage_markers(wt, reviews, head, config.review_publishers), head
+        )[0]
+    else:
+        kind, reviewed = _decide_kind(
+            _lineage_markers(wt, reviews, head, config.review_publishers), head
+        )
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
@@ -554,11 +570,25 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"saved reviewer family {result.family} contributed to this PR lineage; "
                 "run without --repost to obtain an independent review"
             )
-        sessions = result.provenance["session_ids"]
-        prefix = review_marker(head, kind, "repost") + "\n" + (
-            "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
-            + ": " + ", ".join(f"`{session}`" for session in sessions)
+        publication = json.loads(_review_file(wt, head, kind).read_text()).get("publication")
+        if publication is not None:
+            if (not isinstance(publication, dict) or publication.get("repo") != config.repo
+                    or publication.get("number") != pr.number
+                    or not isinstance(publication.get("publisher"), str)
+                    or not publication["publisher"]):
+                raise CliError("saved publication identity differs from this repository/PR")
+            confirmed, reviews = _recover_review(wt, config, pr, result,
+                                                 publication["publisher"], token)
+            if confirmed:
+                return _review_verdict(result)
+        else:
+            reviews = _pr_reviews(config.repo, pr.number)
+        allowed, _ = _decide_kind(
+            _lineage_markers(wt, reviews, head, config.review_publishers), head
         )
+        if allowed != kind:
+            raise CliError("saved review kind differs from the remaining review budget")
+        prefix = _repost_prefix(result)
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort)
@@ -571,25 +601,108 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"worktree changed during review: HEAD before {head}, HEAD after {final_head}; "
                 f"dirty before False, dirty after {final_dirty}"
             )
-        _save_review(wt, result)
         prefix = review_marker(head, kind, "model")
+    _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     try:
         github.post_review(
             config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token
         )
-    except github.GhError as exc:
+    except (github.GhError, _proc.ProcTimeout) as exc:
         path = _review_file(wt, head, kind)
+        try:
+            if _recover_review(wt, config, pr, result, publisher, token)[0]:
+                return _review_verdict(result)
+        except (github.GhError, CliError, _proc.ProcTimeout) as recovery:
+            raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
+                           f"review saved at {path}; retry `loopzero review --repost` "
+                           "after resolving the read-back failure") from recovery
         raise CliError(
-            f"{exc} | review saved at {path}; fix the cause and run `loopzero review --repost`"
+            f"{exc} | publication unconfirmed; review saved at {path}; "
+            "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
         github.update_body(config.repo, pr.number, _append_review(pr.body or _pr_body(wt, head), result))
     except (github.GhError, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
+    return _review_verdict(result)
+
+
+def _review_verdict(result: ReviewResult) -> int:
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in runners.SEVERITIES}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
-    print(f"{kind} review by {result.family} on {head[:12]}: {result.verdict} ({summary})")
+    print(f"{result.kind} review by {result.family} on {result.head[:12]}: {result.verdict} ({summary})")
     return 0 if result.verdict == "approve" else 5  # the exit code is the verdict, as for check
+
+
+def _repost_prefix(result: ReviewResult) -> str:
+    sessions = result.provenance["session_ids"]
+    return review_marker(result.head, result.kind, "repost") + "\n" + (
+        "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
+        + ": " + ", ".join(f"`{session}`" for session in sessions)
+    )
+
+
+def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
+                    publisher: str, token: str) -> tuple[bool, list[dict]]:
+    with github.bounded_reads(30, token=token):
+        reviews = _pr_reviews(config.repo, pr.number)
+        return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
+
+
+def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
+                    publisher: str, reviews: list[dict]) -> bool:
+    """Confirm an exact live publication; absence authorizes no automatic write."""
+    trusted = config.review_publishers or (publisher,)
+    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "")
+                and (r.get("commit_id") == result.head or any(
+                    m.group(1) == result.head for m in REVIEW_MARKER_RE.finditer(r["body"])))]
+    fresh = github.pr_view(config.repo, pr.number)
+    if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
+        raise CliError("PR changed during publication recovery")
+    if not evidence:
+        return False
+    if (publisher.casefold() not in {name.casefold() for name in trusted}
+            or eligibility.eligible_review(reviews, result.head, trusted) is None):
+        raise CliError("publication is revoked, pending or untrusted")
+    payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix)
+                for prefix in (review_marker(result.head, result.kind), _repost_prefix(result))]
+    states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
+    for review in evidence:
+        expected = next((p for p in payloads if p["body"] == review.get("body")), None)
+        review_id = review.get("id")
+        if (expected is None or review.get("commit_id") != result.head
+                or review.get("state") not in states
+                or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or type(review_id) is not int or review_id <= 0):
+            raise CliError("conflicting or ambiguous review publication")
+        comments, page = [], 1
+        while True:
+            endpoint = (f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments"
+                        f"?per_page={PAGE}&page={page}")
+            batch = github.api_get(endpoint)
+            if not isinstance(batch, list) or not all(isinstance(c, dict) for c in batch):
+                raise CliError("invalid GitHub review comments response")
+            comments.extend(batch)
+            if len(batch) < PAGE:
+                break
+            page += 1
+            if page > 100:
+                raise CliError("GitHub review comments pagination limit exceeded")
+        fields = ("path", "line", "side", "body")
+        if (any(c.get("start_line") is not None or c.get("start_side") is not None
+                or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
+                or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                for c in comments)
+                or sorted((tuple(c.get(k) for k in fields) for c in comments), key=repr)
+                != sorted((tuple(c[k] for k in fields) for c in expected["comments"]), key=repr)):
+            raise CliError("review finding contents or locations differ from saved publication")
+    if _pr_reviews(config.repo, pr.number) != reviews:
+        raise CliError("review evidence changed during publication recovery")
+    fresh = github.pr_view(config.repo, pr.number)
+    if (fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref
+            or worktree.head(wt) != result.head or worktree.is_dirty(wt)):
+        raise CliError("head or worktree changed during publication recovery")
+    return True
 
 
 def _run_review(
@@ -687,10 +800,13 @@ def _review_file(wt: Path, head: str, kind: str) -> Path:
     return wt / ".loopzero" / f"review-{head[:12]}-{kind}.json"
 
 
-def _save_review(wt: Path, result: ReviewResult) -> None:
+def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None) -> None:
     path = _review_file(wt, result.head, result.kind)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dataclasses.asdict(result), indent=2) + "\n")
+    data = dataclasses.asdict(result)
+    if publication is not None:
+        data["publication"] = publication
+    path.write_text(json.dumps(data, indent=2) + "\n")
 
 
 def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
@@ -706,6 +822,9 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
     if data.get("head") != head:
         raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
     try:
+        data.pop("publication", None)
+        if data.get("kind") != kind:
+            raise ValueError("saved review kind mismatch")
         findings = tuple(Finding(**f) for f in data["findings"])
         result = ReviewResult(**{**data, "findings": findings})
     except (KeyError, TypeError, ValueError) as exc:

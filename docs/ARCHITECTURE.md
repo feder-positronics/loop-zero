@@ -37,6 +37,16 @@ artifacts, not a second authoritative delivery history. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Losing local artifacts may
 require rerunning checks or review, and never creates a hosted approval.
+Saved runner artifacts also retain the repository, PR and actual request publisher
+before publication. A lost POST reply triggers a read-only reconciliation bounded
+by one 30-second transport deadline, with no read retries. Recovery regenerates
+the exact review body and finding locations, checks the complete review/comment
+pages and unchanged head, and rereads review evidence before returning the saved
+verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
+`review --repost` reconciles before enforcing the remaining publication budget;
+only an explicit retry after complete absence may publish again. The existing
+self-review rejection fallback to COMMENT remains a separate transport rule.
+
 Private agent transcripts, metrics ledgers and copied findings do not belong in
 this guide or in a new persistent store.
 

@@ -8,6 +8,8 @@ import os
 import re
 import tempfile
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -94,6 +96,22 @@ TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeo
                           r"connection reset|no server is currently", re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
+_read_scope: ContextVar[tuple[float, str] | None] = ContextVar("github_reads", default=None)
+
+
+@contextmanager
+def bounded_reads(seconds: float, token: str = ""):
+    """Share one deadline across a reconciliation's reads; never retry these reads."""
+    previous = _read_scope.get()
+    deadline = time.monotonic() + seconds
+    deadline = min(previous[0], deadline) if previous else deadline
+    scope = _read_scope.set((deadline, token))
+    try:
+        yield
+        if time.monotonic() >= deadline:
+            raise GhError(("gh", "api"), "publication read-back deadline exceeded")
+    finally:
+        _read_scope.reset(scope)
 
 
 def _read_only(args: tuple[str, ...]) -> bool:
@@ -129,8 +147,16 @@ def app_token() -> str:
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None) -> str:
     argv = ("gh", *args)
-    selected = token if token is not None else (app_token() if _read_only(args) else "")
-    for delay in (*RETRY_DELAYS, None):
+    scope = _read_scope.get() if _read_only(args) else None
+    selected = token if token is not None else (
+        scope[1] if scope else (app_token() if _read_only(args) else ""))
+    deadline = scope[0] if scope else None
+    for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise GhError(argv, "publication read-back deadline exceeded")
+            timeout = min(timeout, remaining)
         try:
             done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
@@ -210,11 +236,14 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
     page = 1
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
-                         "-F", f"page={page}") or []
+                         "-F", f"page={page}")
         if isinstance(chunk, dict):
-            chunk = chunk.get(key) or []
-        items += chunk
-        if len(chunk) < PAGE:
+            chunk = chunk.get(key)
+        if _read_scope.get() is not None and (
+                not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk)):
+            raise GhError(("gh", "api", endpoint), "invalid paginated response")
+        items += chunk or []
+        if len(chunk or []) < PAGE:
             return items
         page += 1
 
@@ -440,6 +469,31 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
     return commentable, anchor
 
 
+def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
+                   body_prefix: str) -> dict:
+    """Regenerate the publication content from the runner result and current PR diff."""
+    commentable, anchor = _diff_map(repo, number)
+    comments: list[dict] = []
+    loose: list[Finding] = []
+    for f in result.findings:
+        if f.path and f.line and f.line in commentable.get(f.path, ()):
+            comments.append({"path": f.path, "line": f.line, "side": "RIGHT",
+                             "body": _comment_body(f, head_sha)})
+        elif f.severity not in BLOCKING:
+            loose.append(f)
+        elif anchor is None:
+            raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
+                          f"cannot anchor '{f.title}': PR has no diff hunks")
+        else:
+            note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
+            comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
+    return {
+        "commit_id": head_sha,
+        "body": _review_body(result, loose, body_prefix),
+        "comments": comments,
+    }
+
+
 def post_review(
     repo: str,
     number: int,
@@ -464,27 +518,7 @@ def post_review(
         event = "COMMENT"
     else:
         event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
-    commentable, anchor = _diff_map(repo, number)
-    comments: list[dict] = []
-    loose: list[Finding] = []
-    for f in result.findings:
-        if f.path and f.line and f.line in commentable.get(f.path, ()):
-            comments.append({"path": f.path, "line": f.line, "side": "RIGHT",
-                             "body": _comment_body(f, head_sha)})
-        elif f.severity not in BLOCKING:
-            loose.append(f)
-        elif anchor is None:
-            raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
-                          f"cannot anchor '{f.title}': PR has no diff hunks")
-        else:
-            note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
-            comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
-    payload = {
-        "commit_id": head_sha,
-        "event": event,
-        "body": _review_body(result, loose, body_prefix),
-        "comments": comments,
-    }
+    payload = {**review_payload(repo, number, head_sha, result, body_prefix), "event": event}
     endpoint = f"repos/{repo}/pulls/{number}/reviews"
     try:
         _api(endpoint, payload, token=token)
