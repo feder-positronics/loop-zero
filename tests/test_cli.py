@@ -13,7 +13,16 @@ import pytest
 from loopzero import cli, github, mergify
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
-from tests.test_github import FakeGh, merge_json, pr_json, pr_list_key, rest_pr_json, threads_json
+from tests.test_github import (
+    FakeGh,
+    branch_history_key,
+    closed_history_row,
+    merge_json,
+    pr_json,
+    pr_list_key,
+    rest_pr_json,
+    threads_json,
+)
 from tests.test_runners import APPROVE, CHANGES, _claude_envelope, _fake_claude, _fake_codex
 from tests.test_sandbox import FAKE_BWRAP
 
@@ -54,6 +63,7 @@ def repo(git_repo: Path, tmp_path: Path, fake_tool, fake_bin: Path) -> Path:
 @pytest.fixture
 def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     fake = FakeGh(fake_bin, tmp_path)
+    fake.respond(branch_history_key(), [])
     fake.respond("api graphql viewer", {"data": {"viewer": {"login": LOGIN}}})
     fake.respond(f"api repos/{REPO}/pulls/7/files",
                  [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
@@ -256,7 +266,8 @@ def test_repeated_pr_does_not_rewrite_unchanged_body(wt: Path, gh: FakeGh, capsy
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
     before = len(gh.calls)
     assert run(capsys, "pr")[0] == 0
-    assert [c["argv"][:2] for c in gh.calls[before:]] == LOOKUP_CALLS
+    assert [c["argv"][:2] for c in gh.calls[before:]] == [
+        ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS]
 
 
 def test_check_does_not_rewrite_when_only_duration_changes(wt: Path, gh: FakeGh, capsys) -> None:
@@ -313,7 +324,8 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
     code, out, err = run(capsys, command)
     assert code == exit_code and "malformed loopzero checks block" in err
-    assert [c["argv"][:2] for c in gh.calls] == LOOKUP_CALLS
+    history = [["api", branch_history_key().split(" ", 1)[1]]] if command == "pr" else []
+    assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS
     if command == "check":
         assert out.endswith("PASS\n")
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
@@ -487,6 +499,78 @@ exec /usr/bin/git "$@"
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
 
 
+@pytest.mark.parametrize("duplicate", [None, "CLOSED", "OPEN"])
+def test_pr_refuses_completed_branch_before_any_publication(
+    wt: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, duplicate: str | None,
+) -> None:
+    merged = pr_json(state="MERGED", headRefOid=head_of(wt))
+    newer = pr_json(number=8, state=duplicate, headRefOid=head_of(wt))
+    gh.respond_pr_list([newer] if duplicate else [merged])
+    gh.respond_pr_create(pr_json(headRefOid=head_of(wt)))
+    gh.respond(f"api repos/{REPO}/pulls/8 --method PATCH", {})
+    history = [closed_history_row(merged)]
+    if duplicate == "CLOSED":
+        history.insert(0, closed_history_row(newer))
+    gh.respond(branch_history_key(), history)
+    gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(merged))
+    pushes = tmp_path / "pushes"
+    fake_tool("git", f'''\
+if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
+exec /usr/bin/git "$@"
+''')
+
+    code, out, err = run(capsys, "pr")
+
+    assert code == 1 and out == "", (code, out, err)
+    assert "#7" in err and "merged" in err and "loopzero start" in err
+    assert not pushes.exists(), "completed branch was pushed"
+    assert all("--method" not in c["argv"] for c in gh.calls), "GitHub was written"
+
+
+@pytest.mark.parametrize("failure", ["read", "malformed", "incomplete", "repeated", "detail"])
+def test_pr_refuses_unproven_branch_history_before_any_publication(
+    wt: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, failure: str,
+) -> None:
+    gh.respond_pr_list([])
+    gh.respond_pr_create(pr_json(headRefOid=head_of(wt)))
+    if failure == "read":
+        gh.respond(branch_history_key(), "", exit=1, stderr="HTTP 403 forbidden")
+    elif failure == "malformed":
+        gh.respond(branch_history_key(), [{"number": 7}])
+    elif failure == "detail":
+        gh.respond(branch_history_key(), [closed_history_row(pr_json(state="MERGED"))])
+        gh.respond(f"api repos/{REPO}/pulls/7", "", exit=1, stderr="HTTP 403 forbidden")
+    else:
+        page = [closed_history_row(pr_json(number=n, state="CLOSED"))
+                for n in range(1, 101)]
+        gh.respond(branch_history_key(), page)
+        if failure == "incomplete":
+            gh.respond(branch_history_key(2), "", exit=1, stderr="HTTP 403 forbidden")
+        else:
+            gh.respond(branch_history_key(2), page)
+    pushes = tmp_path / "pushes"
+    fake_tool("git", f'''\
+if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
+exec /usr/bin/git "$@"
+''')
+
+    code, out, err = run(capsys, "pr")
+
+    assert code == 1 and out == "", (code, out, err)
+    assert "loopzero pr:" in err
+    assert not pushes.exists(), "branch was pushed without complete history"
+    assert all("--method" not in c["argv"] for c in gh.calls), "GitHub was written"
+
+
+def test_pr_replaces_closed_never_merged_pr(wt: Path, gh: FakeGh, capsys) -> None:
+    closed = pr_json(state="CLOSED", headRefOid=head_of(wt))
+    gh.respond(branch_history_key(), [closed_history_row(closed)])
+    gh.respond_pr_list([closed])
+    gh.respond_pr_create(pr_json(headRefOid=head_of(wt)))
+
+    assert run(capsys, "pr") == (0, URL + "\n", "")
+
+
 def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
     task = wt / ".loopzero" / "task.md"
     task.write_text("## Objective\nx\n\n# Add the feature flag\n")
@@ -547,9 +631,10 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     code, out, _ = run(capsys, "pr")
     assert code == 0 and out == URL + "\n"
-    assert [c["argv"][:2] for c in gh.calls] == [*LOOKUP_CALLS,
+    assert [c["argv"][:2] for c in gh.calls] == [
+        ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS,
                                                 ["api", f"repos/{REPO}/pulls/7"]]
-    assert "(no `loopzero check` run recorded)" in gh.calls[2]["--input"]
+    assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
 def test_pr_uses_lease_for_rewritten_open_pr(

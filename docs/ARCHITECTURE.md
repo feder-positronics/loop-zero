@@ -65,8 +65,14 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    authoritative; stale task trees need integration only when prerequisites are
    missing, preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
-3. `pr` pushes the branch and creates or refreshes a draft PR. The local task
-   supplies narrative; the live PR owns validation and review after creation.
+3. `pr` checks the task branch's closed PR history through GitHub REST before
+   pushing or writing. A confirmed merged PR completes that task branch, even
+   when a newer closed or open duplicate exists; the caller must start a new task.
+   Absence requires complete typed pages, bounded to 100 pages; failed, malformed,
+   repeated or truncated history blocks publication. Other commands retain their
+   open-first, newest-closed branch lookup. An unfinished branch creates or
+   refreshes a draft PR. The local task supplies narrative; the live PR owns
+   validation and review after creation.
 4. `review` runs a native reviewer against the exact authored SHA and publishes
    one GitHub review with findings. By default, keep one authoring family per PR,
    including repairs, and reserve the other family for read-only advice and
