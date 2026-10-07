@@ -1350,6 +1350,114 @@ def test_ready_wait_tracks_the_replacement_workflow(
                             "not ready: required check 'checks' is failure\n")
 
 
+@pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
+@pytest.mark.parametrize("delivery", ["squash", "mergify"])
+@pytest.mark.parametrize("initial_pending", [False, True])
+def test_ready_wait_revalidates_its_ready_transition(
+    wt, gh, capsys, monkeypatch, replacement, expected, delivery, initial_pending
+):
+    if delivery == "mergify":
+        commit_mergify_configuration(wt)
+        monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending" if initial_pending else "success")
+    gh.respond("pr ready", "")
+    clock, sleeps, transitioned = [0.0], [], [False]
+    mark_ready = github.mark_ready
+    def transition(*args):
+        mark_ready(*args)
+        transitioned[0] = True
+        gh.respond_pr_view(pr_json(headRefOid=head, isDraft=False))
+        arm_check_runs(gh, head, [{
+            "id": 100, "name": "checks", "status": "completed", "conclusion": "cancelled",
+            "check_suite": {"id": 10}, "completed_at": "2026-09-23T21:54:41Z"}])
+        gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": [
+            {"id": 1, "check_suite_id": 10, "workflow_id": 7, "head_sha": head,
+             "status": "completed", "created_at": "2026-09-23T21:53:00Z"},
+            {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": head,
+             "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"}]})
+    def advance(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+        if not transitioned[0] or replacement != "pending":
+            settled = replacement if transitioned[0] else "success"
+            arm_check_runs(gh, head, [{"name": "checks", "conclusion": settled}])
+    monkeypatch.setattr(github, "mark_ready", transition)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
+    monkeypatch.setattr(cli, "_sleep", advance)
+
+    code, out, err = run(capsys, "ready", "--wait=40")
+
+    assert (code, err) == (expected, "")
+    assert "waiting: required check 'checks' is cancelled" in out
+    assert sleeps == ([30.0, 10.0] if initial_pending or replacement == "pending" else [30.0])
+    assert out.endswith(f"ready: {URL}\n" if expected == 0 else
+                        "not ready: required check 'checks' is failure\n" if expected == 1 else
+                        f"timed out waiting for required checks on {head[:12]}\n")
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
+@pytest.mark.parametrize("after", ["pending", "late_success", "head_move", "blocker", "cancelled"])
+def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypatch, head, after):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending")
+    gh.respond("pr ready", "")
+    clock, sleeps, transitioned = [0.0], [], [False]
+    mark_ready = github.mark_ready
+    def transition(*args):
+        mark_ready(*args)
+        transitioned[0] = True
+        gh.respond_pr_view(pr_json(headRefOid="f" * 40 if after == "head_move" else head,
+                                   isDraft=False, baseRefName="release" if after == "blocker" else "main"))
+        arm_check_runs(gh, head, [{"name": "checks",
+                                   "conclusion": "cancelled" if after == "cancelled" else "pending"}])
+        gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {"workflow_runs": []})
+    def advance(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+        if not transitioned[0]:
+            arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+    monkeypatch.setattr(github, "mark_ready", transition)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
+    monkeypatch.setattr(cli, "_sleep", advance)
+    if after == "late_success":
+        def late_read(*args, **kwargs):
+            current = original_view(*args, **kwargs)
+            if not current.is_draft:
+                clock[0] = 41.0
+                arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+            return current
+        original_view = github.pr_view
+        monkeypatch.setattr(github, "pr_view", late_read)
+
+    code, out, err = run(capsys, "ready", "--wait=40")
+
+    assert code == (1 if after in {"head_move", "blocker", "cancelled"} else 3)
+    assert sleeps == ([30.0, 10.0] if after == "pending" else [30.0])
+    assert "ready: https" not in out
+    assert ("PR head changed while waiting" in err) == (after == "head_move")
+    if after == "cancelled":
+        assert "not ready: required check 'checks' is cancelled" in out
+    if after == "blocker":
+        assert "PR targets release, configured base is main" in out
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
+@pytest.mark.parametrize("wait,draft", [(True, True), (False, True), (True, False)])
+def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, wait, draft):
+    arm_approved_ready_pr(gh, head, wt, isDraft=draft)
+    gh.respond("pr ready", "")
+
+    code, out, err = run(capsys, "ready", *(["--wait"] if wait else []))
+
+    assert (code, out, err) == (0, f"ready: {URL}\n", "")
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == int(draft)
+    observations = sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
+                       for c in gh.calls)
+    assert observations == (2 if wait and draft else 1)
+
+
 @pytest.mark.parametrize("name", ["checks", "Loop-zero Eligibility"])
 @pytest.mark.parametrize("pending,age,new_failure,wait,expected,waited", [
     (True, 180, False, True, 0, True),
