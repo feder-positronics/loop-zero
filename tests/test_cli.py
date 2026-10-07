@@ -773,6 +773,8 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None
 
 def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES)
+    task = (wt / ".loopzero/task.md").read_text()
+    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     code, out, err = run(capsys, "review")
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
@@ -784,8 +786,14 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     payload = json.loads(post["--input"])
     assert payload["commit_id"] == head and payload["event"] == "REQUEST_CHANGES"
     assert marker(head, "primary") in payload["body"]
-    prompt = (fake_bin / "claude.stdin").read_text()
-    assert "+print('hi')" in prompt and "primary review" in prompt and "## Context and goal" in prompt
+    header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
+    assert json.loads(header) == {
+        "head": head, "kind": "primary", "task_text": task, "diff_utf8_bytes": len(expected_diff),
+    }
+    assert diff == expected_diff and b"+print('hi')" in diff
+    argv = (fake_bin / "claude.argv").read_bytes().decode("utf-8").split("\0")[:-1]
+    policy = argv[argv.index("--append-system-prompt") + 1]
+    assert "primary review of the whole change" in policy and policy.encode("utf-8") not in header + diff
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
 
@@ -1084,10 +1092,19 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     git(wt, "commit", "-q", "-m", "second")
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
+    task = (wt / ".loopzero/task.md").read_text()
+    expected_diff = git(wt, "diff", "--no-color", first, head).strip().encode("utf-8")
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith(f"delta review by claude on {head[:12]}: approve")
-    prompt = (fake_bin / "claude.stdin").read_text()
-    assert "+x = 2" in prompt and "print('hi')" not in prompt and "delta review" in prompt
+    header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
+    assert json.loads(header) == {
+        "head": head, "kind": "delta", "task_text": task, "diff_utf8_bytes": len(expected_diff),
+    }
+    assert diff == expected_diff and b"+x = 2" in diff and b"print('hi')" not in diff
+    argv = (fake_bin / "claude.argv").read_bytes().decode("utf-8").split("\0")[:-1]
+    policy = argv[argv.index("--append-system-prompt") + 1]
+    assert "delta review: only review the diff in the material message" in policy
+    assert policy.encode("utf-8") not in header + diff
     payload = posted_review(gh)
     assert marker(head, "delta") in payload["body"]
 
