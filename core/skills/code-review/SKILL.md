@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Independently review a frozen diff against its acceptance criteria and report defects as structured findings with severity; use for code diffs, not broader assessments.
+description: Review a frozen diff under the contract's default independence or bounded owner exception against its acceptance criteria and report defects as structured findings with severity; use for code diffs, not broader assessments.
 ---
 
 # Code Review
@@ -10,7 +10,10 @@ findings. Do not edit the reviewed tree.
 
 Read [the contract](../../CONTRACT.md), the PR body, the full diff, and enough
 surrounding code to judge the change. Confirm the exact head before reviewing.
-For a delta review, read only the diff since the reviewed commit.
+For a delta review, read only the diff since the reviewed commit. Follow the
+contract's default independence rule or its bounded owner-approved
+contributor-review exception; the latter has reduced assurance and must be
+labeled in the PR narrative and comment.
 
 ## Judge
 

@@ -15,7 +15,8 @@ hold all state. Nothing is recorded anywhere else.
    `.loopzero/task.md` plus a generated checks block within Validation. Later
    `pr` calls sync task narrative but preserve live Validation, Review and extra
    sections; `check` refreshes only the checks block. A draft never needs a clean review.
-4. `loopzero review` — run one independent model review on the exact head.
+4. `loopzero review` — run one model review on the exact head,
+   independent by default; see the owner-approved exception below.
    Findings are posted as one GitHub PR review with inline comments. It exits 0
    on `approve` and 5 on `request_changes`.
 5. `loopzero ready` — compute readiness (below). If ready, mark the PR ready
@@ -79,20 +80,25 @@ or resolve threads; branch protection and CI remain the enforced gates.
 
 ## Review budget
 
-- One primary review per head lineage, by a model family that did not contribute
-  to the PR. Review selection excludes every recognized `Co-Authored-By` family
-  in commits from the configured-base merge-base through HEAD, including repairs
-  and all trailers on each commit. Delta reviews use the same author lineage;
-  their narrower diff does not restore a contributor's independence. Reposting
-  also requires the saved reviewer's family to be independent. If all configured
-  families contributed, review fails closed; do not silently relax the policy.
-- Keep one authoring model family per PR, including delegated implementation and
-  repairs. The opposite family may give read-only advice and formal review.
-  Before committing imported work, record the actual writing delegate in truthful
-  `Co-Authored-By` trailers; the parent committing a patch does not replace its
-  author's family. Preserve every actual contributor's attribution when squashing
-  or amending. Missing attribution stays unknown: trailers cannot mechanically
-  recover an omitted author, and agents must not invent one.
+- By default, one primary review per head lineage is by a model family that
+  did not contribute to the PR. Review selection excludes every recognized
+  `Co-Authored-By` family in commits from the configured-base merge-base through
+  HEAD, including repairs and all trailers on each commit. Delta reviews use
+  the same author lineage; their narrower diff does not restore a contributor's
+  independence. Reposting enforces the same trailer-based exclusion. The selector
+  cannot infer contributions from prose or determine owner permission. When all
+  configured families have recognized lineage trailers, review fails closed:
+  there is no native independent route for that mixed-trailer lineage.
+- By default, keep one authoring model family per PR, including delegated
+  implementation and repairs. The opposite family may give read-only advice and
+  formal independent review. Before committing imported work, record every
+  actual writing delegate in truthful `Co-Authored-By` trailers; the parent
+  committing a patch does not replace its author's family. Preserve every actual
+  contributor's attribution when squashing or amending, subject only to the
+  explicitly authorized disclosure route below. Missing attribution stays
+  unknown: trailers cannot recover an omitted author, and agents must not invent
+  one. Outside a valid owner exception, retain every writer's truthful trailers
+  and fail closed if no independent configured reviewer remains.
 - At most one delta review after fixes; it reads only the diff since the
   reviewed commit. The primary's unresolved blocking threads still count unless
   outdated on a different head.
@@ -112,7 +118,59 @@ or resolve threads; branch protection and CI remain the enforced gates.
 - A reviewer run that yields no verdict (missing tool, authentication failure,
   unparseable output) does not consume the budget; `loopzero review` moves to
   the next configured family and exits nonzero with each reason if all fail.
-A review file not produced by a runner is never a review; if no independent reviewer can run, the delivery waits for the owner.
+A review file not produced by a runner is never a review. If neither an
+independent reviewer nor a reviewer within the valid owner exception below can
+run, delivery waits for the owner.
+
+### Owner-approved contributor-review exception
+
+This alignment is recorded on October 7, 2026, from the owner's
+[#264 ruling](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6025584110)
+and [scope confirmation](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6031084292).
+For the mixed-authoring route confirmed there (following Marcin's IntelFlo
+#6234 direction and delivered in IntelFlo #6327), the owner permits the
+less-writing family to perform genuine native review rather than block delivery
+solely on family independence.
+This is a bounded owner-approved contributor-review exception with reduced
+assurance, not proof of an independent-family review.
+
+Under this route, the squash commit truthfully names the main contributing
+model in its `Co-Authored-By` trailer. Disclose every actual minority writing
+model and its work in the commit body and a PR comment; the PR narrative and
+comment must label the review as an **owner-approved contributor-review
+exception**. Minority disclosure in prose instead of a trailer is specifically
+authorized for this owner route. It is not permission for anyone to manipulate
+trailers, invent a main author, silently discard attribution, or use an automatic
+waiver. Identify the main contributor and less-writing family from the actual
+work, without calculated percentages or a numerical minority threshold.
+
+The native selector excludes recognized trailer families throughout the PR
+lineage, from its configured-base merge-base through HEAD. Prose disclosure and
+a main-author-only HEAD cannot remove earlier minority-family trailers. Before
+the first primary review, the authorized route may squash and rewrite the branch,
+preserving truthful main-contributor attribution on the resulting commit and
+full minority contribution disclosure in its body and a PR comment, then push
+that head for review. GitHub's merge-time squash cannot establish this route.
+After a primary review, using the remaining delta requires retaining the exact
+reviewed primary commit as an ancestor. Only unreviewed repair commits may be
+rewritten for this purpose, and only where the authorized disclosure route and
+truthful attribution permit it; do not credit the main contributor with a repair
+commit they did not write. If selecting the exception would require rewriting
+the primary or its ancestors, the exception does not authorize that rewrite to
+obtain a fresh review budget: delivery waits for owner direction. After delta
+exhaustion, the existing class-wide audit and fresh-lineage rule still applies;
+neither reviewed commit may remain an ancestor before the next primary. This
+exception changes neither selector behavior nor the review budget.
+
+Prose disclosure neither changes selector behavior nor proves permission. The
+existing mixed-trailer diagnostic remains correct whenever the submitted lineage
+contains both recognized families, including an attempted owner exception: no
+native independent route exists for that lineage, and owner permission does not
+change the selector's result. This exception adds no parser, flag, persistence,
+reviewer model or relaxed gate. Genuine runner review on the exact head, checks,
+findings, readiness and merge requirements still apply. Gemini remains parked
+under closed issue #264; it is not a new reviewer route. Cases outside this
+confirmed owner scope keep the default all-writer trailers and closed route.
 
 ## Sandbox rules for checks
 

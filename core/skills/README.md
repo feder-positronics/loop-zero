@@ -24,7 +24,7 @@ Existing provider login flows and sandbox authentication remain separate.
 | `backlog` | Produce a live, read-only view of GitHub issues, PRs, blockers, collisions, and next work. | method |
 | `diagnose` | Establish a failure's cause with one small reproduction and, when needed, ranked discriminating experiments. | method |
 | `resolve-findings` | Decide bounded responses to existing PR review threads before fixes are applied. | method |
-| `code-review` | Independently review a frozen code diff against its acceptance criteria and emit JSON findings for `loopzero review`. | method |
+| `code-review` | Review a frozen code diff under the contract's default independence or bounded owner exception against its acceptance criteria and emit JSON findings for `loopzero review`. | method |
 | `review` | Assess an artifact, system, architecture, workflow, agent configuration, or idea without implementing changes. | method |
 | `security-review` | Add a security-boundary review when a diff touches auth, permissions, secrets, external calls, config, file or shell primitives, serialization, or dependencies. | method |
 | `write-tests` | Add or improve behavior-focused tests when testing itself is the task. | method |

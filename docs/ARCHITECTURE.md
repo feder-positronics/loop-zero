@@ -17,7 +17,9 @@ copying their tables here.
 ## Philosophy and authority
 
 The smallest useful unit is one task, one branch and one draft PR. A deterministic
-check gives an exit-code verdict. An independent model reviews the authored head.
+check gives an exit-code verdict. A model reviews the authored head, independently
+by default. The [bounded owner exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+permits disclosed contributor review with reduced assurance.
 Readiness combines that evidence with live checks and findings. Merge verifies
 what actually landed. Missing evidence blocks progress; there is no waiver file
 or unsandboxed fallback.
@@ -55,17 +57,41 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. `pr` pushes the branch and creates or refreshes a draft PR. The local task
    supplies narrative; the live PR owns validation and review after creation.
-4. `review` runs an independent reviewer against the exact authored SHA and
-   publishes one GitHub review with findings. Review selection excludes every
-   recognized contributing family from the configured-base merge-base through
-   HEAD, including repairs and all trailers on each commit. Delta reviews and
-   reposts enforce the same lineage-wide exclusion. Keep one authoring family
-   per PR, including repairs; the other family may offer read-only advice or
-   formal review. Imported and squashed work must retain actual child attribution,
-   which cannot be inferred from the controller. Omitted trailers leave
-   attribution unknown. There is one primary and at most one delta review per lineage; every changed head needs renewed review.
-   Repairs after the delta require a class-wide audit and a fresh lineage under
-   the contract, not an unlimited review loop.
+4. `review` runs a native reviewer against the exact authored SHA and publishes
+   one GitHub review with findings. By default, keep one authoring family per PR,
+   including repairs, and reserve the other family for read-only advice and
+   independent review. The unchanged selector excludes every recognized
+   `Co-Authored-By` family from the configured-base merge-base through HEAD,
+   including repairs and every trailer on each commit. Delta reviews and reposts
+   enforce the same exclusion. It cannot infer prose contributions or owner
+   permission; mixed-trailer lineage has no native independent route.
+   Default imported and squashed work retains every actual writer's truthful
+   trailers. The contract's owner-approved contributor-review exception, aligned
+   October 7, 2026 from the linked #264 authority, instead permits a truthful
+   main-contributor trailer on the squash commit, with every minority writer and
+   its work disclosed in the commit body and a PR comment. The less-writing family
+   performs genuine native review; the PR narrative and comment label the
+   exception and its reduced assurance, never independent-family proof. No
+   calculated percentages define minority status. This specific owner permission
+   is not a blanket license to manipulate trailers or invent attribution.
+   Earlier recognized lineage trailers remain excluded; prose and a
+   main-author-only HEAD cannot remove them. The [contract's ancestry and budget rules](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+   allow initial preparation to replace minority-trailer ancestry before the
+   first primary review; GitHub's merge-time squash cannot establish the route.
+   A remaining delta requires retaining the exact reviewed primary as an
+   ancestor. Only unreviewed repairs may be rewritten within the authorized
+   disclosure route and truthful attribution; a model cannot be credited with a
+   repair it did not write. If selecting the exception requires rewriting the
+   primary or its ancestors, delivery waits for owner direction. The diagnostic
+   still applies whenever the submitted lineage contains both recognized
+   families, including an attempted exception; permission cannot change selection.
+   Outside that valid scope, retain all-writer trailers and fail closed.
+   Gemini remains parked under closed #264. No selector, gate, persistence or
+   reviewer-model change follows from this documentation alignment.
+   There is one primary and at most one delta review per lineage; every changed
+   head needs renewed review. After delta exhaustion, the existing class-wide
+   audit and fresh-lineage rule requires removing both reviewed commits from
+   ancestry before the next primary. The exception does not grant a fresh budget.
 5. `ready` derives readiness from the unchanged head, review, blocking findings,
    target branch and required CI. Its bounded waiter observes that same head.
    When every non-success signal of a required check strictly predates the eligible
@@ -92,7 +118,7 @@ feedback and needs an owner who responds to failures.
 person / agent session / T3 workspace
   → loopzero CLI → Git worktree and authored commits
                 → sandboxed owning checks
-                → independent model runner
+                → native model runner (independent by default)
                 → GitHub PR, reviews, findings and required checks
                       → trusted hosted eligibility
                       → consumer CI and optional merge queue
@@ -155,12 +181,13 @@ calling it open or closed.
 
 The October 5 direction keeps this guide as the current entry point, preserves
 the small delivery toolkit, and makes architecture upkeep part of contribution
-and review. Early owning tests, truthful model attribution, independent review,
-changed-only writes and explicit ownership remain the design constraints.
+and review. Early owning tests, truthful model attribution, independent review
+by default with the bounded owner exception, changed-only writes and explicit
+ownership remain the design constraints.
 The approved execution direction is T3 V2 for coordination, with loop-zero
-retaining checks, formal independent review, readiness and verified merge
-authority. This boundary is durable; verify runtime compatibility and deployment
-status when adopting or updating an external executor.
+retaining checks, formal native review under that policy, readiness and verified
+merge authority. This boundary is durable; verify runtime compatibility and
+deployment status when adopting or updating an external executor.
 
 ### T3 verification snapshot: October 5, 2026
 
