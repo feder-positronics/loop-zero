@@ -1091,36 +1091,29 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if sha is None:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
-        _delete_remote_branch(config, branch)
-        _cleanup(wt)
-        print(sha)
-        return 0
-    if config.merge_strategy == "mergify":
+    elif config.merge_strategy == "mergify":
         sha = _merge_with_mergify(wt, config, branch, pr, readiness, args.wait)
         if sha is None:
             if args.wait is not None:
                 print(f"timed out waiting for Mergify to land PR #{pr.number}")
                 return 3
             return 0
-        _delete_remote_branch(config, branch)
-        _cleanup(wt)
-        print(sha)
-        return 0
-    if not readiness.ready:
-        hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness) else ""
-        raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
-    sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
-    if sha is None and args.wait is not None:
-        sha = _wait_for_merge(config, pr, args.wait)
+    else:
+        if not readiness.ready:
+            hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness) else ""
+            raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
+        sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
+        if sha is None and args.wait is not None:
+            sha = _wait_for_merge(config, pr, args.wait)
+            if sha is None:
+                print(f"timed out waiting for the merge queue to land PR #{pr.number}")
+                return 3
         if sha is None:
-            print(f"timed out waiting for the merge queue to land PR #{pr.number}")
-            return 3
-    if sha is None:
-        print(
-            f"PR #{pr.number} is queued for merge into {config.base_branch}; "
-            "next: loopzero merge --wait follows the queue, verifies and cleans up"
-        )
-        return 0
+            print(
+                f"PR #{pr.number} is queued for merge into {config.base_branch}; "
+                "next: loopzero merge --wait follows the queue, verifies and cleans up"
+            )
+            return 0
     _delete_remote_branch(config, branch)
     _cleanup(wt)
     print(sha)
