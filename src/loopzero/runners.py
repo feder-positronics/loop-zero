@@ -365,6 +365,9 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     """Prepare mount points and return existing host auth paths to bind read-write."""
     binds: list[tuple[Path, Path]] = []
     if family == "claude":
+        # Native environment auth needs no disk credentials or host refresh state.
+        if any(os.environ.get(name) for name in CLAUDE_AUTH_ENV):
+            return ()
         source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")).resolve()
         if source_dir.is_dir():
             (home / ".claude").mkdir()
