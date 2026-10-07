@@ -111,10 +111,7 @@ class FakeGh:
         if "strict" in plan:
             raise AssertionError("cannot mix respond() compatibility rules with strict expect() rules")
         plan.setdefault("compat", {})[key] = [
-            r if isinstance(r, dict) and "stdout" in r
-            else {"stdout": r if isinstance(r, str) else json.dumps(r), "exit": exit,
-                  "stderr": stderr}
-            for r in responses
+            self._response(r, exit=exit, stderr=stderr) for r in responses
         ]
         self.scenario_file.write_text(json.dumps(plan))
 
