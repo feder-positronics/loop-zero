@@ -719,4 +719,39 @@ private locks lose host coordination, and credential file mounts pin an inode.
 No inspected ordinary selective-bind design preserves all of those requirements
 and arbitrary sibling/mixed-state privacy. Partial environment-route progress
 must not be described as completing file-backed isolation.
-The owner retained the full file-backed requirement; this limitation is not waived.
+The owner clarified that the earlier full file-backed isolation demand was a
+mistake and withdrew it. R2 therefore selects the bounded existing environment
+route, preserving file-backed behavior and documenting its exposure and limitations.
+
+R2's source-backed implementation omits host Claude config/global-state binds when
+an existing `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` is nonempty, without
+stripping, extracting, copying or converting credentials. Empty/absent values keep
+the original file binds; whitespace remains supplied as in the native truthiness
+checks. The pinned Claude 2.1.291 executable above is the evidence source:
+`Dv`/`jcr` select the API key first, including when both variables exist; `AK`/`OK`
+select the OAuth environment token before disk and supply no refresh token;
+`srs`/`RK` retain the supplied environment token after a 401 rather than adopt disk
+credentials. These observations preserve native backend/account/auth/billing
+selection; Codex's forwarded `OPENAI_API_KEY` is not proven to take precedence and
+its bind stays unchanged.
+
+Real bubblewrap tests through `review_with` use synthetic standard/custom HOME and
+config roots for OAuth-only, API-only, both-present and whitespace values. They
+check the exact forwarded environment, inaccessible original/mapped sibling and
+mixed-global markers, private runtime writes, unchanged original host roots and
+no credentials in native argv or returned output. Separate real namespace tests
+retain file-backed Claude/Codex write proofs; they do not prove genuine refresh,
+replacement visibility or host lock coordination. Existing mount-plan protections
+and namespace failure remain fail-closed. File-backed Claude still exposes sibling
+history and mixed global state. No full privacy or network exfiltration guarantee
+is claimed.
+
+The bounded genuine OAuth-environment smoke completed on October 7 through the
+existing account wrapper, with no login, refresh, credential extraction, retry or
+account change. The same-environment preflight found zero host auth binds; one
+native invocation approved the synthetic docstring change with valid protocol,
+session provenance and unchanged fixture context. It requested and CLI-reported
+Claude Opus 5.5; effort was requested medium but not independently reported.
+This proves ordinary private-state startup for that route, not universal native
+compatibility or reviewer quality. API-only and both-present precedence have
+source and namespace evidence only; no live-key proof is claimed.

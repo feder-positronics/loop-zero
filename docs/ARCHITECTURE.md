@@ -140,9 +140,15 @@ At native review launch the CLI pins checks, publishers and runtime paths to one
 remote PR-base revision, refusing a missing remote ref/workflow unless the operator
 supplies explicit configuration. Reposts and other commands retain their fallback
 policy. Runners validate the complete mount plan against private review state and
-known standard/custom native state roots. Existing live auth mounts remain explicit
-exceptions; broad Claude state is still exposed through its auth bind. An implicit
-runtime inside state receives only the selected executable's exact read-only file
+known standard/custom native state roots. Existing file-backed auth mounts remain
+explicit exceptions. Claude's nonempty existing API-key/OAuth environment routes omit host
+config/global-state binds and use disposable private state; empty/absent values
+retain the broad config and mixed global-state exposure. The runner forwards
+credentials unchanged; native Claude owns route precedence and billing. Codex's
+file bind is unchanged even with an environment key. File-backed binds preserve
+in-place writes, without guaranteeing host replacement visibility or shared-lock
+coordination. This boundary is route-specific, not full filesystem privacy. An
+implicit runtime inside state receives only the selected executable's exact read-only file
 mount, while explicit runtime paths have no exception. This preserves standalone
 CLI startup without exposing neighboring state; bundles needing protected siblings
 require installation outside state. The contract owns this boundary and its limits.

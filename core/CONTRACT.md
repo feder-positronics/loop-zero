@@ -204,11 +204,20 @@ after running; changes during the run invalidate the result.
 
 Reviews also require `bwrap` and never fall back to the host. They receive a
 read-only worktree and Git directories, a private HOME, reviewer runtime paths,
-and network access. Live credentials are bound read-write so OAuth refresh
-persists: Claude's config directory (`~/.claude` or `CLAUDE_CONFIG_DIR`) and
-`~/.claude.json`; Codex's `auth.json` only, under `CODEX_HOME` or `~/.codex`.
-The sandbox bounds readable data; it cannot prevent exfiltration over the
-required network.
+and network access. For Claude, an existing nonempty `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN` is forwarded unchanged and omits host config/global-state
+binds; whitespace is supplied, while empty or absent values retain file-backed
+behavior. Native Claude owns precedence, backend, account, auth method and billing;
+the runner does not convert credentials or adopt disk auth on an environment error.
+File-backed Claude binds its config directory (`~/.claude` or `CLAUDE_CONFIG_DIR`)
+and `~/.claude.json` read-write, exposing sibling history and mixed global state.
+Codex retains its read-write `auth.json` bind under `CODEX_HOME` or `~/.codex`,
+including when `OPENAI_API_KEY` is forwarded. These existing binds permit in-place
+writes but do not guarantee visibility after host file replacement or complete
+shared-lock coordination. Environment routes write private state in the disposable
+review HOME. This is route-specific state isolation, not full filesystem privacy:
+the sandbox bounds readable data but cannot prevent exfiltration over the required
+network.
 
 At native review launch, checks, publishers and `delivery.reviewer_ro_paths`
 are read from one verified remote PR-base revision. A missing remote ref or base

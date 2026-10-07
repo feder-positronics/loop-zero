@@ -43,7 +43,9 @@ def _bwrap_argv(log: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path) -> Path:
+def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
     log = tmp_path / "review-bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
     return log
@@ -213,12 +215,17 @@ def test_reviewer_sandbox_binds_resolv_conf(
     assert expected in _pairs(argv, "--ro-bind")
 
 
+@pytest.mark.parametrize("credential", [None, ""])
 def test_claude_binds_config_and_state_read_write_without_copying(
     fake_bin: Path,
     tmp_path: Path,
     fake_bwrap: Path,
     monkeypatch: pytest.MonkeyPatch,
+    credential: str | None,
 ) -> None:
+    if credential is not None:
+        for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+            monkeypatch.setenv(name, credential)
     host_home = tmp_path / "host-home"
     host_home.mkdir()
     configured = tmp_path / "configured-claude"
@@ -237,6 +244,125 @@ def test_claude_binds_config_and_state_read_write_without_copying(
     binds = _pairs(_bwrap_argv(fake_bwrap), "--bind")
     assert (str(configured.resolve()), f"{SANDBOX_HOME}/.claude") in binds
     assert (str(state.resolve()), f"{SANDBOX_HOME}/.claude.json") in binds
+
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+@pytest.mark.parametrize("custom", [False, True], ids=["standard", "custom"])
+@pytest.mark.parametrize("oauth,api", [
+    ("synthetic-oauth-r2", ""), ("", "synthetic-api-r2"),
+    ("synthetic-oauth-r2", "synthetic-api-r2"), (" ", ""), ("", " "),
+], ids=["oauth", "api", "both", "whitespace-oauth", "whitespace-api"])
+def test_real_claude_environment_auth_hides_host_state(
+    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    custom: bool, oauth: str, api: str,
+) -> None:
+    host = tmp_path / ("custom-home" if custom else "host")
+    config = tmp_path / "custom-config" if custom else host / ".claude"
+    config.mkdir(parents=True)
+    host.mkdir(exist_ok=True)
+    history = config / "history.jsonl"
+    history.write_text("synthetic sibling history marker")
+    (config / ".credentials.json").write_text('{"token":"synthetic-disk-auth"}')
+    global_state = host / ".claude.json"
+    global_state.write_text('{"oauth":"synthetic-disk-auth","history":"mixed marker"}')
+    alternate_state = config / ".config.json"
+    alternate_state.write_text('{"history":"custom mixed marker"}')
+    before = {path: path.read_bytes() for path in (*config.iterdir(), global_state)}
+    monkeypatch.setenv("HOME", str(host))
+    if custom:
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
+    else:
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", oauth)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", api)
+    hidden = [history, global_state, alternate_state, config / ".credentials.json",
+              Path(SANDBOX_HOME) / ".claude/history.jsonl",
+              Path(SANDBOX_HOME) / ".claude.json",
+              Path(SANDBOX_HOME) / ".claude/.config.json",
+              Path(SANDBOX_HOME) / ".claude/.credentials.json"]
+    checks = "\n".join(
+        f"test ! -e {shlex.quote(str(path))} || "
+        "{ echo 'host state exposed' >&2; exit 70; }" for path in hidden
+    )
+    _script(fake_bin, "claude", f"""
+        set -eu
+        cat >/dev/null
+        {checks}
+        test "${{CLAUDE_CODE_OAUTH_TOKEN-}}" = {shlex.quote(oauth)} || exit 71
+        test "${{ANTHROPIC_API_KEY-}}" = {shlex.quote(api)} || exit 72
+        test "${{CLAUDE_CONFIG_DIR-}}" = '' || exit 73
+        for value in "$CLAUDE_CODE_OAUTH_TOKEN" "$ANTHROPIC_API_KEY"; do
+          case "$value" in ''|' ') continue;; esac
+          case "$*" in *"$value"*) exit 74;; esac
+        done
+        mkdir -p "$HOME/.claude"
+        printf private > "$HOME/.claude/history.jsonl"
+        printf private > "$HOME/.claude/.config.json"
+        printf private > "$HOME/.claude.json"
+        printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
+    """)
+    (fake_bin / "bwrap").unlink()  # Real kernel namespace, overriding the autouse fake.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = _review("claude", repo)
+    assert result.verdict == "approve"
+    for value in (oauth, api):
+        if value.strip():
+            assert value not in result.raw
+    assert before == {path: path.read_bytes() for path in before}
+    assert set(config.iterdir()) == set(before) - {global_state}
+    assert set(host.iterdir()) == ({global_state} if custom else {global_state, config})
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_real_file_auth_preserves_host_writes(
+    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str,
+) -> None:
+    host = tmp_path / "host"
+    config = host / f".{family}"
+    config.mkdir(parents=True)
+    auth = config / (".credentials.json" if family == "claude" else "auth.json")
+    auth.write_text("synthetic file auth")
+    state = host / ".claude.json"
+    state.write_text("synthetic global state")
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
+    monkeypatch.setenv("CODEX_HOME", str(host / ".codex"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if family == "claude":
+        _script(fake_bin, family, f"""
+            set -eu
+            cat >/dev/null
+            printf refreshed > "$HOME/.claude/.credentials.json"
+            printf updated > "$HOME/.claude.json"
+            printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
+        """)
+    else:
+        # Forwarding this variable must not change Codex's existing file bind.
+        monkeypatch.setenv("OPENAI_API_KEY", "synthetic-openai-r2")
+    (fake_bin / "bwrap").unlink()
+    if family == "codex":
+        _script(fake_bin, family, f"""
+            if [ "$1" = exec ] && [ "$2" = --help ]; then
+              echo --ignore-user-config; exit 0
+            fi
+            set -eu
+            cat >/dev/null
+            test "$OPENAI_API_KEY" = synthetic-openai-r2 || exit 71
+            printf refreshed > "$HOME/.codex/auth.json"
+            while [ $# -gt 0 ]; do
+              if [ "$1" = --output-last-message ]; then out="$2"; fi
+              shift
+            done
+            printf '%s' {shlex.quote(json.dumps(APPROVE))} > "$out"
+            echo '{{"thread_id":"synthetic-r2","usage":{{"total_tokens":1}}}}'
+        """)
+    assert _review(family, repo).verdict == "approve"
+    assert auth.read_text() == "refreshed"
+    assert state.read_text() == ("updated" if family == "claude" else "synthetic global state")
 
 
 def test_reviewer_does_not_bind_missing_auth_paths(
