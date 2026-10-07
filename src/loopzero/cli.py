@@ -944,7 +944,8 @@ def _wait_for_checks(
     started: float | None = None,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
-    started = time.monotonic() if started is None else started
+    grace_started = time.monotonic()
+    started = grace_started if started is None else started
     shown, stale_notice = None, False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
@@ -965,7 +966,7 @@ def _wait_for_checks(
         if pending != shown:
             print("waiting: " + "; ".join(pending))
             shown = pending
-        elapsed = time.monotonic() - started
+        elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(
                 "waiting: required check verdict predates the review; awaiting refresh: "

@@ -1444,6 +1444,40 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
+@pytest.mark.parametrize("run_appears", [True, False])
+def test_ready_transition_missing_run_gets_observation_grace(
+    wt, gh, capsys, monkeypatch, head, run_appears
+):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending")
+    gh.respond("pr ready", "")
+    clock, sleeps, marked_at = [0.0], [], []
+    mark_ready = github.mark_ready
+    def transition(*args):
+        mark_ready(*args)
+        marked_at.append(clock[0])
+        gh.respond_pr_view(pr_json(headRefOid=head, isDraft=False))
+    def advance(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+        if marked_at and run_appears:
+            arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        elif clock[0] >= 210:
+            arm_check_runs(gh, head, [])
+    monkeypatch.setattr(github, "mark_ready", transition)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
+    monkeypatch.setattr(cli, "_sleep", advance)
+
+    code, out, err = run(capsys, "ready", "--wait=300")
+
+    assert (code, err) == (0 if run_appears else 3, "")
+    assert marked_at == [210.0]
+    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [60.0])
+    assert out.endswith(f"ready: {URL}\n" if run_appears else
+                        f"timed out waiting for required checks on {head[:12]}\n")
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
 @pytest.mark.parametrize("wait,draft", [(True, True), (False, True), (True, False)])
 def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, wait, draft):
     arm_approved_ready_pr(gh, head, wt, isDraft=draft)

@@ -112,7 +112,9 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    target branch and required CI. Its bounded waiter observes that same head.
    After its own draft-to-ready write, `ready --wait` revalidates visible readiness
    through that waiter with the original deadline, preserving all existing gates
-   and replacement evidence. An immediate green read may still precede asynchronous
+   and replacement evidence. Missing-run diagnosis retains its two-minute observation
+   grace after activation; that grace does not extend the overall wait deadline.
+   An immediate green read may still precede asynchronous
    CI scheduling: this is best-effort observation, with no unconditional delay or
    wait for a new run that might never be scheduled. Merge admission still checks
    readiness again and fails closed on later blockers. Plain `ready` and already
