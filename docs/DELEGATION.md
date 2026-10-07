@@ -97,9 +97,21 @@ independent-family proof. Choose from actual contributions, without calculated
 percentages or a numerical minority heuristic. Prose disclosure instead of a
 minority trailer is specifically authorized by that owner route; it does not
 allow blanket trailer manipulation, invented attribution or silent omission.
-Earlier recognized trailers remain excluded unless an authorized squash replaces
-the lineage with the fully disclosed main-author commit. Outside the valid owner
-scope, retain truthful every-writer trailers and the closed route. No automatic
+Earlier recognized trailers remain excluded; prose and a main-author-only HEAD
+cannot remove them. Under the [contract's ancestry and budget rules](../core/CONTRACT.md#owner-approved-contributor-review-exception),
+initial preparation may replace minority-trailer ancestry before the first
+primary review; GitHub's merge-time squash cannot establish the route. A
+remaining delta requires the exact reviewed primary commit to remain an ancestor.
+Only unreviewed repairs may be rewritten within the authorized disclosure route
+and truthful attribution; do not credit a model with a repair it did not write.
+If selecting the exception requires rewriting the primary or its ancestors,
+delivery waits for owner direction instead of obtaining a fresh review budget.
+After delta exhaustion, the existing class-wide audit and fresh-lineage rule
+requires removing both reviewed commits from ancestry before the next primary.
+The mixed-trailer diagnostic still applies to any submitted lineage containing
+both recognized families, including an attempted exception; permission does not
+change selection. Outside the valid owner scope, retain truthful every-writer
+trailers and the closed route. No automatic
 waiver, selector or gate change, new reviewer model or persistence is introduced;
 Gemini remains parked under closed #264.
 

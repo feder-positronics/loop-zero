@@ -128,8 +128,9 @@ This alignment is recorded on October 7, 2026, from the owner's
 [#264 ruling](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6025584110)
 and [scope confirmation](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6031084292).
 For the mixed-authoring route confirmed there (following Marcin's IntelFlo
-#6234 direction), the owner permits the less-writing family to perform genuine
-native review rather than block delivery solely on family independence.
+#6234 direction and delivered in IntelFlo #6327), the owner permits the
+less-writing family to perform genuine native review rather than block delivery
+solely on family independence.
 This is a bounded owner-approved contributor-review exception with reduced
 assurance, not proof of an independent-family review.
 
@@ -143,17 +144,33 @@ trailers, invent a main author, silently discard attribution, or use an automati
 waiver. Identify the main contributor and less-writing family from the actual
 work, without calculated percentages or a numerical minority threshold.
 
-The native selector still excludes all recognized trailer families across the
-whole lineage. A main-author-only HEAD does not erase earlier minority-family
-trailers; any authorized squash must preserve full contribution disclosure in
-its body and PR comment. Prose disclosure neither changes selector behavior nor
-proves permission. The existing mixed-trailer diagnostic remains correct: no
-native independent route exists for that lineage. This exception adds no parser,
-flag, persistence, reviewer model or relaxed gate. Genuine runner review on the
-exact head, the review budget, checks, findings, readiness and merge requirements
-still apply. Gemini remains parked under closed issue #264; it is not a new
-reviewer route. Cases outside this confirmed owner scope keep the default
-all-writer trailers and closed route.
+The native selector excludes recognized trailer families throughout the PR
+lineage, from its configured-base merge-base through HEAD. Prose disclosure and
+a main-author-only HEAD cannot remove earlier minority-family trailers. Before
+the first primary review, the authorized route may squash and rewrite the branch,
+preserving truthful main-contributor attribution on the resulting commit and
+full minority contribution disclosure in its body and a PR comment, then push
+that head for review. GitHub's merge-time squash cannot establish this route.
+After a primary review, using the remaining delta requires retaining the exact
+reviewed primary commit as an ancestor. Only unreviewed repair commits may be
+rewritten for this purpose, and only where the authorized disclosure route and
+truthful attribution permit it; do not credit the main contributor with a repair
+commit they did not write. If selecting the exception would require rewriting
+the primary or its ancestors, the exception does not authorize that rewrite to
+obtain a fresh review budget: delivery waits for owner direction. After delta
+exhaustion, the existing class-wide audit and fresh-lineage rule still applies;
+neither reviewed commit may remain an ancestor before the next primary. This
+exception changes neither selector behavior nor the review budget.
+
+Prose disclosure neither changes selector behavior nor proves permission. The
+existing mixed-trailer diagnostic remains correct whenever the submitted lineage
+contains both recognized families, including an attempted owner exception: no
+native independent route exists for that lineage, and owner permission does not
+change the selector's result. This exception adds no parser, flag, persistence,
+reviewer model or relaxed gate. Genuine runner review on the exact head, checks,
+findings, readiness and merge requirements still apply. Gemini remains parked
+under closed issue #264; it is not a new reviewer route. Cases outside this
+confirmed owner scope keep the default all-writer trailers and closed route.
 
 ## Sandbox rules for checks
 

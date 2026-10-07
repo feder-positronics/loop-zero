@@ -74,13 +74,24 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    exception and its reduced assurance, never independent-family proof. No
    calculated percentages define minority status. This specific owner permission
    is not a blanket license to manipulate trailers or invent attribution.
-   Earlier recognized lineage trailers remain excluded; prose cannot override
-   them. Outside that valid scope, retain all-writer trailers and fail closed.
+   Earlier recognized lineage trailers remain excluded; prose and a
+   main-author-only HEAD cannot remove them. The [contract's ancestry and budget rules](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+   allow initial preparation to replace minority-trailer ancestry before the
+   first primary review; GitHub's merge-time squash cannot establish the route.
+   A remaining delta requires retaining the exact reviewed primary as an
+   ancestor. Only unreviewed repairs may be rewritten within the authorized
+   disclosure route and truthful attribution; a model cannot be credited with a
+   repair it did not write. If selecting the exception requires rewriting the
+   primary or its ancestors, delivery waits for owner direction. The diagnostic
+   still applies whenever the submitted lineage contains both recognized
+   families, including an attempted exception; permission cannot change selection.
+   Outside that valid scope, retain all-writer trailers and fail closed.
    Gemini remains parked under closed #264. No selector, gate, persistence or
    reviewer-model change follows from this documentation alignment.
    There is one primary and at most one delta review per lineage; every changed
-   head needs renewed review. Repairs after the delta require a class-wide audit
-   and a fresh lineage under the contract, not an unlimited review loop.
+   head needs renewed review. After delta exhaustion, the existing class-wide
+   audit and fresh-lineage rule requires removing both reviewed commits from
+   ancestry before the next primary. The exception does not grant a fresh budget.
 5. `ready` derives readiness from the unchanged head, review, blocking findings,
    target branch and required CI. Its bounded waiter observes that same head.
    When every non-success signal of a required check strictly predates the eligible
