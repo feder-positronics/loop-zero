@@ -146,6 +146,19 @@ runtime inside state receives only the selected executable's exact read-only fil
 mount, while explicit runtime paths have no exception. This preserves standalone
 CLI startup without exposing neighboring state; bundles needing protected siblings
 require installation outside state. The contract owns this boundary and its limits.
+
+Reviewer settings are optional reporting in the existing provenance container.
+Adapters retain per-call requests; publication derives CLI claims from each retained
+native envelope, ignoring unqualified compatibility fields and optional reported
+metadata. Claude raw output stays unchanged; normalized Codex evidence retains only
+bounded recognized model/effort claims, with absent evidence reported as unknown.
+Chunk merge pads missing request entries and preserves their native-call order.
+Legacy model/effort fields retain their historical adapter meanings for loading;
+qualified summaries never use them as execution evidence. Eligibility still checks
+core native provenance, independently of optional reporting. Recovery considers the
+exact historical renderer only when the saved artifact lacks requested_settings;
+present malformed metadata cannot activate it. New publication/repost uses qualified
+wording, while publisher/head/findings/session/publication checks remain unchanged.
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.

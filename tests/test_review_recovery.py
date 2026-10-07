@@ -214,3 +214,81 @@ def test_recovery_transport_caps_request_time_and_does_not_retry(monkeypatch, fa
     with github.bounded_reads(0.5), pytest.raises((github.GhError, _proc.ProcTimeout)):
         github.api_get("repos/acme/widgets/pulls/7/reviews")
     assert len(timeouts) == 1 and 0 < timeouts[0] <= 0.5
+
+
+@pytest.mark.parametrize("metadata", ["legacy", "null", "empty", "malformed"])
+@pytest.mark.parametrize("source", ["model", "repost"])
+@pytest.mark.parametrize("shape", ["single", "chunked", "truncated"])
+def test_historical_publication_recovery_is_exact_and_legacy_only(
+    wt, gh, fake_bin, monkeypatch, capsys, metadata, source, shape,
+):
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
+    assert run(capsys, "review")[0] == 130
+    path = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    saved = json.loads(path.read_text())
+    envelope = json.loads(saved["raw"])
+    if shape == "chunked":
+        saved["chunk_count"] = 2
+        saved["raw"] = json.dumps([envelope, envelope], separators=(",", ":"))
+        saved["provenance"]["session_ids"] *= 2
+        saved["provenance"]["usage"] = [envelope["usage"], envelope["usage"]]
+        for key in ("total_cost_usd", "duration_api_ms"):
+            saved["provenance"][key] *= 2
+    elif shape == "truncated":
+        saved["raw"] = json.dumps({**envelope, "padding": "é" * 20_000}, ensure_ascii=False)
+    if metadata == "legacy":
+        saved["provenance"].pop("requested_settings", None)
+    else:
+        saved["provenance"]["requested_settings"] = {"null": None, "empty": [], "malformed": "bad"}[metadata]
+    path.write_text(json.dumps(saved))
+    prefix = support.marker(head, "primary", source)
+    if source == "repost":
+        prefix += ("\nReposted from runner sessions: `claude-session-123`, `claude-session-123`"
+                   if shape == "chunked" else "\nReposted from runner session: `claude-session-123`")
+    chunks = "\n\nReviewed in 2 chunks with the same model family." if shape == "chunked" else ""
+    transcript = saved["raw"]
+    if shape == "truncated":
+        transcript = ("[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
+                      "Full output remains in the saved local review artifact.]\n"
+                      + transcript.encode()[-30_000:].decode(errors="ignore"))
+    effort = f" (effort {saved['effort']})" if saved["effort"] else ""
+    body = (f"{prefix}\nloopzero primary review by claude on `{head}`, "
+            f"model {saved['model'] or 'unknown'}{effort}, {saved['duration_s']:.1f}s: "
+            f"**approve** (0 critical, 0 important, 0 suggestion){chunks}\n\n"
+            f"<details><summary>Raw reviewer output</summary>\n\n```\n{transcript}\n```\n</details>")
+    gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body,
+                               "state": "COMMENTED", "user": {"login": LOGIN}}])
+    code, _out, err = run(capsys, "review", "--repost")
+    assert code == (0 if metadata == "legacy" else 1), err
+    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+    assert len([c for c in gh.calls if "--input" in c]) == 1
+    if metadata == "legacy":
+        gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body + "changed",
+                                   "state": "COMMENTED", "user": {"login": LOGIN}}])
+        assert run(capsys, "review", "--repost")[0] == 1
+        gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body,
+                                   "state": "COMMENTED", "user": {"login": LOGIN}}])
+        gh.respond(f"api repos/{REPO}/pulls/7/reviews/17/comments?per_page=100&page=1", [
+            {"path": "feature.py", "line": 1, "side": "RIGHT", "body": "changed finding",
+             "commit_id": head, "pull_request_review_id": 17, "user": {"login": LOGIN}},
+        ])
+        assert run(capsys, "review", "--repost")[0] == 1
+
+
+@pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])
+def test_optional_settings_cannot_block_explicit_repost(wt, gh, fake_bin, monkeypatch, capsys, optional):
+    original = github._api
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
+    assert run(capsys, "review")[0] == 130
+    path = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    saved = json.loads(path.read_text())
+    saved["provenance"]["requested_settings"] = optional
+    saved["provenance"]["reported_settings"] = "forged"
+    path.write_text(json.dumps(saved))
+    gh.respond(reviews_key(), [])
+    monkeypatch.setattr(github, "_api", original)
+    code, _out, err = run(capsys, "review", "--repost")
+    assert code == 0, err
+    body = support.posted_review(gh)["body"]
+    assert "CLI-reported model unknown (effort unknown)" in body and "forged" not in body
+    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]

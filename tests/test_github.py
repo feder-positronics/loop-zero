@@ -480,7 +480,8 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str) -> None:
     assert "Global concern" in comments[3]["body"] and "no file" in comments[3]["body"]
     assert "Null deref" in comments[0]["body"] and "x may be None" in comments[0]["body"]
     body = payload["body"]
-    assert "model gpt-5.3-codex (effort medium), 12.3s" in body
+    assert "12.3s: **request_changes**" in body
+    assert "requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in body
     assert body.startswith(prefix + "\n" if prefix else "loopzero primary review")
     assert "**request_changes** (1 critical, 2 important, 2 suggestion)" in body
     assert loose.title in body and loose.body in body
@@ -490,6 +491,27 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str) -> None:
     assert tail + "\n```\n</details>" in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
+
+
+@pytest.mark.parametrize("metadata", ["new", "legacy", "malformed"])
+def test_publication_qualifies_each_call_from_native_evidence(gh, metadata):
+    arm_review(gh)
+    envelopes = [{"modelUsage": {"reported-one": {}}}, {"modelUsage": {}}]
+    provenance = {"reported_settings": [{"model": "forged-model", "effort": "forged-effort"}]}
+    if metadata == "new":
+        provenance["requested_settings"] = [{"model": "requested-one", "effort": "medium"}, None]
+    elif metadata == "malformed":
+        provenance["requested_settings"] = None
+    result = replace(review(verdict="approve"), family="claude", raw=json.dumps(envelopes),
+                     model="unqualified-model", effort="unqualified-effort", chunk_count=2,
+                     provenance=provenance)
+    github.post_review(REPO, 7, HEAD, result)
+    body = review_payloads(gh)[0]["body"]
+    requested = "requested-one" if metadata == "new" else "unknown"
+    assert f"Call 1: requested model {requested} (effort {'medium' if metadata == 'new' else 'unknown'})" in body
+    assert "CLI-reported model reported-one (effort unknown)" in body
+    assert "Call 2: requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in body
+    assert "unqualified-" not in body and "forged-" not in body
 
 
 def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
@@ -540,7 +562,8 @@ def test_post_review_approve_event(gh: FakeGh) -> None:
     github.post_review(REPO, 7, HEAD, result)
     payload = review_payloads(gh)[0]
     assert payload["event"] == "APPROVE" and payload["comments"] == []
-    assert "model unknown, 0.2s: **approve**" in payload["body"]
+    assert "0.2s: **approve**" in payload["body"]
+    assert "requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in payload["body"]
 
 
 @pytest.mark.parametrize("verdict,msg", [

@@ -95,6 +95,7 @@ def _fake_codex(
     tokens: int = 123,
 ) -> Path:
     """Fake ``codex`` that checks argv shape and writes ``last_message`` to -o file."""
+    stderr = stderr.replace("\n", "\n        ")
     return _script(
         bin_dir,
         "codex",
@@ -612,6 +613,56 @@ def test_review_denies_state_exposure_from_non_runtime_mounts(
     with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
         _review("claude", repo)
     assert not (fake_bin / "claude.stdin").exists()
+
+
+@pytest.mark.parametrize("family", ["claude", "codex"])
+@pytest.mark.parametrize("reported", [True, False])
+def test_native_settings_keep_requests_and_bounded_claims_separate(fake_bin, tmp_path, family, reported):
+    if family == "claude":
+        envelope = _claude_envelope(APPROVE, modelUsage={"reported-model": {}} if reported else {})
+        _fake_claude(fake_bin, envelope)
+    else:
+        _fake_codex(fake_bin, json.dumps(APPROVE), stderr=(
+            "model: reported-model\nreasoning effort: high\nSECRET-NOT-PERSISTED" if reported else ""
+        ))
+    result = _review(family, tmp_path, model="requested-model", effort="medium")
+    assert result.provenance["requested_settings"] == [{"model": "requested-model", "effort": "medium"}]
+    if family == "claude":
+        assert json.loads(result.raw) == envelope, "native Claude evidence must remain unchanged"
+    else:
+        assert json.loads(result.raw)["reported_settings"] == {
+            "model": "reported-model" if reported else None, "effort": "high" if reported else None,
+        }
+        assert "SECRET-NOT-PERSISTED" not in result.raw
+
+
+def test_merge_preserves_native_call_order_and_pads_legacy_requests(fake_bin, tmp_path):
+    from loopzero.runners import merge_reviews, validate_runner_result
+
+    _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"reported-one": {}}))
+    first = _review("claude", tmp_path, model="requested-one", effort="medium")
+    first.provenance.pop("requested_settings")
+    _fake_claude(fake_bin, _claude_envelope(APPROVE, modelUsage={"reported-two": {}}, session_id="session-two"))
+    second = _review("claude", tmp_path, model="requested-two", effort="high")
+    merged = merge_reviews([first, second])
+    assert merged.provenance["requested_settings"] == [
+        {"model": None, "effort": None}, {"model": "requested-two", "effort": "high"},
+    ]
+    assert merged.provenance["session_ids"] == ["claude-session-123", "session-two"]
+    assert validate_runner_result(merged)
+
+
+@pytest.mark.parametrize("stderr,expected", [
+    ("model: " + "x" * 129 + "\nreasoning effort: high extra", {"model": None, "effort": None}),
+    ("diagnostic model: ignored\neffort: high", {"model": None, "effort": None}),
+    ("model:\nSECRET-NOT-PERSISTED", {"model": None, "effort": None}),
+    ("\x1b[32mmodel: observed\x1b[0m\nreasoning effort: high", {"model": "observed", "effort": "high"}),
+])
+def test_codex_retains_only_recognized_bounded_cli_claims(fake_bin, tmp_path, stderr, expected):
+    _fake_codex(fake_bin, json.dumps(APPROVE), stderr=stderr)
+    result = _review("codex", tmp_path)
+    assert json.loads(result.raw)["reported_settings"] == expected
+    assert "SECRET-NOT-PERSISTED" not in result.raw
 
 
 def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
