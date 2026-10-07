@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: Deliver one live GitHub issue from duplicate-checked intake through acceptance, draft PR, independent review, and verified merge or partial delivery; use only for work anchored to an issue.
+description: Deliver one live GitHub issue from duplicate-checked intake through acceptance, draft PR, review under the contract's default independence or bounded owner exception, and verified merge or partial delivery; use only for work anchored to an issue.
 ---
 
 # Work Issue
@@ -40,7 +40,9 @@ when splitting work or choosing an executor.
    weakening the configured checks. Then run `loopzero pr` to push and open the
    draft PR. Before publication, repeat the duplicate check; reconcile if a
    competing delivery appeared.
-6. Run `loopzero review` for the independent primary review. Address every open
+6. Run `loopzero review` for the primary review, independent by default or
+   explicitly labeled under the contract's bounded owner-approved
+   contributor-review exception with reduced assurance. Address every open
    `critical` and `important` thread, reply with the fix commit, rerun
    `loopzero check`, and use the single delta review allowed by the contract.
 7. Run `loopzero ready --wait`; it waits for the required checks on this head.

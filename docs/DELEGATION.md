@@ -69,21 +69,39 @@ runs. Parent-directed reassessment does not add automatic CLI retries.
 
 ## Author lineage and independent review
 
-Keep one authoring model family per PR, including writing delegates and repair
-work. Reserve the opposite family for read-only advice and formal review; a
-read-only adviser must return advice for the authoring family to implement.
-Before committing accepted delegate work, the parent records the actual writing
-model in `Co-Authored-By` trailers. Committing or integrating a child's patch
-does not make the parent its sole author. Preserve truthful attribution for all
-actual contributors through squash and amend. An omitted child cannot be
-recovered mechanically from a parent-only trailer; do not invent attribution.
+By default, keep one authoring model family per PR, including writing delegates
+and repair work. Reserve the opposite family for read-only advice and formal
+independent review; a read-only adviser returns advice for the authoring family
+to implement. Before committing accepted delegate work, record every actual
+writing model in truthful `Co-Authored-By` trailers. Committing or integrating a
+child's patch does not make the parent its sole author. Preserve all actual
+contributors through squash and amend, except for the specifically authorized
+prose disclosure route below. An omitted child cannot be recovered mechanically
+from a parent-only trailer; do not invent attribution.
 
-`loopzero review` excludes all recognized contributor families in the PR lineage
+`loopzero review` excludes all recognized trailer families in the PR lineage
 from its configured-base merge-base to HEAD, including earlier child patches,
-repairs, and multiple HEAD trailers. The delta's narrower diff does not narrow
-author exclusion, and reposting cannot reuse a saved contributor's review. If
-both configured families wrote the PR, formal review fails closed; do not
-silently change the independence policy.
+repairs, and multiple HEAD trailers. Delta review and reposting enforce that
+same exclusion. The selector cannot infer minority contributions from prose or
+owner permission. If every configured family has contributed recognized lineage
+trailers, no native independent route exists and review fails closed.
+
+The [contract's owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+records the October 7, 2026 alignment of the linked #264 ruling and confirmation.
+Within that confirmed mixed-authoring scope, the squash commit truthfully names
+the main contributing model in its trailer; every actual minority writer and its
+work are disclosed in the commit body and a PR comment. The less-writing family
+performs genuine native review. Label it an **owner-approved contributor-review
+exception** in the PR narrative and comment: it has reduced assurance and is not
+independent-family proof. Choose from actual contributions, without calculated
+percentages or a numerical minority heuristic. Prose disclosure instead of a
+minority trailer is specifically authorized by that owner route; it does not
+allow blanket trailer manipulation, invented attribution or silent omission.
+Earlier recognized trailers remain excluded unless an authorized squash replaces
+the lineage with the fully disclosed main-author commit. Outside the valid owner
+scope, retain truthful every-writer trailers and the closed route. No automatic
+waiver, selector or gate change, new reviewer model or persistence is introduced;
+Gemini remains parked under closed #264.
 
 Preserve the final approved head instead of applying optional suggestions.
 Necessary changes use the remaining delta and renewed checks; once that budget
@@ -177,7 +195,8 @@ declared checks do not isolate the change from host tools, run a focused
 restricted-PATH probe and report that limitation. Only the sandboxed `loopzero
 check` report counts as delivery proof; continue through the
 [contract](../core/CONTRACT.md).
-The review profile does not replace independent-review requirements.
+The review profile does not replace default independence requirements or the
+bounded owner exception in the contract.
 `loopzero review` continues to own formal delivery review and its review budget.
 A model upgrade never changes tool permissions, isolation, checks, or merge
 requirements. Merge only when the task authorizes it. Under a merge queue,
