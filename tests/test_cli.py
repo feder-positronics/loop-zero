@@ -792,7 +792,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert data["head"] == head and data["kind"] == "primary" and data["family"] == "claude"
     assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
     assert data["model"] == "claude-sonnet-4-6" and data["duration_s"] >= 0
-    first_body = json.loads(gh.calls[-1]["--input"])["body"]
+    first_body = posted_review(gh)["body"]
     assert "model claude-sonnet-4-6" in first_body
     assert len(first_body.encode("utf-8")) < 65_536
     assert ("Transcript truncated" in first_body) == bool(padding)
