@@ -74,40 +74,17 @@ The six steps are implemented by the [CLI](../src/loopzero/cli.py):
    refreshes a draft PR. The local task supplies narrative; the live PR owns
    validation and review after creation.
 4. `review` runs a native reviewer against the exact authored SHA and publishes
-   one GitHub review with findings. By default, keep one authoring family per PR,
-   including repairs, and reserve the other family for read-only advice and
-   independent review. The unchanged selector excludes every recognized
-   `Co-Authored-By` family from the configured-base merge-base through HEAD,
-   including repairs and every trailer on each commit. Delta reviews and reposts
-   enforce the same exclusion. It cannot infer prose contributions or owner
-   permission; mixed-trailer lineage has no native independent route.
-   Default imported and squashed work retains every actual writer's truthful
-   trailers. The contract's owner-approved contributor-review exception, aligned
-   October 7, 2026 from the linked #264 authority, instead permits a truthful
-   main-contributor trailer on the squash commit, with every minority writer and
-   its work disclosed in the commit body and a PR comment. The less-writing family
-   performs genuine native review; the PR narrative and comment label the
-   exception and its reduced assurance, never independent-family proof. No
-   calculated percentages define minority status. This specific owner permission
-   is not a blanket license to manipulate trailers or invent attribution.
-   Earlier recognized lineage trailers remain excluded; prose and a
-   main-author-only HEAD cannot remove them. The [contract's ancestry and budget rules](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-   allow initial preparation to replace minority-trailer ancestry before the
-   first primary review; GitHub's merge-time squash cannot establish the route.
-   A remaining delta requires retaining the exact reviewed primary as an
-   ancestor. Only unreviewed repairs may be rewritten within the authorized
-   disclosure route and truthful attribution; a model cannot be credited with a
-   repair it did not write. If selecting the exception requires rewriting the
-   primary or its ancestors, delivery waits for owner direction. The diagnostic
-   still applies whenever the submitted lineage contains both recognized
-   families, including an attempted exception; permission cannot change selection.
-   Outside that valid scope, retain all-writer trailers and fail closed.
-   Gemini remains parked under closed #264. No selector, gate, persistence or
-   reviewer-model change follows from this documentation alignment.
-   There is one primary and at most one delta review per lineage; every changed
-   head needs renewed review. After delta exhaustion, the existing class-wide
-   audit and fresh-lineage rule requires removing both reviewed commits from
-   ancestry before the next primary. The exception does not grant a fresh budget.
+   one GitHub review with findings. Its selector excludes every recognized
+   `Co-Authored-By` family from the configured-base merge-base through HEAD, for
+   primary, delta and repost alike. It cannot infer contributions from prose or
+   determine owner permission, so a lineage carrying every configured family's
+   trailers fails closed. There is one primary and at most one delta review per lineage,
+   and every changed head needs renewed review. The contract's
+   [review budget](../core/CONTRACT.md#review-budget) owns authorship and budget
+   rules, including the bounded
+   [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception):
+   a labeled, reduced-assurance route that changes neither the selector nor the
+   budget.
 5. `ready` derives readiness from the unchanged head, review, blocking findings,
    target branch and required CI. Its bounded waiter observes that same head.
    After its own draft-to-ready write, `ready --wait` revalidates visible readiness

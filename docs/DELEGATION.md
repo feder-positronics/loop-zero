@@ -74,52 +74,21 @@ and repair work. Reserve the opposite family for read-only advice and formal
 independent review; a read-only adviser returns advice for the authoring family
 to implement. Before committing accepted delegate work, record every actual
 writing model in truthful `Co-Authored-By` trailers. Committing or integrating a
-child's patch does not make the parent its sole author. Preserve all actual
-contributors through squash and amend, except for the specifically authorized
-prose disclosure route below. An omitted child cannot be recovered mechanically
-from a parent-only trailer; do not invent attribution.
+child's patch does not make the parent its sole author. Preserve every actual
+contributor through squash and amend, except as the contract's owner exception,
+linked below, authorizes. An omitted child cannot be recovered from a
+parent-only trailer; do not invent attribution.
 
-`loopzero review` excludes all recognized trailer families in the PR lineage
-from its configured-base merge-base to HEAD, including earlier child patches,
-repairs, and multiple HEAD trailers. Delta review and reposting enforce that
-same exclusion. The selector cannot infer minority contributions from prose or
-owner permission. If every configured family has contributed recognized lineage
-trailers, no native independent route exists and review fails closed.
-
-The [contract's owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-records the October 7, 2026 alignment of the linked #264 ruling and confirmation.
-Within that confirmed mixed-authoring scope, the squash commit truthfully names
-the main contributing model in its trailer; every actual minority writer and its
-work are disclosed in the commit body and a PR comment. The less-writing family
-performs genuine native review. Label it an **owner-approved contributor-review
-exception** in the PR narrative and comment: it has reduced assurance and is not
-independent-family proof. Choose from actual contributions, without calculated
-percentages or a numerical minority heuristic. Prose disclosure instead of a
-minority trailer is specifically authorized by that owner route; it does not
-allow blanket trailer manipulation, invented attribution or silent omission.
-Earlier recognized trailers remain excluded; prose and a main-author-only HEAD
-cannot remove them. Under the [contract's ancestry and budget rules](../core/CONTRACT.md#owner-approved-contributor-review-exception),
-initial preparation may replace minority-trailer ancestry before the first
-primary review; GitHub's merge-time squash cannot establish the route. A
-remaining delta requires the exact reviewed primary commit to remain an ancestor.
-Only unreviewed repairs may be rewritten within the authorized disclosure route
-and truthful attribution; do not credit a model with a repair it did not write.
-If selecting the exception requires rewriting the primary or its ancestors,
-delivery waits for owner direction instead of obtaining a fresh review budget.
-After delta exhaustion, the existing class-wide audit and fresh-lineage rule
-requires removing both reviewed commits from ancestry before the next primary.
-The mixed-trailer diagnostic still applies to any submitted lineage containing
-both recognized families, including an attempted exception; permission does not
-change selection. Outside the valid owner scope, retain truthful every-writer
-trailers and the closed route. No automatic
-waiver, selector or gate change, new reviewer model or persistence is introduced;
-Gemini remains parked under closed #264.
-
-Preserve the final approved head instead of applying optional suggestions.
-Necessary changes use the remaining delta and renewed checks; once that budget
-is exhausted, audit the defect class and squash/amend as required by the
-[contract](../core/CONTRACT.md) before another primary. These instructions govern
-attribution and delivery; they do not intercept Git commits.
+`loopzero review` excludes every recognized trailer family in the PR lineage and
+cannot infer contributions from prose or determine owner permission, so a
+lineage carrying every configured family's trailers has no independent reviewer
+and fails closed. The contract's [review budget](../core/CONTRACT.md#review-budget) owns
+the selector, delta, repost, approved-head and post-delta squash rules. Its
+[owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+owns the only alternative: its confirmed scope, main-contributor trailer,
+minority disclosure, reduced-assurance labeling and ancestry limits. Read both
+before mixing writing families; the exception is not a general waiver and
+changes neither selection nor the budget.
 
 ## Briefs and ownership
 
