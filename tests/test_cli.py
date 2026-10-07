@@ -2302,9 +2302,7 @@ def test_repost_rejects_saved_contributor_review(
 
     git(wt, "commit", "--amend", "-q", "-m",
         "patch\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
-    head = head_of(wt)
-    arm_empty_primary_review_post(gh, head)
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    head = prepare_review(wt, gh, fake_bin)
     result = runners.review_with("claude", cwd=wt, head=head, kind="primary",
                                  diff="", task_text="")
     cli._save_review(wt, result)
@@ -2325,9 +2323,7 @@ def test_review_uses_lineage_author_after_unattributed_repair(
     git(wt, "commit", "--amend", "-q", "-m",
         f"child patch\n\nCo-Authored-By: {author} <bot@example.com>")
     git(wt, "commit", "--allow-empty", "-q", "-m", "unattributed repair")
-    head = head_of(wt)
-    arm_empty_primary_review_post(gh, head)
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    prepare_review(wt, gh, fake_bin)
     _fake_codex(fake_bin, json.dumps(APPROVE))
 
     code, out, err = run(capsys, "review")

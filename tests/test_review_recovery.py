@@ -13,11 +13,8 @@ from tests.test_cli import (
     CHANGES,
     LOGIN,
     REPO,
-    _claude_envelope,
-    _fake_claude,
     arm_pr,
     head_of,
-    post_key,
     rev,
     reviews_key,
     run,
@@ -33,11 +30,9 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
         history = [rev(head_of(wt), "primary")]
         (wt / "feature.py").write_text("print('fixed')\n")
         git(wt, "commit", "-qam", "repair")
-    head = head_of(wt)
-    arm_pr(gh, head)
-    gh.respond(reviews_key(), history)
-    gh.respond(post_key(), {"id": 17})
-    reviewer = _fake_claude(fake_bin, _claude_envelope(APPROVE if verdict == 0 else CHANGES))
+    head = support.prepare_review(wt, gh, fake_bin, history=history, post_id=17,
+                                  payload=APPROVE if verdict == 0 else CHANGES)
+    reviewer = fake_bin / "claude"
     reviewer.write_text(reviewer.read_text().replace(
         "#!/bin/sh\n", f'#!/bin/sh\nprintf "run\\n" >> "{fake_bin}/claude.runs"\n'))
     original = github._api
