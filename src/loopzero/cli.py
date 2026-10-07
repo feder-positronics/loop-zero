@@ -113,6 +113,28 @@ def _context(args: argparse.Namespace, *, pin_checks: bool = False) -> tuple[Pat
     return wt, _load_config(args, wt, pin_checks=pin_checks)
 
 
+def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) -> tuple[Config, str]:
+    """Pin native launch settings without changing other commands' fallback policy."""
+    if args.config:
+        return config, "reviewer paths are unpinned because --config was provided"
+    try:
+        revision = _git(wt, "rev-parse", "--verify", f"refs/remotes/origin/{config.base_branch}")
+    except CliError as exc:
+        raise CliError("native review needs a remote base; fetch it or supply --config") from exc
+    checks = config_mod.load_base(wt, config.base_branch, revision=revision)
+    if checks is None:
+        raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
+    delivery = config_mod.load_base(wt, config.base_branch, "delivery", revision=revision) or {}
+    pinned = dataclasses.replace(
+        config_mod.load(wt / "workflow.toml", checks=checks),
+        review_publishers=config_mod._strings(
+            "delivery.review_publishers", delivery.get("review_publishers", [])),
+        reviewer_ro_paths=config_mod._host_paths(
+            "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])),
+    )
+    return pinned, f"reviewer paths pinned to origin/{config.base_branch}@{revision}"
+
+
 def _is_ancestor(wt: Path, sha: str, head: str) -> bool:
     done = _proc.run(
         ["git", "merge-base", "--is-ancestor", sha, head],
@@ -535,6 +557,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
+    if not args.repost:
+        config, runtime_source = _review_launch_config(args, wt, config)
     token = github.app_token()  # one identity for the publisher check and the post
     publisher = github.login(token=token)
     if config.review_publishers and publisher.casefold() not in {
@@ -589,7 +613,8 @@ def cmd_review(args: argparse.Namespace) -> int:
         prefix = _repost_prefix(result)
     else:
         try:
-            result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort)
+            result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
+                                 runtime_source=runtime_source)
         except sandbox.SandboxUnavailable as exc:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
@@ -694,7 +719,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
 
 def _run_review(
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
-    model: str | None = None, effort: str | None = None,
+    model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
@@ -722,6 +747,8 @@ def _run_review(
             reviewer_ro_paths=config.reviewer_ro_paths,
             model=model or (settings.model if settings else None), effort=chosen,
         )
+    if runtime_source:
+        print(runtime_source)
     for family in candidates:
         try:
             try:

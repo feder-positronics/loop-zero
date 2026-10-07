@@ -775,7 +775,8 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES)
     code, out, err = run(capsys, "review")
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
-    assert out == (
+    assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
+    assert out.splitlines()[-1] + "\n" == (
         f"primary review by claude on {head[:12]}: request_changes "
         "(0 critical, 1 important, 1 suggestion)\n"
     )
@@ -787,6 +788,56 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert "+print('hi')" in prompt and "primary review" in prompt and "## Context and goal" in prompt
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
+
+
+@pytest.mark.parametrize("source", ["task", "base", "override", "missing_ref", "bootstrap"])
+def test_review_runtime_paths_use_only_verified_base(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, tmp_path: Path, source: str,
+) -> None:
+    workflow = wt / "workflow.toml"
+    exposed = tmp_path / "host-state"
+    exposed.mkdir()
+    (exposed / "history.txt").write_text("private host history")
+    directive = f'reviewer_ro_paths = ["{exposed}"]\n'
+    workflow.write_text(workflow.read_text().replace('[delivery]\n', '[delivery]\n' + directive))
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-qm", "change task runtime paths")
+    if source == "base":
+        git(wt, "update-ref", "refs/remotes/origin/main", head_of(wt))
+    elif source == "missing_ref":
+        git(wt, "update-ref", "-d", "refs/remotes/origin/main")
+    elif source == "bootstrap":
+        git(wt, "update-ref", "refs/remotes/origin/main",
+            git(wt, "rev-list", "--max-parents=0", "HEAD").strip())
+    prepare_review(wt, gh, fake_bin)
+    code, out, err = run(capsys, *(["--config", str(workflow)] if source == "override" else []),
+                         "review")
+    if source in {"missing_ref", "bootstrap"}:
+        assert code == 1 and "--config" in err
+        assert not (fake_bin / "claude.stdin").exists()
+        assert not any(c["argv"][1] == post_key().split(" ")[1] for c in gh.calls)
+    else:
+        assert code == 0 and err == ""
+        mounts = (tmp_path / "bwrap.argv").read_text().splitlines()
+        assert (str(exposed) in mounts) == (source != "task")
+        assert "reviewer paths" in out
+
+
+@pytest.mark.parametrize("command", ["check", "ready", "merge", "status"])
+@pytest.mark.parametrize("missing", ["remote", "workflow"])
+def test_runtime_pinning_preserves_other_command_fallbacks(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, command: str, missing: str,
+) -> None:
+    if missing == "remote":
+        git(wt, "update-ref", "-d", "refs/remotes/origin/main")
+    else:
+        git(wt, "update-ref", "refs/remotes/origin/main",
+            git(wt, "rev-list", "--max-parents=0", "HEAD").strip())
+    prepare_review(wt, gh, fake_bin)
+    code, out, err = run(capsys, command)
+    assert "reviewer paths" not in out + err
+    assert "--config" not in err
+    assert code == (0 if command == "check" else 1)
 
 
 @pytest.mark.parametrize("family,options,model,effort", [
@@ -854,7 +905,7 @@ def test_review_refuses_when_reviewer_dirties_worktree(
     code, out, err = run(capsys, "review")
 
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-    assert code == 1 and out == "" and "worktree changed during review" in err
+    assert code == 1 and out.startswith("reviewer paths pinned") and "worktree changed during review" in err
     assert err.count(head) == 2 and not saved.exists()
     assert all(call["argv"][:2] != ["api", post_key().split(" ")[1]] for call in gh.calls)
 
@@ -869,7 +920,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     _fake_claude(fake_bin, envelope)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
     code, out, err = run(capsys, "review")
-    assert code == 1 and out == "" and saved.exists()
+    assert code == 1 and out.startswith("reviewer paths pinned") and saved.exists()
     assert f"review saved at {saved}" in err and "loopzero review --repost" in err
     saved_bytes = saved.read_bytes()
     data = json.loads(saved_bytes)
@@ -884,7 +935,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     (fake_bin / "claude.stdin").unlink()
     gh.respond(post_key(), {"id": 5})
     code, out, err = run(capsys, "review", "--repost")
-    assert (code, err) == (5, "") and out.startswith("primary review by claude"), err
+    assert (code, err) == (5, "") and out.splitlines()[-1].startswith("primary review by claude"), err
     assert not (fake_bin / "claude.stdin").exists(), "no model invoked"
     payload = posted_review(gh)
     assert marker(head, "primary", "repost") in payload["body"] and "Nit" in payload["body"]
@@ -1012,7 +1063,7 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
     code, out, _ = run(capsys, "review")
-    assert code == 0 and out.startswith(f"delta review by claude on {head[:12]}: approve")
+    assert code == 0 and out.splitlines()[-1].startswith(f"delta review by claude on {head[:12]}: approve")
     prompt = (fake_bin / "claude.stdin").read_text()
     assert "+x = 2" in prompt and "print('hi')" not in prompt and "delta review" in prompt
     payload = posted_review(gh)
@@ -1044,7 +1095,7 @@ def test_review_ignores_invalid_history(wt: Path, gh: FakeGh, fake_bin, capsys,
                [rev(head, "primary", login="stranger"), rev(head, "delta", commit="2" * 40)])
     prepare_review(wt, gh, fake_bin, history=history)
     code, out, _ = run(capsys, "review")
-    assert code == 0 and out.startswith("primary review by claude")
+    assert code == 0 and out.splitlines()[-1].startswith("primary review by claude")
 
 
 def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, capsys) -> None:
@@ -1135,7 +1186,7 @@ def test_review_falls_through_when_preferred_family_fails(
     prepare_review(wt, gh, fake_bin, post_id=4)
     fake_tool("codex", "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
-    assert code == 4 and out == ""
+    assert code == 4 and out.startswith("reviewer paths pinned")
     assert "codex: CLI is not authenticated" in err
 
 
@@ -1153,7 +1204,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
 
     monkeypatch.setattr(cli.runners, "review_with", fail)
     code, out, err = run(capsys, "review")
-    assert code == 4 and out == ""
+    assert code == 4 and out.startswith("reviewer paths pinned")
     assert "no independent reviewer can run" in err
     assert "author family: unknown" in err and "excluded families: none" in err
     assert "fix the reviewer failures below and rerun" in err
@@ -1175,7 +1226,7 @@ def test_review_reports_missing_bwrap_like_check(
         cli.runners.shutil, "which", lambda name: None if name == "bwrap" else original(name)
     )
     code, out, err = run(capsys, "review")
-    assert (code, out) == (2, "")
+    assert code == 2 and out.startswith("reviewer paths pinned")
     assert err == "sandbox unavailable: bwrap not found on PATH (install bubblewrap)\n"
 
 
@@ -1189,7 +1240,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 
     monkeypatch.setattr(cli.runners, "review_with", review_with)
     code, out, err = run(capsys, "review")
-    assert code == 0 and out.startswith("primary review by codex")
+    assert code == 0 and out.splitlines()[-1].startswith("primary review by codex")
     assert "claude: timed out" in err
 
 
@@ -2328,6 +2379,6 @@ def test_review_uses_lineage_author_after_unattributed_repair(
 
     code, out, err = run(capsys, "review")
 
-    assert code == 0 and out.startswith(f"primary review by {expected}"), err
+    assert code == 0 and out.splitlines()[-1].startswith(f"primary review by {expected}"), err
     other = "claude" if expected == "codex" else "codex"
     assert not (fake_bin / f"{other}.stdin").exists()

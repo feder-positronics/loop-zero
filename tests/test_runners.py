@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import textwrap
 from pathlib import Path
 
@@ -22,7 +23,7 @@ from loopzero.runners import (
 from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
 from .conftest import git
-from .test_sandbox import FAKE_BWRAP, _pairs
+from .test_sandbox import FAKE_BWRAP, _pairs, _real_bwrap_works
 
 APPROVE = {"verdict": "approve", "findings": []}
 CHANGES = {
@@ -229,7 +230,9 @@ def test_claude_binds_config_and_state_read_write_without_copying(
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
     monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    assert _review("claude", tmp_path).verdict == "approve"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _review("claude", repo).verdict == "approve"
     binds = _pairs(_bwrap_argv(fake_bwrap), "--bind")
     assert (str(configured.resolve()), f"{SANDBOX_HOME}/.claude") in binds
     assert (str(state.resolve()), f"{SANDBOX_HOME}/.claude.json") in binds
@@ -246,14 +249,16 @@ def test_reviewer_does_not_bind_missing_auth_paths(
     monkeypatch.setenv("HOME", str(host_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host_home / "missing-claude"))
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    _review("claude", tmp_path)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _review("claude", repo)
     assert all(destination == SANDBOX_HOME for _, destination in _pairs(
         _bwrap_argv(fake_bwrap), "--bind"
     ))
 
     monkeypatch.setenv("CODEX_HOME", str(host_home / "missing-codex"))
     _fake_codex(fake_bin, json.dumps(APPROVE))
-    _review("codex", tmp_path)
+    _review("codex", repo)
     assert all(destination == SANDBOX_HOME for _, destination in _pairs(
         _bwrap_argv(fake_bwrap), "--bind"
     ))
@@ -477,6 +482,122 @@ def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path
     assert str(fake_bin) not in [path for pair in _pairs(argv, "--ro-bind-try") for path in pair]
 
 
+@pytest.mark.parametrize("state", [
+    ".claude", ".codex", ".claude.json", "custom-claude", "custom-codex", "secure-storage",
+])
+@pytest.mark.parametrize("exposure", ["exact", "ancestor", "descendant", "alias", "repository"])
+def test_review_refuses_additional_host_state_exposure(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch,
+    state: str, exposure: str,
+) -> None:
+    host = tmp_path / "host"
+    host.mkdir()
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / "custom-claude"))
+    monkeypatch.setenv("CODEX_HOME", str(host / "custom-codex"))
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(host / "secure-storage"))
+    protected = host / state
+    protected.mkdir()
+    (protected / "history.txt").write_text("private host history")
+    child = protected / "child"
+    child.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(protected, target_is_directory=True)
+    exposed = {"exact": protected, "ancestor": host, "descendant": child,
+               "alias": alias, "repository": protected}[exposure]
+    repo = protected if exposure == "repository" else tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        _review("claude", repo, reviewer_ro_paths=() if exposure == "repository" else (str(exposed),))
+    assert not (fake_bin / "claude.stdin").exists()
+
+
+@pytest.mark.parametrize("mode", ["implicit", "explicit", "state_file", "state_root"])
+def test_review_mounts_only_implicit_executable_inside_state(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    host = tmp_path / "host"
+    host.mkdir()
+    state = host / ".codex"
+    state.mkdir()
+    native = state / "packages" / "claude"
+    native.parent.mkdir()
+    if mode == "state_file":
+        native = host / ".claude.json"
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.setenv("CODEX_HOME", str(native if mode == "state_root" else state))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    (fake_bin / "claude").replace(native)
+    (fake_bin / "claude").symlink_to(native)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if mode == "implicit":
+        assert _review("claude", repo).verdict == "approve"
+        assert _pairs(_bwrap_argv(fake_bwrap), "--ro-bind-try") == [(str(native), str(native))]
+        assert (str(state), str(state)) not in _pairs(_bwrap_argv(fake_bwrap), "--ro-bind")
+        return
+    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        _review("claude", repo, reviewer_ro_paths=(str(native),) if mode == "explicit" else ())
+    assert not (fake_bin / "claude.stdin").exists()
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+def test_real_review_executes_state_binary_without_exposing_sibling_history(
+    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    host = tmp_path / "host"
+    state = host / ".codex"
+    native = state / "packages" / "claude"
+    native.parent.mkdir(parents=True)
+    history = native.parent / "history.txt"
+    history.write_text("private history marker")
+    native.write_text("#!/bin/sh\ncat >/dev/null\ntest ! -e " + shlex.quote(str(history))
+                      + " || exit 70\nprintf '%s\\n' "
+                      + shlex.quote(json.dumps(_claude_envelope(APPROVE))) + "\n")
+    native.chmod(0o755)
+    (fake_bin / "bwrap").unlink()  # Override this module's autouse fake for the kernel proof.
+    (fake_bin / "claude").symlink_to(native)
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.setenv("CODEX_HOME", str(state))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
+    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert _review("claude", repo).verdict == "approve"
+    assert history.read_text() == "private history marker"
+    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        _review("claude", repo, reviewer_ro_paths=(str(native.parent),))
+
+
+@pytest.mark.parametrize("mount", ["system", "git"])
+def test_review_denies_state_exposure_from_non_runtime_mounts(
+    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, mount: str,
+) -> None:
+    from loopzero import sandbox
+
+    host = tmp_path / "host"
+    state = host / ".codex"
+    state.mkdir(parents=True)
+    (state / "history.txt").write_text("private history marker")
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.setenv("CODEX_HOME", str(state))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if mount == "system":
+        monkeypatch.setattr(sandbox, "SYSTEM_RO", (*sandbox.SYSTEM_RO, str(host)))
+    else:
+        git(repo, "init", "-q", "--separate-git-dir", str(state / "git"))
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        _review("claude", repo)
+    assert not (fake_bin / "claude.stdin").exists()
+
+
 def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     (fake_bin / "bwrap").unlink()
@@ -509,7 +630,9 @@ def test_codex_approve(
     monkeypatch.setenv("CODEX_HOME", str(configured))
     monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
     _fake_codex(fake_bin, json.dumps(APPROVE))
-    result = _review("codex", tmp_path, model="gpt-5.6-luna", effort="high")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    result = _review("codex", repo, model="gpt-5.6-luna", effort="high")
     assert result.verdict == "approve" and result.family == "codex"
     assert result.model == "gpt-5.6-luna" and result.effort == "high"
     assert result.duration_s is not None
@@ -520,7 +643,7 @@ def test_codex_approve(
     # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert "--ignore-user-config" in argv
-    assert argv[argv.index("--cd") + 1] == str(tmp_path.resolve()) and "--ephemeral" in argv
+    assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" in argv
     assert "mcp_servers={}" in argv
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()

@@ -300,14 +300,21 @@ def _sandbox_prefix(
     auth_binds: tuple[tuple[Path, Path], ...],
 ) -> tuple[list[str], Config, Path]:
     binary = _review_binary(family)
+    state_dirs = tuple(dict.fromkeys(Path(path).resolve() for path in (
+        Path.home() / ".claude", Path.home() / ".codex",
+        os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"),
+        os.environ.get("CODEX_HOME", Path.home() / ".codex"),
+        os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR", Path.home() / ".claude"),
+    )))
+    state_file = (Path.home() / ".claude.json").resolve()
+    implicit_file = not ro_paths and any(
+        binary != root and binary.is_relative_to(root) for root in state_dirs
+    )
     config = _review_config(family, binary, ro_paths)
+    if implicit_file:
+        config = replace(config, sandbox_ro=(str(binary),))
     if shutil.which("bwrap") is None:
         raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
-    for exposed in config.sandbox_ro:
-        if home.resolve().is_relative_to(Path(exposed).resolve()):
-            raise sandbox.SandboxUnavailable(
-                f"sandbox path {exposed!r} would expose private reviewer directories"
-            )
     common_dir = _git_dir(cwd, "--git-common-dir", config.env_allowlist)
     git_dir = _git_dir(cwd, "--git-dir", config.env_allowlist)
     prefix = sandbox.bwrap_argv(
@@ -319,6 +326,33 @@ def _sandbox_prefix(
         clearenv=False,
         writable_binds=auth_binds,
     )
+    private = (home.resolve(), Path(sandbox.SANDBOX_HOME))
+    args = iter(prefix)
+    for option in args:
+        if option == "--":
+            break
+        if option == "--setenv":
+            next(args), next(args)
+        elif option in ("--tmpfs", "--dev", "--proc", "--chdir", "--cap-drop"):
+            next(args)
+        elif option in ("--bind", "--bind-try", "--ro-bind", "--ro-bind-try"):
+            source, destination = Path(next(args)).resolve(), Path(next(args))
+            if option == "--bind" and (source, destination) in (
+                (home.resolve(), Path(sandbox.SANDBOX_HOME)), *auth_binds,
+            ):
+                continue
+            roots = (*state_dirs, state_file, *private)
+            if (implicit_file and option == "--ro-bind-try"
+                    and source == destination == binary):
+                roots = (*(root for root in state_dirs
+                           if binary == root or not binary.is_relative_to(root)),
+                         state_file, *private)
+            if any(path.is_relative_to(root) or root.is_relative_to(path)
+                   for path in (source, destination) for root in roots):
+                raise sandbox.SandboxUnavailable(
+                    f"sandbox mount {source} -> {destination} exposes protected reviewer state; "
+                    "use a runtime installation outside state directories"
+                )
     sandbox.probe(config, cwd, prefix)
     return prefix, config, binary
 
