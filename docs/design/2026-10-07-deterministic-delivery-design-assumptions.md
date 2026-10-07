@@ -1,7 +1,8 @@
 # Deterministic delivery: design assumptions and practices
 
-Date: 2026-10-07. Status: architecture rationale and proposed adaptations;
-this note introduces no delivery policy or implemented capability.
+Date: 2026-10-07. Status: architecture rationale, dated delivery/comparison evidence
+and separately marked proposed adaptations. The contract owns operational policy;
+recorded comparison acceptance does not establish formal review or verified delivery.
 
 Upstream: [current architecture](../ARCHITECTURE.md),
 [delivery contract](../../core/CONTRACT.md), and
@@ -503,7 +504,7 @@ persistence, atomic replacement, replacement visibility or lock coordination.
 The code comment claiming Codex rewrites in place needs version-specific proof.
 No actual credential, refresh or model operation was performed in this audit.
 
-**Proposed sequence and acceptance.** These are separately bounded tasks, with
+**Bounded sequence and acceptance.** These are separately bounded tasks, with
 the parent maintaining their detailed acceptance in the existing task handoff.
 Runner changes share paths and are stacked or sequential, never implemented in
 parallel from the same base. The named next actor is the native-review maintainer.
@@ -539,27 +540,25 @@ parallel from the same base. The named next actor is the native-review maintaine
    or private review state, considering implicit binary-parent, system, source/Git
    mounts and their destinations too. Trust in the operator-selected repository
    and PR base remains an existing prerequisite, not a new arbitrary-ref trust claim.
-   A binary installed inside a protected state root is deliberately refused with
-   a diagnostic directing the operator to a supported installation outside that
-   root; no implicit descendant exception is inferred from its being read-only.
+   An implicit runtime inside a protected state root mounts only the resolved
+   selected executable file read-only; explicit paths receive no exception.
+   Bundles needing protected sibling assets require installation outside state.
    Define this protected set once; it is not a general host-secret denylist.
    Preserve the explicit auth binds until R2; this closes an additional mount
    route and does not yet isolate the existing broad Claude bind. Checks' cache
    paths and their independent configuration remain unchanged. Prove refusals
    happen before launching the native reviewer and allowed runtimes still work.
-3. **Auth/state separation (R2), conditional on R0.** Keep the native adapters,
-   `_proc` and common bubblewrap builder. Select the smallest verified live-state
-   bind plus private runtime state; validate it with the complete mount plan.
-   Preserve refresh at its owning host credential, replacement visibility and
-   locking where required by the supported CLI. Test custom auth homes, markers in
-   sibling files and inside mixed state files, and namespace failure with real
-   bubblewrap and synthetic state. Required real-namespace proofs must execute in
-   the supported CI venue; a local namespace skip is not a passed isolation proof.
-   A later
-   separately authorized native acceptance check must verify the actual routes;
-   a synthetic write test alone cannot establish genuine CLI refresh. Amend the
-   contract and architecture for the actual new boundary. No copied credentials,
-   unsandboxed fallback or silent authentication/billing change is acceptable.
+3. **Auth/state separation (R2), bounded existing environment route after R0.**
+   Keep the native adapters, `_proc` and common bubblewrap builder. An existing
+   nonempty Claude API-key/OAuth environment value omits host config/global-state
+   binds and uses private runtime state, without credential conversion or route
+   change. Empty/absent values preserve file-backed behavior and its exposure;
+   Codex retains its auth.json bind. The owner withdrew full file-backed isolation,
+   whose refresh/replacement/lock requirements remain unproved. Real namespace
+   tests cover synthetic standard/custom state, markers and failure; the separately
+   authorized OAuth smoke establishes that route's genuine private-state startup.
+   Neither synthetic writes nor that smoke establish universal refresh or privacy.
+   No copied credentials, host fallback or auth/billing change is acceptable.
 4. **Reviewer instruction authority (R3).** Retain `review_with` and the review
    schema; introduce only a small internal policy/material split in `runners.py`.
    Fixed role, severity/output rules and primary/delta scope belong to the native
@@ -588,20 +587,20 @@ parallel from the same base. The named next actor is the native-review maintaine
    preserve publisher/head/publication identity checks. Reported model means a CLI claim, not independent
    backend attestation; no new model gate or public artifact migration is proposed.
 
-R1 can proceed after planning without resolving native refresh internals; R2
-cannot. R3's offline structural proof also cannot establish restored defect
-detection. Candidate adoption requires a frozen comparison under its own declared
+R1 and the bounded R2 environment route are delivered; full file-backed isolation
+remains unproved. R3's offline structural proof cannot establish restored defect
+detection. Candidate acceptance requires a frozen comparison under its own declared
 invocation budget, controlled accessible state and independent output assessment.
-The future experiment must stop on protocol/runtime/context failure with consumed
+The comparison must stop on protocol/runtime/context failure with consumed
 attempts retained; injection-only objections do not count as permission-defect
 detection. Require no valid-case blockers or loss of previously detected fixture
 defects. Keep historical results separate and reject an inconclusive candidate.
 
-All future delivery slices use their owning tests and `loopzero check`, plus the
+All delivery slices use their owning tests and `loopzero check`, plus the
 contract's single primary and optional delta formal review. Advisory Fable/Astra
-plan reviews do not replace it. Current upstream measures 4,857 source lines
-against cap 4,884 and 6,737 test lines against cap 6,753. Meaningful new proofs may
-need an explicit owner budget decision; neither hiding tests outside the count,
+plan reviews do not replace it. The frozen R3 candidate measures 5,018 source
+lines and 7,395 test lines against owner-approved caps of 5,250 and 7,600.
+Meaningful new proofs may need an explicit owner budget decision; neither hiding tests outside the count,
 unrelated compaction nor a silent cap increase is proposed. D6 status/metrics and
 a maintained evaluation framework remain deferred without a named consumer/owner.
 
@@ -611,8 +610,9 @@ roots, inventory and marker tests for mixed state files, retained evidence for
 Codex model observations, and exact legacy publication recovery. Their suggestions
 clarified review-only enforcement and preserved fallbacks for other CLI commands,
 base lookup, visible overrides, per-chunk reporting and the CI venue for real
-namespace proofs. Native compatibility questions remain owned by R0 and block
-R2 selection; this review is not a finding that production now meets the proposal.
+namespace proofs. Native compatibility remains version-specific; those planning
+reviews did not establish production acceptance. The dated delivery and comparison
+results below record the subsequent bounded evidence.
 
 ## Deferred adaptations
 
@@ -671,7 +671,8 @@ not establish backend selection or the exact fields/initialization required by
 the supported route. [Official Claude settings](https://code.claude.com/docs/en/settings)
 corroborate that configuration includes private project/sign-in state. A fully
 private auth design preserving host lock identity and replacement visibility is
-still unproved; R2 remains conditional and broad auth mounts are preserved in R1.
+still unproved. At that investigation checkpoint R2 remained conditional and
+broad auth mounts were preserved in R1; the bounded environment route follows below.
 
 The installed Codex binary is inside .codex/packages. This evidence supersedes the
 earlier proposed blanket refusal of binaries inside state roots: R1's implicit
@@ -689,9 +690,9 @@ contains developer_instructions. Its JSONL startup output exposes thread identit
 while the separate human-output mode reports model/effort; current loop-zero JSON
 mode must not infer those observations. R3/R4 retain their own owning acceptance.
 
-R1 is prepared with source/test proofs, including pre-fix failures for task-path
+R1 was prepared with source/test proofs, including pre-fix failures for task-path
 broadening, protected-source exposure and real sibling-marker visibility. At this
-checkpoint formal delivery is pending. The owner approved caps of 4,950 source
+checkpoint formal delivery was pending. The owner approved caps of 4,950 source
 and 6,950 test lines on October 7 for this slice and its review repairs;
 this preparation does not establish deployed isolation or semantic reviewer quality.
 
@@ -709,11 +710,12 @@ presence of the new field prevents using the legacy renderer. Fable/Astra review
 this concrete plan; all conditional requirements were integrated. The current
 candidate uses 4,980 source / 7,083 test lines after a source-backed matcher repair.
 The owner approved caps of 5,250 source / 7,600 test lines for remaining R2-R4 proofs
-and repairs; full delivery remains pending at this checkpoint.
+and repairs. R4 subsequently passed delivery and merged in
+[PR #282](https://github.com/feder-positronics/loop-zero/pull/282).
 
 R2 investigation confirms an existing explicit environment-auth route can omit
-Claude host-state binds without selecting a different auth/billing route. Native
-private-state initialization still needs acceptance. File-backed Claude isolation
+Claude host-state binds without selecting a different auth/billing route. The
+startup acceptance is recorded below. File-backed Claude isolation
 remains conditional: individual lock mounts obstruct mkdir/rmdir acquisition,
 private locks lose host coordination, and credential file mounts pin an inode.
 No inspected ordinary selective-bind design preserves all of those requirements
@@ -755,3 +757,138 @@ Claude Opus 5.5; effort was requested medium but not independently reported.
 This proves ordinary private-state startup for that route, not universal native
 compatibility or reviewer quality. API-only and both-present precedence have
 source and namespace evidence only; no live-key proof is claimed.
+
+R2 passed formal delivery and merged in
+[PR #283](https://github.com/feder-positronics/loop-zero/pull/283) at
+`7d248a8295ca22c5e0074e8288539a19e8ae6c86`. Its bounded environment route is the
+baseline for both R3 comparison arms; file-backed limitations remain unchanged.
+
+
+## R3 instruction transport — October 7, 2026
+
+The candidate routes one fixed ASCII policy paragraph plus validated primary/delta
+scope through Claude's append-system-prompt and Codex's developer_instructions.
+Commit identity, exact task text and UTF-8 diff length are a JSON header on stdin,
+followed by a newline and the exact raw diff. JSON uses ensure_ascii=False; neither
+task whitespace nor trailing diff newlines are stripped. Native review explicitly
+uses UTF-8 even when the parent locale is ASCII. The public review_with interface,
+read-only tools, schema, severity, caller/failure tracing and class-wide finding
+rules remain unchanged. Native default prompts and AGENTS.md/CLAUDE.md processing
+remain enabled, with the repository instruction surface explicitly unresolved.
+
+Astra verified annotated release tag rust-v0.160.1 (tag object
+`c3e23d4c4385619ecec78408766e46b7fa7dd9ad`) peeled to source commit
+`d27764b82f7118f674371e6d6e76271d9d606edb`, and rust-v0.161.0
+(tag object `7e21416b38834816c224ea0dfd135c3de94b2f15`) to source commit
+`979011409de0a60b52f179721948e65531d26144`, using git ls-remote and pinned
+source. The selected installed CLI updated to 0.161.0 during preparation; its
+preflight SHA256 was
+`9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c`.
+That hash is research evidence, not a platform-specific runtime gate or backend
+attestation. Both source-reviewed versions are accepted by the selected
+executable's --version probe. Probe failure, malformed output or another version
+raises RunnerBadOutput before model stdin, allowing existing family fallback.
+Successful generic -c parsing alone is insufficient evidence of recognized keys.
+
+For 0.161.0 the source path is:
+
+- [Recognized developer_instructions field](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/config/src/config_toml.rs#L252)
+  and [configuration resolution](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/config/mod.rs#L4015).
+- [Session copies instructions](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/session/mod.rs#L851),
+  [renders context](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/session/mod.rs#L4218)
+  and [emits instructions](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/session/mod.rs#L4386)
+  with [explicit developer role](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/core/src/context/developer_instructions.rs#L22).
+- [Exec configuration overrides](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L617)
+  reach [the app-server builder](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L732)
+  independently of [JSON output](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L891)
+  and [ephemeral configuration](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/exec/src/lib.rs#L611).
+- [Unknown CLI keys are validated only in strict mode](https://github.com/openai/codex/blob/979011409de0a60b52f179721948e65531d26144/codex-rs/config/src/loader/mod.rs#L651).
+  The candidate does not add strict-config, which would alter unrelated config
+  acceptance. The native 0.161.0 release disables Daybreak for ephemeral threads.
+
+The same path in 0.160.1 was independently verified at configuration field line
+250, resolution line 4005, session copy/render/emission lines 840/4323/4490, and
+exec override/app-server/JSON lines 602/713/855 at the pinned source above.
+
+Offline proof covers argv/stdin bytes, independent TOML decoding, typed version
+refusal, actual ASCII-parent subprocess encoding and CLI chunk/fallback behavior.
+It does not establish semantic instruction immunity or backend identity. The
+subsequent native comparison below passed the declared bounded detection and
+no-regression gate; formal review, current-head checks, readiness and merge remain
+required before verified R3 delivery.
+
+## R3 native comparison — October 7, 2026
+
+The accepted baseline was `7d248a8295ca22c5e0074e8288539a19e8ae6c86`; the frozen
+production candidate was `0d9325e673184d1945f73a79275c9671ac885ccb`. Cases,
+behavioral oracle, source/runtime/configuration hashes and balanced ordering were
+frozen before execution. The matched phase used both arms across four permission
+conditions and four repetitions (32 Claude calls). An independent Astra agent
+assessed every parsed response and accepted the matched gate before the 64-call
+suite of sixteen frozen valid/defective cases across both configured routes and
+both arms. It then independently inspected every suite response and accepted the
+declared gate for formal delivery. This was agent-only adjudication, not a human
+audit or a `loopzero review` verdict.
+
+| Matched Claude outcome | Baseline | Candidate |
+| --- | --- | --- |
+| Concrete defect detected, control | 4/4 | 4/4 |
+| Concrete defect detected, forged override | 0/4 | 4/4 |
+| Valid control approved without blockers | 4/4 | 4/4 |
+| Valid override approved without blockers | 4/4 | 4/4 |
+
+| Suite outcome | Baseline | Candidate |
+| --- | --- | --- |
+| Claude defective cases detected | 7/8 | 8/8 |
+| Codex defective cases detected | 8/8 | 8/8 |
+| Claude valid cases approved without blockers | 8/8 | 8/8 |
+| Codex valid cases approved without blockers | 8/8 | 8/8 |
+
+There were zero paired-baseline defect losses, zero valid-case blockers and zero
+core adjudication ambiguities. Injection-only objections and unrelated findings
+did not count as product-defect detection. Extra out-of-scope blockers on already
+defective cases were reported separately: matched baseline 1/candidate 2, suite
+Claude baseline 4/candidate 2, and suite Codex 0 in either arm. Unsupported
+ancillary claims about historical behavior, roles, duration and security purpose
+persisted. These results neither erase that noise nor prove general reviewer quality.
+
+All 96 native invocations completed successfully with 96 distinct sessions;
+each fixture context remained unchanged and actual source, runtime and access
+guards passed. Fresh independent Git repositories exposed only allowlisted case
+source and their own objects. Labels, oracle/rationale, prior outputs, research
+directories, parent checkout and unrelated Git objects were inaccessible. No
+actual host history was inspected or exported. Both arms used Claude's existing
+OAuth environment with private HOME and zero auth binds, while Codex retained its
+existing live auth.json file bind and disclosed local-state limitation. Normal
+active accounts, providers, authentication and billing routes were unchanged;
+neither backend was independent.
+
+The actual selected Claude was 2.1.293, SHA-256
+`8968405e26db478af44eabc4635ab5ca557057b702a54460a59c13e1b253e978`.
+Codex was 0.161.0, SHA-256
+`9a820c17865fa825d04db416818679a9d63bd72e50835c396f496e5684626c9c`.
+Requests were Opus 5.5 medium and Astra 6 medium. CLI evidence reported Claude
+Opus 5.5 for all 64 Claude calls, with effort unknown; model and effort were
+unknown for all 32 Codex calls. These are qualified CLI observations, not backend
+attestation. Missing optional observations introduce no eligibility gate.
+
+Accounting retained 97 charged attempts: an initial worker failed on a relative
+gate-file path before runner import/native invocation, stopped and remained
+halted; the owner then explicitly approved a fresh maximum-96 batch with "agree".
+The failed charge was neither erased nor silently replaced. The disposable driver
+was repaired and passed fake-client lifecycle, relative-path, native/startup
+failure and restart-refusal proofs before continuation. Charges remain durable
+before worker spawn; continuation charges have UTC timestamps and startup failures
+count conservatively. The original failed record remains unchanged.
+The absence of a native call in the initial failure follows the gate-open-before-
+runner-import control flow, not billing attestation. This research added no
+maintained evaluation framework, authoritative ledger or production dependency.
+
+The sample is small, synthetic and drawn from convenience cases. It supports the
+declared permission detection improvement and Codex no-regression gate only;
+it does not prove general injection immunity, real-world mergeability or an
+end-to-end delivery bypass boundary. Native defaults and AGENTS.md/CLAUDE.md remain
+authority surfaces. At this comparison checkpoint R1/R4/R2 are merged; R3 has
+passed this native gate and awaits formal review, readiness and verified merge.
+D5–D7 and the separately scoped
+deferred adaptations remain deferred.

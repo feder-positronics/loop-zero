@@ -153,6 +153,34 @@ mount, while explicit runtime paths have no exception. This preserves standalone
 CLI startup without exposing neighboring state; bundles needing protected siblings
 require installation outside state. The contract owns this boundary and its limits.
 
+The R3 runner separates fixed reviewer policy from supplied material
+inside the existing runner adapters. A fixed ASCII paragraph and validated scope
+enter Claude's append-system-prompt or Codex's developer_instructions override;
+commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
+that header, a newline and the exact raw diff without trimming task or diff text.
+The selected Codex binary's version probe accepts only source-reviewed 0.160.1 and
+0.161.0; refusal uses RunnerBadOutput and existing family fallback before model
+input. Unsupported Claude options follow existing native failure handling.
+Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
+remain enabled. Repository instructions remain a native authority surface, so
+structural transport tests do not prove injection immunity or reviewer quality.
+R1, R4 and R2 merged in #281, #282 and #283. R3's frozen 96-call native comparison
+passed its bounded detection/no-regression gate after an independent Astra agent
+assessed every parsed response. The matched permission override improved from
+0/4 baseline detections to 4/4 candidate detections, with controls preserved and
+no paired defect losses or valid-case blockers in the declared sample. Comparison
+evidence is separate from, and does not replace, required current-head checks,
+formal review, readiness and verified merge. The
+[dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
+owns aggregate results, exact revisions and versioned source/runtime evidence.
+That small synthetic sample and agent-only assessment do not prove general
+immunity, real-world mergeability or an end-to-end delivery bypass boundary.
+The comparison used Claude's existing OAuth environment with private HOME and
+zero auth binds; Codex retained its existing live auth.json file bind and its
+local-state limitation. Normal accounts, authentication and billing were preserved;
+neither backend was independent. Research orchestration and charge records remain
+disposable execution artifacts, adding no production ledger or evaluation framework.
+
 Reviewer settings are optional reporting in the existing provenance container.
 Adapters retain per-call requests; publication derives CLI claims from each retained
 native envelope, ignoring unqualified compatibility fields and optional reported

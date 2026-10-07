@@ -773,6 +773,8 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None
 
 def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES)
+    task = (wt / ".loopzero/task.md").read_text()
+    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     code, out, err = run(capsys, "review")
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
@@ -784,8 +786,14 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     payload = json.loads(post["--input"])
     assert payload["commit_id"] == head and payload["event"] == "REQUEST_CHANGES"
     assert marker(head, "primary") in payload["body"]
-    prompt = (fake_bin / "claude.stdin").read_text()
-    assert "+print('hi')" in prompt and "primary review" in prompt and "## Context and goal" in prompt
+    header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
+    assert json.loads(header) == {
+        "head": head, "kind": "primary", "task_text": task, "diff_utf8_bytes": len(expected_diff),
+    }
+    assert diff == expected_diff and b"+print('hi')" in diff
+    argv = (fake_bin / "claude.argv").read_bytes().decode("utf-8").split("\0")[:-1]
+    policy = argv[argv.index("--append-system-prompt") + 1]
+    assert "primary review of the whole change" in policy and policy.encode("utf-8") not in header + diff
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
 
@@ -984,7 +992,9 @@ def test_review_chunks_oversized_diff_with_same_family(
     envelope = json.dumps(_claude_envelope(APPROVE))
     _fake_codex(fake_bin, json.dumps(APPROVE))
     fake_tool("claude", f"""
-        input=$(mktemp)
+        input=$(mktemp "{fake_bin}/claude.chunk.XXXXXX")
+        echo "$input" >> "{fake_bin}/claude.calls"
+        printf '%s\\0' "$@" > "$input.argv"
         cat > "$input"
         if [ "$(grep -c '^diff --git ' "$input")" -gt 1 ]; then
             echo 'Prompt is too long' >&2
@@ -997,6 +1007,26 @@ def test_review_chunks_oversized_diff_with_same_family(
     code, out, err = run(capsys, "review")
 
     assert code == 0 and f"review by {'codex' if chunk_auth else 'claude'}" in out
+    materials, policies, tasks = [], [], []
+    for name in (fake_bin / "claude.calls").read_bytes().split(b"\n")[:-1]:
+        path = Path(name.decode())
+        argv = path.with_suffix(path.suffix + ".argv").read_bytes().decode().split("\0")[:-1]
+        policies.append(argv[argv.index("--append-system-prompt") + 1])
+        header, diff = path.read_bytes().split(b"\n", 1)
+        metadata = json.loads(header)
+        assert metadata["head"] == head and metadata["kind"] == "primary"
+        assert metadata["diff_utf8_bytes"] == len(diff)
+        tasks.append(metadata["task_text"])
+        materials.append(diff)
+    assert len(set(policies)) == 1 and len(set(tasks)) == 1 and len(materials) > 1
+    full_diff, *chunks = materials
+    assert all(len(part) <= 4096 for part in chunks)
+    if chunk_auth:
+        assert len(chunks) == 1 and full_diff.startswith(chunks[0])
+        header, fallback_diff = (fake_bin / "codex.stdin").read_bytes().split(b"\n", 1)
+        assert fallback_diff == full_diff and json.loads(header)["task_text"] == tasks[0]
+    else:
+        assert b"".join(chunks) == full_diff
     if chunk_auth:
         assert "trying next" in err and "CLI is not authenticated" in err
         return
@@ -1062,10 +1092,19 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     git(wt, "commit", "-q", "-m", "second")
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
+    task = (wt / ".loopzero/task.md").read_text()
+    expected_diff = git(wt, "diff", "--no-color", first, head).strip().encode("utf-8")
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith(f"delta review by claude on {head[:12]}: approve")
-    prompt = (fake_bin / "claude.stdin").read_text()
-    assert "+x = 2" in prompt and "print('hi')" not in prompt and "delta review" in prompt
+    header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
+    assert json.loads(header) == {
+        "head": head, "kind": "delta", "task_text": task, "diff_utf8_bytes": len(expected_diff),
+    }
+    assert diff == expected_diff and b"+x = 2" in diff and b"print('hi')" not in diff
+    argv = (fake_bin / "claude.argv").read_bytes().decode("utf-8").split("\0")[:-1]
+    policy = argv[argv.index("--append-system-prompt") + 1]
+    assert "delta review: only review the diff in the material message" in policy
+    assert policy.encode("utf-8") not in header + diff
     payload = posted_review(gh)
     assert marker(head, "delta") in payload["body"]
 
@@ -1184,10 +1223,28 @@ def test_review_falls_through_when_preferred_family_fails(
 ) -> None:
     git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
     prepare_review(wt, gh, fake_bin, post_id=4)
-    fake_tool("codex", "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
+    fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
+              "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
     assert code == 4 and out.startswith("reviewer paths pinned")
     assert "codex: CLI is not authenticated" in err
+
+
+def test_review_unverified_codex_version_falls_back_before_model_input(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys,
+) -> None:
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text().replace(
+        'reviewers = ["claude", "codex"]', 'reviewers = ["codex", "claude"]',
+    ))
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "prefer codex")
+    prepare_review(wt, gh, fake_bin)
+    _fake_codex(fake_bin, json.dumps(APPROVE), version="codex-cli 0.162.0")
+    code, out, err = run(capsys, "review")
+    assert code == 0 and "review by claude" in out
+    assert "trying next" in err and "re-verification" in err
+    assert not (fake_bin / "codex.stdin").exists()
 
 
 def test_review_fails_with_three_line_errors_and_remedies_without_spending_budget(

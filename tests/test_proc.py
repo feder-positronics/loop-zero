@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -75,3 +76,24 @@ def test_tail_keeps_last_lines():
     text = "\n".join(str(i) for i in range(100)) + "\n"
     assert _proc.tail(text).splitlines() == [str(i) for i in range(60, 100)]
     assert _proc.tail("", 3) == ""
+
+
+def test_explicit_utf8_input_under_ascii_parent_locale(tmp_path):
+    source = str(Path(_proc.__file__).resolve().parents[1])
+    script = r"""
+import locale, sys
+from loopzero import _proc
+assert locale.getencoding() in ('ANSI_X3.4-1968', 'US-ASCII')
+argv = [sys.executable, '-c', 'import sys; print(sys.stdin.buffer.read().hex())']
+options = dict(cwd='.', env_allowlist=(), timeout=30)
+assert _proc.run(argv, input='ascii', **options).stdout.strip() == '6173636969'
+assert _proc.run(argv, input='\u03a9', **options).stdout.strip() == '3f'
+print(_proc.run(argv, input='\u03a9\r\n\u2028\r', encoding='utf-8', **options).stdout.strip())
+"""
+    done = _proc.run(
+        [sys.executable, "-c", script], cwd=tmp_path, env_allowlist=(), timeout=30,
+        extra_env={"PYTHONPATH": source, "LC_ALL": "C", "PYTHONUTF8": "0",
+                   "PYTHONCOERCECLOCALE": "0"},
+    )
+    assert done.exit_code == 0, done.stderr
+    assert done.stdout.strip() == "Ω\r\n\u2028\r".encode("utf-8").hex()

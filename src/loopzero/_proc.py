@@ -58,11 +58,13 @@ def run(
     timeout: float,
     merge_output: bool = False,
     input: str | None = None,
+    encoding: str | None = None,
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
     `merge_output=True` sends stderr into stdout so interleaving is preserved.
     `input` is written to the child's stdin; without it stdin is /dev/null.
+    `encoding` overrides the parent locale for text I/O; None retains subprocess defaults.
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
     argv = [str(part) for part in argv]
@@ -76,6 +78,7 @@ def run(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
             text=True,
+            encoding=encoding,
             errors="replace",
             timeout=timeout,
             check=False,

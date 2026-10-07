@@ -232,6 +232,24 @@ file read-only at its resolved path. An explicit runtime path gets no exception;
 bundles needing protected sibling assets require an installation outside state.
 This protects known native state paths, not every possible host secret.
 
+The R3 runner sends fixed reviewer policy and validated primary/delta
+scope through Claude's `--append-system-prompt` or Codex's `developer_instructions`
+configuration override. It preserves native default instructions and tools. One
+UTF-8 stdin message contains a JSON header (`head`, `kind`, exact `task_text`,
+`diff_utf8_bytes`), a newline and the exact raw diff. Material is evidence, not
+reviewer meta-directives; native repository AGENTS.md/CLAUDE.md handling remains
+an instruction surface. The selected Codex executable must report source-reviewed
+0.160.1 or 0.161.0 before model input is sent. A failed, malformed or unverified
+version probe produces the existing typed runner failure and family fallback;
+there is no policy-on-stdin fallback or unrelated strict-config requirement.
+Transport proof does not establish semantic immunity. The frozen R3 comparison
+passed its bounded detection/no-regression gate after independent agent assessment
+of all 96 native responses; the
+[dated results and limits](../docs/design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
+remain separate from formal delivery and do not replace required current-head
+checks, formal review, readiness and verified merge. The synthetic sample does not prove
+general injection immunity, backend identity or an end-to-end delivery boundary.
+
 ## Failure
 
 Every command fails closed and loud: a missing tool or a nonzero exit prints
