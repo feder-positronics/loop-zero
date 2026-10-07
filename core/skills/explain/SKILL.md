@@ -30,8 +30,9 @@ for depth, visual choice, HTML validation, or briefing variants as needed.
 - **Markdown:** answer inline using the smallest useful structure.
 - **HTML:** render a self-contained, offline-safe, accessible, printable file to
   a temporary path and run the reference's mandatory checks. Promote it to the
-  requested path or established explainer location only after they pass; a
-  mandatory failure blocks promotion.
+  requested path or established explainer location only after every available
+  mandatory check passes, labeling unavailable browser checks as the reference
+  requires; a mandatory failure blocks promotion.
 - **Briefing:** gather current repository and GitHub evidence for the requested
   project, backlog, pulse, strategy, or journey view. Treat GitHub as read-only
   and label source limits instead of repairing or inventing state.
@@ -43,6 +44,7 @@ and `write-design-doc` when the explanation becomes a durable design contract.
 ## Exit
 
 Markdown is done when the reader can state the main point, mechanism, material
-uncertainty, and takeaway at the requested depth. HTML or briefing output also
-requires its final path and size, source limits, validation result, and no
-failed mandatory check or unauthorized state change.
+uncertainty, and takeaway at the requested depth. HTML output also requires its
+final path and size, source limits, validation result, and no failed mandatory
+check or unauthorized state change. A briefing also requires its source limits
+and no unauthorized state change.

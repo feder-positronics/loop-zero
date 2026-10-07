@@ -25,28 +25,31 @@ when splitting work or choosing an executor.
    outputs, state, or boundary effects, not the same calculation, mock calls, or
    internal steps used by the code. A regression test counts only after you
    watched it fail on the pre-fix code; record that failing output line in
-   `.loopzero/task.md` Notes. A test that passes without the fix proves nothing.
+   `.loopzero/task.md` Notes. A regression test that passes without the fix
+   proves nothing.
 4. Run focused checks while iterating. Commit in small steps with messages that
    state what changed; keep the diff free of unrelated formatting churn. Fill
    `.loopzero/task.md` Notes with trade-offs and deliberately skipped work
    before committing.
-5. Run `loopzero check` on the clean committed head before pushing. Fix
-   nonzero exits; do not edit the check list to make them pass. Running the
-   test command directly is for iteration only: the sandbox hides host tools that CI also lacks, so only
-   the `loopzero check` report counts as proof. Never filter a `loopzero`
-   command through a pipe; its exit code is the verdict (see the contract's
-   Failure section).
+5. Run `loopzero check` on the clean committed head before pushing. Fix nonzero
+   exits; do not edit the check list to make them pass. Running the test command
+   directly is for iteration only: the sandbox exposes only system directories,
+   the configured `ro_paths`, the allowlisted environment and, unless enabled,
+   no network, so a command that passes on the host can fail there; only the
+   `loopzero check` report counts as proof.
+   Never filter a `loopzero` command through a pipe; its exit code is the
+   verdict (see the contract's Failure section).
 6. Run `loopzero pr`.
-7. After `loopzero review`, fix every `critical` and `important` finding in
-   its thread, commit, rerun `loopzero check`, and push with `loopzero pr`.
-   Every pushed head needs review, so put
-   mechanical format, lint, or rename repairs in the same push as the substantive
-   repairs and spend the one delta review on that head. Reply with what changed using
-   `loopzero resolve <id> "<fix commit and what changed>"`; do not resolve a
-   thread silently.
+7. After the primary `loopzero review`, fix every valid `critical` and
+   `important` finding, commit, rerun `loopzero check`, and push with
+   `loopzero pr`. Every pushed head needs review, so put mechanical format,
+   lint, or rename repairs in the same push as the substantive repairs and spend
+   the one delta review on that head. Reply in each thread with
+   `loopzero resolve <id> "<fix commit and what changed>"`, or with the reason a
+   finding does not apply; do not resolve a thread silently.
 8. Stop at `loopzero ready --wait`; it waits for the required checks, so never
-   write a `gh` polling loop. Merge only when the task says so, with
-   `loopzero merge --wait`.
+   write a `gh` polling loop. Merge only when the task says so; from the
+   repository root, run `(cd <worktree> && loopzero merge --wait)`.
 
 ## Stop when
 
@@ -61,6 +64,6 @@ when splitting work or choosing an executor.
 
 ## Do not
 
-- Skip the sandbox or run checks with network to make them pass.
+- Skip the sandbox or enable `[checks].network` to make checks pass.
 - Address suggestions by expanding scope; note them and move on.
 - Commit from inside a check, hook or script. Only you commit.

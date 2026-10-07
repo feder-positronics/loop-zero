@@ -37,11 +37,12 @@ value. Exact choreography needs a safety reason or observed failure.
 ## Output And Exit
 
 For an opinion pass, return the assessment, ranked concerns, recommended
-direction, and material uncertainty. For a findings review, return only the
-highest-value evidence-backed findings as `critical`, `important`, or
-`suggestion`, plus one synthesis and the review limits.
+direction, and material uncertainty. For a findings review, return the
+evidence-backed findings at the requested breadth as `critical`, `important`,
+or `suggestion`, plus one synthesis and the review limits.
 
 Leave the target unchanged. Exit when scope and altitude are explicit, each
 concern is supported by inspected evidence, and uncertainty is stated. If the
-review belongs to a live task, keep actionable discussion in its issue or PR
-threads; do not create a separate findings store.
+review belongs to a live task, leave findings to its PR review threads and
+other actionable discussion to its issue or PR; do not create a separate
+findings store.

@@ -55,6 +55,6 @@ or treat an unplaced record as complete.
 - If the same question loops twice, decide within scope or defer it.
 - If the requester shows fatigue or says "wrap up," summarize immediately and
   defer the remainder.
-- Exit when every material branch has a status and the requester has confirmed
-  the record once. Hand the record to the issue or task Notes for planning and
-  implementation.
+- For normal completion, exit when every material branch has a status and the
+  requester has confirmed the record once. Hand the record to the issue or task
+  Notes for planning and implementation.

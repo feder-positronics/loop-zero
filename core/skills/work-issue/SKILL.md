@@ -43,12 +43,14 @@ when splitting work or choosing an executor.
 6. Run `loopzero review` for the primary review, independent by default or
    explicitly labeled under the contract's bounded owner-approved
    contributor-review exception with reduced assurance. Address every open
-   `critical` and `important` thread, reply with the fix commit, rerun
-   `loopzero check`, and use the single delta review allowed by the contract.
+   `critical` and `important` thread: commit the fixes, rerun `loopzero check`,
+   push with `loopzero pr`, reply with the fix commit, and use the single delta
+   review allowed by the contract.
 7. Run `loopzero ready --wait`; it waits for the required checks on this head.
    Never write a `gh` polling loop. Do not bypass readiness or resolve a finding
    silently.
-8. Recheck issue and competing-PR state, then run `loopzero merge --wait`. Do not close
+8. Recheck issue and competing-PR state, then, from the repository root, run
+   `(cd <worktree> && loopzero merge --wait)`. Do not close
    an umbrella issue from a partial delivery.
 
 ## Stops
@@ -66,8 +68,8 @@ when splitting work or choosing an executor.
 
 Done means the acceptance lines for this delivery are satisfied, its PR is
 merged, no blocking review thread remains, and `loopzero merge` has completed
-branch and worktree cleanup. For a closing delivery, verify `Closes #N` and that
-GitHub shows the issue closed; for a `Refs #N` partial delivery, verify the issue
-remains open and report the remaining acceptance. Report the issue, PR, merge
-SHA, validation, thread state, verified remote issue and PR state, and the
-connected environment state when acceptance depends on it.
+branch and worktree cleanup. For a closing delivery, verify the closing keyword
+reference and that GitHub shows the issue closed; for a `Refs #N` partial
+delivery, verify the issue remains open and report the remaining acceptance.
+Report the issue, PR, merge SHA, validation, thread state, verified remote issue
+and PR state, and the connected environment state when acceptance depends on it.

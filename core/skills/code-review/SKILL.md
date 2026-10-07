@@ -18,7 +18,8 @@ labeled in the PR narrative and comment.
 ## Judge
 
 Review with professional skepticism. Treat the PR narrative, acceptance
-claims, and passing tests as hypotheses to verify, not as evidence. Trace each
+claims, and passing tests as hypotheses: verify that each test exercises the
+claim it is cited for. Trace each
 changed path through its callers and data; check edge cases (empty, missing,
 boundary, concurrent, failure, retry); and look for inconsistencies between
 code, tests, docs, and the contract.

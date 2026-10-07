@@ -14,5 +14,6 @@ Read this reference when selecting test depth or reviewing test quality.
 
 Follow repository placement, fixture, marker, and naming conventions. Prefer
 minimum-valid builders, isolated fixtures, and clear arrange/act/assert flow.
-Avoid timing tolerance, shared mutable state, duplicate cases, coverage-only
-tests, and assertions that merely restate how a mock was configured.
+Avoid timing tolerance, shared mutable state, duplicate cases, tests that add
+coverage without protecting a named contract, and assertions that merely
+restate how a mock was configured.

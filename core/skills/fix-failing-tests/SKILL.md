@@ -28,7 +28,8 @@ commands or handling missing dependencies.
    prior oracle was wrong.
 4. Rerun the exact reproducer, then only the neighboring tests implied by the
    changed dependency surface. A broad green suite does not replace focused
-   proof. Finish with `loopzero check`.
+   proof. Finish by committing the fix and running `loopzero check` on the
+   clean head.
 
 For an explicitly requested full-suite cleanup, collect the failure set, group
 by demonstrated root cause, repair one coherent group at a time, and rerun the
@@ -41,10 +42,11 @@ Stop for a material product decision rather than choosing it silently. Route an
 unknown product symptom to [diagnose](../diagnose/SKILL.md) and net-new coverage to
 [write-tests](../write-tests/SKILL.md).
 
-Standalone fixes that are broad or change product behavior require
-[code-review](../code-review/SKILL.md) after checks pass.
+Standalone fixes continue through the normal PR workflow; formal review is
+`loopzero review`.
 
 Exit with each failure's classification and evidence, changed owner, focused
 and expanded commands with exit status, remaining limits, and whether the
 requested target is green. Record results in `.loopzero/task.md`; no accepted
-fix weakens the oracle or leaves an unexplained deletion.
+fix weakens the oracle without evidence that it was wrong, or leaves an
+unexplained deletion.

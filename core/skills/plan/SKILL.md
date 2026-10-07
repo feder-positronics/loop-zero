@@ -52,6 +52,6 @@ or `.loopzero/task.md`, and enough code to verify current behavior and ownership
 
 ## Do not
 
-- Plan extra review rounds or tracking documents. The contract already
-  fixes one primary review plus one delta.
+- Plan extra review rounds or tracking documents. The contract allows one
+  primary review plus at most one delta per head lineage.
 - Plan work outside the requested change to "clean up while here".

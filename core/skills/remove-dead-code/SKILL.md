@@ -34,7 +34,8 @@ The order is load-bearing:
 2. Quarantine the batch as a reviewable removal diff, retaining its exact prior
    content in Git. Do not mix refactoring or unrelated cleanup into the diff.
 3. Inspect build, packaging, generated-artifact, and documentation consequences,
-   then run `loopzero check` against the quarantined state.
+   then commit the quarantined batch and run `loopzero check` on that clean
+   head.
 4. Keep the removal only when every relevant check passes. On failure, restore
    the batch to its rollback point and classify it for refactor or manual review;
    do not debug while it remains half-removed.
