@@ -280,10 +280,8 @@ def _not_found(number: int, exc: Exception) -> GhError:
     return GhError(("gh", "api"), f"PR #{number} not found or not accessible ({exc!r})")
 
 
-def _api(endpoint: str, payload: dict | None = None, method: str = "POST",
+def _api(endpoint: str, payload: dict, method: str = "POST",
          token: str | None = None) -> object:
-    if payload is None:
-        return api_get(endpoint)
     path = _with_file(json.dumps(payload))
     try:
         return _gh_json("api", endpoint, "--method", method, "--input", str(path), token=token)

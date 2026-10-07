@@ -184,7 +184,6 @@ class Marker:
     head: str
     kind: str
     state: str
-    verdict: str  # "approve" | "request_changes" | ""
 
 
 def _lineage_markers(wt: Path, reviews: list[dict], head: str,
@@ -203,13 +202,7 @@ def _lineage_markers(wt: Path, reviews: list[dict], head: str,
             continue
         if not _is_ancestor(wt, match.group(1), head):
             continue
-        state = review.get("state") or ""
-        verdict = ""
-        if state == "CHANGES_REQUESTED" or "**request_changes**" in body:
-            verdict = "request_changes"
-        elif state == "APPROVED" or "**approve**" in body:
-            verdict = "approve"
-        found.append(Marker(match.group(1), match.group(2), state, verdict))
+        found.append(Marker(match.group(1), match.group(2), review.get("state") or ""))
     return found
 
 

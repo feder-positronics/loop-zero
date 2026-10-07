@@ -216,7 +216,6 @@ def _run(
     *,
     cwd: Path,
     prompt: str,  # delivered on stdin
-    extra_env: dict[str, str],
     env_allowlist: tuple[str, ...],
     timeout: int,
     family: str,
@@ -226,7 +225,6 @@ def _run(
             argv,
             cwd=cwd,
             env_allowlist=env_allowlist,
-            extra_env=extra_env,
             timeout=timeout,
             input=prompt,
         )
@@ -484,7 +482,7 @@ def _review_claude(
         prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
         argv[0] = str(binary)
         done = _run(
-            [*prefix, *argv], cwd=cwd, prompt=prompt, extra_env={},
+            [*prefix, *argv], cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV), timeout=timeout,
             family="claude",
         )
@@ -561,7 +559,6 @@ def _review_codex(
         ]
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt,
-            extra_env={},
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
             family="codex",
         )
