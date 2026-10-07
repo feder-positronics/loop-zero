@@ -22,7 +22,7 @@ from loopzero.runners import (
 from loopzero.sandbox import SANDBOX_HOME, SandboxUnavailable
 
 from .conftest import git
-from .test_sandbox import FAKE_BWRAP
+from .test_sandbox import FAKE_BWRAP, _pairs
 
 APPROVE = {"verdict": "approve", "findings": []}
 CHANGES = {
@@ -39,10 +39,6 @@ def _argv(bin_dir: Path, name: str) -> list[str]:
 
 def _bwrap_argv(log: Path) -> list[str]:
     return log.read_text().splitlines()
-
-
-def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
-    return [(argv[i + 1], argv[i + 2]) for i, arg in enumerate(argv) if arg == flag]
 
 
 @pytest.fixture(autouse=True)
