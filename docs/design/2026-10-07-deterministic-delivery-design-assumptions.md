@@ -691,5 +691,6 @@ mode must not infer those observations. R3/R4 retain their own owning acceptance
 
 R1 is prepared with source/test proofs, including pre-fix failures for task-path
 broadening, protected-source exposure and real sibling-marker visibility. At this
-checkpoint formal delivery and the explicit size-budget decision are pending;
+checkpoint formal delivery is pending. The owner approved caps of 4,950 source
+and 6,950 test lines on October 7 for this slice and its review repairs;
 this preparation does not establish deployed isolation or semantic reviewer quality.

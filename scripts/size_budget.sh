@@ -12,8 +12,10 @@ set -euo pipefail
 # refusal/compatibility proofs (parent-authorized 2026-10-07, measured 4873/6611).
 # Ready-wait post-transition revalidation and public CLI boundary proofs
 # (parent-authorized 2026-10-07, measured 4884/6753); all check commands remain.
-SRC_CAP=4884
-TESTS_CAP=6753
+# Review-only runtime authority and complete mount-boundary proofs
+# (owner approval 2026-10-07, caps 4950/6950); all check commands remain.
+SRC_CAP=4950
+TESTS_CAP=6950
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

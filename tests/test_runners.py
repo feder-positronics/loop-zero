@@ -482,6 +482,22 @@ def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path
     assert str(fake_bin) not in [path for pair in _pairs(argv, "--ro-bind-try") for path in pair]
 
 
+def test_empty_secure_storage_override_preserves_native_default(
+    fake_bin, tmp_path, fake_bwrap, monkeypatch,
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    host = tmp_path / "host"
+    host.mkdir()
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
+    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    assert _review("claude", repo).verdict == "approve"
+    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        _review("claude", repo, reviewer_ro_paths=(str(Path.home() / ".claude"),))
+
+
 @pytest.mark.parametrize("state", [
     ".claude", ".codex", ".claude.json", "custom-claude", "custom-codex", "secure-storage",
 ])

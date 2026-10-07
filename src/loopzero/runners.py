@@ -304,7 +304,7 @@ def _sandbox_prefix(
         Path.home() / ".claude", Path.home() / ".codex",
         os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"),
         os.environ.get("CODEX_HOME", Path.home() / ".codex"),
-        os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR", Path.home() / ".claude"),
+        os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or Path.home() / ".claude",
     )))
     state_file = (Path.home() / ".claude.json").resolve()
     implicit_file = not ro_paths and any(

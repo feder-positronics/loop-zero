@@ -77,7 +77,8 @@ def test_accepted_publication_recovers_saved_verdict(
     else:
         code, out, err = run(capsys, "review")
     assert code == verdict, err
-    assert out.startswith(f"{kind} review by claude")
+    assert out.splitlines()[-1].startswith(f"{kind} review by claude")
+    assert interrupted is True or out.startswith("reviewer paths pinned to origin/main@")
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
     writes = [c for c in gh.calls if "--input" in c]
     assert len(writes) == 1, "confirmed recovery must not write again, including the PR body"
@@ -130,7 +131,9 @@ def test_recovery_requires_exact_live_publication(
         code, out, err = run(capsys, "review", "--repost")
     assert code == (5 if change == "duplicates" else 1), err
     if change != "duplicates":
-        assert not out
+        assert not out if interrupted else (
+            out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
+        )
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
@@ -174,7 +177,8 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
         return data
     monkeypatch.setattr(github, "api_get", read)
     code, out, err = run(capsys, "review")
-    assert code == 1 and not out and "read-back blocked" in err
+    assert code == 1 and "read-back blocked" in err
+    assert out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
