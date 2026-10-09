@@ -22,7 +22,9 @@ commands or handling missing dependencies.
 2. Establish the intended contract from acceptance, repository guidance,
    neighboring tests, production behavior, and history. Classify the owner as
    production regression, stale or incorrect test, or environmental/flaky
-   isolation defect.
+   isolation defect. A flaky family with an onset date stays a regression
+   candidate until the changes landed at that onset are compared; use
+   [diagnose](../diagnose/SKILL.md) for that comparison.
 3. Change the smallest correct owner. Do not delete coverage, weaken an
    assertion, or broaden timing or retry tolerance without evidence that the
    prior oracle was wrong.
