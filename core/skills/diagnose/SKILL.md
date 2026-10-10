@@ -25,6 +25,8 @@ smallest repair and validation contract. Stop before implementation.
    evidence already captured for every failure, such as stack dumps, timings
    and logs, before adding instrumentation. Treat "unrelated" or
    "infrastructure" as a hypothesis to test, not a starting classification.
+   Run disposable experiments in one investigation worktree; batch any hosted
+   instrumentation into one delivery per set of hypotheses.
 4. If several explanations remain, rank hypotheses with evidence for and
    against each. Choose an experiment that separates the leading explanations,
    then rerank after each result. Confirm the cause by predicting and observing

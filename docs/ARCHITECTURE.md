@@ -266,7 +266,10 @@ not treat automatic compaction as assurance that intent survives.
 The pinned [PR watcher](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/PullRequestWatchReactor.ts)
 supplies a hint before merge; terminal merged/closed observations end the watch
 without a wake. Consequently, one `loopzero merge --wait` owns landing
-verification and cleanup. The pinned [notification mailbox](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/NotificationMailbox.ts)
+verification and cleanup. It first waits out required checks still pending or
+missing on the unchanged head under the same budget, so a check created by the
+draft-to-ready write cannot strand a turn between `ready` and the queue. A watch
+only shortens a wait; it never replaces rerunning the waiter. The pinned [notification mailbox](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/NotificationMailbox.ts)
 explicitly permits at-least-once delivery. Our execution rule follows from that
 boundary: reread Git, GitHub and the current head before acting, and make repeated
 execution idempotent. Timeline message IDs do not establish external exactly-once

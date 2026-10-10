@@ -1043,15 +1043,20 @@ def _wait_for_mergify(
                            f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
 
 
+class _AdmissionDeadline(Exception):
+    """The --wait budget expired before a new merge or queue request."""
+
+
 def _merge_with_mergify(
     wt: Path, config: Config, branch: str, pr: github.PR,
-    readiness: github.Readiness, timeout: float | None,
+    readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
     behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
     blockers = tuple(reason for reason in readiness.reasons if reason != behind)
     if blockers:
-        raise CliError("not ready to request Mergify: " + "; ".join(blockers))
+        hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+        raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
     queue = config.mergify_queue
     assert queue is not None
     if not mergify.configured(config.repo, config.base_branch, queue):
@@ -1076,10 +1081,12 @@ def _merge_with_mergify(
         raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
                        f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
     if not confirmed and not requested:
+        if admit_by is not None and time.monotonic() > admit_by:
+            raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
         requested = True
-    if timeout is not None:
-        return _wait_for_mergify(config, pr, timeout, confirmed)
+    if deadline is not None:
+        return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed)
     state_name = "confirmed in" if confirmed else "requested from"
     print(
         f"PR #{pr.number} {state_name} Mergify queue {queue}; "
@@ -1100,7 +1107,21 @@ def cmd_merge(args: argparse.Namespace) -> int:
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
-    pr, readiness = _pr_readiness(wt, config, allow_merged=True)
+    pr, readiness = _pr_readiness(
+        wt, config, allow_merged=True, workflow_wait=args.wait is not None
+    )
+    started = time.monotonic()
+    deadline = None if args.wait is None else started + args.wait
+    # --wait=0 observes once; a positive budget also bounds merge or queue admission.
+    admit_by = deadline if args.wait else None
+    if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
+        # One waiter and one deadline span source checks and landing: a check created
+        # by the ready transition must not end the turn between `ready` and the queue.
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started)
+        if waited is None:
+            print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
+            return 3
+        pr, readiness, _ = waited
     if readiness is None:
         sha = github.merged_sha(
             config.repo, pr.number,
@@ -1110,7 +1131,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
             raise CliError(f"PR #{pr.number} reports MERGED but has no merge commit yet; rerun")
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
-        sha = _merge_with_mergify(wt, config, branch, pr, readiness, args.wait)
+        try:
+            sha = _merge_with_mergify(wt, config, branch, pr, readiness, deadline, admit_by)
+        except _AdmissionDeadline:
+            print(f"timed out before requesting Mergify for PR #{pr.number}")
+            return 3
         if sha is None:
             if args.wait is not None:
                 print(f"timed out waiting for Mergify to land PR #{pr.number}")
@@ -1120,9 +1145,12 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if not readiness.ready:
             hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness) else ""
             raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
+        if admit_by is not None and time.monotonic() > admit_by:
+            print(f"timed out before merging PR #{pr.number}")
+            return 3
         sha = github.merge(config.repo, pr.number, config.merge_strategy, pr.head_sha)
         if sha is None and args.wait is not None:
-            sha = _wait_for_merge(config, pr, args.wait)
+            sha = _wait_for_merge(config, pr, max(0.0, deadline - time.monotonic()))
             if sha is None:
                 print(f"timed out waiting for the merge queue to land PR #{pr.number}")
                 return 3

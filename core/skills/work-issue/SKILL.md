@@ -28,7 +28,8 @@ when splitting work or choosing an executor.
    Use `Refs #N` for a partial delivery; use a closing keyword only when this PR
    completes all issue acceptance. GitHub matches closing references in the
    rendered PR description and commit messages even in negated prose, so inspect
-   both before publication and again before merge.
+   both before publication and again before merge. An incident whose closure
+   needs an observation window is not complete at merge; use `Refs #N`.
 
 ## Deliver
 
@@ -49,8 +50,9 @@ when splitting work or choosing an executor.
 7. Run `loopzero ready --wait`; it waits for the required checks on this head.
    Never write a `gh` polling loop. Do not bypass readiness or resolve a finding
    silently.
-8. Recheck issue and competing-PR state, then, from the repository root, run
-   `(cd <worktree> && loopzero merge --wait)`. Do not close
+8. In the same turn, recheck issue and competing-PR state, then, from the
+   repository root, run `(cd <worktree> && loopzero merge --wait)`; it also
+   waits out checks the ready transition started. Do not close
    an umbrella issue from a partial delivery.
 
 ## Stops
