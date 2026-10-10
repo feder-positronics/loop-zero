@@ -34,7 +34,9 @@ hold all state. Nothing is recorded anywhere else.
 6. `loopzero merge` — recompute readiness, merge with the configured strategy,
    verify the merge SHA, delete the branch and the worktree. Under a merge
    queue the first run enqueues; `--wait[=SECONDS]` follows the queue to the
-   landed SHA and cleans up in the same run.
+   landed SHA and cleans up in the same run. With `--wait`, required checks
+   still pending or missing on the unchanged head are waited out first, under
+   the same budget; without it, `merge` refuses and names `merge --wait`.
 
 `loopzero status` prints where a branch is in this sequence, derived from Git
 and GitHub only.
@@ -43,6 +45,15 @@ End each delivery response with its outcome: the authorized scope is complete,
 or it is blocked (name the exact dependency or decision), or it is waiting
 (name the event, the next action, and whether it resumes on its own or needs
 the requester).
+
+Observe, act, wait with a bounded `--wait`, then observe again. Never end a turn
+waiting for notice of an event that may already have happened: after
+`ready --wait` exits 0, run `merge --wait` in the same turn. A watch or
+notification only shortens a wait; it never replaces rerunning the wait
+command. On every start or resume, run `loopzero status`, then rerun the last
+`--wait` command; both are idempotent. Before yielding, record in a PR comment
+the head, the last exit code, the awaited event and the next command, so any
+session can continue. Stop on terminal failures or quota errors.
 
 ## Blockers
 

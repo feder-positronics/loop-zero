@@ -165,8 +165,9 @@ remain nonzero; candidate attestation still requires reviewed sources.
 Keep the local required-check list, Mergify `queue_conditions`, and the effective
 GitHub ruleset on exactly those context names. Validate the consumer configuration
 before admission. `loopzero merge` posts the queue command only after source
-readiness passes and refuses while eligibility is pending; wait with
-`loopzero ready --wait` first.
+readiness passes. Without `--wait` it refuses while a required check or
+eligibility is pending; `loopzero merge --wait` waits those out on the unchanged
+head under one budget, then requests the queue.
 
 Prove: two reviewed siblings land without source rewrites; a pushed head loses
 eligibility; dismissed reviews and supported finding mutations withdraw eligibility;

@@ -1873,6 +1873,149 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     assert "bare" in git(primary, "worktree", "list", "--porcelain")
 
 
+def test_merge_wait_waits_out_a_pending_check_then_merges(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, head
+) -> None:
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    arm_check_runs(gh, head, *([{"name": "checks", "status": "in_progress"}],) * 2,
+                   [{"name": "checks", "status": "completed", "conclusion": "success"}])
+    gh.respond("pr merge", "")
+    open_pr = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
+    gh.append(f"api repos/{REPO}/pulls/7", open_pr, open_pr, open_pr,
+              merge_json(state="MERGED", head=head, sha="c" * 40))
+    gh.respond("api -X", "")
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    code, out, err = run(capsys, "merge", "--wait")
+
+    assert (code, err) == (0, "")
+    assert "waiting: required check 'checks' is pending" in out
+    assert out.splitlines()[-1] == "c" * 40 and not wt.exists()
+
+
+def test_merge_wait_times_out_on_pending_checks_with_exit_three(
+    wt: Path, gh: FakeGh, capsys, head
+) -> None:
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+
+    code, out, err = run(capsys, "merge", "--wait=0")
+
+    assert (code, err) == (3, "")
+    assert f"timed out waiting for required checks on {head[:12]}" in out
+    assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+
+
+@pytest.mark.parametrize("strategy", ["squash", "mergify"])
+def test_merge_wait_refuses_admission_after_the_shared_deadline(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, strategy
+) -> None:
+    if strategy == "mergify":
+        commit_mergify_configuration(wt)
+        monkeypatch.setattr(mergify, "configured", lambda *_: True)
+        monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+        monkeypatch.setattr(mergify, "membership", lambda *_: None)
+        monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("queued after the deadline"))
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [1000.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+
+    def green_after_deadline(_wt, _config, pr, *_args, **_kwargs):
+        clock[0] += 11
+        return pr, github.Readiness(ready=True, reasons=()), False
+
+    monkeypatch.setattr(cli, "_wait_for_checks", green_after_deadline)
+
+    code, out, err = run(capsys, "merge", "--wait=10")
+
+    assert (code, err) == (3, "")
+    assert "timed out before " in out
+    assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+
+
+@pytest.mark.parametrize("strategy", ["squash", "mergify"])
+def test_merge_wait_reports_terminal_failure_seen_after_the_deadline(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, strategy
+) -> None:
+    if strategy == "mergify":
+        commit_mergify_configuration(wt)
+        monkeypatch.setattr(mergify, "configured", lambda *_: True)
+        monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("queued a failed head"))
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [1000.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    failed = "required check 'checks' is failure"
+
+    def failure_after_deadline(_wt, _config, pr, *_args, **_kwargs):
+        clock[0] += 11
+        return pr, github.Readiness(ready=False, reasons=(failed,)), False
+
+    monkeypatch.setattr(cli, "_wait_for_checks", failure_after_deadline)
+
+    code, _out, err = run(capsys, "merge", "--wait=10")
+
+    assert code == 1 and failed in err and wt.exists()
+
+
+def test_mergify_admission_lookups_count_against_the_deadline(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [1000.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+
+    def slow_membership(*_args):
+        clock[0] += 2
+
+    monkeypatch.setattr(mergify, "membership", slow_membership)
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("queued after the deadline"))
+
+    def green_at_nine_seconds(_wt, _config, pr, *_args, **_kwargs):
+        clock[0] += 9
+        return pr, github.Readiness(ready=True, reasons=()), False
+
+    monkeypatch.setattr(cli, "_wait_for_checks", green_at_nine_seconds)
+
+    code, out, err = run(capsys, "merge", "--wait=10")
+
+    assert (code, err) == (3, "") and "timed out before requesting Mergify for PR #7" in out
+
+
+def test_mergify_landing_wait_uses_the_remaining_shared_budget(
+    wt: Path, gh: FakeGh, capsys, monkeypatch
+) -> None:
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [1000.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+
+    def request(*_args):
+        clock[0] += 2  # admission time counts against the same budget
+
+    monkeypatch.setattr(mergify, "request", request)
+
+    def green_at_four_seconds(_wt, _config, pr, *_args, **_kwargs):
+        clock[0] += 4
+        return pr, github.Readiness(ready=True, reasons=()), False
+
+    monkeypatch.setattr(cli, "_wait_for_checks", green_at_four_seconds)
+    budgets = []
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda _c, _p, timeout, _f: budgets.append(timeout))
+
+    code, _out, _err = run(capsys, "merge", "--wait=10")
+
+    assert code == 3 and budgets == [4.0]
+
+
 def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatch, head) -> None:
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     gh.respond("pr merge", "")
@@ -2065,6 +2208,37 @@ def test_mergify_merge_requests_once_for_behind_head(
         assert "requested from Mergify queue main" in out
     else:
         assert code == 1 and "queue configuration is unverified" in err and not requested
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_mergify_merge_waits_for_pending_checks_only_with_wait(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, wait
+) -> None:
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    arm_check_runs(gh, head, *([{"name": "checks", "status": "in_progress"}],) * 2,
+                   [{"name": "checks", "status": "completed", "conclusion": "success"}])
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    requested = []
+    monkeypatch.setattr(mergify, "request", lambda *args: requested.append(args))
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: "e" * 40)
+    open_pr = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
+    gh.append(f"api repos/{REPO}/pulls/7", open_pr, open_pr, open_pr, open_pr)
+    gh.respond("api -X", "")
+
+    code, out, err = run(capsys, "merge", *(["--wait"] if wait else []))
+
+    if wait:
+        assert (code, err) == (0, "") and requested == [(REPO, 7, head, "main")]
+        assert "waiting: required check 'checks' is pending" in out
+        assert out.splitlines()[-1] == "e" * 40
+    else:
+        assert code == 1 and not requested
+        assert "required check 'checks' is pending; next: loopzero merge --wait" in err
 
 
 @pytest.mark.parametrize("command", ["ready", "status"])

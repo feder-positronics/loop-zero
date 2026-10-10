@@ -48,8 +48,8 @@ when splitting work or choosing an executor.
    `loopzero resolve <id> "<fix commit and what changed>"`, or with the reason a
    finding does not apply; do not resolve a thread silently.
 8. Stop at `loopzero ready --wait`; it waits for the required checks, so never
-   write a `gh` polling loop. Merge only when the task says so; from the
-   repository root, run `(cd <worktree> && loopzero merge --wait)`.
+   write a `gh` polling loop. Merge only when the task says so; in the same
+   turn, from the repository root, run `(cd <worktree> && loopzero merge --wait)`.
 
 ## Stop when
 
