@@ -25,6 +25,11 @@ when splitting work or choosing an executor.
    relying on any user-reported production state.
 3. Run `loopzero start issue-<number>-<slug>`. In `.loopzero/task.md`, translate
    the issue into observable Acceptance lines and keep the issue link in Notes.
+   When the change touches a data migration, authorization, locking or
+   concurrency, or policy and verdict logic, first list in Acceptance the edge
+   cases the proof must cover, such as existing, deleted and duplicate rows,
+   concurrent writers and lock order, authorization boundaries, and rule
+   precedence, and map each to a test or recorded evidence.
    Use `Refs #N` for a partial delivery; use a closing keyword only when this PR
    completes all issue acceptance. GitHub matches closing references in the
    rendered PR description and commit messages even in negated prose, so inspect

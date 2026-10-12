@@ -18,6 +18,11 @@ when splitting work or choosing an executor.
 1. Work only in the task worktree created by `loopzero start`. Confirm its
    branch and `.loopzero/task.md` before the first edit.
 2. Write or extend a test that proves the behavior before or alongside the code.
+   When the change touches a data migration, authorization, locking or
+   concurrency, or policy and verdict logic, first list in Acceptance the edge
+   cases the proof must cover, such as existing, deleted and duplicate rows,
+   concurrent writers and lock order, authorization boundaries, and rule
+   precedence, and map each to a test or recorded evidence.
    Exercise the narrowest stable public seam available to a real caller. If only
    private reach-ins or a test-only extraction make the test possible, report
    the missing seam instead of disguising it as coverage.
