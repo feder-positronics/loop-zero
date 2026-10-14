@@ -102,8 +102,9 @@ Before launch:
 
 - close stdin so a background delegate cannot wait for input;
 - pass the model and effort resolved from the task worktree's `models.toml`;
-- capture output in a log file, record the launched PID, and stop it only by
-  that PID, never by a process-name pattern; and
+- capture output in a log file, record the launched PID, and wait on and stop
+  it only by that PID (`kill -0 <pid>`), never by a process-name pattern: a
+  `pgrep -f` pattern also matches the waiting shell, so the wait never ends; and
 - give each writing delegate its own `loopzero start` worktree.
 
 For example, a writing delegate with the brief in a file (briefs contain
@@ -168,7 +169,10 @@ notifications rather than reading their output files, and, when a resolved route
 is unavailable (for example a provider at its usage limit), tell the requester
 which substitute runs. Start a fresh parent session with a short handoff at a
 delivery milestone or once its context passes roughly 300k tokens; do not reuse
-a finished delivery session for monitoring or unrelated follow-ups.
+a finished delivery session for monitoring or unrelated follow-ups. Roll over
+yourself: launch the successor from the handoff, move any recurring task bound
+to this session to it, post its link and stop. Do not ask the requester to start
+it; a bare "continue" after a rollover recommendation means continue there.
 
 The parent reads the returned diff or evidence and verifies acceptance. Worker
 claims of success are not proof. The parent runs `loopzero check` once; if its
