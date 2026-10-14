@@ -31,6 +31,7 @@ _SHA = re.compile(r"^[0-9a-f]{40}$")
 _ATTEST_ATTEMPTS = 3
 _ATTEST_SECONDS = 30
 _ATTEST_DELAY = 2
+_BATCH_SECONDS = 90
 _retry_sleep = time.sleep
 _TREE_SECONDS = 120
 _TREE_BYTES = 256 * 1024 * 1024
@@ -48,6 +49,10 @@ SourcePolicy = Callable[[int, JsonObject], None]
 
 class CandidateError(RuntimeError):
     """Candidate identity, membership, history, or source policy failed closed."""
+
+
+class CandidateBatchError(CandidateError):
+    """The candidate has no unique live batch during a possible queue rebuild."""
 
 
 class CandidateRaceError(CandidateError):
@@ -113,6 +118,7 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
     _require(
         len(matches) == 1,
         f"PR #{candidate_number} is not exactly one live Mergify batch",
+        CandidateBatchError,
     )
     candidate_id = matches[0]["id"]
     pending = [candidate_id]
@@ -167,6 +173,7 @@ def _candidate_snapshot(
         candidate.get("number") == event_pr.get("number"),
         "GitHub returned the wrong candidate PR",
     )
+    _require(candidate.get("state") != "closed", "Mergify candidate PR is superseded (closed)")
     _require(candidate.get("state") == "open", "Mergify candidate PR is not open")
     _require(candidate.get("draft") is True, "Mergify candidate PR must be a draft")
     _require(
@@ -370,6 +377,7 @@ def attest_candidate(
     source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
     """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
+    batch_deadline = time.monotonic() + _BATCH_SECONDS
     deadline = time.monotonic() + _ATTEST_SECONDS
     for attempt in range(_ATTEST_ATTEMPTS):
         try:
@@ -378,6 +386,7 @@ def attest_candidate(
                 github_get=github_get,
                 mergify_status=mergify_status,
                 source_policy=source_policy,
+                batch_deadline=batch_deadline,
             )
         except CandidateRaceError:
             if attempt + 1 == _ATTEST_ATTEMPTS or time.monotonic() + _ATTEST_DELAY >= deadline:
@@ -394,6 +403,7 @@ def _attest_candidate_once(
     github_get: GitHubGet,
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
+    batch_deadline: float,
 ) -> list[dict[str, object]]:
     """Return stable source evidence after every source passes `source_policy`."""
     repository = event.get("repository")
@@ -467,7 +477,28 @@ def _attest_candidate_once(
         expected_identity=expected_identity,
     )
 
-    first_lineage = _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
+    def live_lineage() -> tuple[str, list[int], list[str]]:
+        delay = 2
+        while True:
+            try:
+                return _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
+            except CandidateBatchError:
+                def recheck_candidate() -> None:
+                    current = _object(github_get(candidate_path), "Invalid candidate lookup")
+                    _candidate_snapshot(current, event_pr=event_pr, repository=repository,
+                                        expected_identity=expected_identity)
+
+                recheck_candidate()
+                remaining = batch_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                _retry_sleep(min(delay, remaining))
+                recheck_candidate()
+                if time.monotonic() >= batch_deadline:
+                    raise
+                delay = min(delay * 2, 30)
+
+    first_lineage = live_lineage()
     main_path = f"/repos/{full_name}/git/ref/heads/main"
     main_before = github_get(main_path) if first_lineage[2] else None
     source_snapshots: dict[int, tuple[str, tuple[object, ...]]] = {}
@@ -518,7 +549,7 @@ def _attest_candidate_once(
                 f"Missing Mergify parent batches {', '.join(first_lineage[2])}: {exc}"
             ) from None
 
-    second_lineage = _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
+    second_lineage = live_lineage()
     _require(
         second_lineage == first_lineage,
         "Mergify candidate membership changed during attestation",

@@ -198,6 +198,12 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
+Candidate lineage reads wait on zero or multiple live batch matches with exponential
+backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
+both reads and all attestation attempts. Each wait revalidates the candidate before
+and after sleeping; closure is a terminal superseded-candidate error. Malformed
+status and other identity failures are not retried, and success still requires
+exactly one batch and stable lineage. Caller-owned synchronous reads are not preempted.
 Candidate attestation retries typed concurrent source metadata, Mergify membership
 and main-ref drift, and landed sources still listed in lineage, up to three complete
 attempts with two-second pauses. A policy exception becomes a landing race only

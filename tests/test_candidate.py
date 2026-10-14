@@ -13,7 +13,9 @@ from loopzero.types import LoopZeroError
 
 @pytest.fixture(autouse=True)
 def no_retry_delay(monkeypatch):
-    monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda _: None)
+    clock = [0.0]
+    monkeypatch.setattr("loopzero.candidate.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
 
 def event() -> dict:
@@ -575,3 +577,31 @@ def test_membership_drift_is_a_retryable_race():
     changed["batches"][1]["sub_batches"][0]["pull_requests"] = [{"number": 103}]
     with pytest.raises(CandidateRaceError, match="membership changed"):
         run_attestation(status_reads=[status(), changed])
+
+
+@pytest.mark.parametrize("matches,second,stop", [(n, s, t) for n in (0, 2) for s in (False, True) for t in ("settled", "ambiguous", "closed", "slow", "oversleep")])
+def test_rebuild_wait(monkeypatch, matches, second, stop):
+    from loopzero import candidate
+    clock, sleeps, reads, values = [0], [], [], payloads(event())
+    ambiguous = {"batches": [{"id": str(i), "queue_pull_request_number": 900} for i in range(matches)]}
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += 100 if stop == "oversleep" else delay
+        if stop == "closed":
+            values["/repos/owner/repo/pulls/900"]["state"] = "closed"
+    def read_status(*_):
+        reads.append(clock[0])
+        if stop == "slow":
+            clock[0] += 100
+        return status() if (second and len(reads) == 1 or stop == "settled" and len(reads) > 1 + second) else ambiguous
+    monkeypatch.setattr(candidate.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(candidate, "_retry_sleep", sleep)
+    def run():
+        return attest_candidate(event(), github_get=lambda p: deepcopy(values[p]), mergify_status=read_status, source_policy=lambda *_: None)
+    if stop == "settled":
+        assert run() == [{"number": 101, "head_sha": "1" * 40}, {"number": 102, "head_sha": "2" * 40}]
+    else:
+        with pytest.raises(CandidateError, match="superseded" if stop == "closed" else "not exactly one live"):
+            run()
+        assert len(reads) <= 7 and sum(sleeps) <= 90
+        assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
