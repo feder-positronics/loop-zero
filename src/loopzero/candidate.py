@@ -33,6 +33,7 @@ _ATTEST_SECONDS = 30
 _ATTEST_DELAY = 2
 _BATCH_SECONDS = 90
 _retry_sleep = time.sleep
+_retry_clock = time.monotonic
 _TREE_SECONDS = 120
 _TREE_BYTES = 256 * 1024 * 1024
 _TREE_OUTPUT = 8 * 1024 * 1024
@@ -377,8 +378,9 @@ def attest_candidate(
     source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
     """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
-    batch_deadline = time.monotonic() + _BATCH_SECONDS
-    deadline = time.monotonic() + _ATTEST_SECONDS
+    batch_wait = [0.0]
+    batch_deadline = _retry_clock() + _BATCH_SECONDS
+    deadline = _retry_clock() + _ATTEST_SECONDS
     for attempt in range(_ATTEST_ATTEMPTS):
         try:
             return _attest_candidate_once(
@@ -387,12 +389,14 @@ def attest_candidate(
                 mergify_status=mergify_status,
                 source_policy=source_policy,
                 batch_deadline=batch_deadline,
+                batch_wait=batch_wait,
             )
         except CandidateRaceError:
-            if attempt + 1 == _ATTEST_ATTEMPTS or time.monotonic() + _ATTEST_DELAY >= deadline:
+            race_deadline = min(batch_deadline, deadline + batch_wait[0])
+            if attempt + 1 == _ATTEST_ATTEMPTS or _retry_clock() + _ATTEST_DELAY >= race_deadline:
                 raise
             _retry_sleep(_ATTEST_DELAY)
-            if time.monotonic() >= deadline:
+            if _retry_clock() >= race_deadline:
                 raise
     raise AssertionError("unreachable")
 
@@ -404,6 +408,7 @@ def _attest_candidate_once(
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
     batch_deadline: float,
+    batch_wait: list[float],
 ) -> list[dict[str, object]]:
     """Return stable source evidence after every source passes `source_policy`."""
     repository = event.get("repository")
@@ -489,12 +494,14 @@ def _attest_candidate_once(
                                         expected_identity=expected_identity)
 
                 recheck_candidate()
-                remaining = batch_deadline - time.monotonic()
+                remaining = batch_deadline - _retry_clock()
                 if remaining <= 0:
                     raise
+                started = _retry_clock()
                 _retry_sleep(min(delay, remaining))
+                batch_wait[0] += _retry_clock() - started
                 recheck_candidate()
-                if time.monotonic() >= batch_deadline:
+                if _retry_clock() >= batch_deadline:
                     raise
                 delay = min(delay * 2, 30)
 

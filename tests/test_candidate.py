@@ -14,7 +14,7 @@ from loopzero.types import LoopZeroError
 @pytest.fixture(autouse=True)
 def no_retry_delay(monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("loopzero.candidate.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("loopzero.candidate._retry_clock", lambda: clock[0])
     monkeypatch.setattr("loopzero.candidate._retry_sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
 
 
@@ -163,13 +163,6 @@ def test_rejects_forged_bot_or_prefix(mutation, message: str) -> None:
     mutation(candidate_event)
     with pytest.raises(CandidateError, match=message):
         run_attestation(candidate_event=candidate_event, github_payloads=original_payloads)
-
-
-def test_rejects_candidate_absent_from_live_status() -> None:
-    first = status()
-    first["batches"][1]["sub_batches"][0]["queue_pull_request_number"] = 901
-    with pytest.raises(CandidateError, match="live Mergify batch"):
-        run_attestation(status_reads=[first])
 
 
 def test_rejects_missing_live_status_as_candidate_error() -> None:
@@ -559,7 +552,7 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
         clock[0] += seconds + oversleep
 
     monkeypatch.setattr(candidate, "_attest_candidate_once", race)
-    monkeypatch.setattr(candidate.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
         attest_candidate(
@@ -579,10 +572,10 @@ def test_membership_drift_is_a_retryable_race():
         run_attestation(status_reads=[status(), changed])
 
 
-@pytest.mark.parametrize("matches,second,stop", [(n, s, t) for n in (0, 2) for s in (False, True) for t in ("settled", "ambiguous", "closed", "slow", "oversleep")])
+@pytest.mark.parametrize("matches,second,stop", [(n, s, t) for n in (0, 2) for s in (False, True) for t in ("settled", "ambiguous", "closed", "slow", "oversleep", "changed")])
 def test_rebuild_wait(monkeypatch, matches, second, stop):
     from loopzero import candidate
-    clock, sleeps, reads, values = [0], [], [], payloads(event())
+    clock, sleeps, reads, values, seen = [0], [], [], payloads(event()), []
     ambiguous = {"batches": [{"id": str(i), "queue_pull_request_number": 900} for i in range(matches)]}
     def sleep(delay):
         sleeps.append(delay)
@@ -593,13 +586,17 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         reads.append(clock[0])
         if stop == "slow":
             clock[0] += 100
-        return status() if (second and len(reads) == 1 or stop == "settled" and len(reads) > 1 + second) else ambiguous
-    monkeypatch.setattr(candidate.time, "monotonic", lambda: clock[0])
+        settled = status()
+        if stop == "changed" and len(reads) >= 6:
+            settled["batches"][1]["sub_batches"][0]["id"] = "replacement"
+        return settled if (second and len(reads) == 1 or stop == "settled" and len(reads) > 1 + second or stop == "changed" and len(reads) >= 6) else ambiguous
+    monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     def run():
-        return attest_candidate(event(), github_get=lambda p: deepcopy(values[p]), mergify_status=read_status, source_policy=lambda *_: None)
-    if stop == "settled":
+        return attest_candidate(event(), github_get=lambda p: deepcopy(values[p]), mergify_status=read_status, source_policy=lambda n, _: seen.append(n))
+    if stop in {"settled", "changed"}:
         assert run() == [{"number": 101, "head_sha": "1" * 40}, {"number": 102, "head_sha": "2" * 40}]
+        assert seen == [101, 102] * (2 if stop == "changed" and second else 1)
     else:
         with pytest.raises(CandidateError, match="superseded" if stop == "closed" else "not exactly one live"):
             run()

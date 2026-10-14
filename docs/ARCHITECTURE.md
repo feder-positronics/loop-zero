@@ -203,7 +203,10 @@ backoff capped at 30 seconds and a shared 90-second retry-admission deadline acr
 both reads and all attestation attempts. Each wait revalidates the candidate before
 and after sleeping; closure is a terminal superseded-candidate error. Malformed
 status and other identity failures are not retried, and success still requires
-exactly one batch and stable lineage. Caller-owned synchronous reads are not preempted.
+exactly one batch and stable lineage. Caller-owned synchronous reads are not preempted. Batch sleep time does not
+consume the separate race-retry window, but race retries remain capped by the
+shared 90-second deadline. A second-read wait lengthens the existing interval
+between source policy evaluation and final snapshots; policy evidence is not atomic.
 Candidate attestation retries typed concurrent source metadata, Mergify membership
 and main-ref drift, and landed sources still listed in lineage, up to three complete
 attempts with two-second pauses. A policy exception becomes a landing race only
