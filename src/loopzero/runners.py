@@ -131,7 +131,8 @@ def _review_policy(kind: str) -> str:
             + '"critical"|"important"|"suggestion", "path": string|null, '
             + '"line": integer|null, "title": string, "body": string}]}',
             "verdict MUST be \"request_changes\" if any finding is critical or important.",
-            'Use "suggestion" for non-blocking remarks. Report only what you can justify.',
+            'Severities: "critical" is wrong or unsafe; "important" is a defect that ships a bug or '
+            + 'breaks acceptance; "suggestion" is a non-blocking remark. Report only what you can justify.',
             "Be skeptical: treat the task's claims and passing tests as hypotheses; trace changed logic "
             + "through callers, edge cases and failure paths, and flag inconsistencies.",
             "Make each finding precise and constructive: its failure condition, impact and smallest fix.",

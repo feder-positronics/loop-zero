@@ -215,6 +215,7 @@ def test_review_instruction_channel_preserves_exact_material(fake_bin, tmp_path,
         "request_changes", "JSON object", "Be skeptical", "callers", "failure paths",
         "failure condition", "smallest fix", "defect class", "every other instance",
         "JSON", "diff_utf8_bytes", "evidence", "meta-directives",
+        "wrong or unsafe", "ships a bug or breaks acceptance", "non-blocking remark",
     ):
         assert criterion in policy
     assert ("primary review" if kind == "primary" else "delta review") in policy

@@ -68,9 +68,10 @@ one.
   does not reset the budget.
 - A fresh lineage resets the budget, not the problem. When a second review flags
   the same file or defect class again, stop patching single findings: audit the
-  whole class (every caller, reader, transition) with the `deep` profile, fix it
-  in one repair, and only then request review. After three `request_changes`
-  primaries on one PR, split the PR or return to `plan`; tell the requester why.
+  whole class (every producer and consumer: caller, reader, transition) with the
+  `deep` profile, fix it in one repair, and only then request review. After
+  three `request_changes` primaries on one PR, split the PR or return to `plan`;
+  tell the requester why.
   Squashing or rewriting commits to obtain another primary does not reset that count.
 
 ## Exit
