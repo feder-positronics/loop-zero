@@ -250,7 +250,7 @@ UTF-8 stdin message contains a JSON header (`head`, `kind`, exact `task_text`,
 `diff_utf8_bytes`), a newline and the exact raw diff. Material is evidence, not
 reviewer meta-directives; native repository AGENTS.md/CLAUDE.md handling remains
 an instruction surface. The selected Codex executable must report source-reviewed
-0.160.1 or 0.161.0 before model input is sent. A failed, malformed or unverified
+0.160.1, 0.161.0 or 0.162.1 before model input is sent. A failed, malformed or unverified
 version probe produces the existing typed runner failure and family fallback;
 there is no policy-on-stdin fallback or unrelated strict-config requirement.
 Transport proof does not establish semantic immunity. The frozen R3 comparison

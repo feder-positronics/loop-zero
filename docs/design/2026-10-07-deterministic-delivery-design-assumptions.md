@@ -892,3 +892,49 @@ authority surfaces. At this comparison checkpoint R1/R4/R2 are merged; R3 has
 passed this native gate and awaits formal review, readiness and verified merge.
 D5–D7 and the separately scoped
 deferred adaptations remain deferred.
+
+
+### Codex 0.162.1 instruction-channel verification — October 16, 2026
+
+`git ls-remote https://github.com/openai/codex 'refs/tags/rust-v0.162.1*'`
+resolved annotated tag object `7a078f6bb4ce0dc2a81408b334ce52979d92c603`
+to peeled source commit `092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`.
+A shallow checkout in `~/.cache/intelflo-scratch/codex-src-0162` verified:
+
+- [Recognized developer_instructions field](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/config/src/config_toml.rs#L254)
+  and [configuration resolution](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/config/mod.rs#L4027).
+- [Session copy](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/session/mod.rs#L875),
+  [context rendering](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/session/mod.rs#L4233)
+  and [message emission](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/session/mod.rs#L4415)
+  retain the [explicit developer role](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/context/developer_instructions.rs#L22).
+  [Fragment rendering](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/context-fragments/src/fragment.rs#L97)
+  carries that role into the [response message](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/context_manager/updates.rs#L10).
+- [Exec parses -c overrides](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/exec/src/lib.rs#L349),
+  passes them to [ConfigBuilder](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/exec/src/lib.rs#L617)
+  and the [in-process app-server arguments](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/exec/src/lib.rs#L731),
+  then [ConfigManager](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/app-server/src/in_process.rs#L427).
+  This is independent of [JSON output selection](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/exec/src/lib.rs#L891)
+  and the [ephemeral harness override](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/exec/src/lib.rs#L611).
+- [Unknown CLI key validation remains strict-mode-only](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/config/src/loader/mod.rs#L253),
+  with the [validator](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/config/src/loader/mod.rs#L652)
+  now also checking unknown TUI paths.
+
+Diffed these source files, plus `exec/src/cli.rs`, against 0.161.0 commit
+`979011409de0a60b52f179721948e65531d26144`. The config field, precedence,
+exec override transport and explicit developer role are unchanged. Session context
+assembly now preserves prefix/standalone items and groups fragments only between
+explicit items; [the merge step](https://github.com/openai/codex/blob/092d3acd6bec3e3a14bdc7e7a2810ab628ab759d/codex-rs/core/src/context_manager/updates.rs#L30)
+preserves already-built messages and separates fragment roles. This changes context
+placement/grouping, not the developer-role guarantee. Strict-mode TUI validation
+also changed; loop-zero does not enable strict mode. No breaking link was found.
+
+The installed `~/.codex/packages/standalone/releases/0.162.1-x86_64-unknown-linux-musl/bin/codex`
+reported `codex-cli 0.162.1`; SHA256:
+`628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1`.
+This is research evidence, not a runtime hash gate or backend attestation.
+Its `exec --help` exited 0 and advertised `--ignore-user-config`, so loop-zero's
+existing capability probe selects that flag. It also confirmed `-c`, `-m`,
+`--json`, `--sandbox danger-full-access`, `--cd`, `--ephemeral`,
+`--skip-git-repo-check`, `--output-schema`, `--output-last-message` and stdin `-`.
+The existing argv's TOML `developer_instructions` string, reasoning-effort override
+and `mcp_servers={}` remain compatible; no argv or config-policy change is needed.
