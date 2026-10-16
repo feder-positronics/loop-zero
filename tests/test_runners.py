@@ -233,7 +233,9 @@ def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
     assert tomllib.loads(override)["developer_instructions"].encode() == policy.encode()
 
 
-@pytest.mark.parametrize("version", ["codex-cli 0.160.1", "codex-cli 0.161.0"])
+@pytest.mark.parametrize("version", [
+    "codex-cli 0.160.1", "codex-cli 0.161.0", "codex-cli 0.162.1",
+])
 def test_codex_reviewed_versions_run(fake_bin, tmp_path, version):
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
     assert _review("codex", tmp_path).verdict == "approve"

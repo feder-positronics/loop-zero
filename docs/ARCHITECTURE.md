@@ -158,8 +158,8 @@ inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the exact raw diff without trimming task or diff text.
-The selected Codex binary's version probe accepts only source-reviewed 0.160.1 and
-0.161.0; refusal uses RunnerBadOutput and existing family fallback before model
+The selected Codex binary's version probe accepts only source-reviewed 0.160.1,
+0.161.0 and 0.162.1; refusal uses RunnerBadOutput and existing family fallback before model
 input. Unsupported Claude options follow existing native failure handling.
 Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
 remain enabled. Repository instructions remain a native authority surface, so
