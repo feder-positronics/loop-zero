@@ -10,7 +10,7 @@ next?”, recommend an evidence-backed next item. Report observed drift and orph
 work as observations. If no item is justified, name the blocker or evidence gap
 and the next action. Keep GitHub and the repository read-only unless mutation is
 explicitly requested; recommending pickup does not start it (no branch, worktree
-or `loopzero start`).
+or `loopzero start`). Use `gh api --method GET` for REST reads with fields.
 
 GitHub owns remote state. Confirm repository and authenticated access; inspect
 relevant open issues, linked/closing PRs, labels, relationships, comments,
@@ -26,7 +26,7 @@ Use repository workflow, labels and design statuses. Classify from evidence:
 - **Needs design:** unresolved material design boundary; established small changes
   need no design artifact.
 - **Unclassified:** insufficient evidence.
-- **Orphan PR:** no identifiable issue or accepted task context.
+- **Orphan PR:** neither an identifiable issue nor accepted task context.
 - **Missing PR:** claimed active work cannot be reconciled to a live PR or branch.
 - **Stale:** exceeds the repository's meaningful-update threshold; otherwise
   report age without inventing a threshold.

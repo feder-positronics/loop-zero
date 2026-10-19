@@ -88,12 +88,12 @@ can edit/resolve evidence; branch protection and CI enforce the gates.
   changes since the primary; unresolved primary findings still count under
   Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
-  another may advise read-only and review independently. Before committing
-  imported work, record every actual writing delegate in truthful
+  another may advise read-only and review independently. Before committing,
+  record every actual writer, including yourself and delegates, in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
   Preserve all actual contributors through squash/amend except under the
   authorized disclosure route below; otherwise retain every writer's
-  truthful trailers. Missing attribution stays unknown; never invent it.
+  truthful trailers. Never invent attribution or omit known writers.
 - Primary, delta and repost exclude every recognized trailer family across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot
