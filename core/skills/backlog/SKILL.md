@@ -26,7 +26,7 @@ Use repository workflow, labels and design statuses. Classify from evidence:
 - **Needs design:** unresolved material design boundary; established small changes
   need no design artifact.
 - **Unclassified:** insufficient evidence.
-- **Orphan PR:** neither an identifiable issue nor accepted task context.
+- **Orphan PR:** no identifiable issue or accepted task context.
 - **Missing PR:** claimed active work cannot be reconciled to a live PR or branch.
 - **Stale:** exceeds the repository's meaningful-update threshold; otherwise
   report age without inventing a threshold.
