@@ -8,7 +8,9 @@ description: Recommend next work or report live GitHub backlog state through a r
 Return a live view another actor can continue from. For “what should I pick up
 next?”, recommend an evidence-backed next item. Report observed drift and orphan
 work as observations. If no item is justified, name the blocker or evidence gap
-and the next action.
+and the next action. Keep GitHub and the repository read-only unless mutation is
+explicitly requested; recommending pickup does not start it (no branch, worktree
+or `loopzero start`).
 
 GitHub owns remote state. Confirm repository and authenticated access; inspect
 relevant open issues, linked/closing PRs, labels, relationships, comments,
@@ -48,7 +50,6 @@ Separate observations from recommendations. A missing issue link alone does
 not prove absence of accepted task context. Omit empty sections and state source
 limits.
 
-Keep GitHub and the repository read-only unless mutation is explicitly requested.
 For requested grooming, re-read live state, keep each issue to one bounded outcome,
 and report changed fields/relationships. Reminders without concrete work belong
 as dated-review recommendations in their owning issue/design, not new items.

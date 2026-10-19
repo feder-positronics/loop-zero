@@ -21,7 +21,8 @@ concurrent, failure, and retry cases. Check:
 - Callers, data shapes, permissions, builds, docs, and contract remain consistent.
 
 Audit sibling callers, readers, transitions, and retries when a defect reveals
-a class; report its instances together. Distinguish unavailable proof from
+a class; group instances that share a fix and report independent defects
+separately. Distinguish unavailable proof from
 demonstrated defects. Findings need an anchor, failure condition, impact, and
 smallest fix; generic advice is not a finding.
 
