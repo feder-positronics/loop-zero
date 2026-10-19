@@ -105,11 +105,11 @@ yield at least 30 seconds), not second-by-second polling.
 
 App-orchestrated delegates (for example T3 `delegate_task`) launched in an
 approval-requiring mode stall unattended at their first tool call, while task
-status still reads running. For an unattended read-only consult,
-choose a mode within your own authority that runs reads without prompts (T3:
-`runtimeMode: full-access`, `interactionMode: plan`) and state "read-only, do
-not edit" in the brief. That is an instruction boundary, not an OS sandbox;
-when writes must be impossible, use a CLI delegate with `--sandbox read-only`.
+status still reads running. For an unattended read-only consult, choose the
+narrowest mode within your own authority that runs reads without prompts (T3:
+`runtimeMode: auto`) and state "read-only, do not edit" in the brief. That is
+an instruction boundary, not an OS sandbox; when writes must be impossible,
+use a CLI delegate with `--sandbox read-only`.
 
 Running or working status does not prove progress. Before ending the turn
 after a launch, read the delegate's activity: a completed tool call and no
