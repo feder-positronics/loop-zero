@@ -21,7 +21,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    A draft blocked only by missing/skipped required checks is activated to
    trigger CI; without `--wait` it exits 3. `--wait[=SECONDS]` (default 1800)
    observes the unchanged head, including after activation within the same
-   budget: 0 ready, 1 blocked, 3 timeout. Immediate green can precede
+   budget: 0 ready; 1 blocked (fix the reported blocker or report the
+   dependency before retrying); 3 timeout. Immediate green can precede
    asynchronous CI scheduling. After two minutes of missing checks without
    visible pending checks, inspect scheduling, triggers and permissions,
    correct the cause, then retry.
@@ -191,5 +192,6 @@ Never use handwritten `gh` wait loops or `gh pr checks --watch`, which misses
 checks not yet created. Other polling requires a deadline, visible progress,
 preserved stderr and stopping on errors. Do not poll `gh pr view`,
 `gh pr checks` or `gh pr list`: hidden GraphQL shares account quota. Use REST
-`gh api` for one-off PR reads/comments. Quota errors require a verified reset
-or `Retry-After`; REST `/rate_limit` does not prove GraphQL capacity.
+`gh api` for one-off PR reads/comments. After a quota error, wait for a
+verified reset or `Retry-After` before any GitHub-backed command, `loopzero`
+waiters included; REST `/rate_limit` does not prove GraphQL capacity.

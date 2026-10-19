@@ -30,7 +30,7 @@ Inside the process making an authorized API request:
    use a private directory (`0700`) and owner-only file (`0600`). Reject unsafe
    files without loading them; do not follow credential-file symlinks.
    Strip surrounding whitespace from the file value.
-3. If absent, empty or unreadable, report unavailable credentials without contents,
+3. If absent, empty, unsafe or unreadable, report unavailable credentials without contents,
    point to [setup](../SETUP.md#api-keys-for-local-agents), and continue independent work.
 
 An invalid supplied key is an authentication failure, not permission to fall
