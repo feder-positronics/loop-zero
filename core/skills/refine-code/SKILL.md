@@ -25,5 +25,5 @@ behavior, abstraction boundaries, weakened tests or uncertain deletion to
 
 Explain the concrete clarity gain and any apparently behavioral edit. Run focused
 success and relevant failure/cancellation tests, then contract delivery checks.
-Record validation in `.loopzero/task.md`. Finish with unchanged observable and
-public contracts, passing checks, and no unrelated cleanup or compatibility layer.
+Record validation in `.loopzero/task.md`. Finish with passing
+checks and no unrelated cleanup or compatibility layer.
