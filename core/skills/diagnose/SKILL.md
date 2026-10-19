@@ -1,66 +1,47 @@
 ---
 name: diagnose
-description: Establish the cause of a newly observed failure with one small reproduction and discriminating evidence; use fix-failing-tests for an understood failing test.
+description: Prove the cause of a newly observed failure; use fix-failing-tests when the cause is understood.
 ---
 
 # Diagnose
 
-Read [the contract](../../CONTRACT.md). Produce a demonstrated cause and the
-smallest repair and validation contract. Stop before implementation.
+Follow [the contract](../../CONTRACT.md). Return a demonstrated cause and the
+smallest repair and validation contract; stop before implementation.
 
-## Do
+1. Capture expected and observed behavior, environment, data source, exact
+   command and output. Find one small, reliable reproduction that fails for the
+   defect and would pass after repair. Distinguish local, staging and production
+   evidence.
+2. Check missing tools, network, sandbox and stale dependencies. When a configured
+   check exercises the reproduction, `loopzero check` tests that sandbox only;
+   it cannot exclude environmental causes elsewhere.
+3. For intermittent failures, find when the rate changed and what landed then.
+   Compare failure rate or another measurable proxy across commits around the
+   onset. Aggregate captured logs, dumps and timings before adding instrumentation.
+   Test “infrastructure” or “unrelated” as hypotheses. Use one investigation
+   worktree for disposable experiments; batch hosted instrumentation per set of
+   hypotheses.
+4. Rank competing explanations with evidence for and against each. Run an
+   experiment that separates the leaders, then rerank. Confirm the cause by
+   predicting and observing a result that distinguishes it from alternatives.
+   Correlation and symptom disappearance are insufficient; avoid speculative
+   patches.
+5. Return reproduction, ranked and rejected hypotheses, discriminating evidence,
+   cause, blast radius, smallest repair, validation and uncertainty. Route proven
+   test repairs to [fix-failing-tests](../fix-failing-tests/SKILL.md), other changes
+   to [implement](../implement/SKILL.md).
 
-1. Capture the expected and observed behavior, environment, data source, and
-   exact command and output. Start with one small, reliable reproduction: one
-   test, command, or input. Prefer an assertion or command that fails for the
-   defect and would pass after repair. Do not report local or staging state as
-   production.
-2. Check whether a missing tool, network, sandbox, or stale dependency could
-   explain the failure. If a configured check exercises the reproduction,
-   `loopzero check` shows whether it reproduces in that sandbox; it does not
-   rule out environmental causes elsewhere.
-3. For an intermittent failure family, find when its rate changed and what
-   landed then. Compare a measurable proxy, such as duration, query size,
-   allocations or failure rate, across commits around the onset. Aggregate the
-   evidence already captured for every failure, such as stack dumps, timings
-   and logs, before adding instrumentation. Treat "unrelated" or
-   "infrastructure" as a hypothesis to test, not a starting classification.
-   Run disposable experiments in one investigation worktree; batch any hosted
-   instrumentation into one delivery per set of hypotheses.
-4. If several explanations remain, rank hypotheses with evidence for and
-   against each. Choose an experiment that separates the leading explanations,
-   then rerank after each result. Confirm the cause by predicting and observing
-   a result that distinguishes it from alternatives.
-5. Return the reproduction, ranked and rejected hypotheses, discriminating
-   evidence, confirmed cause, blast radius, smallest repair and validation
-   contract, and remaining uncertainty. Route an understood test repair to
-   [fix-failing-tests](../fix-failing-tests/SKILL.md) and other code changes to
-   [implement](../implement/SKILL.md).
+Use synthetic or local data first. Redact secrets, database URLs, personal data
+and user content before quoting or persisting evidence. Temporary instrumentation
+needs authority, must avoid sensitive output, and must be recorded and removed.
+Production code edits, remote restarts and remote data mutations require explicit
+authority; production-derived experiments must be in scope with cleanup or recovery
+defined beforehand. Reproduction scripts must not commit, tag or push.
 
-Use synthetic or local data first. Redact credentials, tokens, database URLs,
-personal data, and user content before persisting or quoting evidence. Add
-temporary instrumentation only when authorized and necessary; record it, avoid
-secret-bearing output, and remove it before exit. Do not edit production code,
-restart remote services, or mutate remote data without explicit authority.
-Any production-derived experiment must be explicitly in scope and name its
-cleanup or recovery contract before it runs.
+If reproduction or proof is unavailable, report attempts and the exact missing
+evidence or authority. Stop at out-of-scope repairs. For a shared gate blocked
+by an unproven cause, report its failure rate and blocked deliveries for a requester
+decision about retry or quarantine.
 
-## Stop when
-
-- You cannot reproduce or prove the cause. Report what you tried, the exact
-  missing evidence or authority, and what remains uncertain.
-- The repair would change behavior outside the task. Write it up; do not
-  start it.
-- A shared gate keeps failing while the cause is unproven. Report its failure
-  rate and the deliveries it blocks to the requester as a decision, for example
-  a temporary retry or quarantine, instead of holding everyone's work on proof.
-
-## Do not
-
-- Treat correlation or a plausible explanation as proof.
-- Declare an intermittent failure fixed on fewer passing runs than its prior
-  failure rate warrants: at a 30% failure rate, two passes happen about half
-  the time by chance.
-- Apply speculative patches to see if the symptom goes away.
-- Commit, tag, or push from a reproduction script; reproductions are
-  read-only against Git.
+Never declare an intermittent failure fixed on insufficient passing runs:
+at a prior 30% failure rate, two passes occur about half the time by chance.

@@ -1,37 +1,29 @@
 ---
 name: refine-code
-description: Simplify recently touched code without intentional behavior, API, data, or test-contract change; use after a bounded edit or before code review.
+description: Simplify a user-named or current-task diff while preserving observable behavior and public contracts.
 ---
 
 # Refine Code
 
-Make one user-named or current-task diff easier to read and maintain while
-preserving its observable contract.
+Make the bounded diff clearer through names, control flow, fewer redundant
+intermediates and established local patterns. Default to current-task files
+unless the requester names a broader boundary.
 
-Work in the task worktree from `loopzero start`, or the outer task's worktree
-when nested; confirm its branch and `.loopzero/task.md` before editing.
+Follow [the contract](../../CONTRACT.md) in the task worktree, inheriting the
+outer task's worktree when nested. Confirm branch and `.loopzero/task.md`
+before editing.
 
-## Refine
+Remove comments or symbols only with evidence they have no runtime, import,
+configuration or tooling effect. One dead symbol does not prove its file or
+module dead.
 
-- Default to files changed by the current task unless the requester names a
-  broader boundary. Do not sweep unrelated modules.
-- Prefer clearer names and control flow, fewer redundant intermediates, and
-  reuse of an established local pattern.
-- Remove comments or unused symbols only when their lack of runtime, import,
-  configuration, or tooling effect is demonstrated. Do not infer from one
-  symbol that its whole file or module is dead; that requires separate proof.
-- Treat concurrency, exception timing, transactions, ordering, query
-  predicates, persistence, isolation, serialization, public imports, API shape,
-  and test assertions as semantic until equivalence is demonstrated.
-- If cleanup requires new behavior, a new abstraction boundary, weakened tests,
-  or uncertain deletion, stop and route it to [implement](../implement/SKILL.md)
-  rather than disguising it as refinement.
+Treat concurrency, exception timing, transactions, ordering, query predicates,
+persistence, isolation, serialization, public imports, API shape and test
+assertions as semantic until equivalence is demonstrated. Stop and route new
+behavior, abstraction boundaries, weakened tests or uncertain deletion to
+[implement](../implement/SKILL.md).
 
-## Validate And Exit
-
-Describe the concrete clarity gain and any edit that could appear behavioral.
-Run focused tests for success and relevant failure or cancellation paths, then
-commit and run `loopzero check` on the clean head. Exit when observable and
-public contracts are unchanged, checks pass, and no unrelated cleanup or
-compatibility layer was introduced. Record the validation in `.loopzero/task.md`
-and leave formal review to `loopzero review`.
+Explain the concrete clarity gain and any apparently behavioral edit. Run focused
+success and relevant failure/cancellation tests, then contract delivery checks.
+Record validation in `.loopzero/task.md`. Finish with unchanged observable and
+public contracts, passing checks, and no unrelated cleanup or compatibility layer.

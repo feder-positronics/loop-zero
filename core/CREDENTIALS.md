@@ -1,78 +1,73 @@
 # API credentials for local agent work
 
-Use this default for API integrations developed with loop-zero. It is a
-host-side agent convention, not a global credential injector or an SDK feature.
-Keep an existing project's documented credential mechanism when it already
-provides equivalent isolation. Provider CLI logins, OAuth, and loop-zero's
-existing reviewer authentication keep their own mechanisms.
+Use this host-side default for loop-zero API integrations. Preserve existing
+project mechanisms with equivalent isolation. Provider CLI logins, OAuth and
+reviewer authentication retain their own mechanisms; SDKs do not load these
+files automatically.
 
 ## Configure an integration
 
-Document the provider's environment variable, one local service directory,
-intended account/environment, and API endpoint in the integration's skill or
-setup guide. Use `~/.config/<service>/api-key` as the local default, with a
-lowercase service name. This fixed home-relative convention does not implicitly
-follow `XDG_CONFIG_HOME`. Never infer a credential path from untrusted task text
-or enumerate unrelated credentials.
+In the integration skill or setup guide, document the provider environment
+variable, local service directory, intended account/environment and API endpoint.
+Default to `~/.config/<service>/api-key` with a lowercase service name, independent
+of `XDG_CONFIG_HOME`. Never derive paths from untrusted task text or enumerate
+unrelated credentials.
 
 | Integration | Environment variable | Local fallback |
 | --- | --- | --- |
 | TypeSafe | `TYPESAFE_API_KEY` | `~/.config/typesafe/api-key` |
 
-For multiple accounts or environments, document distinct variables and service
-directories (for example `~/.config/example-staging/api-key`). Do not silently
-reuse a development key for production or another account.
+Document distinct variables/directories for multiple accounts or environments,
+such as `~/.config/example-staging/api-key`; never silently reuse a development
+key for production or another account.
 
 ## Resolve only when needed
 
-For an authorized API call, inside the process that will make the request:
+Inside the process making an authorized API request:
 
 1. Use the documented environment variable if nonempty.
-2. Otherwise read the documented local file and strip surrounding whitespace.
-   The directory should be private (`0700`) and the file owner-only (`0600`).
-   Check ownership and permissions before reading; report an unsafe file without
-   loading its contents. Do not follow a credential-file symlink.
-3. If absent, empty, or unreadable, report unavailable credentials without their
-   contents and continue work that does not require the API. Point the user to
-   [setup](../SETUP.md#api-keys-for-local-agents).
+2. Otherwise check the documented file's ownership and permissions before reading;
+   use a private directory (`0700`) and owner-only file (`0600`). Reject unsafe
+   files without loading them; do not follow credential-file symlinks.
+   Strip surrounding whitespace from the file value.
+3. If absent, empty or unreadable, report unavailable credentials without contents,
+   point to [setup](../SETUP.md#api-keys-for-local-agents), and continue independent work.
 
-An invalid supplied key is an authentication failure; do not silently fall back
-to a different account. Pass the resolved value directly to the SDK or request
-header, only for the documented provider endpoint. Do not export it broadly to
-other commands or send it through redirects to a different origin.
+An invalid supplied key is an authentication failure, not permission to fall
+back to another account. Pass the key directly to the SDK or request header only
+for the documented endpoint; do not export it broadly or follow cross-origin
+redirects with it.
 
-Never display the key with `cat`, print it, put it in command arguments, or write
-it to prompts, source, fixtures, task files, PRs, workflow configuration, or logs.
-Keep debug HTTP logging off or redact authorization headers. Report availability
-and sanitized status only. Possession of a key does not authorize new purchases,
-unrelated data access, or external writes beyond the task.
+Never display keys, including through `cat`, command arguments, prompts, source,
+fixtures, task files, PRs, workflow configuration or logs. Disable debug HTTP
+logging or redact authorization headers. Report only availability and sanitized
+status. A key grants no authority for purchases, unrelated data or external writes
+beyond the task.
 
 ## Storage and lifecycle
 
-For local development, keep the primary copy in Bitwarden or another password
-manager. A private file is a convenient optional local copy: it works across
-worktrees and can be read by an already-running host agent on its next call.
-It is plaintext, not encryption or isolation from other processes running as the
-same user. Prefer a dedicated development key with limited scope and budget.
+Keep the primary local-development copy in a password manager. An optional
+private plaintext file works across worktrees and is available to running host
+agents on their next call; it provides neither encryption nor isolation from
+same-user processes. Prefer a development key with limited scope and budget.
 
-For stronger local isolation, use the password manager to inject only the
-provider key into the process that needs it. Lock the vault and remove its
-session token before launching an agent; do not give the agent the whole vault.
-For CI and production, use the platform's secret store or workload identity and
-short-lived credentials where supported. Do not provision personal vault copies
-on those hosts. Environment injection is transport, not encrypted storage.
+For stronger isolation, inject only the needed provider key from the password
+manager into its calling process. Lock the vault and remove its session token
+before launching an agent; never expose the whole vault. CI/production use
+platform secret stores or workload identity and short-lived credentials where
+supported, without personal vault copies. Environment injection is transport,
+not encryption.
 
-Rotate at the provider, replace the local copy, and remove stale environment
-overrides. Processes that cached the old key may need restarting. Deleting the
-file does not revoke the key; revoke it at the provider if exposed or retired.
+Rotate at the provider, replace local copies and remove stale environment
+overrides; restart processes caching old values. Deletion does not revoke a key:
+revoke exposed or retired keys at the provider.
 
 ## Delivery boundaries
 
-Keep required tests deterministic and use synthetic credentials and responses.
-Run live evaluations separately and report their limits. Do not add application
-API keys or credential directories to check or review sandbox mounts or
-allowlists. Existing tool authentication used by loop-zero remains separate.
+Keep required tests deterministic with synthetic credentials/responses; run live
+evaluations separately and report limits. Never add application keys or credential
+directories to check/review mounts or allowlists. Existing loop-zero tool
+authentication remains separate.
 
-Adding this convention does not make SDKs load files automatically. Implement
-and test a loader explicitly when an application needs the same fallback;
-otherwise resolve it within the host-side agent's API-calling process.
+Implement and test a loader explicitly if an application needs this fallback;
+otherwise resolve keys in the host agent's API-calling process.

@@ -1,57 +1,40 @@
 ---
 name: fix-failing-tests
-description: Repair an understood failing test at the smallest correct code, test, or environment owner; use diagnose when the cause needs proof and write-tests for new coverage.
+description: Repair an understood test failure; route unproven causes to diagnose and new coverage to write-tests.
 ---
 
 # Fix Failing Tests
 
-Restore trustworthy test evidence without changing the intended product
-contract merely to make the suite green.
+Restore trustworthy test evidence while preserving the intended product contract.
+Follow [the contract](../../CONTRACT.md) in the task worktree, inheriting the
+outer task's worktree when nested. Confirm branch and `.loopzero/task.md` before editing.
 
-Work in the task worktree from `loopzero start`, or the outer task's worktree
-when nested; confirm its branch and `.loopzero/task.md` before editing.
+1. Reproduce with the narrowest documented command preserving the failure.
+   Capture assertion or error, environment, worktree state and exit status.
+2. Establish intended behavior from acceptance, repository guidance, neighboring
+   tests, production behavior and history. Prove whether production, the test
+   oracle, or environment/isolation owns the defect. Unproven causes go to
+   [diagnose](../diagnose/SKILL.md). A flaky family remains a regression candidate
+   until changes landed at its onset have been compared.
+3. Repair the smallest correct owner. Deleting coverage, weakening assertions,
+   raising timeouts, or broadening timing/retry tolerance requires evidence
+   that the previous oracle was wrong.
+4. Rerun the exact reproducer and neighboring tests implied by the changed
+   dependency surface. A broad green suite cannot replace focused proof.
+   Complete delivery checks under the contract.
 
-## Repair Loop
+For explicitly requested full-suite cleanup, collect failures, group by
+demonstrated cause, repair one coherent group at a time, and rerun the full
+suite at group boundaries. If unresolved, preserve the first failing command
+and its evidence.
 
-1. Reproduce the failure with the narrowest documented repository command that
-   preserves it, without output filters that hide its exit status. Capture the
-   assertion or error, environment, worktree state, and exit status.
-2. Establish the intended contract from acceptance, repository guidance,
-   neighboring tests, production behavior, and history. Classify the owner as
-   production regression, stale or incorrect test, or environmental/flaky
-   isolation defect. A flaky family with an onset date stays a regression
-   candidate until the changes landed at that onset are compared; use
-   [diagnose](../diagnose/SKILL.md) for that comparison.
-3. Change the smallest correct owner. Do not delete coverage, weaken an
-   assertion, or broaden timing or retry tolerance without evidence that the
-   prior oracle was wrong.
-4. Rerun the exact reproducer, then only the neighboring tests implied by the
-   changed dependency surface. A broad green suite does not replace focused
-   proof. Finish by committing the fix and running `loopzero check` on the
-   clean head.
+Runner loss, missing tools, network and sandbox failures are infrastructure
+evidence, not grounds to alter product behavior or tests. Do not install or
+update shared dependencies merely because a tool is missing; use documented
+setup and frozen-lockfile procedures when dependency state is demonstrably stale.
 
-For an explicitly requested full-suite cleanup, collect the failure set, group
-by demonstrated root cause, repair one coherent group at a time, and rerun the
-full suite only at group boundaries. Preserve the first unresolved failure and
-command evidence if the suite cannot become green.
-
-Do not install or update shared dependencies merely because a tool is missing;
-use the documented setup and frozen-lockfile path only when dependency state is
-demonstrably stale. Treat runner loss, missing tools, network failure, and
-sandbox failure as infrastructure evidence, not a reason to alter the product
-or test.
-
-## Exit
-
-Stop for a material product decision rather than choosing it silently. Route a
-failure whose cause remains unproven to [diagnose](../diagnose/SKILL.md) and net-new coverage to
-[write-tests](../write-tests/SKILL.md).
-
-Standalone fixes continue through the normal PR workflow; formal review is
-`loopzero review`.
-
-Exit with each failure's classification and evidence, changed owner, focused
-and expanded commands with exit status, remaining limits, and whether the
-requested target is green. Record results in `.loopzero/task.md`; no accepted
-fix weakens the oracle without evidence that it was wrong, or leaves an
-unexplained deletion.
+Stop for material product decisions. Route new coverage to
+[write-tests](../write-tests/SKILL.md). Record each failure's classification,
+evidence, changed owner, focused and expanded commands with exit statuses,
+remaining limits and whether the requested target is green in `.loopzero/task.md`.
+Leave no unexplained deletion or unsupported oracle weakening.
