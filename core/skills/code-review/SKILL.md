@@ -1,50 +1,33 @@
 ---
 name: code-review
-description: Review a frozen code diff against its acceptance criteria and report defects as structured findings with severity; use for code diffs, not broader assessments.
+description: Review a frozen code diff against acceptance criteria and emit JSON for loopzero review.
 ---
 
 # Code Review
 
-Review one frozen diff against its acceptance criteria and return structured
-findings. Do not edit the reviewed tree.
-
-Read [the contract](../../CONTRACT.md), the PR body, and enough surrounding
-code to judge the change. Confirm the exact head. Review the full diff for a
-primary and only the diff since the reviewed commit for a delta. Follow the
-contract's default independence rule or its bounded owner-approved
-contributor-review exception; the latter has reduced assurance and must be
-labeled in the PR narrative and comment.
+Review one frozen diff without editing the tree. Read [the contract](../../CONTRACT.md),
+the PR body, and surrounding code. Confirm the exact head; review the full diff
+for a primary, only changes since the reviewed commit for a delta. The contract
+owns review eligibility and budget.
 
 ## Judge
 
-Review with professional skepticism. Treat the PR narrative, acceptance
-claims, and passing tests as hypotheses: verify that each test exercises the
-claim it is cited for. Trace each
-changed path through its callers and data; check edge cases (empty, missing,
-boundary, concurrent, failure, retry); and look for inconsistencies between
-code, tests, docs, and the contract.
+Treat narratives, acceptance claims, and passing tests as hypotheses. Trace
+changed paths through callers and data, including empty, missing, boundary,
+concurrent, failure, and retry cases. Check:
 
-- Does the change meet each acceptance line? Missing proof is a finding.
-- Would it break a caller, data shape, permission boundary, or build?
-- Is any test asserting less than the objective claims?
-- Does every test or acceptance check named in the PR body or docs exist in the diff or tree?
+- Each acceptance criterion has proof; tests exercise the claimed behavior.
+- Named tests and checks exist in the diff or tree.
+- Callers, data shapes, permissions, builds, docs, and contract remain consistent.
 
-When a failure is one instance of a class (a missed caller, reader, state
-transition, or retry path), find and report the other instances in the same
-review; a sibling discovered next round is a miss of this one.
-
-Report demonstrated failures precisely and constructively: anchor, failure
-condition, impact, and the smallest fix. Separate "could not verify" from
-"is wrong". Generic advice is not a finding.
-
-Use the [contract's severities](../../CONTRACT.md#findings): `critical` and
-`important` block; `suggestion` never does.
+Audit sibling callers, readers, transitions, and retries when a defect reveals
+a class; report its instances together. Distinguish unavailable proof from
+demonstrated defects. Findings need an anchor, failure condition, impact, and
+smallest fix; generic advice is not a finding.
 
 ## Output And Exit
 
-Return exactly one JSON object and nothing else. `verdict` is `approve` or
-`request_changes`; every finding has severity `critical`, `important`, or
-`suggestion` and includes all five fields shown here:
+Return exactly one JSON object, with no surrounding text:
 
 ```json
 {
@@ -59,8 +42,14 @@ Return exactly one JSON object and nothing else. `verdict` is `approve` or
 }
 ```
 
-`path` and `line` may be `null` when no precise location exists; `loopzero
-review` anchors such blocking findings on a changed file. Request changes when any blocking finding
-exists. Approve when none exists; approval may include suggestions or an empty
-list. If the diff or required evidence is unavailable, return one `critical`
-finding saying so; never approve blind.
+Include all five finding fields. `verdict` is `approve` or `request_changes`;
+severity is `critical`, `important`, or `suggestion`, per
+[the contract](../../CONTRACT.md#findings).
+Any blocking finding requires `request_changes`; otherwise approve, with
+suggestions or an empty list.
+
+Anchor findings precisely. `path` and `line` may be `null` when no precise
+location exists; `loopzero review` anchors such blocking findings on a changed file.
+
+If the diff or required evidence is unavailable, return `request_changes` with
+exactly one `critical` finding explaining what is missing. Never approve blind.

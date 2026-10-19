@@ -1,53 +1,43 @@
 ---
 name: security-review
-description: Review a frozen security-sensitive diff for exploitable boundary failures; use when auth, permissions, secrets, external calls, config, file or shell primitives, serialization, or dependencies change.
+description: Add security review to diffs changing auth, sessions, permissions, secrets, endpoints, external calls, config, file or shell primitives, serialization, or dependencies.
 ---
 
 # Security Review
 
-Find exploitable boundary failures in one frozen diff. Do not edit it.
+Apply [code-review](../code-review/SKILL.md), including its JSON contract and
+missing-evidence failure. Do not edit the tree.
 
-Read [the contract](../../CONTRACT.md) and [code-review](../code-review/SKILL.md);
-this skill adds a security lens and uses the same output shape. Apply
-it when the diff changes authentication, authorization, session handling,
-endpoint exposure, secrets or config, outbound calls, file or shell
-primitives, serialization, or dependencies.
-
-## Ground
-
-From the diff, name the actors, the assets, the trust boundary crossed and
-every attacker-controlled input. Judge lines only after that. Keep
-code-review's skeptical stance: do not assume an input is trusted or a control
-exists until the code shows it, and report only failures with a reachable path.
+Before judging lines, identify actors, assets, crossed trust boundaries, and
+attacker-controlled inputs. Verify trust and controls in code; do not assume them.
 
 ## Check
 
-- Secrets, tokens, credentials or PII in code, config, logs, errors or tests;
-  CORS and cookie changes do not broaden exposure.
-- Each changed endpoint, action or job: authentication, authorization,
-  tenant/user isolation, admin scope, and what 403 vs 404 discloses.
-- Attacker-controlled data traced through validation, queries, shell and
-  path primitives, outbound URLs, serialization, storage and output.
-- Injection, SSRF, path traversal, unsafe deserialization, mass assignment,
-  replay, race and idempotency failures, and cost or denial amplification where
-  the code path makes them plausible.
-- Side-effecting tasks re-derive ownership instead of trusting caller context;
-  outbound calls have timeouts, validation and safe logging.
-- New dependencies and integrations: credentials, permissions, transport,
-  failure behavior, reach, publisher, and supply-chain blast radius.
+- Secrets, tokens, credentials or PII exposed in code, config, logs, errors or
+  tests; CORS and cookie changes that broaden exposure.
+- Changed endpoints, actions, and jobs: authentication, authorization,
+  tenant/user isolation, admin scope, and 403/404 disclosure.
+- Trace attacker-controlled data through validation, queries, shell, paths,
+  outbound URLs, serialization, storage, and output.
+- Reachable injection, SSRF, traversal, unsafe deserialization, mass assignment,
+  replay, races, idempotency failures, and cost or denial amplification.
+- Side-effecting tasks re-derive ownership; outbound calls have timeouts,
+  validation, and safe logging.
+- Dependencies and integrations: credentials, permissions, transport, failures,
+  reach, publisher, and supply-chain blast radius.
 
-Depth follows attack surface. A vulnerability class without a reachable path
-in this diff is not a finding.
+Depth follows attack surface; a vulnerability class without a reachable path
+is not a finding.
 
 ## Output
 
-Return the exact JSON object defined in [code-review](../code-review/SKILL.md).
-Severity: `critical` for a reachable exploit or secret exposure, `important`
-for a missing control on a real boundary, `suggestion` for hardening. Put the
-threat model summary (two to four sentences) in the `body` of the first
-finding, or in a single `suggestion` finding titled `Threat model` when there
-are no defects. Never include secrets, tokens, credentials, or PII in a finding.
+Return only code-review's JSON. Secret exposure or a reachable exploit is
+`critical`; a missing control on a real boundary is `important`; hardening is
+a `suggestion`. Both blocking severities require `request_changes`.
 
-Exit when each changed trust boundary and plausible attacker-controlled path
-has been assessed, residual uncertainty is stated, and the structured verdict
-is complete.
+Put a two-to-four-sentence threat model in the first finding's `body`.
+With no defects, use one `suggestion` titled `Threat model`.
+Never echo secrets, tokens, credentials, or PII in findings.
+
+Finish after assessing each changed boundary and plausible attacker-controlled
+path, stating residual uncertainty, and completing the verdict.

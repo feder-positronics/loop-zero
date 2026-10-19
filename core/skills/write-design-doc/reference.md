@@ -1,67 +1,79 @@
 # Write Design Doc Reference
 
-Read this reference when selecting and drafting a design artifact.
+Shared grounding, design contract, and validation for writing, reviewing, and
+refining. Apply at the depth appropriate to the artifact and next action.
+
+## Grounding
+
+Read the request, complete existing artifact, linked issue or task, upstream
+decisions, repository guidance, and enough code to verify current-state claims,
+including claimed component capabilities. Separate facts from assumptions.
+Requester decisions stay settled unless evidence invalidates their premise;
+assumptions remain vetoable; deferred decisions become open questions.
+
+Repository changes follow [the delivery contract](../../CONTRACT.md) in the
+task worktree.
 
 ## Artifact Choice
 
 | Need | Artifact |
 | --- | --- |
-| Investigate or compare directions | Exploration |
-| Lock a durable architecture or policy boundary | ADR |
-| Coordinate multiple delivery lanes | Initiative |
+| Compare directions | Exploration |
+| Lock an architecture or policy boundary | ADR |
+| Coordinate delivery lanes | Initiative |
 | Specify bounded implementation | Blueprint |
 | Explain an existing procedure | Guide |
 
-Prefer the repository's established path and template for the chosen type. If it
-has none, use a descriptive Markdown filename in its documentation tree rather
-than introducing a new hierarchy for one document.
+Use repository paths, templates, frontmatter, terminology, and labels.
+Without a convention, choose and explain a descriptive Markdown path in the
+documentation tree; avoid a new hierarchy for one document.
+Link sources of truth instead of copying them.
 
 ## Design Contract
 
-At the depth appropriate to the artifact, include:
+Cover the material:
 
-- current trigger, actors or jobs, intended outcome, non-goals, and success
-  evidence;
-- verified current state, data and state boundaries, consumers, integration
-  points, failure modes, and blast radius;
-- materially different options, the chosen shape, strongest rejected
-  alternative, and the premise that decides between them;
-- a simplest-shape and reuse audit, including composition with existing product
-  surfaces;
-- repository domain terms and user-facing labels, with intentional divergence
-  called out;
-- implementation boundary, concrete acceptance and validation, rollback, and
-  observability where relevant;
-- open questions, their owners, and the work each question blocks.
+- Trigger, actors/jobs, outcome, non-goals, success evidence.
+- Verified current state, state/data boundaries, consumers, integration,
+  failures, and blast radius.
+- Material alternatives, chosen shape, strongest rejected alternative, and
+  deciding premise; prefer the simplest shape and reuse existing surfaces.
+- Domain terms and user-facing labels; explain intentional divergence.
+- Implementation boundary, observable acceptance, validation, rollback,
+  and observability where relevant.
+- Open questions, owners, and the work each blocks.
 
-For unresolved non-visual logic or state uncertainty, an exploration may define
-a bounded executable spike. State the question, time or scope bound, throwaway
-or retained output, and evidence that ends the spike.
+A bounded executable spike may resolve non-visual logic or state uncertainty:
+name the question, time/scope bound, retained or throwaway output, and evidence
+that ends it.
 
 ## Decisions
 
-Record each material decision with a stable short ID, its status (`Locked`,
-`Assumed`, or `Deferred`), evidence, strongest rejected alternative, deciding
-premise, and implementation consequence. High-impact, low-confidence,
-evidence-conflicted, or plausible-alternative decisions need an explicit
-challenge to the deciding premise.
+Record material decisions with stable short IDs, status (`Locked`, `Assumed`,
+`Deferred`), evidence, strongest rejected alternative, deciding premise, and
+implementation consequence. Challenge the premise for high-impact,
+low-confidence, evidence-conflicted decisions or plausible alternatives.
 
 ## Artifact Lifecycle
 
-- Preserve an artifact's `upstream:` links or equivalent relationship to the
-  source issue, exploration, ADR, or initiative.
-- Do not hand-edit generated lifecycle fields or indexes; change their source or
-  use the repository's generator.
-- For a time-gated decision, record the review date, owner, evidence to inspect,
-  and condition that would change the decision. Do not create a reminder issue.
-- When an ADR or blueprint is meant to be implementation-ready, revise and
-  revalidate it until material questions converge or are explicit blockers.
+Preserve `upstream:` or equivalent source relationships. Change generated
+lifecycle fields and indexes through their source or generator.
+For time-gated decisions, record review date, owner, evidence to inspect,
+and reversal condition in the artifact; do not create reminder issues.
+An implementation-ready ADR or blueprint needs converged material questions
+or explicit blockers.
+
+## Validate
+
+Remove placeholders; verify links, frontmatter, current-state premises,
+decision status, question owners, acceptance, and repository conventions.
+Execute guides and report observed behavior; omit architecture analysis unless
+the guide introduces a design decision.
 
 ## Type-Specific Checks
 
-- Exploration: compares real alternatives and ends with a decision route.
-- ADR: states the durable boundary, consequences, and reversal conditions.
-- Initiative: separates delivery lanes, dependencies, ownership, and evidence.
-- Blueprint: names concrete paths, sequenced acceptance, risks, and validation.
-- Guide: execute the procedure, report observed reality, and omit architecture
-  analysis unless the guide itself introduces a design decision.
+- Exploration: real alternatives and a decision route.
+- ADR: durable boundary, consequences, reversal conditions.
+- Initiative: delivery lanes, dependencies, owners, evidence.
+- Blueprint: concrete paths, sequenced acceptance, risks, validation.
+- Guide: a verified procedure.

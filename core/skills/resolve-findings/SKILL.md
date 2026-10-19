@@ -1,6 +1,6 @@
 ---
 name: resolve-findings
-description: Decide and hand off responses to existing PR review findings; do not review or implement responses.
+description: Decide the response to each existing PR review finding: post factual rejections, hand code fixes to implementation; do not review.
 ---
 
 # Resolve Findings
@@ -14,15 +14,17 @@ the head moved. Findings stay in PR threads, never issues, backlogs or tracking 
 - State failure and acceptance conditions; verify applicability on current head.
 - Valid `critical`/`important`: hand off the narrowest fix and validation.
 - Already fixed, inapplicable or unsupported: **verify on current head, then
-  hand off `loopzero resolve <id> "<evidence-backed reason>"`**.
+  post the reply yourself with `loopzero resolve <id> "<evidence-backed reason>"`**.
+  Replying is not implementation.
 - Suggestions are optional; do not expand scope for them.
 - Requester-reserved, irreversible, acceptance/scope/cost changes or external
   commitments need requester direction; never infer it.
 
 Give each supplied thread one status: bounded fix, factual rejection,
 reviewer-confirmed duplicate, deferred suggestion or requester decision.
-Hand responses to the narrowest implementation or documentation step using
-[response handoff](reference.md#response-handoff).
+Hand fixes to the narrowest implementation or documentation step using
+[response handoff](reference.md#response-handoff); that step replies with the
+fix commit after applying it.
 
 Preserve severity unless corrected with evidence in the thread. Critical or
 security-path downgrades need requester authority; identifying findings as the
