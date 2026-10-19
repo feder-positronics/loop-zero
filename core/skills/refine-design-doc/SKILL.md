@@ -26,8 +26,7 @@ Repeat while material findings remain:
 If the same important finding survives two passes, revisit the approach.
 After five non-converging passes, report the surviving blocker.
 
-Keep decisions in their proper status and material open questions owned and
-visibly blocking in the artifact. Exit when no critical or important finding
-remains; otherwise hand off the exact blocker and options without claiming
-readiness.
+Exit when no critical or important finding remains, decisions retain their
+proper status, and owned open questions visibly block the relevant action.
+Otherwise hand off the exact blocker without claiming readiness.
 Record the artifact path and material decisions in task Notes when available.
