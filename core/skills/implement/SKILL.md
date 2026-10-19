@@ -1,70 +1,54 @@
 ---
 name: implement
-description: Deliver an understood bounded change with its owning behavior proof and repository-required checks, stopping at readiness unless merge is separately requested.
+description: Implement a bounded change through behavior proof and readiness; merge only when separately authorized.
 ---
 
 # Implement
 
-Deliver one bounded change with its behavior proof. Read [the contract](../../CONTRACT.md),
-`.loopzero/task.md`, repository guidance, and the affected public interfaces.
-When the task uses API keys, follow [the credential convention](../../CREDENTIALS.md).
+Read [the contract](../../CONTRACT.md), `.loopzero/task.md`, repository
+guidance, and affected public interfaces. Follow [credential conventions](../../CREDENTIALS.md)
+for API keys and [delegation guidance](../../../docs/DELEGATION.md) when choosing
+executors or splitting work.
 
-Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
-when splitting work or choosing an executor.
+## Deliver
 
-## Do
+1. Edit only in the `loopzero start` task worktree; confirm its branch and task
+   file first.
+2. Write or extend behavior tests before or alongside code at the narrowest
+   stable public seam a real caller uses. If proof requires private reach-ins
+   or test-only extraction, report the missing seam.
+   For migrations, authorization, locking/concurrency, or policy/verdict logic,
+   first list edge cases in Acceptance and map each to tests or recorded
+   evidence, e.g. existing/deleted/duplicate rows, concurrent writers, lock order,
+   authorization boundaries, rule precedence.
+3. Assert observable outputs, state, or boundary effects independently of the
+   implementation, not mirrored calculations, mock calls, or internal steps.
+   **Watch regression tests fail on pre-fix code and record the failing output
+   line in task Notes.** A test passing without the fix proves nothing.
+4. Iterate with focused checks; commit small steps describing the change,
+   without unrelated formatting. Record trade-offs and deliberately skipped
+   work in Notes before committing.
+5. Run `loopzero check` on the clean committed head **before pushing or `loopzero pr`**.
+   Fix failures without changing the check list, bypassing the sandbox, or
+   enabling `[checks].network`. Host test runs support iteration; only the
+   sandboxed report counts as delivery proof.
+6. Run `loopzero pr`, then the primary `loopzero review`. Fix valid
+   `critical`/`important` findings; batch **all repairs, including format,
+   lint and renames, into the one delta head**. Commit, check, publish, and
+   review every pushed head under the [review budget](../../CONTRACT.md#review-budget).
+   Reply per thread with `loopzero resolve <id> "<fix commit and change>"`,
+   or a verified reason it does not apply. Suggestions must not expand scope.
+7. Stop at `loopzero ready --wait` unless merge is authorized. When authorized
+   and readiness exits 0, run `(cd <worktree> && loopzero merge --wait)` from
+   the repository root in the same turn. Follow the contract's wait and
+   exit-code rules.
 
-1. Work only in the task worktree created by `loopzero start`. Confirm its
-   branch and `.loopzero/task.md` before the first edit.
-2. Write or extend a test that proves the behavior before or alongside the code.
-   When the change touches a data migration, authorization, locking or
-   concurrency, or policy and verdict logic, first list in Acceptance the edge
-   cases the proof must cover, such as existing, deleted and duplicate rows,
-   concurrent writers and lock order, authorization boundaries, and rule
-   precedence, and map each to a test or recorded evidence.
-   Exercise the narrowest stable public seam available to a real caller. If only
-   private reach-ins or a test-only extraction make the test possible, report
-   the missing seam instead of disguising it as coverage.
-3. Make the test oracle independent of the implementation: assert observable
-   outputs, state, or boundary effects, not the same calculation, mock calls, or
-   internal steps used by the code. A regression test counts only after you
-   watched it fail on the pre-fix code; record that failing output line in
-   `.loopzero/task.md` Notes. A regression test that passes without the fix
-   proves nothing.
-4. Run focused checks while iterating. Commit in small steps with messages that
-   state what changed; keep the diff free of unrelated formatting churn. Fill
-   `.loopzero/task.md` Notes with trade-offs and deliberately skipped work
-   before committing.
-5. Run `loopzero check` on the clean committed head before pushing. Fix nonzero
-   exits; do not edit the check list to make them pass. Direct test runs are for
-   iteration: a command that passes on the host can fail in the sandbox, and only
-   the `loopzero check` report counts as proof. Never pipe a `loopzero` command;
-   its exit code is the verdict.
-6. Run `loopzero pr`.
-7. After the primary `loopzero review`, fix every valid `critical` and
-   `important` finding, commit, rerun `loopzero check`, and push with
-   `loopzero pr`. Every pushed head needs review, so put mechanical format,
-   lint, or rename repairs in the same push as the substantive repairs and spend
-   the one delta review on that head. Reply in each thread with
-   `loopzero resolve <id> "<fix commit and what changed>"`, or with the reason a
-   finding does not apply; do not resolve a thread silently.
-8. Stop at `loopzero ready --wait`; it waits for the required checks, so never
-   write a `gh` polling loop. Merge only when the task says so; in the same
-   turn, from the repository root, run `(cd <worktree> && loopzero merge --wait)`.
+## Boundaries
 
-## Stop when
-
-- Acceptance turns out to need a change outside the listed paths. Update the
-  task file and say so in the PR before continuing.
-- A check fails on the base branch without your change. Report it as a base
-  failure; do not work around it in this PR.
-- The public seam needed for faithful proof would expand acceptance or ownership.
-  Record the boundary and ask for that scope decision.
-- Time expires before readiness. Preserve an adoptable diff and report its exact
-  state, remaining checks, and unresolved findings.
-
-## Do not
-
-- Skip the sandbox or enable `[checks].network` to make checks pass.
-- Address suggestions by expanding scope; note them and move on.
-- Commit from inside a check, hook or script. Only you commit.
+- If acceptance requires unlisted paths, update the task and PR before continuing.
+- Report checks failing on base without this change; do not work around them.
+- If a faithful public proof seam expands acceptance or ownership, record the
+  boundary and request that scope decision.
+- If time expires before readiness, preserve an adoptable diff and report its
+  exact state, remaining checks and unresolved findings.
+- Only you commit; never commit from checks, hooks or scripts.

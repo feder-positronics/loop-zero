@@ -1,65 +1,53 @@
 ---
 name: work-issue
-description: Deliver one live GitHub issue from duplicate-checked intake through implementation, review and verified merge, then closure or an explicit partial-delivery boundary; use only for work anchored to an issue.
+description: Deliver one live GitHub issue through verified merge and closure or an explicit partial-delivery boundary; use only for work anchored to an issue.
 ---
 
 # Work Issue
 
-Take one live GitHub issue through the six loop-zero commands to a verified merge
-and either closure or an explicit partial-delivery boundary. Preserve the issue
-as intake context and the PR as delivery record.
-
-Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
-when splitting work or choosing an executor.
+Use [the contract](../../CONTRACT.md); the issue owns intake context, the PR
+owns delivery evidence. Follow [delegation guidance](../../../docs/DELEGATION.md)
+when choosing executors or splitting work.
 
 ## Intake
 
-1. Read the issue body, comments, labels, linked PRs, screenshots, logs, and
-   referenced artifacts. State the outcome, affected surfaces, non-goals,
-   validation evidence, and unsafe unknowns. Ask one focused question only when
-   the issue cannot answer a material acceptance choice.
-2. Check GitHub for an existing open or merged PR, branch, or prior partial
-   delivery for this exact issue. If the issue is closed, a delivery PR exists,
-   or work already shipped, reconcile that state; do not duplicate implementation.
-   Verify the GitHub remote before mutation and the connected environment before
-   relying on any user-reported production state.
-3. Run `loopzero start issue-<number>-<slug>`. In `.loopzero/task.md`, translate
-   the issue into observable Acceptance lines and keep the issue link in Notes.
-   Use `Refs #N` for a partial delivery; use a closing keyword only when this PR
-   completes all issue acceptance. GitHub matches closing references in the
-   rendered PR description and commit messages even in negated prose, so inspect
-   both before publication and again before merge. An incident whose closure
-   needs an observation window is not complete at merge; use `Refs #N`.
+1. Read the issue, comments, labels, linked PRs and artifacts, including
+   screenshots/logs. State outcome, affected surfaces, non-goals, validation
+   and unsafe unknowns. Ask one focused question only for material acceptance
+   choices the issue cannot answer.
+2. Before editing, check issue state, branches, open/merged PRs and prior
+   partial deliveries for this exact issue. Reconcile closed, shipped or
+   competing work before implementing. Verify the remote before mutation and
+   the connected environment before relying on reported production state.
+3. Run `loopzero start issue-<number>-<slug>`. Write observable Acceptance
+   and the issue link in task Notes.
+   **Partial delivery uses `Refs #N`**, including incidents needing an
+   observation window after merge. Closing keywords belong only to deliveries
+   completing all issue acceptance. Inspect rendered PR descriptions and commit
+   messages before publication and merge: even negated closing prose can close
+   an issue.
 
-## Deliver
+## Deliver and close out
 
-4. Deliver only the accepted scope with [implement](../implement/SKILL.md),
-   through review and `loopzero ready --wait`. Read [the delivery
-   safeguards](reference.md) for conditional API, fresh-stack, documentation,
-   blueprint, re-entry, issue-reference correction, and closeout requirements.
-5. Repeat the duplicate-delivery check before `loopzero pr` and again before
-   merge; reconcile a competing delivery instead of continuing.
-6. In the same turn as readiness, from the repository root, run
-   `(cd <worktree> && loopzero merge --wait)`. Do not close an umbrella issue
-   from a partial delivery.
+4. Read applicable [safeguards](reference.md). Deliver accepted scope with
+   [implement](../implement/SKILL.md) through review and `loopzero ready --wait`.
+   Repeat the duplicate-delivery check before `loopzero pr`.
+5. **After readiness exits 0, immediately re-read the issue and recheck branches,
+   competing open/merged PRs and prior deliveries before merge.** Reconcile
+   collisions or changed issue state. Then, in the same turn, from repository
+   root run `(cd <worktree> && loopzero merge --wait)`.
+6. Verify acceptance, no blocking threads, merged PR/SHA, and branch/worktree
+   cleanup. **Verify GitHub shows the issue closed for a closing delivery,
+   with the closing reference; for `Refs #N`, verify it remains open** and
+   report remaining acceptance. Never close an umbrella issue for partial work.
 
-## Stops
+Report issue, PR, merge SHA, validation, thread state, verified remote issue/PR
+state, and connected environment state when acceptance depends on it.
 
-- If acceptance expands beyond one PR, propose issue boundaries and continue
-  only with the one the requester selects.
-- If the issue conflicts with current code or another delivery, report the exact
-  conflict before editing.
-- Requester-reserved, outward, costly, irreversible, or scope-expanding choices
-  stop for explicit direction; issue-local reversible choices may proceed.
-- If a required post-merge condition cannot yet be observed, report it as open;
-  do not claim closure.
+## Stop for
 
-## Exit
-
-Done means the acceptance lines for this delivery are satisfied, its PR is
-merged, no blocking review thread remains, and `loopzero merge` has completed
-branch and worktree cleanup. For a closing delivery, verify the closing keyword
-reference and that GitHub shows the issue closed; for a `Refs #N` partial
-delivery, verify the issue remains open and report the remaining acceptance.
-Report the issue, PR, merge SHA, validation, thread state, verified remote issue
-and PR state, and the connected environment state when acceptance depends on it.
+- Scope exceeding one PR: propose boundaries; continue with the requester's selection.
+- Conflict between the issue, current code or another delivery: report before editing.
+- Requester-reserved, outward, costly, irreversible or scope-expanding choices;
+  issue-local reversible choices may proceed.
+- Unobservable required post-merge conditions: report them open; do not claim closure.
