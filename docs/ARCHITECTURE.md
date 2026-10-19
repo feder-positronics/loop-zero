@@ -151,7 +151,13 @@ coordination. This boundary is route-specific, not full filesystem privacy. An
 implicit runtime inside state receives only the selected executable's exact read-only file
 mount, while explicit runtime paths have no exception. This preserves standalone
 CLI startup without exposing neighboring state; bundles needing protected siblings
-require installation outside state. The contract owns this boundary and its limits.
+require installation outside state. The contract states the agent-facing
+consequences. Claude's environment routes are `ANTHROPIC_API_KEY` and
+`CLAUDE_CODE_OAUTH_TOKEN`; a nonempty value (whitespace included) is forwarded
+unchanged and omits host config binds, and the runner never adopts disk auth
+after an environment error. File-backed Claude binds `~/.claude` (or
+`CLAUDE_CONFIG_DIR`) and `~/.claude.json`; Codex keeps its `auth.json` bind under
+`CODEX_HOME` or `~/.codex`, including when `OPENAI_API_KEY` is forwarded.
 
 The R3 runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
@@ -163,7 +169,8 @@ The selected Codex binary's version probe accepts only source-reviewed 0.160.1,
 input. Unsupported Claude options follow existing native failure handling.
 Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
 remain enabled. Repository instructions remain a native authority surface, so
-structural transport tests do not prove injection immunity or reviewer quality.
+structural transport tests do not prove injection immunity, reviewer quality or
+backend identity.
 R1, R4 and R2 merged in #281, #282 and #283. R3's frozen 96-call native comparison
 passed its bounded detection/no-regression gate after an independent Astra agent
 assessed every parsed response. The matched permission override improved from
@@ -241,6 +248,10 @@ The transport uses bounded retries for selected transient failures and stops on
 quota errors. Waits use bounded backoff and one waiter per PR; direct `gh`
 polling adds shared account load and cannot replace the wait command. A rate
 limit is a waiting dependency, not permission to turn missing evidence green.
+GitHub reads retry transient failures up to three times (5/20/60 seconds),
+excluding rate limits; Mergify reads retry server errors, throttling and failed
+reads up to twice (2/5 seconds). The optional host ai-accounts shim may retry
+`loopzero` once after a usage-limit exit (4).
 
 ## Direction and historical evidence
 
