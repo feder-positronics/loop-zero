@@ -1,46 +1,59 @@
 ---
 name: backlog
-description: Produce a live, read-only GitHub issue and pull-request view of active, blocked, next, stale, orphaned, or poorly coordinated work; use for backlog status or re-entry, not implementation.
+description: Recommend next work or report live GitHub backlog state through a read-only, evidence-backed issue and PR view.
 ---
 
 # Backlog
 
-Produce one live, read-only view of GitHub issues and pull requests that another
-actor can continue from. Do not invent work state or implement an item.
+Return a live view another actor can continue from. For “what should I pick up
+next?”, recommend an evidence-backed next item. Report observed drift and orphan
+work as observations. If no item is justified, name the blocker or evidence gap
+and the next action.
 
-## Collect
+GitHub owns remote state. Confirm repository and authenticated access; inspect
+relevant open issues, linked/closing PRs, labels, relationships, comments,
+checks, review threads, timestamps and design artifacts. Local branches and
+registered worktrees supply independent collision evidence. If live access
+fails, label any repository-only result partial and make no live-state claim.
 
-Confirm the repository and authenticated GitHub access. Read the relevant open
-issues, linked or closing PRs, labels, relationships, comments, checks, review
-threads, timestamps, and repository design artifacts. Use local branches and
-registered worktrees only as independent collision evidence, never as a
-replacement for GitHub state.
+Use repository workflow, labels and design statuses. Classify from evidence:
 
-Read [the backlog reference](reference.md) for classification and output shape.
-Use the repository's own labels and documented workflow; do not impose a
-universal label taxonomy. If live access fails, stop the live-state claim and
-label any repository-only result as partial.
+- **Active:** live delivery PR or recent implementation activity.
+- **Blocked:** a named dependency, decision, finding or check prevents the next action.
+- **Next:** accepted, sufficiently specified, no live collision.
+- **Needs design:** unresolved material design boundary; established small changes
+  need no design artifact.
+- **Unclassified:** insufficient evidence.
+- **Orphan PR:** no identifiable issue or accepted task context.
+- **Missing PR:** claimed active work cannot be reconciled to a live PR or branch.
+- **Stale:** exceeds the repository's meaningful-update threshold; otherwise
+  report age without inventing a threshold.
 
-## Compose
+Before recommending pickup, re-read the issue, acceptance, linked design,
+branch/worktree claim and competing PRs. Another delivery for the same acceptance
+is a collision to reconcile. Explicit links, closing keywords, shared references
+and comments outweigh title similarity; native sub-issues outweigh prose
+parentage. Exact worktree/branch matches establish collisions; similar slugs
+only warrant inspection. Use [contract blockers](../../CONTRACT.md#blockers)
+for readiness, not labels. Reassess complexity after design settles; it describes
+judgment, not executor preference.
 
-Select only sections relevant to the question and separate observed facts
-from recommendations.
+Lead with the recommendation for next-work questions, current delivery/blockers
+for re-entry. Include relevant links, observed state, defined priority,
+parentage, acceptance/design gaps, dependencies, collisions, age, last meaningful
+evidence, classification rationale and smallest next action. For delegation,
+include bounded acceptance and evidence that pickup is clear.
 
-Before recommending an executable next item, re-read its issue, acceptance,
-linked design artifact, branch or worktree claim, and competing PR state. Treat
-another live delivery for the same acceptance as a collision to reconcile, not
-an invitation to duplicate work.
+Separate observations from recommendations. A missing issue link alone does
+not prove absence of accepted task context. Omit empty sections and state source
+limits.
 
-If the requester explicitly asks for issue grooming, re-read live state before mutation, keep each issue to
-one bounded outcome, and report every changed issue field or relationship.
+Keep GitHub and the repository read-only unless mutation is explicitly requested.
+For requested grooming, re-read live state, keep each issue to one bounded outcome,
+and report changed fields/relationships. Reminders without concrete work belong
+as dated-review recommendations in their owning issue/design, not new items.
 
-Route delivery to `work-issue`, missing durable design to `write-design-doc`, a
-draft design needing convergence to `refine-design-doc`, and a narrative brief
-to `explain`.
-
-## Exit
-
-Exit with a concise, evidence-linked live view containing the relevant readiness,
-collision, gap, and age signals plus the next justified action. Omit empty
-sections, label every source limit, and make no unrequested GitHub or repository
-mutation.
+Route delivery to [work-issue](../work-issue/SKILL.md), missing design to
+[write-design-doc](../write-design-doc/SKILL.md), design convergence to
+[refine-design-doc](../refine-design-doc/SKILL.md), narrative briefs to
+[explain](../explain/SKILL.md).

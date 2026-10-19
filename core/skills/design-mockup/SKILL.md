@@ -1,53 +1,43 @@
 ---
 name: design-mockup
-description: Create a standalone HTML/CSS visual mockup to explore a UI direction before production implementation; use for product shape or aesthetic exploration, not production components.
+description: Explore a UI direction with a standalone HTML/CSS mockup before production implementation.
 ---
 
 # Design Mockup
 
-Create one standalone HTML/CSS mockup that makes an intended interaction and
-visual hierarchy inspectable while design changes are cheap. Keep it clearly
-non-production and do not implement backend behavior.
+Make an interaction and visual hierarchy inspectable while changes are cheap.
+Keep the artifact clearly non-production; omit backend implementation.
 
-## Grounding
+Read the request, issue/task, relevant design and existing surface. Identify
+actors, jobs, scenarios, consequential states and the design question. Inspect
+available component catalogs, tokens, theme/layout guidance, prior mockups and
+browser-testing instructions. Otherwise infer only from production UI and state
+the limit. Reuse recognizable patterns while allowing better composition;
+compare directions only when they help decide.
 
-Read the request, issue or `.loopzero/task.md`, relevant design artifact,
-existing product surface, and [the mockup reference](reference.md). Identify the
-actors, jobs, scenarios, consequential states, and design question the mockup
-must answer.
+Save at the documented mockup location or
+`docs/design/mockups/YYYY-MM-DD-feature-name.html`. Use semantic, responsive HTML,
+accessible states, theme tokens and realistic data exposing relevant hard cases:
+long labels, density, truncation, empty/loading/error states, permissions or
+destructive actions.
 
-Inspect existing component and token conventions when present. Reuse recognizable
-patterns without treating current composition as a constraint against a better
-direction. When multiple genuinely different directions help decide the design,
-compare them; do not create variants merely to satisfy a process.
+Keep CSS and bounded interaction JavaScript inline, title the page as a mockup,
+and avoid remote runtime dependencies, production imports or an application-server
+requirement. Demonstrate consequential transitions, hierarchy and feedback.
+Controls must work or be plainly non-functional; use static alternatives when
+interaction does not inform the design question.
 
-## Build And Inspect
+Inspect representative desktop and mobile widths, keyboard order/focus,
+headings/landmarks, control names, contrast, reduced motion, overflow, zoom and
+both themes when supported. Report inspected conditions and unavailable
+browser-dependent checks.
 
-- Save a self-contained HTML artifact at the repository's documented mockup
-  location, or `docs/design/mockups/YYYY-MM-DD-feature-name.html` (ISO date,
-  short kebab-case feature name).
-- Use semantic HTML, responsive behavior, accessible states, theme tokens, and
-  realistic representative data.
-- Demonstrate only the consequential states and interactions needed to judge
-  the idea. Controls must work or be plainly marked non-functional.
-- Do not simulate backend complexity or imply that the artifact is production.
-- Run the reference's inspection, including consequential interactions, and
-  record any tooling limit that affects design judgment.
+Document mappings to existing components/tokens, production gaps and visual
+assumptions distinct from settled architecture. Seek stakeholder validation
+when required; otherwise mark material direction assumed and vetoable.
 
-When the mockup is part of a loop-zero task, put its path plus material design
-assumptions in `.loopzero/task.md` Notes, and run `loopzero check` after the
-delivery owner commits the mockup.
-
-## Translation Handoff
-
-Document which existing components and tokens map to the concept, which
-production gaps remain, and which choices are visual assumptions rather than
-settled architecture. Ask the stakeholder to validate material direction when
-required; otherwise mark it assumed and vetoable.
-
-## Exit
-
-Exit when the core design decision is inspectable with realistic states, the
-relevant viewport, theme, interaction, and accessibility conditions work,
-controls are honest, translation gaps and assumptions are explicit, and the
-artifact is unmistakably self-contained and non-production.
+For loop-zero tasks, record artifact path and material assumptions in
+`.loopzero/task.md` Notes, then follow [the contract](../../CONTRACT.md) for
+delivery checks after the owner commits. Finish when realistic states make the
+decision inspectable, relevant checks work, controls are honest, and translation
+gaps and assumptions are explicit.

@@ -1,48 +1,40 @@
 ---
 name: write-tests
-description: Design, add, or improve tests when testing itself is the task; use for coverage gaps, suite quality, or complex test design, and use fix-failing-tests for observed failures.
+description: Add or improve behavior-focused coverage when testing is the task; use fix-failing-tests for observed failures.
 ---
 
 # Write Tests
 
-Add the smallest set of behavior-focused tests that materially improves
-confidence. Do not change product behavior merely to increase coverage.
+Add the smallest useful tests for a named user or system contract and regression
+risk. Follow [the contract](../../CONTRACT.md) in the task worktree, inheriting
+the outer task's worktree when nested. Confirm branch and `.loopzero/task.md`
+before editing. Do not change product behavior merely to increase coverage.
 
-Work in the task worktree from `loopzero start`, or the outer task's worktree
-when nested; confirm its branch and `.loopzero/task.md` before editing.
+Choose the cheapest faithful boundary: unit tests for deterministic logic with
+stable collaborators and no real network/database; integration tests for real
+queries, transactions, isolation, constraints, serialization and adapters;
+end-to-end tests for critical journeys that cannot be proved below the assembled
+system.
 
-## Choose The Proof
+Exercise stable public seams. Repeated private access or a harness as complex
+as the behavior signals a missing seam: report it rather than extracting
+production code solely for testing convenience. Use an independent oracle for
+observable outputs, transitions or boundary effects. Mock calls, internal steps,
+snapshots or duplicated implementation calculations alone are insufficient.
 
-- Name the user or system contract, regression risk, and failures the suite must
-  distinguish.
-- Choose the cheapest faithful boundary: unit tests for deterministic logic
-  with stable collaborators (no real database or network); integration tests for
-  queries, transactions, isolation, constraints, serialization, and adapters
-  whose behavior depends on real boundaries; end-to-end tests only for the few
-  critical journeys that cannot be proved below the assembled system.
-- Exercise stable public seams. Repeated private reach-ins or a harness as
-  complex as the behavior is evidence of a missing seam; report that boundary
-  rather than extracting production code solely for test convenience.
-- Use an oracle independent of the implementation. Assert observable outputs,
-  state transitions, or boundary effects; avoid asserting only mock calls,
-  internal steps, snapshots, or a duplicated implementation calculation.
-- Cover applicable success, denial or isolation, validation, state transition,
-  and failure behavior without turning that list into a quota.
+Cover applicable success, denial/isolation, validation, transitions and failures
+without a case quota. Follow repository placement, fixture, marker and naming
+conventions. Keep fixtures minimal, isolated and deterministic; avoid timing
+tolerance, shared mutable state, duplicate cases and assertions repeating mock
+configuration.
 
-## Validate And Exit
+For a bug fix or behavior change, observe the regression test failing on
+pre-fix code for the intended behavior and record the failing line in
+`.loopzero/task.md` Notes. An infrastructure failure does not count.
+Coverage-only tests may pass existing code.
 
-Run the focused test while developing. For a bug fix or behavior change, watch
-it fail on the pre-fix code for the intended regression and record that failing
-line in `.loopzero/task.md`. Coverage-only tests may pass on existing code.
-Then run the narrow neighboring suite, commit, and run `loopzero check` on the
-clean head. Follow repository placement, fixture, marker, and naming
-conventions. Keep fixtures minimal, isolated, and deterministic, and preserve
-the runner's exit status. Avoid timing tolerance, shared mutable state,
-duplicate cases, and assertions that restate how a mock was configured.
-
-Exit when every added test protects a named contract, regression tests were
-seen failing on the pre-fix code for the intended behavior rather than
-infrastructure, relevant checks pass, and
-the added brittleness is lower than the risk protected. Record commands and
-results in `.loopzero/task.md`; use [implement](../implement/SKILL.md) if
-production behavior must change.
+Run focused tests during development, then the narrow neighboring suite and
+contract delivery checks. Record commands and results in task Notes. Exit when
+each test protects its named contract, regression failure evidence exists,
+checks pass and added brittleness is lower than the risk protected. Route
+necessary product changes to [implement](../implement/SKILL.md).
