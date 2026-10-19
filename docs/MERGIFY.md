@@ -19,7 +19,8 @@ model review remain separate evidence.
    and a GitHub Actions installation token cannot read queue membership.
 3. Deliver shared authored-head eligibility and Mergify CLI support before
    enabling this configuration. Set trusted review publishers to the GitHub
-   accounts that actually post model reviews (currently `eowca`).
+   accounts that actually post model reviews (now only
+   `loopzero-feder-positronics[bot]`).
 4. Prove source and candidate publishers and existing CI on a disposable target.
    A source-only eligibility publisher is insufficient: Mergify carries queue
    check conditions into its temporary candidate checks. The candidate publisher
@@ -183,6 +184,11 @@ resuming the original path. loop-zero returns to its native queue; IntelFlo retu
 to strict up-to-date squash delivery. Public plans may not offer a pause API, so
 rollback must include reviewed revocation of queue authority. Keep all required
 checks. Do not silently lower protections during an outage.
+
+Restoring a removed review publisher cannot self-approve: hosted eligibility reads
+trusted publishers from `main`. Break-glass is owner-only: add a temporary
+PR-only bypass to the guardrail ruleset, merge the restoring PR, remove the bypass
+immediately, then refresh eligibility on every open PR and requeue candidates.
 
 Finding mutations use the supported withdraw/edit/refresh/readmit protocol in
 SETUP.md. Actions does not cover every thread-reopening event and an asynchronous
