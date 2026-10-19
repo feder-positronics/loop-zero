@@ -15,10 +15,6 @@ Before trusting a finding after the PR head moves:
 5. Record that evidence for the proposed thread reply. The thread is resolved
    only after the fix or reason is visible there.
 
-For a delta review, inspect only the diff since the reviewed commit and the open
-threads inherited from the primary review. Do not reopen unrelated parts of the
-full diff unless new evidence shows the reviewed premise was false.
-
 ## Response Handoff
 
 For each thread, hand off:

@@ -37,8 +37,9 @@ describes required judgment, not a preferred model or executor.
 
 ## Output
 
-For each included item report its identifier and link, observed state, why it is
-in that section, relevant dependencies or collisions, last meaningful evidence,
-and the smallest justified next action. For re-entry, lead with current delivery
+For each included item report its identifier and link, observed state,
+priority when defined, parent or initiative relationships, acceptance or design
+gaps, dependencies or collisions, age and last meaningful evidence, why it is in
+that section, and the smallest justified next action. For re-entry, lead with current delivery
 and blockers. For delegation candidates, include bounded acceptance and why no
 collision or unresolved design choice prevents pickup.

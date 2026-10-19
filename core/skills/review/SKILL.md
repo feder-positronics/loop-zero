@@ -10,7 +10,7 @@ evidence-backed judgment. Do not implement changes.
 
 ## Route And Ground
 
-Route a code diff or PR to [code-review](../code-review/SKILL.md), adding
+Route a code-diff review to [code-review](../code-review/SKILL.md), adding
 [security-review](../security-review/SKILL.md) when a trust boundary changes.
 For other targets, read enough source material and surrounding context to
 understand purpose, constraints, callers or consumers, and acceptance.
@@ -36,10 +36,9 @@ value. Exact choreography needs a safety reason or observed failure.
 
 ## Output And Exit
 
-For an opinion pass, return the assessment, ranked concerns, recommended
-direction, and material uncertainty. For a findings review, return the
+State material uncertainty and review limits. For a findings review, label
 evidence-backed findings at the requested breadth as `critical`, `important`,
-or `suggestion`, plus one synthesis and the review limits.
+or `suggestion`, and add one synthesis.
 
 Leave the target unchanged. Exit when scope and altitude are explicit, each
 concern is supported by inspected evidence, and uncertainty is stated. If the

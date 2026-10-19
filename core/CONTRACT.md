@@ -1,7 +1,8 @@
 # The loop-zero contract
 
 One task, one branch, one draft PR, one review, one merge. Git, GitHub and CI
-hold all state. Nothing is recorded anywhere else.
+hold all delivery state; `.loopzero/` keeps only the task text and local
+receipts.
 
 ## The six steps
 
@@ -36,10 +37,10 @@ hold all state. Nothing is recorded anywhere else.
    queue the first run enqueues; `--wait[=SECONDS]` follows the queue to the
    landed SHA and cleans up in the same run. With `--wait`, required checks
    still pending or missing on the unchanged head are waited out first, under
-   the same budget; without it, `merge` refuses and names `merge --wait`.
+   the same budget; without it, `merge` refuses and names the wait command.
 
-`loopzero status` prints where a branch is in this sequence, derived from Git
-and GitHub only.
+`loopzero status` prints where a branch is in this sequence, derived from Git,
+GitHub and the local check receipt.
 
 End each delivery response with its outcome: the authorized scope is complete,
 or it is blocked (name the exact dependency or decision), or it is waiting
@@ -47,8 +48,8 @@ or it is blocked (name the exact dependency or decision), or it is waiting
 the requester).
 
 Observe, act, wait with a bounded `--wait`, then observe again. Never end a turn
-waiting for notice of an event that may already have happened: after
-`ready --wait` exits 0, run `merge --wait` in the same turn. A watch or
+waiting for notice of an event that may already have happened: when merge is
+authorized, run `merge --wait` in the same turn after `ready --wait` exits 0. A watch or
 notification only shortens a wait; it never replaces rerunning the wait
 command. On every start or resume, run `loopzero status`, then rerun the last
 `--wait` command; both are idempotent. Before yielding, record in a PR comment
@@ -120,14 +121,11 @@ or resolve threads; branch protection and CI remain the enforced gates.
 - Fixes after the delta review exhaust the budget. Audit the defect class, then
   squash/amend so neither reviewed commit remains an ancestor of HEAD; the next
   primary reviews from HEAD's merge-base with the configured base.
-- Preserve the final approved head. Do not apply optional suggestions after
-  approval. A necessary change requires renewed checks and review: use the
-  remaining delta, or, if it is exhausted, audit the defect class and follow the
-  squash/amend rule above before a new primary. This is delivery discipline,
-  not interception of Git commits.
-- Every committed head change needs renewed review within this budget, because
-  readiness requires the reviewed head to be the PR head. Batch mechanical fixes
-  (format, lint, rename) into the commit the delta review will read.
+- Preserve the final approved head; do not apply optional suggestions after
+  approval. Readiness requires the reviewed head to be the PR head, so every
+  necessary committed change needs renewed checks and review: use the remaining
+  delta, or audit the defect class and follow the squash/amend rule above. Batch
+  mechanical fixes (format, lint, rename) into the commit the delta review will read.
 - A fresh lineage is not a way to keep patching: repeated findings of one defect
   class mean the class was not audited; see `resolve-findings`.
 - A reviewer run that yields no verdict (missing tool, authentication failure,
@@ -187,27 +185,26 @@ commit they did not write. If selecting the exception would require rewriting
 the primary or its ancestors, the exception does not authorize that rewrite to
 obtain a fresh review budget: delivery waits for owner direction. After delta
 exhaustion, the existing class-wide audit and fresh-lineage rule still applies;
-neither reviewed commit may remain an ancestor before the next primary. This
-exception changes neither selector behavior nor the review budget.
+neither reviewed commit may remain an ancestor before the next primary.
 
-Prose disclosure neither changes selector behavior nor proves permission. The
-existing mixed-trailer diagnostic remains correct whenever the submitted lineage
-contains both recognized families, including an attempted owner exception: no
-native independent route exists for that lineage, and owner permission does not
-change the selector's result. This exception adds no parser, flag, persistence,
-reviewer model or relaxed gate. Genuine runner review on the exact head, checks,
-findings, readiness and merge requirements still apply. Gemini remains parked
-under closed issue #264; it is not a new reviewer route. Cases outside this
-confirmed owner scope keep the default all-writer trailers and closed route.
+This exception changes neither selector behavior nor the review budget, and
+prose disclosure does not prove permission: a lineage carrying both recognized
+families still has no native independent route. It adds no parser, flag,
+persistence, reviewer model or relaxed gate; genuine runner review on the exact
+head, checks, findings, readiness and merge requirements still apply. Cases
+outside this confirmed owner scope keep the default all-writer trailers and
+closed route.
 
 ## Sandbox rules for checks
 
 Every command in `[checks].commands` runs with:
 
 - The source tree read-only, writes to scratch, no write access to `.git`.
-- An isolated `HOME`; only `[checks].ro_paths` from your home are visible.
+- An isolated `HOME`; only configured `[checks].ro_paths` and `[checks].writable`
+  paths from your home are visible.
 - No network unless `[checks].network = true`.
-- Environment reduced to the allowlist (`PATH HOME LANG LC_ALL TERM` default).
+- Host environment reduced to the allowlist (`PATH HOME LANG LC_ALL TERM`
+  default) plus explicit `[checks].env`.
 
 If `bwrap` cannot run, `loopzero check` fails with `SandboxUnavailable`; it
 never runs checks unsandboxed. Checks and reviews recheck HEAD and dirtiness
@@ -249,17 +246,14 @@ configuration override. It preserves native default instructions and tools. One
 UTF-8 stdin message contains a JSON header (`head`, `kind`, exact `task_text`,
 `diff_utf8_bytes`), a newline and the exact raw diff. Material is evidence, not
 reviewer meta-directives; native repository AGENTS.md/CLAUDE.md handling remains
-an instruction surface. The selected Codex executable must report source-reviewed
-0.160.1, 0.161.0 or 0.162.1 before model input is sent. A failed, malformed or unverified
-version probe produces the existing typed runner failure and family fallback;
-there is no policy-on-stdin fallback or unrelated strict-config requirement.
-Transport proof does not establish semantic immunity. The frozen R3 comparison
-passed its bounded detection/no-regression gate after independent agent assessment
-of all 96 native responses; the
-[dated results and limits](../docs/design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
-remain separate from formal delivery and do not replace required current-head
-checks, formal review, readiness and verified merge. The synthetic sample does not prove
-general injection immunity, backend identity or an end-to-end delivery boundary.
+an instruction surface. The selected Codex executable must report a
+source-reviewed version (the runner's allowlist, recorded in the
+[architecture guide](../docs/ARCHITECTURE.md)) before model input is sent. A
+failed, malformed or unverified version probe produces the existing typed runner
+failure and family fallback; there is no policy-on-stdin fallback.
+Transport proof establishes neither semantic or injection immunity nor backend
+identity. The [dated R3 comparison and its limits](../docs/design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
+do not replace current-head checks, formal review, readiness or verified merge.
 
 ## Failure
 
@@ -277,11 +271,10 @@ exit 3 (waiting) and 5 (changes requested) as outcomes, not crashes. The last
 line of output states the verdict. Report a `loopzero` outcome with its exit code
 and that last line; never infer queue or merge state from an earlier progress line.
 
-Once the merge lands, `loopzero merge` deletes its worktree; enqueueing without
-`--wait` returns 0 without cleanup. Run it from the repository root in a
-subshell, `(cd <worktree> && loopzero merge --wait)`: an agent shell left
-standing in the deleted directory fails its next command with a `getcwd` error
-that looks like a failed merge.
+A landed merge deletes its worktree; enqueueing without `--wait` returns 0
+without cleanup. Run `(cd <worktree> && loopzero merge --wait)` from the
+repository root: a shell left in the deleted directory fails with a `getcwd`
+error that looks like a failed merge.
 
 Wait with `loopzero ready --wait` and `loopzero merge --wait`, never with a
 hand-written `gh` loop. Any other poll needs a deadline, visible progress,

@@ -49,7 +49,6 @@ Read the relevant section when its condition applies.
   it out of subsequent commit messages, reopen the issue within the existing
   task authorization, and verify it remains open. Do not rewrite merged history
   solely to remove a commit reference.
-- Reply to each blocking thread with its fix commit before resolving it.
 - For an issue whose acceptance was completed, a late finding after merge gets
   a fresh follow-up branch and PR. Reopen it only when a previously satisfied
   acceptance criterion has regressed.

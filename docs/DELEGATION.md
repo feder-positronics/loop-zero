@@ -32,8 +32,7 @@ not parse it, and it does not change the running parent model or configure
    `openai` and `anthropic` identify providers, not executable names. Native
    subagents or supported provider CLIs are execution mechanisms; a tool's
    available model list may differ from a provider's catalog. Model aliases
-   such as `opus` resolve in the selected runtime. Fable 5.1 uses the published
-   ID [`claude-fable-5-1`](https://platform.claude.com/docs/en/models/fable-5-1/overview).
+   such as `opus` resolve in the selected runtime.
 4. Pass both model and effort explicitly through the runtime's supported
    fields. Do not inherit the parent model by habit. For runtimes that require
    a fresh context to select a model, provide a self-contained brief.
@@ -45,17 +44,11 @@ not parse it, and it does not change the running parent model or configure
 
 ## Profiles are starting points
 
-| Profile | Typical work | Selection considerations |
-| --- | --- | --- |
-| `fast` | Narrow edits, focused tests, locating code, extracting facts from supplied material | Settled scope and an easily checked result. |
-| `standard` | Cohesive implementation, moderate debugging, bounded synthesis | Several connected decisions within an understood boundary. |
-| `deep` | Ambiguous architecture, difficult diagnosis, consequential decisions | Substantial uncertainty or judgment in defining or checking the answer. |
-
-These names describe the intended task shape, not permanent model rankings.
-The shipped assignments are explicit owner choices, not a measured price or
-speed ordering. Preserve those choices rather than swapping models based on
-an assumed ranking; reassess defaults with evidence and owner direction.
-Use clarity, uncertainty, consequences, and verification quality. A small
+Profile names in `models.toml` describe task shape, not a price or speed
+ranking; the shipped assignments are owner choices. Preserve them rather than
+swapping models on an assumed ranking, and reassess defaults with evidence and
+owner direction. Choose by clarity, uncertainty, consequences, and verification
+quality. A small
 security change may need deep reasoning; a large mechanical migration may use
 fast execution after its design is settled. Smaller models may investigate or
 summarize bounded source material when the parent can check the evidence.
@@ -69,48 +62,30 @@ runs. Parent-directed reassessment does not add automatic CLI retries.
 
 ## Author lineage and independent review
 
-By default, keep one authoring model family per PR, including writing delegates
-and repair work. Reserve the opposite family for read-only advice and formal
-independent review; a read-only adviser returns advice for the authoring family
-to implement. Before committing accepted delegate work, record every actual
-writing model in truthful `Co-Authored-By` trailers. Committing or integrating a
-child's patch does not make the parent its sole author. Preserve every actual
-contributor through squash and amend, except as the contract's owner exception,
-linked below, authorizes. An omitted child cannot be recovered from a
-parent-only trailer; do not invent attribution.
-
-`loopzero review` excludes every recognized trailer family in the PR lineage and
-cannot infer contributions from prose or determine owner permission, so a
-lineage carrying every configured family's trailers has no independent reviewer
-and fails closed. The contract's [review budget](../core/CONTRACT.md#review-budget) owns
-the selector, delta, repost, approved-head and post-delta squash rules. Its
+By default, keep one authoring model family per PR, including writing
+delegates and repairs; the opposite family gives read-only advice and formal
+independent review. Record every actual writing model in truthful `Co-Authored-By` trailers
+before committing delegate work; the parent committing a patch does not make it
+the sole author. The contract's [review budget](../core/CONTRACT.md#review-budget)
+owns attribution, lineage and reviewer selection, and its
 [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-owns the only alternative: its confirmed scope, main-contributor trailer,
-minority disclosure, reduced-assurance labeling and ancestry limits. Read both
-before mixing writing families; the exception is not a general waiver and
-changes neither selection nor the budget.
+is the only alternative; read both before mixing writing families.
 
 ## Briefs and ownership
 
-Give the delegate the objective, relevant source or context, allowed paths,
-acceptance evidence, selected model/effort, and the conditions for returning an
-unresolved question. Do not assume it inherited the conversation.
+Give each writing delegate its own `loopzero start` worktree and the
+self-contained brief below; do not assume it inherited the conversation.
 
-### Launching a delegate
+### Launching a background CLI delegate
 
-Before launch:
-
-- close stdin so a background delegate cannot wait for input;
-- pass the model and effort resolved from the task worktree's `models.toml`;
-- capture output in a log file, record the launched PID, and wait on and stop
-  it only by that PID (`kill -0 <pid>`), never by a process-name pattern: a
-  `pgrep -f` pattern also matches the waiting shell, so the wait never ends; and
-- give each writing delegate its own `loopzero start` worktree.
-
-For example, a writing delegate with the brief in a file (briefs contain
-quotes, so do not inline them; use an absolute path, because a relative one
-read after a `cd … &` expands to an empty prompt). State the sandbox mode; never
-rely on the CLI default. Use `read-only` for investigation:
+- Close stdin so the delegate cannot wait for input.
+- Pass the model and effort resolved from the task worktree's `models.toml`.
+- Capture output in a log file, record the launched PID, and wait on and stop
+  it only by that PID (`kill -0 <pid>`): a `pgrep -f` pattern also matches the
+  waiting shell, so the wait never ends.
+- Read the brief from a file by absolute path (a relative path read after
+  `cd … &` expands to an empty prompt), and state the sandbox mode explicitly:
+  `workspace-write` for edits, `read-only` for investigation.
 
 ```sh
 codex exec --model <model> -c model_reasoning_effort=<effort> \
@@ -130,7 +105,7 @@ Acceptance evidence: <observable evidence required for each criterion>
 Model/effort: <selection resolved from models.toml>
 Effort policy: Children inherit this policy; do not raise effort or launch a stronger model without returning to the parent.
 Delegate verification: <focused tests for the changed behavior, runnable in the delegate sandbox; wait on long commands with a blocking call (Codex: yield at least 30 s), not second-by-second polls>
-Parent verification: <broad suites and `loopzero check`, which the parent runs once; the delegate does not repeat them or start its own reviewers>
+Parent verification: <broad suites and `loopzero check`, which the parent runs once per delivery head; the delegate does not repeat them or start its own reviewers>
 Return conditions: <when to stop and return an unresolved question>; a progress summary is not a stop: continue until the acceptance evidence exists or a named blocker needs the parent
 Final report: <changed files, evidence, check results, deviations, open questions>
 ```
@@ -144,8 +119,8 @@ up front rather than telling a delegate to stop at a line count. Continue an
 unfinished delegate by resuming its session (for example `codex exec resume`)
 rather than starting a fresh one that re-reads everything. Delegate verification
 runs the focused owning tests and applicable coverage checks specified in the
-brief; the parent runs required broad verification once against the delivery
-base. When a delegate needs a shared tool cache, grant exactly that directory
+brief; the parent runs required broad verification once per delivery head.
+When a delegate needs a shared tool cache, grant exactly that directory
 (`--add-dir ~/.cache/uv`); never point caches at shared `/tmp`, whose inodes
 fill and stop every session on the host.
 
@@ -163,8 +138,8 @@ A linked worktree may have its shared Git directory outside the delegate's
 writable sandbox; leave commits to the parent when that directory is not
 writable. Retarget stacked PRs before deleting their base branch.
 
-The parent coordinates; it does not become the implementer. Delegate review
-repairs like other implementation, wait for background-task completion
+The parent coordinates. Apply the criteria above to implementation and review
+repairs alike, wait for background-task completion
 notifications rather than reading their output files, and, when a resolved route
 is unavailable (for example a provider at its usage limit), tell the requester
 which substitute runs. Start a fresh parent session with a short handoff at a
@@ -175,22 +150,14 @@ to this session to it, post its link and stop. Do not ask the requester to start
 it; a bare "continue" after a rollover recommendation means continue there.
 
 The parent reads the returned diff or evidence and verifies acceptance. Worker
-claims of success are not proof. The parent runs `loopzero check` once; if its
+claims of success are not proof, including claims of no deviations. The parent
+runs `loopzero check` once per delivery head; if its
 declared checks do not isolate the change from host tools, run a focused
 restricted-PATH probe and report that limitation. Only the sandboxed `loopzero
 check` report counts as delivery proof; continue through the
-[contract](../core/CONTRACT.md).
-The review profile does not replace default independence requirements or the
-bounded owner exception in the contract.
-`loopzero review` continues to own formal delivery review and its review budget.
-A model upgrade never changes tool permissions, isolation, checks, or merge
-requirements. Merge only when the task authorizes it. Under a merge queue,
-`loopzero merge --wait` can enqueue, verify the merge, and clean up in one run.
-
-These safeguards retain the [2026-09-18 delegation lessons](https://github.com/feder-positronics/loop-zero/blob/3080a7f5bbf69f5d375e11c7a923b545cf6c21e4/docs/DELEGATION.md):
-delegate reports concealed an environment-variable change and claimed skipped
-tests that did not exist. Read the diff yourself and treat claims of no
-deviations as unverified until the actual changes and checks support them.
+[contract](../core/CONTRACT.md). Model selection never changes tool
+permissions or the contract's isolation, checks, review, readiness, or
+authorized-merge requirements.
 
 ## Configuration and upgrades
 

@@ -23,17 +23,16 @@ compare them; do not create variants merely to satisfy a process.
 
 ## Build And Inspect
 
-- Save a self-contained HTML artifact at
-  `docs/design/mockups/YYYY-MM-DD-feature-name.html`, preserving that convention
-  unless the repository already documents an equivalent mockup location.
+- Save a self-contained HTML artifact at the repository's documented mockup
+  location, or `docs/design/mockups/YYYY-MM-DD-feature-name.html` (ISO date,
+  short kebab-case feature name).
 - Use semantic HTML, responsive behavior, accessible states, theme tokens, and
   realistic representative data.
 - Demonstrate only the consequential states and interactions needed to judge
   the idea. Controls must work or be plainly marked non-functional.
 - Do not simulate backend complexity or imply that the artifact is production.
-- Inspect representative desktop and mobile widths, light and dark themes when
-  relevant, keyboard flow, focus, contrast, and consequential interactions.
-  Record any tooling or inspection limit that affects design judgment.
+- Run the reference's inspection, including consequential interactions, and
+  record any tooling limit that affects design judgment.
 
 When the mockup is part of a loop-zero task, put its path plus material design
 assumptions in `.loopzero/task.md` Notes, and run `loopzero check` after the

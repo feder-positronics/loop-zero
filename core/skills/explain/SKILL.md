@@ -28,14 +28,11 @@ for depth, visual choice, HTML validation, or briefing variants as needed.
 ## Output
 
 - **Markdown:** answer inline using the smallest useful structure.
-- **HTML:** render a self-contained, offline-safe, accessible, printable file to
-  a temporary path and run the reference's mandatory checks. Promote it to the
-  requested path or established explainer location only after every available
-  mandatory check passes, labeling unavailable browser checks as the reference
-  requires; a mandatory failure blocks promotion.
-- **Briefing:** gather current repository and GitHub evidence for the requested
-  project, backlog, pulse, strategy, or journey view. Treat GitHub as read-only
-  and label source limits instead of repairing or inventing state.
+- **HTML:** create a self-contained, offline-safe, accessible, printable file
+  through the reference's HTML validation and promotion procedure.
+- **Briefing:** present an evidence-backed project, backlog, pulse, strategy, or
+  journey narrative. Use `backlog` to collect live work state; treat GitHub as
+  read-only and label source limits instead of repairing or inventing state.
 
 End with a compressed, actionable or memorable takeaway. Use `review` for
 critique, `backlog` for a live work view, `design-mockup` for UI exploration,

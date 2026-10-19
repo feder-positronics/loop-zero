@@ -40,7 +40,9 @@ Before handoff verify:
 - print rendering works and the file stays below 500 KB without embedded
   diagrams or 2 MB with them.
 
-Validate a temporary artifact, then promote it. A mandatory failure blocks
+Validate a temporary artifact, then promote it to the requested path or
+established explainer location after every available mandatory check passes. A
+mandatory failure blocks
 promotion and is reported with its location. If browser accessibility or print
 tooling is unavailable, run the source-level and offline checks, label the
 browser check unavailable, and do not claim a full pass.

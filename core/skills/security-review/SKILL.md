@@ -50,5 +50,4 @@ are no defects. Never include secrets, tokens, credentials, or PII in a finding.
 
 Exit when each changed trust boundary and plausible attacker-controlled path
 has been assessed, residual uncertainty is stated, and the structured verdict
-is complete. Missing diff or required evidence is a `critical` finding, never
-an approval.
+is complete.

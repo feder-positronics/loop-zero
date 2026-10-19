@@ -4,17 +4,14 @@ For subagent model selection, use the shared [delegation guidance](../../docs/DE
 and the task repository's `models.toml`. `plan`, `implement`, `work-issue`,
 and `typesafe-ai` are linked under `.agents/skills` for discovery in this checkout.
 
-For API-key integrations, all skills use the shared
-[credential convention](../CREDENTIALS.md): the documented provider environment
-variable first, then a private `~/.config/<service>/api-key` file for local work.
-See [configuration and provisioning](../../SETUP.md#api-keys-for-local-agents).
-Existing provider login flows and sandbox authentication remain separate.
+For API-key integrations, follow the [credential convention](../CREDENTIALS.md)
+and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 
 | Name | When to use | Tier |
 | --- | --- | --- |
 | `plan` | Bound an unclear requested change as one objective with observable acceptance before implementation. | entry |
 | `implement` | Deliver a bounded task through tests, checks, a draft PR, review fixes, and the `loopzero ready` gate; merge only when separately requested. | entry |
-| `work-issue` | Deliver one live GitHub issue from duplicate-checked intake through verified merge and either closure or an explicit partial-delivery boundary. | entry |
+| `work-issue` | Deliver one live GitHub issue through `implement` to verified merge and either closure or an explicit partial-delivery boundary. | entry |
 | `write-design-doc` | Create an exploration, ADR, initiative, blueprint, or guide when implementation needs a durable design contract. | entry |
 | `grill-me` | Settle coupled material decisions when the requester asks for stress-testing or consequential choices are structurally coupled even without that request. | method |
 | `review-design-doc` | Review an existing design artifact for material design and implementation-readiness gaps without editing it. | method |
@@ -24,7 +21,7 @@ Existing provider login flows and sandbox authentication remain separate.
 | `backlog` | Produce a live, read-only view of GitHub issues, PRs, blockers, collisions, and next work. | method |
 | `diagnose` | Establish a failure's cause with one small reproduction and, when needed, ranked discriminating experiments. | method |
 | `resolve-findings` | Decide bounded responses to existing PR review threads before fixes are applied. | method |
-| `code-review` | Review a frozen code diff under the contract's default independence or bounded owner exception against its acceptance criteria and emit JSON findings for `loopzero review`. | method |
+| `code-review` | Review a frozen code diff against its acceptance criteria and emit JSON findings for `loopzero review`. | method |
 | `review` | Assess an artifact, system, architecture, workflow, agent configuration, or idea without implementing changes. | method |
 | `security-review` | Add a security-boundary review when a diff touches auth, permissions, secrets, external calls, config, file or shell primitives, serialization, or dependencies. | method |
 | `write-tests` | Add or improve behavior-focused tests when testing itself is the task. | method |

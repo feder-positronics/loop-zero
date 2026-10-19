@@ -7,8 +7,7 @@ description: Deliver an understood bounded change with its owning behavior proof
 
 Deliver one bounded change with its behavior proof. Read [the contract](../../CONTRACT.md),
 `.loopzero/task.md`, repository guidance, and the affected public interfaces.
-When the task uses API keys, follow [the credential convention](../../CREDENTIALS.md)
-and document the integration's variable, local fallback, and target environment.
+When the task uses API keys, follow [the credential convention](../../CREDENTIALS.md).
 
 Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
 when splitting work or choosing an executor.
@@ -37,13 +36,10 @@ when splitting work or choosing an executor.
    `.loopzero/task.md` Notes with trade-offs and deliberately skipped work
    before committing.
 5. Run `loopzero check` on the clean committed head before pushing. Fix nonzero
-   exits; do not edit the check list to make them pass. Running the test command
-   directly is for iteration only: the sandbox exposes only system directories,
-   the configured `ro_paths`, the allowlisted environment and, unless enabled,
-   no network, so a command that passes on the host can fail there; only the
-   `loopzero check` report counts as proof.
-   Never filter a `loopzero` command through a pipe; its exit code is the
-   verdict (see the contract's Failure section).
+   exits; do not edit the check list to make them pass. Direct test runs are for
+   iteration: a command that passes on the host can fail in the sandbox, and only
+   the `loopzero check` report counts as proof. Never pipe a `loopzero` command;
+   its exit code is the verdict.
 6. Run `loopzero pr`.
 7. After the primary `loopzero review`, fix every valid `critical` and
    `important` finding, commit, rerun `loopzero check`, and push with
