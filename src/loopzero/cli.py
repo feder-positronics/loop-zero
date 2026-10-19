@@ -245,7 +245,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
         raise CliError("more than one primary review marker found for this lineage; refusing")
     reviewed = primaries[0].head
     if head.startswith(reviewed) or reviewed.startswith(head):
-        raise CliError(f"head {head[:12]} already has a primary review; push new commits first")
+        raise CliError(f"head {head[:12]} already has a primary review; run `loopzero ready`, or push fixes for the delta")
     return "delta", reviewed
 
 
@@ -777,7 +777,7 @@ def _run_review(
                 package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
                 detail += f"\nFix: install it with `npm install -g {package}`."
             failures.append(detail)
-            print(f"reviewer {family} unavailable, trying next: {reason}", file=sys.stderr)
+            print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
             _independence_message(authors, excluded, failures, config.reviewers)
@@ -994,7 +994,7 @@ def _wait_for_checks(
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
-                "retry `loopzero ready --wait`"
+                "rerun the same `--wait` command"
             )
 
 
@@ -1020,7 +1020,7 @@ def _wait_for_mergify(
     started = time.monotonic()
     queue = config.mergify_queue
     assert queue is not None
-    print(f"PR #{pr.number} in Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
+    print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
@@ -1143,7 +1143,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             return 0
     else:
         if not readiness.ready:
-            hint = f"; {NEXT_WAIT}" if _pending_checks(config, pr, readiness) else ""
+            hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
             raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
@@ -1256,9 +1256,9 @@ def build_parser() -> argparse.ArgumentParser:
         "ready", help="compute readiness and mark the PR ready; --wait polls required checks"
     )
     merge = sub.add_parser(
-        "merge", help="recheck readiness, merge, remove the worktree; --wait follows a merge queue"
+        "merge", help="recheck readiness, merge and clean up; --wait waits for checks and landing"
     )
-    for waiter, what in ((ready, "required checks on this head"), (merge, "the merge queue")):
+    for waiter, what in ((ready, "required checks on this head"), (merge, "required checks and the landed merge")):
         waiter.add_argument(
             "--wait", nargs="?", const=WAIT_TIMEOUT, type=float, metavar="SECONDS",
             help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",

@@ -1028,7 +1028,7 @@ def test_review_chunks_oversized_diff_with_same_family(
     else:
         assert b"".join(chunks) == full_diff
     if chunk_auth:
-        assert "trying next" in err and "CLI is not authenticated" in err
+        assert "reviewer claude unavailable:" in err and "CLI is not authenticated" in err
         return
     assert "reviewing" in err and "chunks" in err
     payload = posted_review(gh)
@@ -1192,7 +1192,7 @@ def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher)
     arm_pr(gh, head)
     gh.respond(reviews_key(), [rev(head, "primary", login=publisher)])
     code, _, err = run(capsys, "review")
-    assert code == 1 and "already has a primary review" in err
+    assert code == 1 and "already has a primary review; run `loopzero ready`" in err
 
 
 @pytest.mark.parametrize("condition,message", [
@@ -1243,7 +1243,7 @@ def test_review_unverified_codex_version_falls_back_before_model_input(
     _fake_codex(fake_bin, json.dumps(APPROVE), version="codex-cli 0.162.0")
     code, out, err = run(capsys, "review")
     assert code == 0 and "review by claude" in out
-    assert "trying next" in err and "re-verification" in err
+    assert "reviewer codex unavailable:" in err and "re-verification" in err
     assert not (fake_bin / "codex.stdin").exists()
 
 
@@ -1366,7 +1366,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
     code, out, err = run(capsys, "merge")
 
     assert (code, out) == (1, "")
-    assert "required check 'checks' is pending; next: loopzero ready --wait" in err
+    assert "required check 'checks' is pending; next: loopzero merge --wait" in err
 
 
 @pytest.mark.parametrize("draft", [True, False])
@@ -1724,7 +1724,7 @@ def test_ready_wait_reports_missing_checks_without_lifecycle_recovery(
     code, out, err = run(capsys, "ready", "--wait")
 
     assert code == 1 and "waiting:" in out and f"head {head[:12]}" in err and "workflow scheduling, triggers and permissions" in err
-    assert "after correcting the cause, retry `loopzero ready --wait`" in err and not any(s in err for s in ("close", "reopen", "retrigger", "created no run"))
+    assert "after correcting the cause, rerun the same `--wait` command" in err and not any(s in err for s in ("close", "reopen", "retrigger", "created no run"))
 
 
 def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
@@ -2492,7 +2492,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     monkeypatch.setattr(cli, "_sleep", sleeps.append)
     code, out, err = run(capsys, "merge", "--wait=250" if outcome == "timeout" else "--wait=0")
     if outcome == "timeout":
-        assert f"Mergify queue main; head {head[:12]}; waiting up to 250s" in out
+        assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 2
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2

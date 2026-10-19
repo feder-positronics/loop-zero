@@ -1,200 +1,94 @@
-# Mergify adoption
+# Mergify operations
 
-The proposed workflow for both repositories uses explicit queue admission, serial
-cumulative integration, one source PR per batch, three speculative checks and
-squash merges of original PRs. After cutover, the queue owns integration; agents
-keep their authored heads unchanged when only main advances. Product tests and
-model review remain separate evidence.
+loop-zero delivers through explicit admission to the serial Mergify `main` queue:
+one source PR per batch, up to three speculative checks and squash merges of the
+original PRs. The queue owns integration; keep authored heads unchanged when only
+main advances. Product tests and model review remain separate evidence.
+[Setup](../SETUP.md#mergify) owns admission, credentials, source-head preservation
+and configuration verification; [hosted eligibility](../SETUP.md#hosted-review-eligibility)
+owns review publishers, secret isolation, status identity and the
+withdraw/edit/refresh/readmit protocol.
 
-## Dependencies
+## Publisher and integration constraints
 
-1. Install the Mergify GitHub App for loop-zero and IntelFlo. The verified public
-   App is `mergify` (10562), with author `mergify[bot]` (37929162). Recheck the live
-   installation rather than granting an actor by display name.
-2. Create a Mergify admin application key; the vendor's queue read endpoints do
-   not offer a narrower application-key scope. Store local CLI credentials in
-   `MERGIFY_API_KEY` or private `~/.config/mergify/api-key`. In Actions, create a `mergify-metadata`
-   environment restricted to deployments from the protected default branch and
-   store its `MERGIFY_API_KEY` there, never as a repository secret. A CI-scoped key
-   and a GitHub Actions installation token cannot read queue membership.
-3. Deliver shared authored-head eligibility and Mergify CLI support before
-   enabling this configuration. Set trusted review publishers to the GitHub
-   accounts that actually post model reviews (now only
-   `loopzero-feder-positronics[bot]`).
-4. Prove source and candidate publishers and existing CI on a disposable target.
-   A source-only eligibility publisher is insufficient: Mergify carries queue
-   check conditions into its temporary candidate checks. The candidate publisher
-   must verify live vendor membership, candidate identity, all constituent source
-   heads and their review eligibility before publishing success on the candidate.
-   Candidate success is published only from an `opened` or `synchronize`
-   `pull_request_target` event whose sender is the verified Mergify bot; manual and
-   workflow-run refreshes cannot authenticate a candidate head and fail closed.
+Mergify carries queue check conditions into its temporary candidates, so a
+source-only eligibility publisher is insufficient. The candidate attestor verifies
+live vendor membership, candidate identity, all constituent source heads and their
+review eligibility before publishing success. Candidate success is published only
+from an `opened` or `synchronize` `pull_request_target` event whose sender is the
+verified Mergify bot (App `mergify` 10562, `mergify[bot]` 37929162; recheck the live
+installation, never trust a display name). Manual and workflow-run refreshes cannot
+authenticate a candidate and fail closed: dequeue and request again so Mergify
+supplies a fresh event. Source PRs can be refreshed with the eligibility
+workflow's manual PR-number input.
 
-Review the environment boundary as configuration before applying it. The exact
-GitHub API payloads are:
-
-```json
-PUT /repos/feder-positronics/loop-zero/environments/mergify-metadata
-{
-  "deployment_branch_policy": {
-    "protected_branches": false,
-    "custom_branch_policies": true
-  }
-}
-```
-
-```json
-POST /repos/feder-positronics/loop-zero/environments/mergify-metadata/deployment-branch-policies
-{"name": "main", "type": "branch"}
-```
-
-After creating that policy, move `MERGIFY_API_KEY` into the environment, verify a
-default-branch publisher run can read queue status, and only then delete the
-repository-scoped secret. Read the environment and branch-policy APIs back before
-cutover. The workflow sets `environment.deployment: false`, so using the environment
-for its secret and branch policy does not create deployment objects. These are
-reviewed payloads; this repository does not apply them.
-
-For initial bootstrap before this publisher exists on the default branch, a
-read-only workflow inventory may instead prove that no default-branch workflow
-consumes the repository secret. After creating and reading back the main-only
-environment and confirming the environment secret is present, remove that unused
-repository-scoped copy. The available repository token cannot inventory organization
-secrets, so this procedure makes no claim about them and must not delete them. A
-successful default-branch publisher run and a rejected non-main environment run are
-still required before queue cutover.
-
-## Admission and CI
-
-`loopzero merge --wait` requests `@mergifyio queue main`, confirms membership via
-Mergify's API, and waits for GitHub to report the original PR MERGED. A submitted
-comment or `Mergify Merge Queue` badge does not prove membership. New source
-commits need new review evidence and explicit delivery intent. No persistent
-label automatically requeues a pushed branch.
-
-After the trusted publisher first reaches `main`, refresh existing source PRs with
-the eligibility workflow's manual PR-number input before requesting queue admission.
-A temporary candidate cannot be refreshed manually: dequeue and request it again so
-Mergify creates or updates the candidate and supplies a fresh authenticated event.
-
-Keep the `checks` required check in loop-zero, and `PR Policy` plus
-`PR Quality Gate` in IntelFlo. The queue injects the GitHub rules at both admission
-and landing. Test temporary draft PRs against the real target branch, including
-all earlier queued changes. Never select the cumulative risk lane using only
-Mergify's `checking_base_sha`, which can already include earlier queued work.
-
-Mergify may directly merge a current PR using already-valid integration checks.
-It documents no disable switch. With no scopes configured, prove that this path
-requires green exact-head eligibility and existing CI, and that behind/cumulative
-PRs get fresh integration candidates. Do not promise every PR gets a temporary
-branch. Do not reduce parallel checks to one: that can enable source-head updates.
-The adapter reads stable default-branch configuration; the deprecated rule API
-field is not a runtime verdict. After any configuration change, drain first and
-verify vendor draft-PR placement before resuming. GitHub blob identity alone
-does not establish that Mergify has ingested that revision.
+Keep the local required-check list, Mergify `queue_conditions` and the effective
+GitHub ruleset on exactly the same context names (`checks` and
+`Loop-zero Eligibility` here; `PR Policy` and `PR Quality Gate` in IntelFlo). The
+queue injects the GitHub rules at admission and landing. Candidate CI tests the
+real target including all earlier queued changes and never deploys. Never select a
+cumulative risk lane using only Mergify's `checking_base_sha`, which can already
+include earlier queued work. Mergify may directly merge a current PR using
+already-valid integration checks and documents no switch to disable that; do not
+promise every PR a temporary branch. Do not reduce parallel checks to one: that can
+enable source-head updates.
 
 When a parent batch has vanished from live status, attestation still checks every
-live source it discovers. It additionally requires the candidate's complete tree
-to equal a clean integration of those pinned source heads onto current main, in
-source order derived from the candidate's first-parent merge topology. A temporary
-bare Git store fetches SHA-pinned objects using the GitHub CLI's token; it never
-checks out or executes candidate content. Ambiguous topology, conflicts, missing
-objects, resource limits or unequal trees fail closed and identify missing batches.
-Main and the live attestation inputs are reread before success. Complete live
-lineages retain the existing behavior. Squashed parents can pass; unavailable live
-predecessors behind a missing batch and unrelated main advances may still reject.
-The fallback requires Linux `prlimit` and Git with `merge-tree --write-tree`; it
-is bounded to 32 sources, 100,000 reachable objects, 256 MiB on disk, 8 MiB command
-output, history depth 200 and 120 seconds of Git work.
+live source it discovers and requires the candidate's complete tree to equal a
+clean integration of those pinned source heads onto current main, in source order
+derived from the candidate's first-parent merge topology. A temporary bare Git
+store fetches SHA-pinned objects using the GitHub CLI's token; it never checks out
+or executes candidate content. Ambiguous topology, conflicts, missing objects,
+resource limits or unequal trees fail closed and identify missing batches. Main
+and the live attestation inputs are reread before success. Squashed parents can
+pass; unavailable live predecessors behind a missing batch and unrelated main
+advances may still reject. The fallback requires Linux `prlimit` and Git with
+`merge-tree --write-tree`; it is bounded to 32 sources, 100,000 reachable objects,
+256 MiB on disk, 8 MiB command output, history depth 200 and 120 seconds of Git work.
 
-## Reviewed protection proposal
+## Protection and credentials
 
-These JSON files are review artifacts; no workflow automatically applies them.
+The JSON files under `.github/rulesets/` are reviewed configuration artifacts; no
+workflow applies them.
 
-- `.github/rulesets/main.json` replaces ruleset 23666528. Its only behavioral
-  changes are removing GitHub's native merge queue and requiring
-  `Loop-zero Eligibility`; existing PR, `checks`, deletion and non-fast-forward
-  rules remain. Strict status checking was already false.
-  This ruleset has **no bypass actors**, including Mergify.
-- `.github/rulesets/mergify-owner.json` is a separate update restriction for main.
-  Only Mergify App 10562 bypasses that restriction. Its bypass grants no exemption
-  from the independent guardrail ruleset. Ordinary writers cannot merge around
-  the queue or push directly to main.
-- `.github/rulesets/main-before-mergify.json` is the inspected rollback payload.
-  Capture another live snapshot immediately before applying: other sessions can
-  change configuration. Do not overwrite unrelated live changes with this file.
+- `main.json` requires PRs, `checks` and `Loop-zero Eligibility`, protects
+  deletion and non-fast-forward updates, and has **no bypass actors**, including
+  Mergify.
+- `mergify-owner.json` separately restricts main updates to Mergify App 10562.
+  Its bypass grants no exemption from the guardrail ruleset, so ordinary writers
+  cannot merge around the queue or push to main. The installed App's permission
+  grant and ruleset bypasses are separate; never replace this with a blanket
+  bypass on the guardrail set, and prepare any broader authority as a concrete
+  change for review.
+- `main-before-mergify.json` is the pre-cutover rollback payload. Capture a fresh
+  live snapshot before applying anything; never overwrite unrelated live changes.
 
-The installed App's permission grant and these ruleset bypasses are separate.
-Do not replace this narrow proposal with a blanket bypass on the guardrail set.
-Verify that Mergify works with those remaining rules on the disposable target;
-if it needs broader authority, prepare that concrete change for review first.
-IntelFlo's corresponding strict-to-queue transition requires the approval reserved
-by its review-gate policy after the diff and scenario evidence are prepared.
+The Mergify admin application key is needed because queue read endpoints offer no
+narrower scope; a CI-scoped key or an Actions installation token cannot read queue
+membership. In Actions, keep `MERGIFY_API_KEY` in the `mergify-metadata`
+environment, restricted by a custom branch policy to `main`, never as a repository
+secret; the workflow's `environment.deployment: false` avoids deployment objects.
+When moving a key into that environment, read the environment and branch policy
+back, verify that a default-branch publisher run can read queue status and that a
+non-main run is rejected, and only then delete the repository-scoped copy. A token
+that cannot inventory organization secrets gives no basis to delete them.
 
-The supplied publisher uses a GitHub Actions commit status. GitHub and Mergify
-match that status by context name, so a repository writer who can add a workflow
-can forge it with `GITHUB_TOKEN`. The protected environment keeps the Mergify key
-out of branch workflows but cannot solve status identity. Before cutover, record
-explicit owner acceptance of this cooperative writer boundary, or replace the
-publisher with a dedicated GitHub App and bind the ruleset check to its integration
-ID. Branch names, PR bodies and untrusted event metadata alone remain insufficient
-to pass the candidate attestor.
+## Recovery
 
-## Cutover proof and rollback
+If the queue misbehaves, stop admission and prevent Mergify landing, restore the
+captured guardrail rules and remove the Mergify-only update restriction before
+resuming the original path (loop-zero: native queue; IntelFlo: strict up-to-date
+squash delivery). Never admit to native and Mergify queues at once. Public plans
+may lack a pause API, so rollback revokes queue authority through reviewed
+changes. Keep all required checks; an outage does not justify lowering protection.
+After any queue configuration change, drain first and verify vendor draft-PR
+placement before resuming; GitHub blob identity does not prove Mergify ingested it.
 
-Freeze landing briefly and drain the native queue before replacing its authority.
-Never admit to native GitHub and Mergify queues simultaneously on main. Read back
-effective rules before admitting reviewed work.
-
-The approved cutover commit changes the trusted `workflow.toml` together with the
-ruleset transition; this proposal deliberately leaves the live values unchanged:
-
-```toml
-[checks]
-required_ci = ["checks", "Loop-zero Eligibility"]
-
-[delivery]
-merge = "mergify"
-mergify_queue = "main"
-```
-
-A hosted source refresh succeeds while its sole blocker is missing trusted
-current-head review, leaving `Loop-zero Eligibility` pending. Pending still blocks
-merge and local readiness. Mixed blockers, findings, conflicts and refresh errors
-remain nonzero; candidate attestation still requires reviewed sources.
-
-Keep the local required-check list, Mergify `queue_conditions`, and the effective
-GitHub ruleset on exactly those context names. Validate the consumer configuration
-before admission. `loopzero merge` posts the queue command only after source
-readiness passes. Without `--wait` it refuses while a required check or
-eligibility is pending; `loopzero merge --wait` waits those out on the unchanged
-head under one budget, then requests the queue.
-
-Prove: two reviewed siblings land without source rewrites; a pushed head loses
-eligibility; dismissed reviews and supported finding mutations withdraw eligibility;
-individually passing but jointly failing changes do not land; candidate removal
-rebuilds dependents; a forged queue prefix is rejected; CLI restart resumes without
-another request; API errors never fall back to direct merge; only Mergify can update
-main; temporary candidate CI never deploys. IntelFlo additionally proves combined
-migration-head and migration-prerequisite behavior.
-
-If verification fails, stop admission and prevent Mergify landing, then restore
-the captured guardrail rules and remove the Mergify-only update restriction before
-resuming the original path. loop-zero returns to its native queue; IntelFlo returns
-to strict up-to-date squash delivery. Public plans may not offer a pause API, so
-rollback must include reviewed revocation of queue authority. Keep all required
-checks. Do not silently lower protections during an outage.
-
-Restoring a removed review publisher cannot self-approve: hosted eligibility reads
-trusted publishers from `main`. Break-glass is owner-only: add a temporary
-PR-only bypass to the guardrail ruleset, merge the restoring PR, remove the bypass
-immediately, then refresh eligibility on every open PR and requeue candidates.
-
-Finding mutations use the supported withdraw/edit/refresh/readmit protocol in
-SETUP.md. Actions does not cover every thread-reopening event and an asynchronous
-publisher cannot make metadata changes atomic with a merge. This limitation must
-be accepted explicitly before unattended landing; no custom scheduler or ledger
-is introduced to hide it.
+Hosted eligibility reads trusted publishers from `main`, so a PR restoring a
+removed publisher cannot approve itself. Break-glass is owner-only: add a
+temporary PR-only bypass to the guardrail ruleset, merge the restoring PR, remove
+the bypass immediately, then refresh eligibility on every open PR and requeue
+candidates.
 
 ## Sources
 

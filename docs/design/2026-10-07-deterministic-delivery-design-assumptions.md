@@ -106,7 +106,7 @@ across GitHub scheduling. Preserve missing, stale and failed observations until
 the owning rule permits waiting or fresh evidence resolves them.
 
 **D4 — Assumed: external notifications are hints requiring reconciliation.**
-The [architecture's dated T3 verification](../ARCHITECTURE.md#t3-verification-snapshot-october-5-2026)
+The [dated T3 verification](#t3-verification-snapshot--october-5-2026)
 records at-least-once mailbox delivery and watcher limits. Notifications should
 wake the controller to reread authority, rather than directly authorize a
 transition. Trusting event delivery is simpler; the premise would change only
@@ -938,3 +938,39 @@ existing capability probe selects that flag. It also confirmed `-c`, `-m`,
 `--skip-git-repo-check`, `--output-schema`, `--output-last-message` and stdin `-`.
 The existing argv's TOML `developer_instructions` string, reasoning-effort override
 and `mcp_servers={}` remain compatible; no argv or config-policy change is needed.
+
+## T3 verification snapshot — October 5, 2026
+
+At this verification, the consumer rollout was separate and T3 V2 was not live
+there. The [upstream V2 release](https://github.com/pingdotgg/t3code/releases/tag/v0.0.46-nightly.20261003.2610)
+documents native cross-provider `delegate_task` and lossy provider switching:
+a switched provider receives selected context, not the previous provider's
+native state. Prefer delegation when combining harnesses. The owner-approved
+controller routine starts fresh at milestones or around 300k tokens; it does
+not treat automatic compaction as assurance that intent survives.
+
+The pinned [PR watcher](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/PullRequestWatchReactor.ts)
+supplies a hint before merge; terminal merged/closed observations end the watch
+without a wake. Consequently, one `loopzero merge --wait` owns landing
+verification and cleanup. It first waits out required checks still pending or
+missing on the unchanged head under the same budget, so a check created by the
+draft-to-ready write cannot strand a turn between `ready` and the queue. A watch
+only shortens a wait; it never replaces rerunning the waiter. The pinned [notification mailbox](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/NotificationMailbox.ts)
+explicitly permits at-least-once delivery. Our execution rule follows from that
+boundary: reread Git, GitHub and the current head before acting, and make repeated
+execution idempotent. Timeline message IDs do not establish external exactly-once
+effects.
+After approval, freeze the final approved SHA. Optional suggestions cannot
+justify another edit; necessary fixes use the remaining delta or, after it is
+spent, a class-wide audit and fresh lineage.
+
+The consumer owns a production lease at the operation boundary and a host-global
+browser-resource `flock`; these are external resource controls, not loop-zero
+readiness gates. Trial V2 with isolated user data, project copies and ports,
+a coherent SQLite backup including WAL handling after provider drain, and
+preservation of custom `.git`, bare repositories and `GIT_*` guards. This is an
+approved migration constraint, not an in-place installation procedure or a
+claim that the consumer controls have shipped. Version-specific verification
+belongs in a dated compatibility note before that rollout. Reverify these
+upstream capabilities, deployed versions and deployment status when runtime or
+consumer deployment changes.

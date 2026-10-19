@@ -57,59 +57,44 @@ this guide or in a new persistent store.
 
 ## Delivery and feedback
 
-The six steps are implemented by the [CLI](../src/loopzero/cli.py):
+The [CLI](../src/loopzero/cli.py) implements the contract's
+[six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
-   The task file states the objective, acceptance and base SHA.
-2. Implementation proves the owning behavior at the narrowest public seam.
-   Focused tests start early; `check` runs the repository's deterministic checks
-   in a read-only source sandbox before the change enters hosted delivery.
-   Before long checks, a narrow simple-command preflight catches missing local
-   scripts and prepares recognized uv dependency groups offline in that same
-   sandbox. It prints progress before each command. Trusted-base commands remain
-   authoritative; stale task trees need integration only when prerequisites are
-   missing, preserving source-preserving queue eligibility for behind branches.
+2. Implementation proves the owning behavior at the narrowest public seam;
+   focused tests start early. `check` runs deterministic checks in a read-only
+   source sandbox. Its simple-command preflight catches missing local scripts,
+   prepares recognized uv dependency groups offline in that sandbox and prints
+   progress before each command. Trusted-base commands remain authoritative;
+   stale task trees need integration only when prerequisites are missing,
+   preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
-3. `pr` checks the task branch's closed PR history through GitHub REST before
-   pushing or writing. A confirmed merged PR completes that task branch, even
-   when a newer closed or open duplicate exists; the caller must start a new task.
-   Absence requires complete typed pages, bounded to 100 pages; failed, malformed,
-   repeated or truncated history blocks publication. Other commands retain their
-   open-first, newest-closed branch lookup. An unfinished branch creates or
-   refreshes a draft PR. The local task supplies narrative; the live PR owns
-   validation and review after creation.
-4. `review` runs a native reviewer against the exact authored SHA and publishes
-   one GitHub review with findings. Its selector excludes every recognized
-   `Co-Authored-By` family from the configured-base merge-base through HEAD, for
-   primary, delta and repost alike. It cannot infer contributions from prose or
-   determine owner permission, so a lineage carrying every configured family's
-   trailers fails closed. There is one primary and at most one delta review per lineage,
-   and every changed head needs renewed review. The contract's
-   [review budget](../core/CONTRACT.md#review-budget) owns authorship and budget
-   rules, including the bounded
-   [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception):
-   a labeled, reduced-assurance route that changes neither the selector nor the
-   budget.
+3. Before pushing or writing, `pr` reads the branch's closed PR history through
+   GitHub REST. A confirmed merged PR completes that branch, even when a newer
+   duplicate exists; the caller must start a new task. Absence requires complete
+   typed pages, bounded to 100; failed, malformed, repeated or truncated history
+   blocks publication. Other commands use open-first, newest-closed lookup. An
+   unfinished branch creates or refreshes a draft PR.
+4. `review` publishes one native review of the exact authored SHA. The contract's
+   [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
+   primary/delta limits and the
+   [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
+   which changes neither the selector nor the budget.
 5. `ready` derives readiness from the unchanged head, review, blocking findings,
-   target branch and required CI. Its bounded waiter observes that same head.
-   After its own draft-to-ready write, `ready --wait` revalidates visible readiness
-   through that waiter with the original deadline, preserving all existing gates
-   and replacement evidence. Missing-run diagnosis retains its two-minute observation
-   grace after activation; that grace does not extend the overall wait deadline.
-   An immediate green read may still precede asynchronous
-   CI scheduling: this is best-effort observation, with no unconditional delay or
-   wait for a new run that might never be scheduled. Merge admission still checks
-   readiness again and fails closed on later blockers. Plain `ready` and already
-   non-draft PRs retain their behavior.
+   target branch and required CI. After its own draft-to-ready write,
+   `ready --wait` revalidates through the same waiter and original deadline.
+   This is best-effort observation: an immediate green read may precede
+   asynchronous CI scheduling, there is no unconditional delay, and merge
+   admission checks readiness again. Missing-run diagnosis keeps its two-minute
+   grace after activation without extending the deadline.
    When every non-success signal of a required check strictly predates the eligible
    review, `ready --wait` allows up to 15 minutes from that review for a refresh,
    including time before GitHub publishes pending. Past the ordinary two-minute
    review grace it identifies the old verdict and awaited refresh. The check still
    blocks readiness throughout; at 15 minutes it becomes a final failure again
    unless existing pending/replacement evidence independently permits waiting.
-   Failures at or after the review receive no extended grace. The two-minute
-   grace for missing runs and generic failures, and calls without `--wait`, retain
-   their existing behavior. The command's own timeout can end waiting sooner.
+   Failures at or after the review receive no extended grace. The command's own
+   timeout can end waiting sooner.
 6. `merge` recomputes readiness, merges or enters the configured queue, verifies
    the landed SHA and then cleans up the task branch and worktree.
 
@@ -141,23 +126,21 @@ remote PR-base revision, refusing a missing remote ref/workflow unless the opera
 supplies explicit configuration. Reposts and other commands retain their fallback
 policy. Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
-explicit exceptions. Claude's nonempty existing API-key/OAuth environment routes omit host
-config/global-state binds and use disposable private state; empty/absent values
-retain the broad config and mixed global-state exposure. The runner forwards
-credentials unchanged; native Claude owns route precedence and billing. Codex's
-file bind is unchanged even with an environment key. File-backed binds preserve
-in-place writes, without guaranteeing host replacement visibility or shared-lock
-coordination. This boundary is route-specific, not full filesystem privacy. An
-implicit runtime inside state receives only the selected executable's exact read-only file
-mount, while explicit runtime paths have no exception. This preserves standalone
-CLI startup without exposing neighboring state; bundles needing protected siblings
-require installation outside state. The contract states the agent-facing
-consequences. Claude's environment routes are `ANTHROPIC_API_KEY` and
-`CLAUDE_CODE_OAUTH_TOKEN`; a nonempty value (whitespace included) is forwarded
-unchanged and omits host config binds, and the runner never adopts disk auth
-after an environment error. File-backed Claude binds `~/.claude` (or
-`CLAUDE_CONFIG_DIR`) and `~/.claude.json`; Codex keeps its `auth.json` bind under
+explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
+`CLAUDE_CODE_OAUTH_TOKEN`: a nonempty value (whitespace included) is forwarded
+unchanged, omits host config/global-state binds and uses disposable private state;
+the runner never adopts disk auth after an environment error, and native Claude
+owns route precedence and billing. Empty or absent values retain the file-backed
+binds of `~/.claude` (or `CLAUDE_CONFIG_DIR`) and `~/.claude.json`, with their broad
+config and mixed global-state exposure. Codex keeps its `auth.json` bind under
 `CODEX_HOME` or `~/.codex`, including when `OPENAI_API_KEY` is forwarded.
+File-backed binds preserve in-place writes, without guaranteeing host replacement
+visibility or shared-lock coordination. This boundary is route-specific, not full
+filesystem privacy. An implicit runtime inside state receives only the selected
+executable's exact read-only file mount, while explicit runtime paths have no
+exception. This preserves standalone CLI startup without exposing neighboring
+state; bundles needing protected siblings require installation outside state.
+The contract states the agent-facing consequences.
 
 The R3 runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
@@ -171,22 +154,8 @@ Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
 remain enabled. Repository instructions remain a native authority surface, so
 structural transport tests do not prove injection immunity, reviewer quality or
 backend identity.
-R1, R4 and R2 merged in #281, #282 and #283. R3's frozen 96-call native comparison
-passed its bounded detection/no-regression gate after an independent Astra agent
-assessed every parsed response. The matched permission override improved from
-0/4 baseline detections to 4/4 candidate detections, with controls preserved and
-no paired defect losses or valid-case blockers in the declared sample. Comparison
-evidence is separate from, and does not replace, required current-head checks,
-formal review, readiness and verified merge. The
-[dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
-owns aggregate results, exact revisions and versioned source/runtime evidence.
-That small synthetic sample and agent-only assessment do not prove general
-immunity, real-world mergeability or an end-to-end delivery bypass boundary.
-The comparison used Claude's existing OAuth environment with private HOME and
-zero auth binds; Codex retained its existing live auth.json file bind and its
-local-state limitation. Normal accounts, authentication and billing were preserved;
-neither backend was independent. Research orchestration and charge records remain
-disposable execution artifacts, adding no production ledger or evaluation framework.
+The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
+owns the implementation history, native comparison results and their limits.
 
 Reviewer settings are optional reporting in the existing provenance container.
 Adapters retain per-call requests; publication derives CLI claims from each retained
@@ -244,24 +213,19 @@ are not features shipped by loop-zero.
 The current CLI writes PR bodies only when content changes, excluding volatile
 check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
-The transport uses bounded retries for selected transient failures and stops on
-quota errors. Waits use bounded backoff and one waiter per PR; direct `gh`
-polling adds shared account load and cannot replace the wait command. A rate
-limit is a waiting dependency, not permission to turn missing evidence green.
-GitHub reads retry transient failures up to three times (5/20/60 seconds),
-excluding rate limits; Mergify reads retry server errors, throttling and failed
-reads up to twice (2/5 seconds). The optional host ai-accounts shim may retry
+GitHub reads retry transient failures up to three times (5/20/60 seconds) and
+stop on rate limits; Mergify reads retry server errors, throttling and failed
+reads up to twice (2/5 seconds). Waits use bounded backoff and one waiter per PR;
+direct `gh` polling adds shared account load and cannot replace the wait command.
+A rate limit is a waiting dependency, not permission to turn missing evidence green. The optional host ai-accounts shim may retry
 `loopzero` once after a usage-limit exit (4).
 
 ## Direction and historical evidence
 
 The [September 24 architecture note](design/2026-09-24-delivery-system-architecture.md)
-is dated evidence from a consumer repository and its accepted principles. Its
-measurements, gap table and owners describe that observation window. They are
-not the current implementation backlog: for example, current configuration has
-trusted review publishers, transport has bounded retries, and CLI waits use
-backoff. Verify a historical gap against its owning code and consumer before
-calling it open or closed.
+is dated consumer evidence and its accepted principles. Its measurements, gap
+table and owners describe that window, not the current backlog; verify a gap
+against its owning code and consumer before calling it open or closed.
 
 The October 5 direction keeps this guide as the current entry point, preserves
 the small delivery toolkit, and makes architecture upkeep part of contribution
@@ -273,92 +237,55 @@ retaining checks, formal native review under that policy, readiness and verified
 merge authority. This boundary is durable; verify runtime compatibility and
 deployment status when adopting or updating an external executor.
 
-### T3 verification snapshot: October 5, 2026
-
-At this verification, the consumer rollout was separate and T3 V2 was not live
-there. The [upstream V2 release](https://github.com/pingdotgg/t3code/releases/tag/v0.0.46-nightly.20261003.2610)
-documents native cross-provider `delegate_task` and lossy provider switching:
-a switched provider receives selected context, not the previous provider's
-native state. Prefer delegation when combining harnesses. The owner-approved
-controller routine starts fresh at milestones or around 300k tokens; it does
-not treat automatic compaction as assurance that intent survives.
-
-The pinned [PR watcher](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/PullRequestWatchReactor.ts)
-supplies a hint before merge; terminal merged/closed observations end the watch
-without a wake. Consequently, one `loopzero merge --wait` owns landing
-verification and cleanup. It first waits out required checks still pending or
-missing on the unchanged head under the same budget, so a check created by the
-draft-to-ready write cannot strand a turn between `ready` and the queue. A watch
-only shortens a wait; it never replaces rerunning the waiter. The pinned [notification mailbox](https://github.com/pingdotgg/t3code/blob/37de6cbde65c7cf9ba90a2557c232e63b7e16988/apps/server/src/orchestration-v2/NotificationMailbox.ts)
-explicitly permits at-least-once delivery. Our execution rule follows from that
-boundary: reread Git, GitHub and the current head before acting, and make repeated
-execution idempotent. Timeline message IDs do not establish external exactly-once
-effects.
-After approval, freeze the final approved SHA. Optional suggestions cannot
-justify another edit; necessary fixes use the remaining delta or, after it is
-spent, a class-wide audit and fresh lineage.
-
-The consumer owns a production lease at the operation boundary and a host-global
-browser-resource `flock`; these are external resource controls, not loop-zero
-readiness gates. Trial V2 with isolated user data, project copies and ports,
-a coherent SQLite backup including WAL handling after provider drain, and
-preservation of custom `.git`, bare repositories and `GIT_*` guards. This is an
-approved migration constraint, not an in-place installation procedure or a
-claim that the consumer controls have shipped. Version-specific verification
-belongs in a dated compatibility note before that rollout. Reverify these
-upstream capabilities, deployed versions and deployment status when runtime or
-consumer deployment changes. A new
-daemon, scheduler, reminder issue or metrics ledger would add state without
-improving the current authority boundary and is outside this direction.
+The [October 5 T3 verification snapshot](design/2026-10-07-deterministic-delivery-design-assumptions.md#t3-verification-snapshot--october-5-2026)
+records the runtime evidence behind this boundary: at-least-once notifications,
+watcher limits and consumer migration constraints. A new daemon, scheduler,
+reminder issue or metrics ledger would add state without improving the current
+authority boundary and is outside this direction.
 
 ## Keeping the guide current
 
 Architecture review is event-driven. When changing commands, configuration,
 state authority, sandbox/trust boundaries, review/readiness, queue integration,
-module ownership or delivery routines, the contributor reads this guide and the
-owning sources before finishing the change. Update the affected explanation
-and links in the same PR, or explicitly explain why the guide remains accurate.
-A reviewer checks that claim against the diff, challenges misplaced ownership
-and distinguishes shipped behavior from proposals and dated observations.
+module ownership or delivery routines, read this guide and the owning sources
+before finishing. Update the affected explanation and links in the same PR, or
+explain why the guide remains accurate. A reviewer checks that claim against the
+diff, challenges misplaced ownership and distinguishes shipped behavior from
+proposals and dated observations.
 
-Run `python3 scripts/check_architecture_docs.py [BASE]` locally. With no explicit
-base it uses the merge-base of HEAD and `origin/main`. The repository's
-`workflow.toml` runs the default gate. PR and merge-group CI runs enforce it
-against the event's base SHA before merge. Push-to-main CI runs
-`python3 scripts/check_architecture_docs.py --links-only`: squash merging can
-drop authored commit trailers, so landed history cannot re-establish the
-pre-merge acknowledgement. This mode still rejects broken local links and
-anchors; it leaves the default local and pre-merge review gate unchanged.
-`loopzero check` pins checks to trusted base configuration,
-so a newly introduced check enters that command after the configuration lands
-on the base. Run it directly while introducing or changing the gate. The script compares that base with the working tree, including new files.
-It validates local Markdown links and anchors in this guide, the docs index,
-README and AGENTS guidance without network access.
+Run `python3 scripts/check_architecture_docs.py [BASE]`. It compares the base
+(default: merge-base of HEAD and `origin/main`) with the working tree, including
+new files, and validates local Markdown links and anchors in this guide, the docs
+index, README and AGENTS guidance without network access. The repository's
+`workflow.toml` runs the default gate; PR and merge-group CI enforce it against
+the event's base SHA. Push-to-main CI runs `--links-only`, because squash merging
+can drop authored trailers and landed history cannot re-establish the pre-merge
+acknowledgement; that mode still rejects broken local links and anchors.
+`loopzero check` pins checks to trusted base configuration, so run a new or
+changed gate directly until its configuration lands on the base.
 
-The deterministic review gate watches source-owned contracts, skill routing,
-the example and actual workflow, hosted workflow files, its own checker, and
-selected CLI/configuration interfaces. The checker lists the exact paths and AST
-selections. It ignores Python formatting and implementation-only edits outside
-those interfaces. A watched change requires a guide edit in the same comparison,
-or a commit trailer in the changed range:
+The checker watches source-owned contracts, skill routing, the example and actual
+workflow, hosted workflow files, itself, and selected CLI/configuration interfaces;
+it lists the exact paths and AST selections and ignores formatting and
+implementation-only edits outside them. A watched change requires a guide edit
+in the same comparison, or a commit trailer in the changed range:
 
 ```text
 Architecture-Review: unchanged; <concrete reason the guide is still accurate>
 ```
 
-The checker requires a nonblank reason of at least 20 characters. Use a real
-reason, such as a workflow dependency pin that leaves triggers,
-required checks and trust boundaries unchanged. This acknowledgement lives in
-Git's existing history; there is no separate review ledger. Uncommitted watched
-changes need a guide update or a committed acknowledgement before the final
-check. A missing base, unreadable source, malformed Python or broken local link
-fails the check. CI validates repository links, not the availability or current
-claims of external websites.
+The reason must be nonblank and at least 20 characters, and real: for example, a
+workflow dependency pin that leaves triggers, required checks and trust
+boundaries unchanged. Git history holds the acknowledgement; there is no separate
+review ledger. Uncommitted watched changes need a guide update or a committed
+acknowledgement before the final check. A missing base, unreadable source,
+malformed Python or broken local link fails the check. CI does not check external
+websites.
 
 Automation proves that review was recorded and links resolve. It cannot prove
-semantic freshness, detect every architecture change, or establish that a
-reasoned acknowledgement is true. Contributor and reviewer responsibility also
-covers implementation changes outside the watched public surfaces. Changes to
-the architecture boundary require updating the checker selections as well as
-the guide. Keep version-specific external compatibility research in a dated
-note with verified primary sources, leaving this core guide evergreen.
+semantic freshness, detect every architecture change, or establish that an
+acknowledgement is true; contributors and reviewers own that, including changes
+outside the watched surfaces. Changes to the architecture boundary require
+updating the checker selections as well as the guide. Keep version-specific
+external compatibility research in a dated note with verified primary sources,
+leaving this guide evergreen.
