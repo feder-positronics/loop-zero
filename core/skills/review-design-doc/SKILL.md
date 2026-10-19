@@ -1,54 +1,32 @@
 ---
 name: review-design-doc
-description: Review an existing design artifact for product fit, architecture, decisions, and implementation readiness; use for critique before implementation, not for editing the artifact.
+description: Critique an existing design artifact for product fit, architecture, decisions, and readiness without editing it.
 ---
 
 # Review Design Doc
 
-Review one existing exploration, ADR, initiative, blueprint, or design document
-as a read-only artifact. Decide whether it is the right design and a sufficient
-contract for its intended next action.
+Decide whether the design is sound and sufficient for its intended next action.
+Read [shared design guidance](../write-design-doc/reference.md) for grounding
+and decision status, then [review lenses](reference.md). Identify type, audience,
+status, next actor, and scope. Apply only checks material to that action; do not
+manufacture alternatives or demand detail the artifact's type does not need.
 
-## Grounding
+Challenge premises and current-state claims against evidence. Probe edge cases,
+failures, and migration; flag internal inconsistencies. Respect settled decisions
+unless new evidence contradicts their premise.
 
-Read the complete artifact, its linked issue or `.loopzero/task.md`, upstream
-decisions, repository guidance, and only the implementation needed to verify
-current-state claims. Identify its type, audience, status, next actor, scope,
-and settled versus open decisions before judging it.
+Return evidence-backed findings using [contract severities](../../CONTRACT.md#findings):
+unsafe, invalid, or infeasible design is critical; a material decision, boundary, acceptance,
+or validation gap that threatens the next action is important. Suggestions
+do not block.
 
-Question the artifact's premises and current-state claims rather than
-accepting them: trace each material decision to its evidence, probe edge cases,
-failure modes, and migration paths, and flag internal inconsistencies.
+Give each finding a stable short ID, evidence anchor, consequence, and smallest
+resolving acceptance condition. Separate wording edits from design findings;
+finish with an overall assessment, review limits, and the next action or exact blocker.
 
-Read [the review reference](reference.md) and apply only the checks material to
-the artifact. Respect ratified decisions unless current evidence contradicts
-their premise. Do not manufacture options or penalize an artifact for detail
-that its type does not need.
-
-## Findings
-
-Report only evidence-backed findings:
-
-- `critical`: the design is unsafe, internally invalid, or cannot meet its goal;
-- `important`: implementation would likely ship a defect or lacks a material
-  decision, boundary, acceptance criterion, or validation route;
-- `suggestion`: worthwhile improvement that does not block the next action.
-
-For each finding, give a stable short ID, evidence anchor, consequence, and the
-smallest acceptance condition that resolves it. Keep wording edits separate
-from design findings. Follow findings with a short overall assessment and the
-limits of the review.
-
-Leave the artifact unchanged unless the requester separately authorizes edits.
-Return findings in the response; when the artifact belongs to an existing PR
-and recording the review there is authorized, use its review threads rather
-than a local findings file. Resolve competing responses to response-only
-findings within the design workflow; use `resolve-findings` only when the
-findings already exist as PR review threads. Route convergence through edits to
-`refine-design-doc`, and missing first-principles design to `write-design-doc`.
-
-## Exit
-
-Exit when the artifact's intent and scope have been respected, every material
-design or readiness gap is ranked and actionable, validation and review limits
-are explicit, and the next actor can proceed or can see the exact blocker.
+Leave the artifact unchanged. Return findings in the response; use existing
+PR review threads only when recording there is authorized. Do not create a
+findings file. Resolve response-only findings within the design workflow;
+[resolve-findings](../resolve-findings/SKILL.md) handles existing PR threads.
+Route edits through [refine-design-doc](../refine-design-doc/SKILL.md), missing
+first-principles design through [write-design-doc](../write-design-doc/SKILL.md).

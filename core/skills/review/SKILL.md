@@ -1,47 +1,34 @@
 ---
 name: review
-description: Assess an artifact, system, architecture, workflow, agent configuration, or idea and return ranked concerns without implementing changes; for code diffs use code-review.
+description: Assess a non-diff artifact, system, architecture, workflow, agent configuration, or idea without changing it.
 ---
 
 # Review
 
-Assess one non-diff target at the requested altitude and return a ranked,
-evidence-backed judgment. Do not implement changes.
+Return a ranked, evidence-backed judgment at the requested altitude.
+Route diffs to [code-review](../code-review/SKILL.md), adding
+[security-review](../security-review/SKILL.md) for changed trust boundaries.
+Route design artifacts to [review-design-doc](../review-design-doc/SKILL.md).
 
-## Route And Ground
+Read the target and context for purpose, constraints, consumers, and acceptance.
+Question premises, trace material claims to sources, probe edge cases and
+failure modes, and identify inconsistencies. Each concern needs evidence,
+consequence, and a concrete direction.
 
-Route a code-diff review to [code-review](../code-review/SKILL.md), adding
-[security-review](../security-review/SKILL.md) when a trust boundary changes.
-For other targets, read enough source material and surrounding context to
-understand purpose, constraints, callers or consumers, and acceptance.
-Approach the target with professional skepticism: question its stated premises
-and assumptions, trace each material claim to its source, probe edge cases and
-failure modes, and note inconsistencies with its sources. Keep each concern
-constructive: its evidence, consequence, and a concrete direction.
+Use a concise opinion pass for directional requests: assessment, highest-value
+concerns, recommended direction. Use findings for requested audits, exhaustive
+assessment, or gate input.
 
-Use an opinion pass for directional requests: a concise assessment, the few
-highest-value concerns, and a recommended direction. Use a findings review only
-when the requester asks for an audit, exhaustive assessment, or gate input.
+Select relevant lenses:
 
-Select only relevant lenses:
+- Architecture: boundaries, coupling, contracts, divergent paths.
+- Strategy: problem, users, evidence, leverage, timing.
+- Workflow: outcome coverage, friction, enforcement, feedback.
+- Agent configuration: source-of-truth consistency, trigger overlap,
+  deterministic versus prompt enforcement, stale scaffolding. Keep instructions
+  only for non-inferable value; choreography needs a safety reason or observed failure.
 
-- architecture: boundaries, coupling, contracts, and divergent paths;
-- strategy: problem, users, evidence, leverage, and timing;
-- workflow: outcome coverage, friction, enforcement, and feedback;
-- agent configuration: source-of-truth consistency, trigger overlap,
-  deterministic versus prompt enforcement, and stale scaffolding.
-
-For agent configuration, keep an instruction only when it adds non-inferable
-value. Exact choreography needs a safety reason or observed failure.
-
-## Output And Exit
-
-State material uncertainty and review limits. For a findings review, label
-evidence-backed findings at the requested breadth as `critical`, `important`,
-or `suggestion`, and add one synthesis.
-
-Leave the target unchanged. Exit when scope and altitude are explicit, each
-concern is supported by inspected evidence, and uncertainty is stated. If the
-review belongs to a live task, leave findings to its PR review threads and
-other actionable discussion to its issue or PR; do not create a separate
-findings store.
+State scope, uncertainty, and limits. For findings, use
+[contract severities](../../CONTRACT.md#findings) and one synthesis.
+Leave the target unchanged. Live-task findings belong in PR review threads;
+other actionable discussion belongs in its issue or PR, never a separate store.

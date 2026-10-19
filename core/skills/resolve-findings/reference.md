@@ -9,9 +9,9 @@ When the head moves:
    numbers alone prove nothing.
 3. Run the smallest reproduction or inspect current acceptance evidence.
 4. Classify: reproducible, fixed by named commit, or unsupported by current code.
-5. Hand off reply evidence; the next step posts and resolves with
-   `loopzero resolve <id> "<fix commit or evidence-backed reason>"`, making
-   the fix or reason visible in the thread.
+5. Make the fix or reason visible in the thread with
+   `loopzero resolve <id> "<fix commit or evidence-backed reason>"`: now for a
+   factual rejection, after the fix lands for a repair.
 
 ## Response handoff
 

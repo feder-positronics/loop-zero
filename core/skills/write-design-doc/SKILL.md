@@ -1,49 +1,24 @@
 ---
 name: write-design-doc
-description: Research and write an exploration, ADR, initiative, blueprint, or guide when implementation needs a durable design contract; do not use to review an existing design or implement it.
+description: Create an exploration, ADR, initiative, blueprint, or guide when a durable design artifact is needed or requested.
 ---
 
 # Write Design Doc
 
-Produce the smallest design artifact that lets the next actor proceed without
-re-deriving intent or architecture. Do not implement the design.
+Produce the smallest artifact that lets the next actor proceed without
+re-deriving intent or architecture. Do not implement it. Unless explicitly
+requested, skip the document for a clear, small, safely bounded change.
 
-## Before Writing
+Read [shared design guidance](reference.md) for grounding, artifact choice,
+decision records, conventions, and validation. Align material ambiguity before
+drafting; preserve requester decisions and keep unresolved questions owned and
+visibly blocking the relevant action.
 
-- Read the request, issue or `.loopzero/task.md`, repository guidance, related
-  design artifacts, and enough code to verify the current state.
-- Treat requester decisions as settled, distinguish assumptions from facts, and
-  verify every claim that an existing component provides a capability.
-- Align material ambiguity before drafting. A locked decision stays settled, an
-  assumption remains vetoable, and a deferred decision becomes an open question.
-- When the document is a repository change, work in the task worktree created
-  by `loopzero start`.
-- Unless the requester explicitly asked for the artifact, skip it when the
-  change is clear, small, and safely implementable as one bounded change.
+Write user scenarios before UI proposals, then validate material UI shape
+with a mockup or established pattern. Blueprints name concrete paths and
+sequenced acceptance without prescribing inferable coding steps.
 
-Read [the design-doc reference](reference.md) before choosing the artifact and
-drafting its contract.
-
-## Write
-
-Use the repository's existing documentation location, frontmatter, terminology,
-and template conventions. Link to sources of truth instead of copying them.
-Where no convention exists, choose a descriptive Markdown path and say why.
-
-Keep open questions in the artifact with an owner and the decision they block.
-For user-facing work, write scenarios before proposing UI, then validate material
-UI shape with a mockup or an existing pattern. For implementation blueprints,
-name concrete paths and sequenced acceptance without prescribing inferable
-coding steps.
-
-## Validate And Exit
-
-- Remove placeholders and verify links, frontmatter, premises, and the documented
-  procedure where the artifact is a guide.
-- When the document is part of a loop-zero task, run `loopzero check` after the
-  delivery owner commits it; fix any failure before handoff.
-- If material ambiguity remains, revise the artifact or leave an explicit
-  blocker; do not label it implementation-ready merely because drafting ended.
-- Exit with a commit-ready document whose acceptance and open questions are
-  actionable. Put its path and material decisions in task Notes when a task
-  file exists, otherwise in the handoff response.
+Validate the artifact. Revise material ambiguity or leave an explicit blocker;
+drafting alone does not establish implementation readiness.
+Finish with a commit-ready document and actionable acceptance and questions.
+Record its path and material decisions in task Notes, or otherwise in the handoff.
