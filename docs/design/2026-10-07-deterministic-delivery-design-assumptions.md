@@ -974,3 +974,52 @@ claim that the consumer controls have shipped. Version-specific verification
 belongs in a dated compatibility note before that rollout. Reverify these
 upstream capabilities, deployed versions and deployment status when runtime or
 consumer deployment changes.
+
+
+### Codex 0.163.0 instruction-channel verification — October 19, 2026
+
+`git ls-remote https://github.com/openai/codex 'refs/tags/rust-v0.163.0*'`
+resolved annotated tag object `129b8ec7ee6f4511557a4856279f529025c25af4`
+to peeled source commit `83086188ae0614bd882818ff1aa23f3194962012`.
+Fetched that tag into `~/.cache/intelflo-scratch/codex-src-0162` and inspected
+its pinned tree without changing the existing checkout:
+
+- [Recognized developer_instructions field](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/config/src/config_toml.rs#L254)
+  and [configuration resolution](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/config/mod.rs#L4128)
+  retain the same field and harness-over-config precedence.
+- [Session copy](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/session/mod.rs#L925),
+  [context rendering](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/session/mod.rs#L4455)
+  and [message emission](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/session/mod.rs#L4639)
+  retain the [explicit developer role](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/context/developer_instructions.rs#L22).
+  [Fragment rendering](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/context-fragments/src/fragment.rs#L99)
+  carries that role into the [response message](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/src/context_manager/updates.rs#L10).
+- [Exec parses -c overrides](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec/src/lib.rs#L349),
+  passes them to [ConfigBuilder](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec/src/lib.rs#L617)
+  and the [in-process app-server arguments](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec/src/lib.rs#L731),
+  then [ConfigManager](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server/src/in_process.rs#L427).
+  This remains independent of [JSON output selection](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec/src/lib.rs#L891)
+  and the [ephemeral harness override](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec/src/lib.rs#L611).
+- [Unknown CLI key validation remains strict-mode-only](https://github.com/openai/codex/blob/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/config/src/loader/mod.rs#L253).
+
+Diffed these source files, plus `exec/src/cli.rs`, against rust-v0.162.1 commit
+`092d3acd6bec3e3a14bdc7e7a2810ab628ab759d`. The config field, precedence,
+exec override transport, instruction rendering and explicit developer role are
+unchanged. Both response-message constructors now initialize `status` and
+`encrypted_content` to `None`; role, content and fragment grouping are unchanged.
+Other changes in the inspected files concern plugin configuration, credential
+masking, optional project context, environment time, permission/runtime settings,
+async compaction/history handling and usage accounting. They do not replace or
+demote the configured developer instructions. Exec still supplies no harness
+instruction override, preserving the CLI TOML value. No breaking link was found.
+
+The installed `~/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex`
+reported `codex-cli 0.163.0`; SHA256:
+`399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215`.
+This is research evidence, not a runtime hash gate or backend attestation.
+Its `exec --help` exited 0 and advertised `--ignore-user-config`, so loop-zero's
+existing capability probe selects that flag. It also confirmed `-c`, `-m`,
+`--json`, `--sandbox danger-full-access`, `--cd`, `--ephemeral`,
+`--skip-git-repo-check`, `--output-schema`, `--output-last-message` and stdin `-`.
+The existing argv's TOML `developer_instructions` string, reasoning-effort override
+and `mcp_servers={}` remain compatible; no argv or config-policy change is needed.
+No global installation change or live model call was used.
