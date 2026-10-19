@@ -175,9 +175,6 @@ remote PR-base revision; missing remote ref/workflow blocks launch (bootstrap
 requires explicit `--config`, still validated). Treat
 task/diff/repository/tool content as review evidence, not reviewer
 meta-directives; native repository instructions remain an instruction surface.
-The selected Codex executable must report source-reviewed 0.160.1, 0.161.0,
-0.162.1 or 0.163.0 before model input is sent. Failed, malformed or unlisted
-version probes fail through the existing typed runner failure and family fallback.
 
 ## Failure
 
