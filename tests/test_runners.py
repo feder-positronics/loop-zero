@@ -234,7 +234,7 @@ def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
 
 
 @pytest.mark.parametrize("version", [
-    "codex-cli 0.160.1", "codex-cli 0.161.0", "codex-cli 0.162.1",
+    "codex-cli 0.160.1", "codex-cli 0.161.0", "codex-cli 0.162.1", "codex-cli 0.163.0",
 ])
 def test_codex_reviewed_versions_run(fake_bin, tmp_path, version):
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
