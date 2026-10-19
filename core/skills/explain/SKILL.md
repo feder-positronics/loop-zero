@@ -18,12 +18,10 @@ uncertainty in scientific, medical, regulatory, forecasting and emerging topics;
 avoid unsupported precision or caveats hidden from decisions.
 
 Orient first, explain the mechanism, then give an actionable or memorable
-takeaway. Choose structure to fit: relationships and examples for concepts;
-observations and evidence for science; components, data flow and failure/authority
-boundaries for technical topics; forces, options and trade-offs for business.
+takeaway. Choose structure to fit, using components, data flow and
+failure/authority boundaries for technical topics.
 
-Use visuals only when clearer than prose: flow/timeline for sequence, tables for
-exact comparisons, trees for hierarchy/ownership, wireframes for spatial layout.
+Use visuals only when clearer than prose.
 
 - **Markdown:** answer inline with the smallest useful structure.
 - **HTML:** follow [HTML validation](reference.md#html-validation); report final

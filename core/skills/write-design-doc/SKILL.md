@@ -18,7 +18,6 @@ Write user scenarios before UI proposals, then validate material UI shape
 with a mockup or established pattern. Blueprints name concrete paths and
 sequenced acceptance without prescribing inferable coding steps.
 
-Validate the artifact. Revise material ambiguity or leave an explicit blocker;
-drafting alone does not establish implementation readiness.
+Validate the artifact. Revise material ambiguity or leave an explicit blocker.
 Finish with a commit-ready document and actionable acceptance and questions.
 Record its path and material decisions in task Notes, or otherwise in the handoff.
