@@ -1,186 +1,142 @@
 # Model selection and delegation
 
-Use subagents for independent, bounded work when they can make useful progress
-and the result can be checked. Prefer the least expensive available model
-likely to complete the task reliably. Keep tightly coupled or small work inline
-when briefing and integration would cost more than doing it directly. There is
-no delegation quota, line-count threshold, or required exception record.
+Delegate independent, bounded work whose result can be checked. Prefer the
+least expensive reliable model; keep small or tightly coupled work inline
+when briefing and integration cost more. No delegation quota, line threshold
+or exception record is required.
+
+## Coordinator rollover
+
+At a delivery milestone or roughly 300k context tokens, launch a successor
+with a short handoff, transfer recurring tasks bound to this session, post its
+link and stop. After a finished delivery, roll over before monitoring or
+unrelated follow-ups. Do this yourself; do not ask the requester to start it.
+A bare "continue" means continue there.
 
 ## Resolve the model before delegation
 
-Read the task repository's canonical routing source before choosing an
-executor: `models.toml` at its worktree root. Never import another repository's defaults,
-including this checkout's, for a different project. If the file is missing or unclear,
-report that and follow explicit user choices rather than inventing defaults.
+Read `models.toml` at the **task repository's worktree root**, never another
+project's defaults. Report missing, malformed, unknown-version or ambiguous
+configuration rather than inventing defaults; preserve explicit user choices.
 
-The agent reads this small TOML file directly. It is configuration for agent
-instructions, not a scheduler or an extension of `workflow.toml`. The CLI does
-not parse it, and it does not change the running parent model or configure
-`loopzero review`.
+1. Resolve category → profile → provider, model and effort. Categories are
+   starting points; choose another profile if none fits or the task warrants it.
+   Settled bounded implementation starts at `bounded_implementation`.
+2. Use the default or explicitly select a configured alternative allowed by
+   provider preferences. Alternatives are choices, not automatic retries.
+   Distinguish models when several share a provider.
+3. Check actual runtime support and pass **both model and effort explicitly**.
+   Providers are not executable names; aliases resolve in the runtime.
+   Use a self-contained brief when model selection requires fresh context.
+4. Report unavailable routes or rejected efforts. Explicitly choose and announce
+   a suitable configured substitute only within authorized choices. Preserve an
+   explicitly requested model; ask for direction if no authorized route remains.
+   Runtime permissions still apply.
 
-1. Find the task category in `[categories]` and its suggested profile in
-   `[profiles]`. Select a different profile when uncertainty or consequences
-   justify it. When no category fits, choose a suitable profile directly.
-2. Take the profile's default `provider`, `model`, and `effort`, or choose a
-   configured alternative when the user asks for that provider/model or the
-   runtime requires it. Alternatives are explicit choices, not automatic
-   retries. If several entries match, identify the intended model as well as
-   its provider; do not silently pick the first match. Provider preferences
-   commented in `models.toml` limit that choice; follow them unless the user
-   explicitly asks otherwise.
-3. Check model and effort support against the runtime's actual capabilities.
-   `openai` and `anthropic` identify providers, not executable names. Native
-   subagents or supported provider CLIs are execution mechanisms; a tool's
-   available model list may differ from a provider's catalog. Model aliases
-   such as `opus` resolve in the selected runtime.
-4. Pass both model and effort explicitly through the runtime's supported
-   fields. Do not inherit the parent model by habit. For runtimes that require
-   a fresh context to select a model, provide a self-contained brief.
-5. If a route is unavailable or rejects the effort, report it. For a default
-   route, choose another suitable configured choice explicitly and state the
-   change. Preserve an explicitly requested model: do not silently substitute
-   it; obtain direction if no authorized alternative exists. Higher-priority
-   runtime permissions still apply.
+**Provider preferences in `models.toml` limit every choice.** When they leave
+no available route (for example every audit route is OpenAI and OpenAI is at its
+usage limit), report it and ask the owner whether to wait or explicitly approve
+a substitute; availability of another provider is not permission. Checking
+audit findings with the other provider before acting is a separate step.
 
 ## Profiles are starting points
 
-Profile names in `models.toml` describe task shape, not a price or speed
-ranking; the shipped assignments are owner choices. Preserve them rather than
-swapping models on an assumed ranking, and reassess defaults with evidence and
-owner direction. Choose by clarity, uncertainty, consequences, and verification
-quality. A small
-security change may need deep reasoning; a large mechanical migration may use
-fast execution after its design is settled. Smaller models may investigate or
-summarize bounded source material when the parent can check the evidence.
+Profile names describe task shape, not measured cost or speed. Preserve owner
+assignments; reassess with evidence and owner direction. Weigh uncertainty,
+consequences and verification quality.
 
-When scope grows or a result is unreliable, reassess the route. Check audit
-findings with the other provider before acting on them. Fix tool and
-environment failures before spending on a stronger model. Escalate substantive
-difficulty directly to a suitable profile without requiring intermediate
-attempts. Do not repeat successful work for reassurance or blindly retry failed
-runs. Parent-directed reassessment does not add automatic CLI retries.
+Reassess when scope grows or results are unreliable. Fix environment failures
+before escalating models; escalate substantive difficulty directly to a suitable
+profile. Avoid blind retries or repeating successful work for reassurance.
 
 ## Author lineage and independent review
 
-By default, keep one authoring model family per PR, including writing
-delegates and repairs; the opposite family gives read-only advice and formal
-independent review. Record every actual writing model in truthful `Co-Authored-By` trailers
-before committing delegate work; the parent committing a patch does not make it
-the sole author. The contract's [review budget](../core/CONTRACT.md#review-budget)
-owns attribution, lineage and reviewer selection, and its
-[owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
-is the only alternative; read both before mixing writing families.
+The contract's [review budget](../core/CONTRACT.md#review-budget) owns authorship
+and reviewer selection. Keep one writing family by default; the other can advise
+read-only. Before committing, record every actual writer in truthful
+`Co-Authored-By` trailers. The parent committing a delegate's patch does not
+replace that author.
+
+Without the contract's
+[owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
+retain all writers' attribution through amendments and squashes. If mixed
+authorship leaves no independent configured reviewer, review fails closed:
+wait for the owner. Do not re-author work or drop trailers to regain eligibility.
+Read the exception before mixing writing families. Formal delivery review is
+`loopzero review`.
 
 ## Briefs and ownership
 
-Give each writing delegate its own `loopzero start` worktree and the
-self-contained brief below; do not assume it inherited the conversation.
+Give each writing delegate its own `loopzero start` worktree and a
+self-contained brief:
+
+```text
+Objective: <one bounded outcome>
+Context: <source text, decisions, files; sandboxed delegates usually lack network/gh>
+Allowed paths: <owned scope>
+Acceptance evidence: <observable proof for each criterion>
+Model/effort: <resolved from the task repository's models.toml>
+Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
+Verification: <focused owning tests and applicable coverage, runnable in the sandbox>
+Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
+Return: Continue until acceptance evidence exists or a named blocker needs the parent; a progress summary is not completion.
+Report: <changed files, evidence, check results, deviations, open questions>
+```
 
 ### Launching a background CLI delegate
 
-- Close stdin so the delegate cannot wait for input.
-- Pass the model and effort resolved from the task worktree's `models.toml`.
-- Capture output in a log file, record the launched PID, and wait on and stop
-  it only by that PID (`kill -0 <pid>`): a `pgrep -f` pattern also matches the
-  waiting shell, so the wait never ends.
-- Read the brief from a file by absolute path (a relative path read after
-  `cd … &` expands to an empty prompt), and state the sandbox mode explicitly:
-  `workspace-write` for edits, `read-only` for investigation.
+Use the resolved model and effort, an explicit sandbox (`workspace-write` for
+edits, `read-only` for investigation), `--cd`, closed stdin and a log.
+Read the brief through an **absolute path**: relative reads around background
+`cd` can produce an empty prompt.
 
 ```sh
-codex exec --model <model> -c model_reasoning_effort=<effort> \
+codex exec --model <resolved-model> -c model_reasoning_effort=<resolved-effort> \
   --sandbox workspace-write --cd <worktree> \
-  --output-last-message <final-message-file> "$(cat <brief-file>)" \
+  --output-last-message <final-message-file> "$(cat /absolute/path/to/brief)" \
   </dev/null ><log-file> 2>&1 &
 echo $! ><pid-file>
 ```
 
-Use a self-contained brief:
+Record `$!` and use `kill -0 <pid>`, never `pgrep -f`: pattern matching also
+finds the waiting shell and can wait forever. Prefer completion notifications
+to reading output files. Wait on long commands with blocking calls (Codex:
+yield at least 30 seconds), not second-by-second polling.
 
-```text
-Objective: <one bounded outcome>
-Source/context: <issue text and decisions pasted in, files to read; sandboxed delegates usually have no network or `gh`>
-Allowed paths: <paths the delegate may change>
-Acceptance evidence: <observable evidence required for each criterion>
-Model/effort: <selection resolved from models.toml>
-Effort policy: Children inherit this policy; do not raise effort or launch a stronger model without returning to the parent.
-Delegate verification: <focused tests for the changed behavior, runnable in the delegate sandbox; wait on long commands with a blocking call (Codex: yield at least 30 s), not second-by-second polls>
-Parent verification: <broad suites and `loopzero check`, which the parent runs once per delivery head; the delegate does not repeat them or start its own reviewers>
-Return conditions: <when to stop and return an unresolved question>; a progress summary is not a stop: continue until the acceptance evidence exists or a named blocker needs the parent
-Final report: <changed files, evidence, check results, deviations, open questions>
-```
+Split oversized scope in the plan rather than imposing brief line limits.
+Resume unfinished delegate sessions instead of restarting. After two repair
+rounds on one defect class, reassess rather than dispatching another isolated fix.
 
-When the delegate cannot run the decisive tests, the parent runs them before
-requesting review. After two repair rounds on the same defect class, the parent
-stops dispatching single-finding patches and reassesses the route.
+Read-only work may share stable source. Sequence overlapping writers or integrate
+deliberately; never run them in one checkout. Respect concurrency limits and avoid
+competing suites whose temporary-directory cleanup can interfere. Grant only a
+needed cache directory (`--add-dir ~/.cache/uv`); shared `/tmp` caches can exhaust
+host inodes. If a linked worktree's shared Git directory is outside the writable
+sandbox, leave commits to the parent. Retarget stacked PRs before deleting their base.
 
-Bound size in the plan, not the brief: split oversized scope into separate tasks
-up front rather than telling a delegate to stop at a line count. Continue an
-unfinished delegate by resuming its session (for example `codex exec resume`)
-rather than starting a fresh one that re-reads everything. Delegate verification
-runs the focused owning tests and applicable coverage checks specified in the
-brief; the parent runs required broad verification once per delivery head.
-When a delegate needs a shared tool cache, grant exactly that directory
-(`--add-dir ~/.cache/uv`); never point caches at shared `/tmp`, whose inodes
-fill and stop every session on the host.
+Nested background results may reach the top-level session instead of their
+owner: run nested reviewers in the foreground or forward results promptly.
 
-A subagent's own background agents may report to the top-level session instead
-of that subagent. Have subagents run their reviewers in the foreground, or
-forward each result to the owning subagent as soon as it arrives; never assume
-it was received.
-
-Read-only investigation can use a stable shared source. Work that touches the
-same files runs in sequence or is integrated deliberately; do not run
-overlapping writers in one checkout. Respect the runtime's concurrency limit
-and avoid competing test suites on one host because temporary-directory cleanup
-can interfere.
-A linked worktree may have its shared Git directory outside the delegate's
-writable sandbox; leave commits to the parent when that directory is not
-writable. Retarget stacked PRs before deleting their base branch.
-
-The parent coordinates. Apply the criteria above to implementation and review
-repairs alike, wait for background-task completion
-notifications rather than reading their output files, and, when a resolved route
-is unavailable (for example a provider at its usage limit), tell the requester
-which substitute runs. Start a fresh parent session with a short handoff at a
-delivery milestone or once its context passes roughly 300k tokens; do not reuse
-a finished delivery session for monitoring or unrelated follow-ups. Roll over
-yourself: launch the successor from the handoff, move any recurring task bound
-to this session to it, post its link and stop. Do not ask the requester to start
-it; a bare "continue" after a rollover recommendation means continue there.
-
-The parent reads the returned diff or evidence and verifies acceptance. Worker
-claims of success are not proof, including claims of no deviations. The parent
-runs `loopzero check` once per delivery head; if its
-declared checks do not isolate the change from host tools, run a focused
-restricted-PATH probe and report that limitation. Only the sandboxed `loopzero
-check` report counts as delivery proof; continue through the
-[contract](../core/CONTRACT.md). Model selection never changes tool
-permissions or the contract's isolation, checks, review, readiness, or
-authorized-merge requirements.
+The parent owns integration and acceptance: inspect returned diffs and evidence;
+worker success claims are not proof. Run decisive tests unavailable to the
+delegate before review, and required broad verification and `loopzero check`
+once per delivery head. If declared checks do not isolate host tools, run a
+focused restricted-PATH probe and report the limitation. Only sandboxed
+`loopzero check` counts as delivery proof; continue under the
+[contract](../core/CONTRACT.md).
 
 ## Configuration and upgrades
 
-The [repository model configuration](../models.toml) is the single home for
-current model and effort selections and category defaults. Skills link here;
-they do not duplicate model names. Consumers copy that file into their own
-repository and maintain it there.
+[models.toml](../models.toml) owns selections; skills link here. Consumers
+maintain their own copy. Version 1 has profiles with `provider`, `model`, `effort`,
+optional same-field alternatives, and category-to-profile mappings. Verify
+selected entries are complete and referenced profiles exist.
 
-Version 1 contains profiles with `provider`, `model`, and `effort` strings,
-optional `alternatives` tables with the same fields, and a category-to-profile
-mapping. While reading it, check that the selected entry is complete and its
-category references an existing profile. Report malformed TOML, an unknown
-format version, or ambiguous choices rather than silently inheriting the parent.
-There is no separate schema validator or hardcoded model/effort catalog; the
-agent checks the selected values against the runtime before launch.
+Agents read it; the CLI does not parse it, schedule work, change the parent model
+or configure `loopzero review`. New profiles, models and efforts need no
+routing-code changes or separate catalog validator.
 
-Multiple distinct models from one provider are allowed. Profiles and categories
-can be extended in the file; skills do not carry copies of that mapping. A new
-model or effort spelling needs no routing-code change.
-
-Change one profile to upgrade its model or effort; change a category mapping to
-adjust its default. Check representative work for first-pass acceptance,
-substantive rework, elapsed time, and observed usage when available. Use existing
-PR outcomes rather than adding a ledger, spending quota, or automatic benchmark
-gate. Reassess immediately after a serious failure and prefer repeated evidence
-to isolated cost measurements. Explicit user choices remain authoritative.
+Upgrade using existing PR evidence: first-pass acceptance, rework, elapsed time
+and observed usage. Reassess serious failures immediately; prefer repeated
+evidence to isolated costs. Add no ledger, spending quota or automatic
+benchmark gate.

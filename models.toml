@@ -1,10 +1,9 @@
-# Selected model profiles and suggested task routes.
-# Owner-selected defaults (2026-09-19; Sol 6.1 and Sonnet 5.5 routes 2026-09-30).
-# Profile names describe task shape; they do not claim a measured ranking of
-# model prices or speeds.
-# Agents read this file before delegation, check runtime support, and explicitly
-# pass the selected model and effort. This file does not launch models by itself.
-# Effort: avoid max and ultra; use xhigh only where it measurably helps.
+# Owner-selected task routes (2026-09-19; Sol 6.1 and Sonnet 5.5 routes 2026-09-30);
+# provider preferences below are owner rules (2026-09-30). Profile names do not rank cost or speed.
+# Read before delegation; check runtime support and pass model/effort explicitly.
+# Effort: avoid max/ultra; xhigh only where it measurably helps.
+# Values pass through; runtimes resolve aliases. Alternatives are explicit choices,
+# not automatic retries or replacements for an explicitly requested model.
 version = 1
 
 [profiles.fast]
@@ -22,15 +21,11 @@ provider = "openai"
 model = "gpt-6.1-sol"
 effort = "medium"
 
-# Model IDs and efforts pass through unchanged; runtime aliases
-# are resolved by the runtime. Validate support before launch. Alternatives are choices,
-# not automatic retries or replacements for an explicitly requested model.
 [[profiles.standard.alternatives]]
 provider = "anthropic"
 model = "claude-sonnet-5-5"
 effort = "medium"
-# Sonnet 5.5 reroutes high-risk security prompts to Sonnet 5; choose another route
-# for security-sensitive work.
+# Sonnet 5.5 reroutes high-risk security prompts to Sonnet 5; use another route.
 
 [profiles.deep]
 provider = "openai"
@@ -42,7 +37,8 @@ provider = "anthropic"
 model = "claude-fable-5-1"
 effort = "low"
 
-# Exhaustive search for defects or gaps: thorough but noisy.
+# Exhaustive defect/gap search: thorough, potentially noisy; OpenAI only, so do not
+# choose an Anthropic alternative. If no OpenAI route is available, ask the owner.
 [profiles.audit]
 provider = "openai"
 model = "gpt-6.1-sol"
@@ -53,8 +49,7 @@ provider = "openai"
 model = "gpt-6-astra"
 effort = "medium"
 
-# UI and UX design, including frontend work whose main decisions are layout,
-# interaction or visual design.
+# UI/UX design and frontend layout/interaction decisions: Anthropic only.
 [profiles.design]
 provider = "anthropic"
 model = "claude-opus-5-5"
@@ -65,20 +60,16 @@ provider = "anthropic"
 model = "claude-sonnet-5-5"
 effort = "medium"
 
-# Provider preferences (owner, 2026-09-30); they limit which alternatives apply:
-# - Exhaustive review and audits, where finding every detail matters, stay on
-#   OpenAI; choose an OpenAI profile rather than an Anthropic alternative.
-#   Checking such findings with the other family is a separate step.
-# - UI design always uses Anthropic models (the design profile).
-# Categories suggest a starting profile; task requirements may justify another.
-# The review category does not replace independent-review requirements.
+# Categories are starting points. Provider constraints above limit alternatives.
+# Exhaustive reviews/audits stay on OpenAI; other-family finding checks are separate.
+# The review route does not replace independent-review requirements.
 [categories]
 mechanical = "fast"
 bounded_implementation = "fast" # One settled behavior with direct acceptance.
-implementation = "standard" # Cohesive work with several connected decisions.
+implementation = "standard" # Several connected decisions.
 investigation = "standard"
 planning = "deep"
 architecture = "deep"
 review = "deep"
-audit = "audit" # OpenAI only.
-ui_design = "design" # Anthropic only.
+audit = "audit"
+ui_design = "design"
