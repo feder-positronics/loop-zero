@@ -10,7 +10,9 @@
   not use the snap: its confinement cannot reach the keyring. Without root,
   unpack the [release](https://github.com/cli/cli/releases) tarball and put
   `bin/gh` in `~/.local/bin` ahead of `/usr/bin`; that copy does not update.
-- Keep `gh`, `claude` and `codex` current. Tools that shape the build (`uv`,
+- Keep `gh` and `claude` current. Codex reviews run only on the versions
+  allowlisted in `src/loopzero/runners.py`; upgrade Codex with a loop-zero release
+  that accepts the new version. Tools that shape the build (`uv`,
   Python, a consumer's Node and package manager) change only with their pin in
   the repository, for example `uv` in `.github/workflows/checks.yml`.
 - `bwrap` on `PATH` (`loopzero check` refuses to run without it).
@@ -64,18 +66,11 @@ from the optional integrations. In this repository, `.agents/skills` links
 for discovery. Other consumers must
 connect their own agent.
 
-For model routing, copy [models.toml](models.toml) into the consuming repository
-and adjust its model IDs and effort values to the available runtimes. Point
-repository instructions at the shared [delegation guidance](docs/DELEGATION.md).
-The agent reads the category/profile mapping directly, checks availability,
-and passes the selected model and effort to its delegation tool. There is no
-additional CLI, scheduler, or model catalog to upgrade. Formal `loopzero review`
-continues to use reviewer families from `workflow.toml`; `models.toml` does not
-change it.
-
-Configure application API keys using the shared convention below. This requires
-no changes to `workflow.toml` and no Bitwarden CLI installation if you paste
-the key from the Bitwarden app at the hidden setup prompt.
+For model routing, copy [models.toml](models.toml) into the consuming repository,
+adjust its models and efforts to the available runtimes, and point repository
+instructions at the shared [delegation guidance](docs/DELEGATION.md). Formal
+`loopzero review` uses reviewer families from `workflow.toml`; `models.toml` does
+not change it.
 
 ## Configure
 
@@ -96,9 +91,8 @@ unpins them. Then:
   must commit `uv.lock`.
 - `[checks] env` — e.g. `{ UV_CACHE_DIR = "/home/<you>/.cache/uv" }`; wins over
   sandbox defaults and host variables. `PATH` and `HOME` cannot be overridden.
-- `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime
-  paths. The default is the selected binary's resolved directory; Claude may
-  need its npm or bun prefix listed.
+- `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
+  the [example](workflow.example.toml) states the default and protected-state limits.
 - For offline checks, warm the configured writable uv cache on the host with
   `UV_CACHE_DIR=<configured-cache> uv sync --group dev` (use the groups your
   checks require). This also fetches build backends such as hatchling.
@@ -120,19 +114,9 @@ unpins them. Then:
 
 ## API keys for local agents
 
-All API-key integrations follow the [credential convention](core/CREDENTIALS.md):
-use the integration's documented environment variable first, then
-`~/.config/<service>/api-key`. This is the default for local agent work; existing
-provider CLI logins and reviewer authentication retain their own configuration.
-Document each integration's variable, service directory, endpoint, and intended
-account/environment. Secret values never belong in `workflow.toml`.
-
-The file is a convenient local copy, shared across worktrees by agents running
-as your user. It is plaintext and readable by processes with that user's access.
-Keep the primary copy in Bitwarden. For stronger isolation, inject a key from
-Bitwarden into only the calling process instead of creating the file; do not
-pass an unlocked vault session to the agent. CI and production should use their
-platform's secret store or workload identity, with separate credentials.
+The [credential convention](core/CREDENTIALS.md) owns lookup, isolation,
+rotation and CI/production credentials. Keep the primary development key in
+Bitwarden; the file below is an optional plaintext local copy.
 
 To provision a local copy, run this in your own Bash terminal. Set `api_service`
 to the documented service directory name and paste the key at the hidden prompt.
@@ -172,23 +156,8 @@ authentication, ask the agent to use the integration skill for one live call
 with synthetic input and report the result without credentials. For TypeSafe:
 "Use typesafe-ai to run one live smoke test with synthetic text."
 
-A host agent following the convention can read the file on its next API call;
-no application restart is needed to create it. An application that caches its
-key may need restarting after rotation. Environment variables are inherited at
+Rerun the setup to replace a rotated key. Environment variables are inherited at
 process launch; exporting one elsewhere cannot update an existing agent.
-Installing a skill does not change an SDK's lookup behavior: agents resolve the
-key in their calling process, and applications need an explicit loader if they
-want the same fallback.
-
-Rerun the setup to replace a rotated key. Clear stale environment overrides,
-which take precedence over the file. Remove the file and unset the documented
-variable to remove local sources; revoke at the provider to invalidate copies
-already loaded by processes. Do not paste keys into chat or print them to verify
-configuration. Report only whether a usable credential source is available.
-
-Keep live evaluations separate from required checks. Application keys and their
-directories must not be added to check or review sandbox allowlists or mounts.
-The sandboxes' existing tool authentication is unchanged.
 
 ### TypeSafe credentials (optional)
 
@@ -205,9 +174,7 @@ In Bitwarden, store a dedicated development key in a Login item named
 `TypeSafe API`, in its password field. Paste that password at the setup prompt
 above. Bitwarden CLI users can instead retrieve it into the calling process's
 environment; see the [official CLI guide](https://bitwarden.com/help/cli/).
-Lock the vault and remove `BW_SESSION` before starting the agent. An existing
-nonempty but invalid `TYPESAFE_API_KEY` causes an authentication failure; fix or
-unset it rather than silently switching to the file.
+Lock the vault and remove `BW_SESSION` before starting the agent.
 
 ### Several subscription accounts (optional)
 
@@ -287,7 +254,7 @@ membership through `https://api.mergify.com/v1`. A command comment is only a
 request; a behind branch is treated as queued only after that API confirms it.
 
 Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
-than one (the rollout uses three). In-place updates rewrite the reviewed source
+than one. In-place updates rewrite the reviewed source
 head and are unsupported. Admission checks the live serial queue's identity and
 reads `.mergify.yml` from GitHub's default branch, requiring explicit integer
 parallelism greater than one and the matching queue name. The configuration blob
@@ -393,6 +360,7 @@ change after the last read and before landing. Do not claim atomic review/merge
 validation or enable unattended landing without accepting this boundary.
 
 After cancellation or ejection, repair the cause and explicitly requeue with
-`@mergifyio queue main` on the PR, then resume `loopzero merge --wait`.
+`@mergifyio queue <name>` (the configured queue) as the whole PR comment, then
+resume `loopzero merge --wait`.
 The CLI never retries a failed admission automatically. Resume request markers
 are scoped to the publishing GitHub login; use the same account across sessions.

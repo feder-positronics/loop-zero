@@ -1,7 +1,7 @@
 # Contributor module map
 
-The rewrite is implemented. This map describes the current module boundaries;
-delivery behavior belongs in the live documents linked below.
+Current module boundaries. The [architecture guide](ARCHITECTURE.md) explains
+the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavior.
 
 ## Modules
 
@@ -22,15 +22,7 @@ delivery behavior belongs in the live documents linked below.
 
 ## Live references
 
-- [Delivery contract](../core/CONTRACT.md): readiness, review budget, sandbox
-  boundaries, failures and merge cleanup.
-- [Skill catalog](../core/skills/README.md): planning, implementation and review
-  responsibilities.
-- [README configuration](../README.md#configuration), [setup](../SETUP.md) and
-  [example workflow](../workflow.example.toml): supported keys and first run.
-- [Mergify adoption](MERGIFY.md): queue deployment, candidate proof and rollback.
-- [Architecture guide](ARCHITECTURE.md): current system boundaries, ownership
-  and the dated decision notes behind them.
+- [Mergify operations](MERGIFY.md): candidate constraints, protection and recovery.
 - [Size budget script](../scripts/size_budget.sh): authoritative source/test
   caps and comparison with base; over-cap changes pass only when they do not grow.
 - [Tests](../tests/): module behavior proofs using temporary Git repositories

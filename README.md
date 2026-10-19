@@ -27,56 +27,42 @@ ownership and the contributor routine that keeps documentation current.
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
-| `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for a merge queue before cleanup. |
+| `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for required checks and landing before cleanup. |
 
 `loopzero status` prints where the current branch is in that sequence.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
 
-For agent-directed delegation, [models.toml](models.toml) holds the current
-provider, model, effort, and category defaults. Agents read it through the
-shared [model selection and delegation guidance](docs/DELEGATION.md), check
-runtime support, and explicitly select the delegate's model and effort.
+For agent delegation, follow [model selection](docs/DELEGATION.md) using the
+task repository's [models.toml](models.toml).
 
-After creation, `check` updates only the generated checks block in the live PR's
-Validation section. Human validation notes and review summaries survive refreshes.
-Check timings remain in terminal output, so duration changes alone do not rewrite
-the PR and retrigger policy CI. Keep human evidence outside the checks markers.
+PR narrative and generated evidence follow the [contract](core/CONTRACT.md#the-six-steps).
+Check timings stay in terminal output; duration changes alone do not rewrite the
+PR or retrigger policy CI. Keep human evidence outside the generated checks markers.
+`pr` leaves the PR title unchanged. After creation, edit validation evidence on
+GitHub; keep acceptance changes in both task.md and the PR by rerunning `pr`.
 
-Running `pr` again publishes task.md's narrative sections; the PR title stays
-unchanged.
-The live PR owns Validation and Review, and sections absent from task.md are kept.
-Edit validation evidence on GitHub after creation; keep acceptance changes in
-both task.md (the reviewer's task context) and the PR by rerunning `pr`.
+Review publication records duration and distinguishes requested model/effort from
+CLI-reported claims, which are not backend attestation; saved artifacts preserve
+them for `--repost`. GitHub reviews include at most the last 30,000 UTF-8 bytes of
+raw reviewer output, with a truncation notice. Verdicts and findings remain
+complete. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
+`loopzero review --repost` uses it without rerunning the model.
 
-Review headers record the model and duration; saved artifacts preserve them for
-`--repost`. GitHub reviews include at most the last 30,000 UTF-8 bytes of raw
-reviewer output, with a truncation notice for longer transcripts. Verdicts and
-findings remain complete. The full transcript stays in the saved local
-`.loopzero/review-<head>-<kind>.json` artifact; `loopzero review --repost` uses that
-artifact without rerunning the model.
+Waits observe immediately, then use 30/60/120-second intervals with up to 10%
+earlier jitter, bounded by the timeout. Each readiness observation rechecks
+reviews and findings. Mergify waits use REST for source-head guards, merge
+observation, queue comments, PR lookup/detail and draft creation; native GitHub
+queue membership and review threads use GraphQL. With `ready --wait`, a failed or
+cancelled required Actions check may trigger a lookup for a newer active run on
+that head; fine-grained tokens need Actions read permission.
 
-Wait commands observe immediately, then back off to 30, 60 and 120 second intervals
-(with up to 10% earlier jitter), bounded by the remaining wait timeout. Readiness
-still checks current reviews and findings on every observation. Mergify wait ticks
-use REST for source-head guards, verified merge observation, queue comments,
-PR lookup, detail, and draft creation. Native GitHub queue membership and review
-threads still require GraphQL.
-With `ready --wait`, a failed or cancelled required GitHub Actions check may
-trigger a workflow-run lookup to see whether a newer run on the same head is
-still active. Fine-grained GitHub tokens need Actions read permission for that
-lookup.
-
-A GitHub rate-limit error stops the command immediately instead of using transient
-5/20/60-second retries. Resume after the primary reset or secondary `Retry-After`
-period; loopzero does not schedule a retry. REST and GraphQL have separate primary
-budgets, and all sessions using the same user share that user's allowance. See
-[GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
-When a primary GraphQL limit is explicit, loopzero may make one bounded
-diagnostic query to report a verified reset time. It does not preflight every
-request or infer GraphQL capacity from the REST `/rate_limit` endpoint.
-Concurrent waiters and other clients still consume the shared allowance; run
-one waiter per PR and avoid manual `gh pr view`/`checks`/`list` polling.
+Quota handling follows the contract's [failure rules](core/CONTRACT.md#failure):
+a GitHub rate-limit error stops the command without retry. REST and GraphQL have
+separate primary budgets, shared by all sessions of one user. For an explicit
+primary GraphQL limit, loopzero may make one bounded diagnostic query for a
+verified reset time; it does not preflight requests or infer GraphQL capacity
+from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api).
 
 ## Adopt it in six steps
 
@@ -99,33 +85,21 @@ one waiter per PR and avoid manual `gh pr view`/`checks`/`list` polling.
 
 ## Configuration
 
-Delivery configuration lives in one file, `workflow.toml`, at the repository root
-(start from [workflow.example.toml](workflow.example.toml)). This repository's
-own [workflow.toml](workflow.toml) is a working example.
+Delivery configuration lives in one file, `workflow.toml`, at the repository
+root. The annotated [workflow.example.toml](workflow.example.toml) documents its
+keys; this repository's own [workflow.toml](workflow.toml) is a working example.
+Keep secret values out of it; API keys follow the
+[credential convention](core/CREDENTIALS.md) and [setup](SETUP.md#api-keys-for-local-agents).
 
-For API keys used during agent development, follow the
-[credential convention](core/CREDENTIALS.md): provider environment variable
-first, then a private local file outside the repository. See
-[setup](SETUP.md#api-keys-for-local-agents) for provisioning, Bitwarden use,
-rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
+Settings and semantics the example does not spell out:
 
 | Key | Meaning |
 | --- | --- |
-| `repo.name` | GitHub repository as `owner/name`; used for every `gh` call. |
-| `repo.base` | Branch that `start` branches from and `merge` merges into. |
-| `checks.commands` | Shell commands `check` runs in order inside the sandbox; the first nonzero exit fails the run. |
-| `checks.required_ci` | Exact GitHub check-run or commit-status names required on the head before `ready` and `merge`; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
-| `checks.ro_paths` | Absolute host paths mounted read-only into the sandbox. `/home` is hidden, so list every toolchain path under it (for example `~/.local/bin` and `~/.local/share/uv`, spelled out); put writable caches in `checks.writable`. |
-| `checks.writable` | Absolute host paths mounted read-write into the sandbox, such as a shared `~/.cache/uv`; this is a trust decision and the forbidden-path rules from `checks.ro_paths` apply. |
-| `checks.scratch` | Worktree-relative directories given a fresh writable mount per run; defaults to `.venv`, `.ruff_cache`, `.pytest_cache` and `node_modules/.cache`. |
-| `checks.env` | Fixed environment variables that override sandbox defaults and host values; `PATH` and `HOME` cannot be set. |
+| `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
+| `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
 | `checks.limits` | Per-check resource limits applied with `prlimit`, capped at the inherited hard limits: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size); overrides must be positive integers. |
-| `checks.network` | Allow network inside the sandbox; default `false`. |
 | `checks.env_allowlist` | Environment variables passed into the sandbox; default `PATH HOME LANG LC_ALL TERM`. |
-| `delivery.merge` | Strategy for `gh pr merge`: `squash`, `merge`, `rebase`, or `queue` when the base branch has a merge queue that owns the method; use `merge --wait` to enqueue and verify in one run. |
-| `delivery.reviewers` | Reviewer families in order of preference (`claude`, `codex`). Review selection excludes every recognized `Co-Authored-By` family from the configured-base merge-base through HEAD, including repairs and all trailers on each commit. Delta reviews and reposts enforce the same exclusion. The selector cannot infer prose contributions or owner permission. Mixed-trailer lineage remains blocked; see the [bounded owner-approved contributor-review exception](core/CONTRACT.md#owner-approved-contributor-review-exception) for the authorized disclosure route and reduced assurance. |
 | `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
-| `delivery.reviewer_ro_paths` | Absolute reviewer CLI/runtime paths mounted read-only. Defaults to the resolved directory of the selected reviewer binary; list an npm or bun prefix for Claude when needed. |
 
 ## What it deliberately does not do
 
@@ -134,7 +108,6 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 - No dashboard. `loopzero status` and GitHub are the UI.
 - No compatibility mode. There is one procedure, the current one.
 - No signed evidence or attestations. Checks exit zero or they do not.
-- No retry framework. A failed command prints its tail and stops.
 - No waivers or override files. Fix the finding or resolve the thread with a
   reason.
 - Reviews run with network access because the model CLIs require it. The
@@ -147,7 +120,7 @@ rotation, and CI/production guidance. Keep secret values out of `workflow.toml`.
 - [core/skills/](core/skills) — core agent skills and their routing.
 - [integrations/](integrations/) — optional vendor integration skills.
 - [SETUP.md](SETUP.md) — install, configure, first run.
-- [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — module map and links for contributors.
+- [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — contributor module map.
 
 ## License
 

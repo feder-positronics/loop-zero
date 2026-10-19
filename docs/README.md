@@ -15,7 +15,7 @@ and setup.
 - [../core/skills/](../core/skills) — 19 core skills; start with `plan`,
   `implement`, `work-issue`, or `write-design-doc`.
 - [../integrations/](../integrations/) — optional vendor integration skills.
-- [REWRITE-SPEC.md](REWRITE-SPEC.md) — module map and live contributor references.
+- [REWRITE-SPEC.md](REWRITE-SPEC.md) — contributor module map.
 - [design/2026-09-24-delivery-system-architecture.md](design/2026-09-24-delivery-system-architecture.md) —
   dated consumer evidence and accepted principles; its gaps and measurements
   describe September 24, not the current backlog.
