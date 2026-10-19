@@ -1,7 +1,6 @@
 # Write Design Doc Reference
 
-Shared grounding, design contract, and validation for writing, reviewing, and
-refining. Apply at the depth appropriate to the artifact and next action.
+Apply at the depth appropriate to the artifact and next action.
 
 ## Grounding
 
@@ -36,8 +35,8 @@ Cover the material:
 - Trigger, actors/jobs, outcome, non-goals, success evidence.
 - Verified current state, state/data boundaries, consumers, integration,
   failures, and blast radius.
-- Material alternatives, chosen shape, strongest rejected alternative, and
-  deciding premise; prefer the simplest shape and reuse existing surfaces.
+- Material alternatives and chosen shape; prefer the simplest shape and reuse
+  existing surfaces.
 - Domain terms and user-facing labels; explain intentional divergence.
 - Implementation boundary, observable acceptance, validation, rollback,
   and observability where relevant.
@@ -76,4 +75,3 @@ the guide introduces a design decision.
 - ADR: durable boundary, consequences, reversal conditions.
 - Initiative: delivery lanes, dependencies, owners, evidence.
 - Blueprint: concrete paths, sequenced acceptance, risks, validation.
-- Guide: a verified procedure.
