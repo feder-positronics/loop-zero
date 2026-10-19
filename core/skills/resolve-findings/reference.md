@@ -1,27 +1,21 @@
 # Resolve Findings Reference
 
-## Staleness Re-Verification
+## Staleness re-verification
 
-Before trusting a finding after the PR head moves:
+When the head moves:
 
-1. Identify the head SHA reviewed by the primary or delta review and the current
-   PR head.
-2. Re-open the cited path and surrounding behavior on the current head; line
-   numbers alone are not evidence.
-3. Re-run the smallest relevant reproduction or inspect the current acceptance
-   evidence.
-4. Classify the thread as still reproducible, already fixed by a named commit, or
-   no longer supported by the current code.
-5. Record that evidence for the proposed thread reply. The thread is resolved
-   only after the fix or reason is visible there.
+1. Identify primary/delta reviewed SHA and current PR head.
+2. Re-open the cited path and surrounding behavior on current head; line
+   numbers alone prove nothing.
+3. Run the smallest reproduction or inspect current acceptance evidence.
+4. Classify: reproducible, fixed by named commit, or unsupported by current code.
+5. Hand off reply evidence; the next step posts and resolves with
+   `loopzero resolve <id> "<fix commit or evidence-backed reason>"`, making
+   the fix or reason visible in the thread.
 
-## Response Handoff
+## Response handoff
 
-For each thread, hand off:
-
-- PR thread URL or stable location;
-- severity and current-head applicability;
-- failure and acceptance conditions;
-- smallest chosen response and strongest rejected alternative when material;
-- files likely to change and validation to run;
-- exact factual reply to post after the response is applied.
+For each thread provide URL/stable location, severity, current-head
+applicability, failure/acceptance conditions, chosen response, strongest
+rejected alternative when material, affected files, validation and exact reply
+to post after applying the response.

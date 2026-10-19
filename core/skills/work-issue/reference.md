@@ -1,58 +1,51 @@
 # Work Issue Delivery Safeguards
 
-Read the relevant section when its condition applies.
+Read each section when its condition applies.
 
-## Implementation Boundaries
+## Implementation boundaries
 
-- When an API shape changes, regenerate its checked-in schema or client artifacts
-  and validate callers against the generated result.
-- When acceptance depends on seeded browser state or a changed prerequisite,
-  prove it on a fresh stack rather than only an already-running local stack.
-- Before the review, record whether the change affects documentation and either
-  update it or give the evidence-backed reason no update is needed.
-- Before publication, inspect the issue and linked artifacts for a lifecycle
-  blueprint owned by this exact issue. If one exists, include its required
-  completion in the closing delivery; a child issue does not own its parent's
-  blueprint.
+- API shape changes require regenerated checked-in schema/client artifacts and
+  caller validation against them.
+- Seeded browser state or changed prerequisites require fresh-stack proof,
+  not just an already-running stack.
+- Before review, record documentation impact; update docs or give an
+  evidence-backed reason they need no update.
+- Before publication, inspect the issue and linked artifacts for its lifecycle
+  blueprint. Include required completion in the closing delivery. A child issue
+  does not own its parent's blueprint.
 
-## Evidence Shown For Approval
+## Evidence for approval
 
-- Any count, census, or state presented to the requester for a decision carries
-  its provenance on the same line: environment, service or host, how the
-  connection was resolved, and the time read. Local and staging data are never
-  labelled production.
-- A request to approve a production change restates that provenance. If the
-  source turns out wrong, say so, void the approval, and ask again.
+Counts, censuses and states presented for decisions carry provenance on the
+same line: environment, service/host, connection resolution, read time. Never
+label local/staging data production. Restate provenance when requesting
+production-change approval. If the source proves wrong, disclose it, void the
+approval and ask again.
 
-## Collision, Waiting, And Re-entry
+## Integration, waiting and re-entry
 
-- Where the base has no merge queue, a branch that is merely behind does not
-  need a rebase while implementation or repairs continue. Rebase once, when the
-  change is otherwise finished, then run checks and request the exact-head
-  review: a review taken before that final rebase is spent for nothing.
-  Serialize final integration across parallel tasks instead of racing rebases.
+- Without a base merge queue, defer a merely-behind branch's rebase during
+  implementation/repairs. Rebase once when otherwise finished, then check and
+  request exact-head review; an earlier review is wasted. Serialize parallel
+  tasks' final integration.
+- Treat the issue as singly owned; perform the checks before editing,
+  publication and merge in [Work Issue](SKILL.md). Stop and reconcile
+  competing deliveries.
+- Review, CI and observable post-merge acceptance waits remain this task;
+  neither bypass them nor start another issue.
+- After interruption/context loss, re-read the issue, PR head, remote branch,
+  CI and open threads before resuming. Follow the
+  [contract's resume/wait rules](../../CONTRACT.md#the-six-steps), not memory.
 
-- Treat the issue as singly owned. Recheck branches and PRs before the first edit,
-  before publication, and before merge; if another delivery appears, stop and
-  reconcile rather than continuing concurrently.
-- Waiting for required review, CI, or an observable post-merge acceptance
-  condition remains part of this issue task. Do not bypass the wait or start a
-  different issue in the same task.
-- After interruption or context loss, re-read the issue, PR head, remote branch,
-  CI, and open review threads before resuming. Never rely on remembered state.
+## Late evidence
 
-## Late Evidence
-
-- If a partial delivery automatically closes its issue, inspect the issue event
-  and delivery evidence first. When a closing reference caused the premature
-  close and acceptance remains, remove the reference from editable PR text, keep
-  it out of subsequent commit messages, reopen the issue within the existing
-  task authorization, and verify it remains open. Do not rewrite merged history
-  solely to remove a commit reference.
-- For an issue whose acceptance was completed, a late finding after merge gets
-  a fresh follow-up branch and PR. Reopen it only when a previously satisfied
-  acceptance criterion has regressed.
+- If partial delivery auto-closes the issue, inspect the event and delivery
+  evidence. If a closing reference caused it while acceptance remains, remove
+  editable PR references, exclude them from subsequent commits, reopen under
+  existing task authorization and verify open state. Do not rewrite merged
+  history solely to remove a reference.
+- After completed acceptance, late findings need a fresh follow-up branch/PR.
+  Reopen the issue only for regression of previously satisfied acceptance.
 - Ordinary monitoring after shipped acceptance is separate work. Later evidence
-  gets a new, explicitly requested review or issue; do not create reminder issues.
-- Deferred work does not extend this delivery. Take it up only as a separately
-  requested task, preferably in a fresh session.
+  needs a newly requested review/issue; create no reminder issues.
+- Deferred work requires a separate request, preferably a fresh session.

@@ -1,53 +1,40 @@
 ---
 name: plan
-description: Bound a requested change with objective, acceptance, ownership, affected paths, and validation before implementation when those are not yet clear.
+description: Bound an unclear change into PR-sized tasks with observable acceptance, ownership, paths and checks; do not implement.
 ---
 
 # Plan
 
-Turn one request into a change small enough for one PR. Do not implement it.
+Read [the contract](../../CONTRACT.md), repository guidance, the issue/task file,
+and enough code to verify behavior and ownership. Use
+[delegation guidance](../../../docs/DELEGATION.md) when choosing executors or
+splitting work.
 
-Use the shared [model selection and delegation guidance](../../../docs/DELEGATION.md)
-when splitting work or choosing an executor.
+## Define the task
 
-Read [the contract](../../CONTRACT.md), repository guidance, the relevant issue
-or `.loopzero/task.md`, and enough code to verify current behavior and ownership.
+- State one objective per PR; split independent outcomes and give their order.
+  For state machines, migrations, auth or concurrency, change one behavioral
+  invariant per PR; name its callers, readers and transitions in acceptance.
+- **Give every task observable acceptance**: passing tests, changed command
+  output or rendered pages, without adjectives.
+- **Put generated code, including SDKs and lockfiles, in a separate mechanical
+  commit.**
+- Split beyond roughly 1,500 hand-written changed lines, or explain in the
+  task why splitting is impossible: reviewers sample such diffs rather than
+  verify them.
+- For each task, list affected paths, owners/governing constraints and
+  `workflow.toml` checks. Add a check only if existing checks cannot cover the
+  behavior. Tasks sharing a file must be stacked or sequential, never parallel
+  from the same base.
+- Decide routine choices from evidence; ask only when acceptance changes or
+  another owner's surface is affected.
 
-## Do
+Write objective, acceptance, paths, constraints, checks and owner in
+`.loopzero/task.md` using [HANDOFF](../../HANDOFF.md), without a separate plan
+file. Exit when it contains one objective, observable acceptance, owned scope
+and proving checks.
 
-1. State the objective in one paragraph. If the request contains two
-   independent outcomes, split it into two tasks. For state machines,
-   migrations, auth, or concurrency, one PR changes one behavioral invariant,
-   and its acceptance names that invariant's callers, readers, and transitions.
-   Generated code (SDKs, lockfiles) goes in its own mechanical commit. A slice
-   beyond roughly 1,500 hand-written changed lines is split, or the task file
-   says why it cannot be: a reviewer samples a diff that large, it does not
-   verify it.
-2. Write acceptance as observable conditions: a test that passes, a command
-   whose output changes, a page that renders. No adjectives.
-3. List the paths you expect to touch, their current owner or governing
-   constraint, and the checks from `workflow.toml`
-   that exercise them. Add a new check only if no existing one covers the
-   behavior. When the request splits into several tasks, list the paths for
-   each; two tasks that share a file are stacked or done in sequence, never
-   in parallel from the same base.
-4. Decide routine implementation choices from available evidence.
-   Ask only when a decision would change the acceptance criteria or touch a
-   surface someone else owns.
-5. Write the objective, acceptance, affected paths, constraints, checks, and
-   owner into `.loopzero/task.md` (see [HANDOFF](../../HANDOFF.md)). No separate
-   plan file.
-
-## Stop when
-
-- Missing authority, conflicting ownership, or a material requirement needs a
-  decision. Name the exact decision
-  and the options; continue with any preparation that does not depend on it.
-- The change cannot fit one PR. Propose the split and the order.
-- Exit when the task file contains one objective, observable acceptance, owned
-  scope, and the checks that will prove it.
-
-## Do not
-
-- Plan extra review rounds or tracking documents.
-- Plan work outside the requested change to "clean up while here".
+Missing authority, conflicting ownership or material requirements need the
+exact decision and options; continue independent preparation. If one PR cannot
+fit, propose the split and order. Do not implement, add review rounds/tracking
+documents, or plan unrelated cleanup.
