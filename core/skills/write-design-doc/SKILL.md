@@ -28,8 +28,7 @@ drafting its contract.
 
 Use the repository's existing documentation location, frontmatter, terminology,
 and template conventions. Link to sources of truth instead of copying them.
-Where no convention exists, choose a descriptive Markdown path and state why in
-`.loopzero/task.md` Notes.
+Where no convention exists, choose a descriptive Markdown path and say why.
 
 Keep open questions in the artifact with an owner and the decision they block.
 For user-facing work, write scenarios before proposing UI, then validate material
@@ -46,5 +45,5 @@ coding steps.
 - If material ambiguity remains, revise the artifact or leave an explicit
   blocker; do not label it implementation-ready merely because drafting ended.
 - Exit with a commit-ready document whose acceptance and open questions are
-  actionable. Put its path and material decisions in task Notes so the commit
-  and PR body hand the contract to planning or implementation.
+  actionable. Put its path and material decisions in task Notes when a task
+  file exists, otherwise in the handoff response.

@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: Deliver one live GitHub issue from duplicate-checked intake through acceptance, draft PR, review under the contract's default independence or bounded owner exception, and verified merge or partial delivery; use only for work anchored to an issue.
+description: Deliver one live GitHub issue from duplicate-checked intake through implementation, review and verified merge, then closure or an explicit partial-delivery boundary; use only for work anchored to an issue.
 ---
 
 # Work Issue
@@ -25,11 +25,6 @@ when splitting work or choosing an executor.
    relying on any user-reported production state.
 3. Run `loopzero start issue-<number>-<slug>`. In `.loopzero/task.md`, translate
    the issue into observable Acceptance lines and keep the issue link in Notes.
-   When the change touches a data migration, authorization, locking or
-   concurrency, or policy and verdict logic, first list in Acceptance the edge
-   cases the proof must cover, such as existing, deleted and duplicate rows,
-   concurrent writers and lock order, authorization boundaries, and rule
-   precedence, and map each to a test or recorded evidence.
    Use `Refs #N` for a partial delivery; use a closing keyword only when this PR
    completes all issue acceptance. GitHub matches closing references in the
    rendered PR description and commit messages even in negated prose, so inspect
@@ -38,27 +33,15 @@ when splitting work or choosing an executor.
 
 ## Deliver
 
-4. Implement only the accepted scope, add proof for its behavior, and commit
-   the bounded change. Read [the delivery safeguards](reference.md) for
-   conditional API, fresh-stack, documentation, blueprint, re-entry,
-   issue-reference correction, and closeout requirements.
-5. Run `loopzero check` on the clean committed head; fix failures without
-   weakening the configured checks. Then run `loopzero pr` to push and open the
-   draft PR. Before publication, repeat the duplicate check; reconcile if a
-   competing delivery appeared.
-6. Run `loopzero review` for the primary review, independent by default or
-   explicitly labeled under the contract's bounded owner-approved
-   contributor-review exception with reduced assurance. Address every open
-   `critical` and `important` thread: commit the fixes, rerun `loopzero check`,
-   push with `loopzero pr`, reply with the fix commit, and use the single delta
-   review allowed by the contract.
-7. Run `loopzero ready --wait`; it waits for the required checks on this head.
-   Never write a `gh` polling loop. Do not bypass readiness or resolve a finding
-   silently.
-8. In the same turn, recheck issue and competing-PR state, then, from the
-   repository root, run `(cd <worktree> && loopzero merge --wait)`; it also
-   waits out checks the ready transition started. Do not close
-   an umbrella issue from a partial delivery.
+4. Deliver only the accepted scope with [implement](../implement/SKILL.md),
+   through review and `loopzero ready --wait`. Read [the delivery
+   safeguards](reference.md) for conditional API, fresh-stack, documentation,
+   blueprint, re-entry, issue-reference correction, and closeout requirements.
+5. Repeat the duplicate-delivery check before `loopzero pr` and again before
+   merge; reconcile a competing delivery instead of continuing.
+6. In the same turn as readiness, from the repository root, run
+   `(cd <worktree> && loopzero merge --wait)`. Do not close an umbrella issue
+   from a partial delivery.
 
 ## Stops
 

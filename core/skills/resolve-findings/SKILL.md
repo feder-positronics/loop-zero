@@ -17,18 +17,16 @@ them into an issue, backlog, or local tracking file.
 
 ## Decide Each Thread
 
-1. Restate the demonstrated failure condition and acceptance condition. Record
-   the category, impact, and current status for every supplied thread.
+1. Restate the demonstrated failure condition and acceptance condition.
 2. Verify whether it still applies on the current head.
 3. Choose the narrowest response:
    - a valid `critical` or `important` finding gets a bounded fix and validation;
    - an already-fixed, inapplicable, or unsupported finding gets a factual reply
      explaining why the thread can be resolved;
    - a `suggestion` is optional and must not expand the task merely to address it.
-4. For a material choice, record confidence, reversibility, evidence, strongest
-   rejected alternative, and expected outcome. Ask the requester only when the
-   response is requester-reserved, irreversible, or changes acceptance, scope,
-   cost, or an external commitment; never infer that authority.
+4. Ask the requester only when the response is requester-reserved,
+   irreversible, or changes acceptance, scope, cost, or an external commitment;
+   never infer that authority.
 5. Hand the chosen response to the narrowest implementation or documentation
    step. Preserve severity unless the thread itself records the correction and
    evidence.
@@ -38,41 +36,22 @@ reviewer-confirmed duplicate, deferred suggestion, or requester decision. Do not
 grow the batch with new findings. Genuinely new critical evidence stops this
 adjudication and must be raised in a separate authorized PR review thread.
 
-High-impact, low-confidence, evidence-conflicted, or plausible-alternative
-choices require a challenge to the deciding premise. For high-impact choices,
-compare only materially different responses and prefer the cleanest sustainable
-architecture. Do not downgrade a critical or security-path finding without
-requester authority, or mark findings as the same defect without reviewer
-confirmation in the thread.
+Do not downgrade a critical or security-path finding without requester
+authority, or mark findings as the same defect without reviewer confirmation in
+the thread. When two findings conflict, satisfy the higher-impact acceptance
+requirement and re-evaluate the other. If a chosen response fails twice, select
+a different evidence-backed route; ask the requester if none remains.
 
-When two findings conflict, satisfy the higher-impact acceptance requirement and
-re-evaluate the other. If a chosen response fails twice, select a different
-evidence-backed route; ask the requester if none remains.
-If every option is rejected, treat the rejection as a new constraint, reconsider
-once, then defer the response pending requester direction rather than inventing
-one.
+## Repeated Findings
 
-## Review Budget
-
-- One primary review covers a head lineage. Commit the fixes, rerun `loopzero
-  check`, push with `loopzero pr`, reply with the fix commit in each thread, and
-  request at most one delta review with `loopzero review`.
-- A delta review reads only the diff since the reviewed commit. Unresolved
-  blocking threads still count unless outdated on a different head.
-- Mechanical format, lint, or rename fixes ride in the same push as the repairs;
-  readiness accepts only a reviewed head, so they cannot land without review of
-  the resulting head.
-- Any fix after the delta exhausts the budget. Audit the class, then squash/amend
-  so neither reviewed commit remains an ancestor of HEAD. The next primary
-  reviews from HEAD's merge-base with the configured base; appending commits
-  does not reset the budget.
-- A fresh lineage resets the budget, not the problem. When a second review flags
-  the same file or defect class again, stop patching single findings: audit the
-  whole class (every producer and consumer: caller, reader, transition) with the
-  `deep` profile, fix it in one repair, and only then request review. After
-  three `request_changes` primaries on one PR, split the PR or return to `plan`;
-  tell the requester why.
-  Squashing or rewriting commits to obtain another primary does not reset that count.
+Repairs follow the [contract's review budget](../../CONTRACT.md#review-budget).
+A fresh lineage resets the budget, not the problem. When a second review flags
+the same file or defect class again, stop patching single findings: audit the
+whole class (every producer and consumer: caller, reader, transition) with the
+`deep` profile, fix it in one repair, and only then request review. After three
+`request_changes` primaries on one PR, split the PR or return to `plan`; tell
+the requester why. Squashing or rewriting commits to obtain another primary
+does not reset that count.
 
 ## Exit
 

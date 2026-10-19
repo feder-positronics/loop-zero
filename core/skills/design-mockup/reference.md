@@ -8,12 +8,9 @@ only what current production UI demonstrates and state the limitation.
 
 ## Artifact Convention
 
-Use the repository's documented mockup location, or
-`docs/design/mockups/YYYY-MM-DD-feature-name.html`: ISO date, short kebab-case
-feature name, one self-contained HTML file. Keep CSS and bounded interaction
-JavaScript inline, avoid remote runtime dependencies, and title the page as a
-mockup. Do not add production imports or require an application server merely
-to inspect it.
+Keep CSS and bounded interaction JavaScript inline, avoid remote runtime
+dependencies, and title the page as a mockup. Do not add production imports or
+require an application server merely to inspect it.
 
 ## Representative Evidence
 

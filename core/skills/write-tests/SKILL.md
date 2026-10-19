@@ -8,20 +8,18 @@ description: Design, add, or improve tests when testing itself is the task; use 
 Add the smallest set of behavior-focused tests that materially improves
 confidence. Do not change product behavior merely to increase coverage.
 
-For standalone work, use the task worktree created by `loopzero start` and
-confirm its branch and `.loopzero/task.md` before editing. Nested work stays in
-the outer task's worktree.
-
-Read [the test-depth reference](reference.md) when boundary choice or suite
-quality needs more detail.
+Work in the task worktree from `loopzero start`, or the outer task's worktree
+when nested; confirm its branch and `.loopzero/task.md` before editing.
 
 ## Choose The Proof
 
 - Name the user or system contract, regression risk, and failures the suite must
   distinguish.
-- Choose the cheapest faithful boundary: unit for isolated logic, integration
-  for real boundary behavior, and end-to-end only for critical cross-boundary
-  journeys.
+- Choose the cheapest faithful boundary: unit tests for deterministic logic
+  with stable collaborators (no real database or network); integration tests for
+  queries, transactions, isolation, constraints, serialization, and adapters
+  whose behavior depends on real boundaries; end-to-end tests only for the few
+  critical journeys that cannot be proved below the assembled system.
 - Exercise stable public seams. Repeated private reach-ins or a harness as
   complex as the behavior is evidence of a missing seam; report that boundary
   rather than extracting production code solely for test convenience.
@@ -37,8 +35,10 @@ Run the focused test while developing. For a bug fix or behavior change, watch
 it fail on the pre-fix code for the intended regression and record that failing
 line in `.loopzero/task.md`. Coverage-only tests may pass on existing code.
 Then run the narrow neighboring suite, commit, and run `loopzero check` on the
-clean head. Keep fixtures minimal and deterministic and preserve the runner's
-exit status.
+clean head. Follow repository placement, fixture, marker, and naming
+conventions. Keep fixtures minimal, isolated, and deterministic, and preserve
+the runner's exit status. Avoid timing tolerance, shared mutable state,
+duplicate cases, and assertions that restate how a mock was configured.
 
 Exit when every added test protects a named contract, regression tests were
 seen failing on the pre-fix code for the intended behavior rather than

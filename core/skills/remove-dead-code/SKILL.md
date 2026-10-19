@@ -29,13 +29,15 @@ cleanup to `refine-code` and design-dependent removal to `write-design-doc`.
 
 The order is load-bearing:
 
-1. Establish a clean rollback point and choose a small, coherent batch of only
-   clear candidates.
+1. Use the clean commit immediately before removal as the rollback point and
+   choose a small, coherent batch of only clear candidates.
 2. Quarantine the batch as a reviewable removal diff, retaining its exact prior
    content in Git. Do not mix refactoring or unrelated cleanup into the diff.
-3. Inspect build, packaging, generated-artifact, and documentation consequences,
-   then commit the quarantined batch and run `loopzero check` on that clean
-   head.
+3. Inspect build, packaging, generated-artifact, and documentation consequences
+   (dangling exports, empty modules, package manifests, generated indexes,
+   example references, newly unused dependencies), then commit the quarantined
+   batch and run `loopzero check` on that clean head without weakening its
+   checks.
 4. Keep the removal only when every relevant check passes. On failure, restore
    the batch to its rollback point and classify it for refactor or manual review;
    do not debug while it remains half-removed.

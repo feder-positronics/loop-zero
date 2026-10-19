@@ -16,8 +16,8 @@ decisions, repository guidance, and enough current code to verify its premises.
 Locked decisions remain constraints unless new evidence invalidates their
 premise; assumptions remain active and vetoable.
 
-When this is part of a loop-zero task, make the edits in its task worktree. Do
-not create a second worktree or a separate findings file.
+When this is part of a loop-zero task, edit in its task worktree; do not
+create a separate findings file.
 
 ## Converge
 
@@ -42,8 +42,8 @@ forcing nominal closure.
 ## Validate And Exit
 
 Verify links, frontmatter, current-state claims, decision status, open-question
-owners, acceptance, and the artifact's repository conventions. Run
-`loopzero check` when the document belongs to a loop-zero task.
+owners, acceptance, and the artifact's repository conventions. In a loop-zero
+task, run `loopzero check` after the delivery owner commits the document.
 
 Exit when no `critical` or `important` finding remains, settled decisions stayed
 settled unless evidence formally reopened them, open questions are durable and

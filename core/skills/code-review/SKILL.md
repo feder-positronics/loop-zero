@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: Review a frozen diff under the contract's default independence or bounded owner exception against its acceptance criteria and report defects as structured findings with severity; use for code diffs, not broader assessments.
+description: Review a frozen code diff against its acceptance criteria and report defects as structured findings with severity; use for code diffs, not broader assessments.
 ---
 
 # Code Review
@@ -8,9 +8,9 @@ description: Review a frozen diff under the contract's default independence or b
 Review one frozen diff against its acceptance criteria and return structured
 findings. Do not edit the reviewed tree.
 
-Read [the contract](../../CONTRACT.md), the PR body, the full diff, and enough
-surrounding code to judge the change. Confirm the exact head before reviewing.
-For a delta review, read only the diff since the reviewed commit. Follow the
+Read [the contract](../../CONTRACT.md), the PR body, and enough surrounding
+code to judge the change. Confirm the exact head. Review the full diff for a
+primary and only the diff since the reviewed commit for a delta. Follow the
 contract's default independence rule or its bounded owner-approved
 contributor-review exception; the latter has reduced assurance and must be
 labeled in the PR narrative and comment.
@@ -37,11 +37,8 @@ Report demonstrated failures precisely and constructively: anchor, failure
 condition, impact, and the smallest fix. Separate "could not verify" from
 "is wrong". Generic advice is not a finding.
 
-## Severity
-
-- `critical`: wrong, unsafe, or data-losing; must be fixed.
-- `important`: ships a bug or misses acceptance; must be fixed.
-- `suggestion`: optional improvement; never blocks and is never counted.
+Use the [contract's severities](../../CONTRACT.md#findings): `critical` and
+`important` block; `suggestion` never does.
 
 ## Output And Exit
 
@@ -62,8 +59,8 @@ Return exactly one JSON object and nothing else. `verdict` is `approve` or
 }
 ```
 
-`path` and `line` may be `null`, but every blocking finding needs an anchor;
-otherwise use the first changed file. Request changes when any blocking finding
+`path` and `line` may be `null` when no precise location exists; `loopzero
+review` anchors such blocking findings on a changed file. Request changes when any blocking finding
 exists. Approve when none exists; approval may include suggestions or an empty
 list. If the diff or required evidence is unavailable, return one `critical`
 finding saying so; never approve blind.

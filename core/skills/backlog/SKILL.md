@@ -23,18 +23,15 @@ label any repository-only result as partial.
 
 ## Compose
 
-Select only sections relevant to the question. Preserve issue and PR identifiers,
-state, priority when defined, parent or initiative relationships, acceptance or
-design gaps, collision signals, age, and evidence behind each recommendation.
-Separate observed facts from recommendations.
+Select only sections relevant to the question and separate observed facts
+from recommendations.
 
 Before recommending an executable next item, re-read its issue, acceptance,
 linked design artifact, branch or worktree claim, and competing PR state. Treat
 another live delivery for the same acceptance as a collision to reconcile, not
 an invitation to duplicate work.
 
-Ordinary backlog and re-entry views are read-only. If the requester explicitly
-asks for issue grooming, re-read live state before mutation, keep each issue to
+If the requester explicitly asks for issue grooming, re-read live state before mutation, keep each issue to
 one bounded outcome, and report every changed issue field or relationship.
 
 Route delivery to `work-issue`, missing durable design to `write-design-doc`, a

@@ -71,7 +71,7 @@ effort = "medium"
 #   Checking such findings with the other family is a separate step.
 # - UI design always uses Anthropic models (the design profile).
 # Categories suggest a starting profile; task requirements may justify another.
-# The review profile does not replace independent-review requirements.
+# The review category does not replace independent-review requirements.
 [categories]
 mechanical = "fast"
 bounded_implementation = "fast" # One settled behavior with direct acceptance.

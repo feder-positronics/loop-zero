@@ -8,9 +8,8 @@ description: Simplify recently touched code without intentional behavior, API, d
 Make one user-named or current-task diff easier to read and maintain while
 preserving its observable contract.
 
-For standalone work, use the task worktree created by `loopzero start` and
-confirm its branch and `.loopzero/task.md` before editing. Nested work stays in
-the outer task's worktree.
+Work in the task worktree from `loopzero start`, or the outer task's worktree
+when nested; confirm its branch and `.loopzero/task.md` before editing.
 
 ## Refine
 

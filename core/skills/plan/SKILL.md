@@ -34,10 +34,7 @@ or `.loopzero/task.md`, and enough code to verify current behavior and ownership
 4. Decide routine implementation choices from available evidence.
    Ask only when a decision would change the acceptance criteria or touch a
    surface someone else owns.
-5. Confirm that validation runs through `loopzero check`, whose sandbox isolates
-   the worktree and Git metadata, and that the task uses the single primary and
-   optional delta review allowed by the contract.
-6. Write the objective, acceptance, affected paths, constraints, checks, and
+5. Write the objective, acceptance, affected paths, constraints, checks, and
    owner into `.loopzero/task.md` (see [HANDOFF](../../HANDOFF.md)). No separate
    plan file.
 
@@ -52,6 +49,5 @@ or `.loopzero/task.md`, and enough code to verify current behavior and ownership
 
 ## Do not
 
-- Plan extra review rounds or tracking documents. The contract allows one
-  primary review plus at most one delta per head lineage.
+- Plan extra review rounds or tracking documents.
 - Plan work outside the requested change to "clean up while here".
