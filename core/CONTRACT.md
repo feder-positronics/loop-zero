@@ -23,9 +23,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    observes the unchanged head, including after activation within the same
    budget: 0 ready; 1 blocked (fix the reported blocker or report the
    dependency before retrying); 3 timeout. Immediate green can precede
-   asynchronous CI scheduling. After two minutes of missing checks without
-   visible pending checks, inspect scheduling, triggers and permissions,
-   correct the cause, then retry.
+   asynchronous CI scheduling. The waiter exits 1 after two minutes of missing
+   checks without visible pending checks: inspect scheduling, triggers and
+   permissions, correct the cause, then rerun it.
 6. `loopzero merge` rechecks readiness, uses the configured strategy, verifies
    the landed SHA, and deletes branch/worktree. A queue initially enqueues;
    `--wait[=SECONDS]` follows landing and cleanup. It first waits out
@@ -39,9 +39,10 @@ an authorized merge runs in the same turn from the repository root:
 shell inside a deleted worktree.
 
 On every start/resume, run `loopzero status`, then rerun the last `--wait`
-command if any; both are idempotent. Status derives the branch's stage from
-Git, GitHub and the check receipt. Never end a turn waiting for notice of an
-event that may already have happened; notifications never replace the waiter.
+command if any before acting on the reported stage; both are idempotent.
+Status derives the branch's stage from Git, GitHub and the check receipt.
+Never end a turn waiting for notice of an event that may already have
+happened; notifications never replace the waiter.
 Before yielding, comment on the PR with head, last exit code, awaited event
 and next command. End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
