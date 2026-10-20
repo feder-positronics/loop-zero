@@ -43,8 +43,9 @@ judgment, not executor preference.
 Lead with the recommendation for next-work questions, current delivery/blockers
 for re-entry. Include relevant links, observed state, defined priority,
 parentage, acceptance/design gaps, dependencies, collisions, age, last meaningful
-evidence, classification rationale and smallest next action. For delegation,
-include bounded acceptance and evidence that pickup is clear.
+evidence, classification rationale and smallest next action, with unrequested
+GitHub writes offered for requester approval. For delegation, include bounded
+acceptance and evidence that pickup is clear.
 
 Separate observations from recommendations. A missing issue link alone does
 not prove absence of accepted task context. Omit empty sections and state source
