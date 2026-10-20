@@ -6,8 +6,8 @@ description: Recommend next work or report live GitHub backlog state through a r
 # Backlog
 
 Return a live view another actor can continue from. For “what should I pick up
-next?”, recommend an evidence-backed next item. Report observed drift and orphan
-work as observations. If no item is justified, name the blocker or evidence gap
+next?”, recommend an evidence-backed next item. Report observed drift and missing
+issue links as observations. If no item is justified, name the blocker or evidence gap
 and the next action. Keep GitHub and the repository read-only unless mutation is
 explicitly requested; recommending pickup does not start it (no branch, worktree
 or `loopzero start`). Use `gh api --method GET` for REST reads with fields.
@@ -26,7 +26,7 @@ Use repository workflow, labels and design statuses. Classify from evidence:
 - **Needs design:** unresolved material design boundary; established small changes
   need no design artifact.
 - **Unclassified:** insufficient evidence.
-- **Orphan PR:** no identifiable issue or accepted task context.
+- **Missing issue link:** no linked issue identified.
 - **Missing PR:** claimed active work cannot be reconciled to a live PR or branch.
 - **Stale:** exceeds the repository's meaningful-update threshold; otherwise
   report age without inventing a threshold.
