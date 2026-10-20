@@ -21,8 +21,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    A draft blocked only by missing/skipped required checks is activated to
    trigger CI; without `--wait` it exits 3. `--wait[=SECONDS]` (default 1800)
    observes the unchanged head, including after activation within the same
-   budget: 0 ready; 1 blocked (fix the reported blocker or report the
-   dependency before retrying); 3 timeout. Immediate green can precede
+   budget: 0 ready, 1 blocked, 3 timeout. Immediate green can precede
    asynchronous CI scheduling. After two minutes of missing checks without
    visible pending checks, inspect scheduling, triggers and permissions,
    correct the cause, then retry.
