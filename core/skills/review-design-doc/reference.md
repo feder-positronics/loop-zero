@@ -7,8 +7,8 @@ at the depth needed for the artifact's next action.
 ## Need And Shape
 
 Challenge evidenced need, product fit, reuse, and the strongest alternative.
-Do not invent options. Check decision authority, reversibility and
-assumptions; flag material open questions without owners.
+Do not invent options. Check decision authority, reversibility, assumptions,
+and owned open questions.
 
 ## Boundaries And Operation
 
