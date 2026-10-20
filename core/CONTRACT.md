@@ -21,8 +21,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    A draft blocked only by missing/skipped required checks is activated to
    trigger CI; without `--wait` it exits 3. `--wait[=SECONDS]` (default 1800)
    observes the unchanged head, including after activation within the same
-   budget: 0 ready; 1 blocked (fix the reported blocker or report the
-   dependency before retrying); 3 timeout. Immediate green can precede
+   budget: 0 ready, 1 blocked, 3 timeout. Immediate green can precede
    asynchronous CI scheduling. After two minutes of missing checks without
    visible pending checks, inspect scheduling, triggers and permissions,
    correct the cause, then retry.
@@ -88,12 +87,12 @@ can edit/resolve evidence; branch protection and CI enforce the gates.
   changes since the primary; unresolved primary findings still count under
   Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
-  another may advise read-only and review independently. Before committing,
-  record every actual writer, including yourself and delegates, in truthful
+  another may advise read-only and review independently. Before committing
+  imported work, record every actual writing delegate in truthful
   `Co-Authored-By` trailers; the committer does not replace the writer.
   Preserve all actual contributors through squash/amend except under the
   authorized disclosure route below; otherwise retain every writer's
-  truthful trailers. Never invent attribution or omit known writers.
+  truthful trailers. Missing attribution stays unknown; never invent it.
 - Primary, delta and repost exclude every recognized trailer family across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot

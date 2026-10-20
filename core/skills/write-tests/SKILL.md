@@ -35,6 +35,6 @@ Coverage-only tests may pass existing code.
 
 Run focused tests during development, then the narrow neighboring suite and
 contract delivery checks. Record commands and results in task Notes. Exit when
-regression failure evidence exists, checks pass and added brittleness is lower
-than the risk protected. Route
+each test protects its named contract, regression failure evidence exists,
+checks pass and added brittleness is lower than the risk protected. Route
 necessary product changes to [implement](../implement/SKILL.md).
