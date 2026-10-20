@@ -20,7 +20,7 @@ unsafe, invalid, or infeasible design is critical; a material decision, boundary
 or validation gap that threatens the next action is important. Suggestions
 do not block.
 
-Give each finding a stable short ID, severity, evidence anchor, consequence, and smallest
+Give each finding a stable short ID, evidence anchor, consequence, and smallest
 resolving acceptance condition. Separate wording edits from design findings;
 finish with an overall assessment, review limits, and the next action or exact blocker.
 
