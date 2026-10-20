@@ -28,5 +28,6 @@ After five non-converging passes, report the surviving blocker.
 
 Exit when no critical or important finding remains, decisions retain their
 proper status, and owned open questions visibly block the relevant action.
-Otherwise hand off the exact blocker without claiming readiness.
+Otherwise keep the exact blocker owned and visibly blocking in the artifact and
+hand it off with its options, without claiming readiness.
 Record the artifact path and material decisions in task Notes when available.
