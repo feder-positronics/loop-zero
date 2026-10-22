@@ -202,12 +202,32 @@ the two systemd units to `~/.config/systemd/user/`, then
   Claude prefers Fable and Opus, then Opus only; Codex prefers every model
   available. At 95% of any limit an account counts as spent. `ai-accounts status`
   shows accounts, emails, tiers and resets.
-- Each shim starts the real CLI on the active account and keeps the shims first on
-  its PATH, so the session's own shells switch too. `loopzero` retries once on another
-  account when no reviewer could run because of `usage limit reached` (exit 4). A
-  running session keeps its account until resumed. A token or `CODEX_HOME` the caller
-  set itself is kept. Never put the token in `settings.json` `env`; that pins every
-  process to one account.
+- Each shim starts the real CLI on the selected account and keeps the shims first on
+  its PATH. Verified helper-managed credentials inherited by a later command can
+  rebind; explicit OAuth tokens, API keys and `CODEX_HOME` values remain caller-owned.
+  The helper uses opaque account-binding markers to distinguish these cases.
+  Codex bindings retain account identity across routine OAuth token refreshes.
+  `loopzero` commands are never replayed by the shim. Existing processes keep their
+  credentials until their harness safely replaces them; changing the active file
+  does not change a running session. Never pin a token in `settings.json` `env`.
+- Harness integrations can call `ai-accounts launch <provider> --model <model>` for
+  a nonsecret JSON identity, then `ai-accounts exec <provider> --identity <identity>
+  -- /absolute/real/executable ...` to pin that exact managed revision. Pass the
+  real executable, not another shim. Preparing the current account does not claim
+  model eligibility; its native CLI validates ordinary startup. Choosing a replacement
+  requires positive model evidence. `ai-accounts exhausted <provider> --identity
+  <failed-identity> --model <model>` selects for the unchanged requested model under
+  the selection lock. Concurrent stale failures reuse a recent eligible selection.
+  Failed model/revision pairs have a five-minute cooldown; unknown availability is
+  not treated as usable. These commands report unsupported or unmanaged routes
+  without inventing account credentials. The authentication provider determines
+  the account pool, even when a harness can use several model providers.
+- `ai-accounts run <provider> --model <model> -- ...` can select a replacement after
+  a quota failure without repeating the command. Add `--retry-safe` only for a
+  caller-proven repeatable command: it permits one retry after the effective
+  credential revision changes. Do not use it for interactive streams, unknown
+  tool outcomes or publication. `status` marks quota evidence over ten minutes old
+  as stale; `status --json` exposes the same flag.
 - Token sessions lack claude.ai connectors. Changing an agent host's binary path
   may restart its provider and interrupt running sessions.
 
