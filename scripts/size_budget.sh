@@ -17,7 +17,8 @@ set -euo pipefail
 # Remaining R2-R4 accepted improvements, owning proofs and formal-review repairs
 # (owner approval 2026-10-07, caps 5250/7600); all check commands remain.
 SRC_CAP=5250
-TESTS_CAP=7600
+# Managed-account and native quota regression coverage (owner approval 2026-10-22).
+TESTS_CAP=7900
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \
