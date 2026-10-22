@@ -169,6 +169,10 @@ core native provenance, independently of optional reporting. Recovery considers 
 exact historical renderer only when the saved artifact lacks requested_settings;
 present malformed metadata cannot activate it. New publication/repost uses qualified
 wording, while publisher/head/findings/session/publication checks remain unchanged.
+Native runner failures distinguish subscription exhaustion from transient throttling:
+weekly/session-limit text and Claude's blocking-limit terminal reason identify quota;
+HTTP 429 alone does not. This classification neither switches accounts nor retries
+review publication; the existing reviewer selector and delivery gates still apply.
 [GitHub transport](../src/loopzero/github.py) owns API access and changed-only
 PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 [eligibility](../src/loopzero/eligibility.py) evaluate trusted review evidence.

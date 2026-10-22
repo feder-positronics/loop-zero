@@ -94,8 +94,10 @@ class RunnerUsageLimit(RunnerBadOutput):
     """The account hit a subscription usage limit; a reset or another account can help."""
 
 
-_USAGE_LIMIT = re.compile(r'reached your [\w .-]*limit|hit your (?:usage )?limit|usage_limit_reached'
-                          r'|"api_error_status":\s*429', re.IGNORECASE)
+_USAGE_LIMIT = re.compile(
+    r'reached your [\w .-]*limit|hit your (?:(?:usage|weekly|session) )?limit'
+    r'|usage_limit_(?:reached|exceeded)|usageLimitExceeded', re.IGNORECASE,
+)
 _TOO_LONG_PATTERNS = (
     re.compile(r"prompt is too long", re.IGNORECASE),
     re.compile(r"context_length_exceeded", re.IGNORECASE),
@@ -174,6 +176,13 @@ def _claude_envelope_auth_failure(envelope: object) -> bool:
 
 def _looks_too_long(text: str) -> bool:
     return any(p.search(text) for p in _TOO_LONG_PATTERNS)
+
+
+def _subscription_exhausted(text: str, envelope: object = None) -> bool:
+    # HTTP 429 also means temporary throttling; require quota-specific evidence.
+    return bool(_USAGE_LIMIT.search(text)) or (
+        isinstance(envelope, dict) and envelope.get("terminal_reason") == "blocking_limit"
+    )
 
 
 def _extract_json_object(text: str) -> object:
@@ -257,7 +266,7 @@ def _run(
                 pass
         if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
             raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
-        if _USAGE_LIMIT.search(combined):
+        if _subscription_exhausted(combined, envelope):
             raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(combined))
         if _looks_too_long(combined):
             raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(combined))
@@ -607,7 +616,7 @@ def _review_claude(
         raise RunnerBadOutput("claude: result envelope is not an object", _tail(raw))
     if _claude_envelope_auth_failure(envelope):
         raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(raw)}")
-    if envelope.get("is_error") and _USAGE_LIMIT.search(raw):
+    if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
         raise RunnerUsageLimit("claude: usage limit reached", _tail(raw))
     if envelope.get("is_error") or envelope.get("subtype", "success") != "success":
         text = str(envelope.get("result", ""))
