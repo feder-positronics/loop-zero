@@ -221,8 +221,15 @@ GitHub reads retry transient failures up to three times (5/20/60 seconds) and
 stop on rate limits; Mergify reads retry server errors, throttling and failed
 reads up to twice (2/5 seconds). Waits use bounded backoff and one waiter per PR;
 direct `gh` polling adds shared account load and cannot replace the wait command.
-A rate limit is a waiting dependency, not permission to turn missing evidence green. The optional host ai-accounts shim may retry
-`loopzero` once after a usage-limit exit (4).
+A rate limit is a waiting dependency, not permission to turn missing evidence green.
+The optional host ai-accounts helper owns managed credential selection and exact-model
+eligibility under its existing lock. Nonsecret launch identities pin credential bindings
+(Codex account principals survive routine OAuth refreshes);
+explicit caller credentials and billing routes remain unchanged. Harnesses own safe live
+session replacement, including effects and native history. The shim does not replay
+whole `loopzero` commands. An explicitly repeatable one-shot helper caller may opt into
+one retry after its effective credential changes; this supplies no delivery evidence or
+permission to replay uncertain tool actions or review publication.
 
 ## Direction and historical evidence
 
