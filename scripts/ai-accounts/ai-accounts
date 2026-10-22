@@ -11,13 +11,20 @@ Store: ~/.local/state/ai-accounts (0700). Never prints secrets.
   ai-accounts label claude <name> <email>
                                          name a Claude account (setup-token tokens cannot read it)
   ai-accounts exec <p[,p]> -- CMD...     run CMD with the active account(s) in its environment
-  ai-accounts run <p[,p]> [--retry-exit N,...] -- CMD...
-                                         like exec; on a usage-limit failure (any nonzero exit, or
-                                         only exits N) re-check and retry once if the account changed
+  ai-accounts launch <provider> --model EXACT
+                                         prepare nonsecret managed identity for an exact model
+  ai-accounts exec <provider> --identity OPAQUE -- CMD...
+                                         pin that credential revision; fails closed if unavailable
+  ai-accounts exhausted <provider> --identity OPAQUE --model EXACT
+                                         report exhausted managed revision; JSON selection result
+  ai-accounts run <p> [--model EXACT] [--retry-safe] [--retry-exit N,...] -- CMD...
+                                         with --model, select after managed quota failure; replay once
+                                         only with --retry-safe (caller guarantees replay is safe)
+                                         and only if that provider credential revision changed
 
 Installed as `claude`, `codex` or `loopzero` (symlinks in a directory ahead of the real CLIs
-on PATH), it runs the real CLI on the active account(s); `loopzero` also retries once when no
-reviewer could run because of a usage limit (exit 4). Credentials the caller set itself win.
+on PATH), it runs the real CLI on the active account(s). Whole loopzero commands are never
+replayed. Credentials the caller set itself win.
 
 Claude tiers: 2 = Fable + Opus usable, 1 = Opus only, 0 = none. Codex tiers: 2 = every
 model usable, 1 = some models restricted, 0 = none. -1 = unknown (probe failed).
@@ -28,9 +35,11 @@ available tier and switches otherwise, preferring the least-used account.
 """
 from __future__ import annotations
 
+import argparse
 import base64
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -53,10 +62,15 @@ CLAUDE_TIER_NAMES = {2: "fable+opus", 1: "opus", 0: "none", -1: "unknown"}
 # Per-account files; everything else in ~/.codex is shared so threads resume across accounts.
 CODEX_PRIVATE = ("auth.json",)
 USAGE_LIMIT_RE = re.compile(
-    r"usage limit reached|reached your [\w .-]*limit|hit your (?:usage )?limit|usage_limit_reached",
+    r"usage limit reached|reached your [\w .-]*limit|hit your (?:usage )?limit|usage_limit_reached|weekly limit",
     re.IGNORECASE)
 PROVIDERS = ("claude", "codex")
 SHIMS = {"claude": "claude", "codex": "codex", "loopzero": "claude,codex"}
+EXPLICIT_ROUTES = {
+    "claude": ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+               "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"),
+    "codex": ("OPENAI_API_KEY", "OPENAI_BASE_URL"),
+}
 
 
 def now() -> float:
@@ -162,32 +176,72 @@ def sync_codex_home(home: Path) -> None:
                     pass
 
 
-def account_env(provider: str) -> dict[str, str]:
-    name = active(provider)
+def identity(provider: str, name: str) -> str:
+    """Opaque binding; Codex refreshes tokens in place without changing its account."""
+    credential = (claude_token(name).encode() if provider == "claude" else
+                  (codex_home(name) / "auth.json").read_bytes())
+    if provider == "codex":
+        try:
+            auth = json.loads(credential)
+        except ValueError:
+            auth = {}
+        tokens = auth.get("tokens") if isinstance(auth, dict) else None
+        tokens = tokens if isinstance(tokens, dict) else {}
+        claims = jwt_claims(tokens.get("id_token", ""))
+        principal = {key: value if isinstance(value, str) else None for key, value in
+                     {"account": tokens.get("account_id"), "subject": claims.get("sub"),
+                      "issuer": claims.get("iss")}.items()}
+        if principal["subject"]:
+            credential = json.dumps({"home": str(codex_home(name).resolve()), **principal},
+                                    sort_keys=True).encode()
+        # Unidentified legacy files retain strict revision matching: without an
+        # account principal, token replacement cannot safely be called a refresh.
+    return hashlib.sha256(provider.encode() + b"\0" + name.encode() + b"\0" + credential).hexdigest()
+
+
+def marker(provider: str) -> str:
+    return f"AI_ACCOUNTS_{provider.upper()}_IDENTITY"
+
+
+def managed_name(provider: str, env: dict[str, str]) -> str | None:
+    if provider not in PROVIDERS or any(env.get(key) for key in EXPLICIT_ROUTES[provider]):
+        return None
+    value = env.get("CLAUDE_CODE_OAUTH_TOKEN" if provider == "claude" else "CODEX_HOME")
+    for name in accounts(provider):
+        try:
+            expected = claude_token(name) if provider == "claude" else str(codex_home(name))
+            if value == expected and env.get(marker(provider)) == identity(provider, name):
+                return name
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def account_env(provider: str, name: str | None = None) -> dict[str, str]:
+    name = active(provider) if name is None else name
     if name is None:
         return {}
     if provider == "claude":
-        return {"CLAUDE_CODE_OAUTH_TOKEN": claude_token(name)}
-    if name != "main":
-        sync_codex_home(codex_home(name))
-    return {"CODEX_HOME": str(codex_home(name))}
+        env = {"CLAUDE_CODE_OAUTH_TOKEN": claude_token(name)}
+    else:
+        if name != "main":
+            sync_codex_home(codex_home(name))
+        env = {"CODEX_HOME": str(codex_home(name)),
+               "AI_ACCOUNTS_CODEX_HOME": str(codex_home(name))}
+    return {**env, marker(provider): identity(provider, name)}
 
 
 def with_accounts(providers: str, base: dict[str, str]) -> dict[str, str]:
-    """Return ``base`` with each provider's active account, unless the caller chose its own.
-
-    Claude Code strips its token from the commands it runs, so a token present was set by the
-    caller. CODEX_HOME is inherited by a Codex session's shells; AI_ACCOUNTS_CODEX_HOME records
-    the value a shim set, so only that inherited value is replaced by the current account.
-    """
+    """Rebind verified managed inheritance; caller credentials and billing always win."""
     env = dict(base)
     for provider in providers.split(","):
-        if provider == "claude":
-            if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
-                env.update(account_env(provider))
-        elif env.get("CODEX_HOME", "") == env.get("AI_ACCOUNTS_CODEX_HOME", ""):
+        if provider not in PROVIDERS:
+            continue
+        credential = "CLAUDE_CODE_OAUTH_TOKEN" if provider == "claude" else "CODEX_HOME"
+        if any(env.get(key) for key in EXPLICIT_ROUTES[provider]):
+            continue
+        if not env.get(credential) or managed_name(provider, env) is not None:
             env.update(account_env(provider))
-            env["AI_ACCOUNTS_CODEX_HOME"] = env.get("CODEX_HOME", "")
     return env
 
 
@@ -272,8 +326,9 @@ def claude_email(name: str, org: str | None) -> str | None:
 def jwt_claims(token: str) -> dict:
     try:
         payload = token.split(".")[1]
-        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    except (IndexError, ValueError):
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return claims if isinstance(claims, dict) else {}
+    except (AttributeError, IndexError, ValueError, TypeError):
         return {}
 
 
@@ -409,7 +464,13 @@ def check(quiet: bool = False) -> dict:
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(STATE / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        status = {"checked_at": now(), "providers": {}}
+        try:
+            previous = json.loads((STATE / "status.json").read_text())
+        except (OSError, ValueError):
+            previous = {}
+        status = {"checked_at": now(), "providers": {},
+                  "exhausted": previous.get("exhausted", {}),
+                  "selections": previous.get("selections", {})}
         for provider in PROVIDERS:
             names = accounts(provider)
             if provider == "codex":
@@ -440,6 +501,8 @@ def check(quiet: bool = False) -> dict:
 
 def print_status(status: dict) -> None:
     print(f"checked {iso(status.get('checked_at'))}  (margin {MARGIN:.0%})")
+    if now() - status.get("checked_at", 0) > 600:
+        print("STALE: no account check in over 10 minutes; check ai-accounts.timer")
     for provider, info in status.get("providers", {}).items():
         tiers = CLAUDE_TIER_NAMES if provider == "claude" else CODEX_TIER_NAMES
         print(f"{provider}:")
@@ -485,11 +548,186 @@ def cmd_exec(providers: str, argv: list[str]) -> int:
     return 127
 
 
+def model_availability(provider: str, name: str, model: str) -> tuple[bool, bool, float]:
+    if provider == "claude":
+        evidence = probe_claude_model(claude_token(name), model)
+        usable = evidence.get("ok") is True
+        known = evidence.get("http") in (200, 400, 404) or (
+            evidence.get("http") == 429 and bool(evidence.get("rejected") or any(
+                value >= MARGIN for value in evidence.get("util", {}).values())))
+        return usable, known, max(evidence.get("util", {}).values(), default=0)
+    evidence = check_codex(name)
+    availability = evidence.get("models", {}).get(model)
+    known = evidence.get("tier", -1) >= 0 and isinstance(availability, bool)
+    return (known and evidence["tier"] > 0 and availability is True,
+            known, evidence.get("util", 1))
+
+
+def caller_credentials(provider: str, env: dict[str, str]) -> bool:
+    credential = "CLAUDE_CODE_OAUTH_TOKEN" if provider == "claude" else "CODEX_HOME"
+    return any(env.get(key) for key in EXPLICIT_ROUTES[provider]) or bool(
+        env.get(credential) and managed_name(provider, env) is None)
+
+
+def launch(provider: str, model: str, env: dict[str, str]) -> dict:
+    """Prepare a nonsecret exact-model identity; exec --identity pins the launch."""
+    def result(outcome: str, name: str | None = None) -> dict:
+        return {"outcome": outcome, "ready": outcome == "ready", "provider": provider,
+                "model": model, "identity": identity(provider, name) if name else None}
+
+    if provider not in PROVIDERS:
+        return result("unsupported")
+    if caller_credentials(provider, env) or not STATE.is_dir() or not accounts(provider):
+        return result("unmanaged")
+    with open(STATE / ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            status = json.loads((STATE / "status.json").read_text())
+        except (OSError, ValueError):
+            status = {}
+        current = active(provider)
+        names = sorted(accounts(provider), key=lambda name: name != current)
+        unknown = False
+        for name in names:
+            try:
+                revision = identity(provider, name)
+                if status.get("exhausted", {}).get(revision + ":" + model, 0) > now():
+                    continue
+                # Preparing the selected account is not a rotation or an assertion
+                # about model access. Let its native CLI validate a healthy launch;
+                # partial quota telemetry must not prevent ordinary Codex startup.
+                if name == current:
+                    return result("ready", name)
+                evidence = status.get("selections", {}).get(provider + ":" + model, {})
+                if evidence.get("identity") == revision and evidence.get("until", 0) > now():
+                    usable, known = True, True
+                else:
+                    usable, known, _ = model_availability(provider, name, model)
+                if usable:
+                    set_active(provider, name)
+                    status.setdefault("selections", {})[provider + ":" + model] = {
+                        "identity": revision, "until": now() + 300,
+                    }
+                    write_private(STATE / "status.json", json.dumps(status) + "\n")
+                    return result("ready", name)
+                unknown |= not known
+            except (OSError, ValueError, KeyError, urllib.error.URLError):
+                unknown = True
+        return result("unknown" if unknown else "exhausted")
+
+
+def cmd_pinned_exec(provider: str, revision: str, argv: list[str]) -> int:
+    """Build the named revision under the selection lock, without rebinding active."""
+    env = dict(os.environ)
+    name = None
+    if provider in PROVIDERS and STATE.is_dir() and not caller_credentials(provider, env):
+        with open(STATE / ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            for candidate in accounts(provider):
+                try:
+                    if identity(provider, candidate) == revision:
+                        env.update(account_env(provider, candidate))
+                        if env.get(marker(provider)) == revision:
+                            name = candidate
+                        break
+                except (OSError, ValueError):
+                    continue
+    if name is None or not argv:
+        print(json.dumps({"outcome": "unsupported" if provider not in PROVIDERS else "unmanaged",
+                          "provider": provider, "changed": False}))
+        return 2
+    os.execvpe(argv[0], argv, env)
+    return 127
+
+
+def exhausted(provider: str, failed_identity: str, model: str) -> dict:
+    """Compare-and-select for one exact provider/model, serialized with monitor checks.
+
+    The caller sends only the opaque managed revision from its effective environment.
+    Unknown availability cannot authorize selection. A short cooldown prevents an
+    exhausted revision from winning again before a later quota reset/probe.
+    """
+    def result(outcome: str, name: str | None = None) -> dict:
+        return {"outcome": outcome, "provider": provider, "model": model,
+                "identity": identity(provider, name) if name else None,
+                "changed": outcome in ("switched", "already-switched")}
+
+    if provider not in PROVIDERS:
+        return result("unsupported")
+    if not STATE.is_dir():
+        return result("unmanaged")
+    with open(STATE / ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        revisions = {}
+        for name in accounts(provider):
+            try:
+                revisions[identity(provider, name)] = name
+            except OSError:
+                continue
+        if failed_identity not in revisions:
+            return result("unmanaged")
+        try:
+            status = json.loads((STATE / "status.json").read_text())
+        except (OSError, ValueError):
+            status = {}
+        status.setdefault("providers", {
+            p: {"active": active(p), "accounts": {n: {"tier": -1} for n in accounts(p)}}
+            for p in PROVIDERS})
+        blocked = {k: expiry for k, expiry in status.get("exhausted", {}).items() if expiry > now()}
+        status["exhausted"] = blocked
+        key = failed_identity + ":" + model
+        blocked[key] = now() + 300
+        current = active(provider)
+        current_id = identity(provider, current) if current else None
+        selected = status.setdefault("selections", {})
+        selection_key = provider + ":" + model
+        evidence = selected.get(selection_key, {})
+        # A delayed failure must preserve a healthy current account even when
+        # the monitor/manual selection did not record model-specific evidence.
+        if (current_id is not None and current_id != failed_identity
+                and blocked.get(current_id + ":" + model, 0) <= now()):
+            usable = evidence.get("identity") == current_id and evidence.get("until", 0) > now()
+            known = True
+            if not usable:
+                try:
+                    usable, known, _ = model_availability(provider, current, model)
+                except (OSError, ValueError, KeyError, urllib.error.URLError):
+                    known = False
+            if usable or not known:
+                if usable:
+                    selected[selection_key] = {"identity": current_id, "until": now() + 300}
+                write_private(STATE / "status.json", json.dumps(status) + "\n")
+                return result("already-switched" if usable else "unknown", current)
+        candidates = []
+        unknown = False
+        for revision, name in revisions.items():
+            if (blocked.get(revision + ":" + model, 0) > now()
+                    or (revision == current_id and current_id != failed_identity)):
+                continue
+            try:
+                usable, known, utilization = model_availability(provider, name, model)
+                if usable:
+                    candidates.append((utilization, name))
+                elif not known:
+                    unknown = True
+            except (OSError, ValueError, KeyError, urllib.error.URLError):
+                unknown = True
+        if candidates:
+            chosen = min(candidates)[1]
+            set_active(provider, chosen)
+            selected[selection_key] = {"identity": identity(provider, chosen), "until": now() + 300}
+            outcome = result("already-switched" if chosen == current else "switched", chosen)
+        else:
+            outcome = result("unknown" if unknown else "exhausted", current)
+        write_private(STATE / "status.json", json.dumps(status) + "\n")
+        return outcome
+
+
 def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
-            base: dict[str, str] | None = None) -> int:
-    """Run once; on a usage-limit failure re-probe and retry once if the account changed."""
+            base: dict[str, str] | None = None, model: str | None = None,
+            retry_safe: bool = False) -> int:
+    """Preserve stdout streaming; replay only one identified managed provider/model."""
     for attempt in (1, 2):
-        before = {p: active(p) for p in providers.split(",")}
         env = with_accounts(providers, dict(os.environ) if base is None else base)
         proc = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE)
         seen: list[bytes] = []
@@ -506,15 +744,15 @@ def cmd_run(providers: str, argv: list[str], retry_exit: set[int] | None = None,
         t.join()
         text = b"".join(seen).decode("utf-8", "replace")
         retryable = code != 0 and (retry_exit is None or code in retry_exit)
-        if not retryable or attempt == 2 or not USAGE_LIMIT_RE.search(text):
+        if (not retryable or attempt == 2 or not model or providers not in PROVIDERS
+                or not USAGE_LIMIT_RE.search(text) or managed_name(providers, env) is None):
             return code
-        check(quiet=True)
-        after = {p: active(p) for p in before}
-        if after == before:
-            print("ai-accounts: usage limit reached and no better account is available", file=sys.stderr)
+        before = env[marker(providers)]
+        outcome = exhausted(providers, before, model)
+        after = with_accounts(providers, env)
+        if not retry_safe or not outcome["changed"] or after.get(marker(providers)) == before:
             return code
-        changed = ", ".join(f"{p} {before[p]} -> {after[p]}" for p in before if before[p] != after[p])
-        print(f"ai-accounts: usage limit reached; switched {changed}; retrying once", file=sys.stderr)
+        print("ai-accounts: managed account changed; retrying once", file=sys.stderr)
     return code
 
 
@@ -535,7 +773,8 @@ def cmd_shim(name: str, args: list[str]) -> int:
     if name == "loopzero":
         # loopzero resolves claude/codex on PATH and runs them in its sandbox: hide the shims.
         base = {**os.environ, "PATH": os.pathsep.join(rest)}
-        return cmd_run(SHIMS[name], [real, *args], {4}, base)
+        os.execve(real, [real, *args], with_accounts(SHIMS[name], base))
+        return 127
     # Put the shims first for the session's own shells, so their commands switch accounts too.
     base = {**os.environ, "PATH": os.pathsep.join([str(Path(sys.argv[0]).absolute().parent), *rest])}
     os.execve(real, [real, *args], with_accounts(SHIMS[name], base))
@@ -544,9 +783,27 @@ def cmd_shim(name: str, args: list[str]) -> int:
 
 def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "status"
+    if cmd == "launch":
+        parser = argparse.ArgumentParser(prog="ai-accounts launch")
+        parser.add_argument("provider")
+        parser.add_argument("--model", required=True)
+        args = parser.parse_args(argv[1:])
+        print(json.dumps(launch(args.provider, args.model, dict(os.environ))))
+        return 0
+    if cmd == "exec" and len(argv) >= 5 and argv[2] == "--identity" and argv[4] == "--":
+        return cmd_pinned_exec(argv[1], argv[3], argv[5:])
+    if cmd == "exhausted":
+        parser = argparse.ArgumentParser(prog="ai-accounts exhausted")
+        parser.add_argument("provider")
+        parser.add_argument("--identity", required=True)
+        parser.add_argument("--model", required=True)
+        args = parser.parse_args(argv[1:])
+        print(json.dumps(exhausted(args.provider, args.identity, args.model)))
+        return 0
     if cmd == "status":
         f = STATE / "status.json"
         status = json.loads(f.read_text()) if f.is_file() else check(quiet=True)
+        status["stale"] = now() - status.get("checked_at", 0) > 600
         for provider, info in status.get("providers", {}).items():
             info["active"] = active(provider)
         if "--json" in argv:
@@ -564,7 +821,10 @@ def main(argv: list[str]) -> int:
     if cmd == "use" and len(argv) == 3 and argv[1] in PROVIDERS:
         if argv[2] not in accounts(argv[1]):
             sys.exit(f"ai-accounts: unknown {argv[1]} account {argv[2]!r}")
-        set_active(argv[1], argv[2])
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(STATE / ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            set_active(argv[1], argv[2])
         log(f"{argv[1]}: manual -> {argv[2]}")
         print(f"{argv[1]} active: {argv[2]}")
         return 0
@@ -576,16 +836,29 @@ def main(argv: list[str]) -> int:
         return 0
     if cmd == "add" and len(argv) == 3 and argv[1] in PROVIDERS:
         return cmd_add(argv[1], argv[2])
+    retry_safe = False
+    if cmd == "run" and "--retry-safe" in argv[2:]:
+        index = argv.index("--retry-safe", 2)
+        if "--" not in argv[:index]:
+            retry_safe = True
+            argv = argv[:index] + argv[index + 1:]
+    model = None
+    if cmd == "run" and "--model" in argv[2:]:
+        index = argv.index("--model", 2)
+        if "--" not in argv[:index] and index + 1 < len(argv):
+            model = argv[index + 1]
+            argv = argv[:index] + argv[index + 2:]
     retry_exit = None
     if cmd == "run" and len(argv) >= 4 and argv[2] == "--retry-exit":
         retry_exit = {int(n) for n in argv[3].split(",")}
         argv = argv[:2] + argv[4:]
     if cmd in ("exec", "run") and len(argv) >= 3 and argv[2] == "--":
         if any(p not in PROVIDERS for p in argv[1].split(",")):
-            sys.exit("ai-accounts: providers are claude, codex or claude,codex")
+            print(json.dumps({"outcome": "unsupported", "changed": False}))
+            return 2
         if cmd == "exec":
             return cmd_exec(argv[1], argv[3:])
-        return cmd_run(argv[1], argv[3:], retry_exit)
+        return cmd_run(argv[1], argv[3:], retry_exit, model=model, retry_safe=retry_safe)
     print(__doc__.strip(), file=sys.stderr)
     return 2
 
