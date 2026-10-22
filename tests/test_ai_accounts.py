@@ -142,12 +142,17 @@ def test_machine_selection_never_prints_credentials(helper, monkeypatch, capsys)
     assert 'synthetic-secret' not in (helper.STATE / 'status.json').read_text()
 
 
-def test_stale_failure_requires_exact_model_evidence(helper, monkeypatch):
+@pytest.mark.parametrize('cache', ['missing', 'expired', 'other-model'])
+@pytest.mark.parametrize('usable,known,outcome,active', [(True, True, 'already-switched', 'b'), (False, False, 'unknown', 'b'), (False, True, 'switched', 'c')])
+def test_stale_failure_requires_exact_model_evidence(helper, monkeypatch, cache, usable, known, outcome, active):
     identity = helper.with_accounts('claude', {})['AI_ACCOUNTS_CLAUDE_IDENTITY']
     helper.set_active('claude', 'b')
-    monkeypatch.setattr(helper, 'probe_claude_model', lambda token, model: {'ok': False, 'http': 200, 'util': {}})
-    assert helper.exhausted('claude', identity, 'unavailable-model')['outcome'] == 'exhausted'
-    assert helper.active('claude') == 'b'
+    if cache != 'missing':
+        key = 'claude:m' if cache == 'expired' else 'claude:other'
+        helper.write_private(helper.STATE / 'status.json', json.dumps({'selections': {key: {'identity': helper.identity('claude', 'b'), 'until': 0 if cache == 'expired' else helper.now() + 300}}}))
+    monkeypatch.setattr(helper, 'model_availability', lambda provider, name, model: (usable, known, .8) if name == 'b' else (True, True, 0))
+    assert helper.exhausted('claude', identity, 'm')['outcome'] == outcome
+    assert helper.active('claude') == active
 
 
 def test_launch_then_pin_survives_active_change(helper, monkeypatch, capsys):

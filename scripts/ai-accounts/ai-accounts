@@ -682,16 +682,27 @@ def exhausted(provider: str, failed_identity: str, model: str) -> dict:
         selected = status.setdefault("selections", {})
         selection_key = provider + ":" + model
         evidence = selected.get(selection_key, {})
-        # Converge only on a recently proven selection for this exact model/revision.
-        if (current_id != failed_identity and evidence.get("identity") == current_id
-                and evidence.get("until", 0) > now()
+        # A delayed failure must preserve a healthy current account even when
+        # the monitor/manual selection did not record model-specific evidence.
+        if (current_id is not None and current_id != failed_identity
                 and blocked.get(current_id + ":" + model, 0) <= now()):
-            write_private(STATE / "status.json", json.dumps(status) + "\n")
-            return result("already-switched", current)
+            usable = evidence.get("identity") == current_id and evidence.get("until", 0) > now()
+            known = True
+            if not usable:
+                try:
+                    usable, known, _ = model_availability(provider, current, model)
+                except (OSError, ValueError, KeyError, urllib.error.URLError):
+                    known = False
+            if usable or not known:
+                if usable:
+                    selected[selection_key] = {"identity": current_id, "until": now() + 300}
+                write_private(STATE / "status.json", json.dumps(status) + "\n")
+                return result("already-switched" if usable else "unknown", current)
         candidates = []
         unknown = False
         for revision, name in revisions.items():
-            if blocked.get(revision + ":" + model, 0) > now():
+            if (blocked.get(revision + ":" + model, 0) > now()
+                    or (revision == current_id and current_id != failed_identity)):
                 continue
             try:
                 usable, known, utilization = model_availability(provider, name, model)
