@@ -578,13 +578,37 @@ def test_claude_auth_failure_envelope(fake_bin: Path, tmp_path: Path, exit_code,
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
-@pytest.mark.parametrize("status,match", [(500, "claude: (error|exited)"), (429, "usage limit reached")])
-def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code, status, match) -> None:
+@pytest.mark.parametrize("status", [429, 500])
+def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code, status) -> None:
     _fake_claude(fake_bin, {"is_error": True, "api_error_status": status,
                            "terminal_reason": "api_error", "result": "Internal server error"},
                  exit_code=exit_code)
-    with pytest.raises(RunnerBadOutput, match=match):
+    with pytest.raises(RunnerBadOutput, match="claude: (error|exited)") as error:
         _review("claude", tmp_path)
+    assert not isinstance(error.value, RunnerUsageLimit)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("details", [
+    {"result": "You've hit your weekly limit · resets 11pm (Europe/Warsaw)"},
+    {"result": "You've hit your session limit"},
+    {"terminal_reason": "blocking_limit", "result": "Please wait until reset"},
+])
+def test_claude_subscription_exhaustion(fake_bin: Path, tmp_path: Path, exit_code, details) -> None:
+    _fake_claude(fake_bin, {"is_error": True, **details}, exit_code=exit_code)
+    with pytest.raises(RunnerUsageLimit):
+        _review("claude", tmp_path)
+
+
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_weekly_quota_plain_failure(fake_bin: Path, tmp_path: Path, family) -> None:
+    phrase = "You've hit your weekly limit · resets 11pm"
+    if family == "claude":
+        _fake_claude(fake_bin, phrase, exit_code=1)
+    else:
+        _fake_codex(fake_bin, "", stderr=phrase, exit_code=1)
+    with pytest.raises(RunnerUsageLimit):
+        _review(family, tmp_path)
 
 
 @pytest.mark.parametrize("family,message", [
