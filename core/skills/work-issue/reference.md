@@ -26,8 +26,9 @@ approval and ask again.
 
 - Without a base merge queue, defer a merely-behind branch's rebase during
   implementation/repairs. Rebase once when otherwise finished, then check and
-  request exact-head review; an earlier review is wasted. Serialize parallel
-  tasks' final integration.
+  request exact-head review; an earlier review is wasted. Update the base by
+  rebase, never a base merge: `loopzero review` refuses a delta across a merge
+  commit. Serialize parallel tasks' final integration.
 - Treat the issue as singly owned; perform the checks before editing,
   publication and merge in [Work Issue](SKILL.md). Stop and reconcile
   competing deliveries.
