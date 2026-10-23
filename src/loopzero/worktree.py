@@ -157,6 +157,11 @@ def diff_since(wt: Path, sha: str) -> str:
     return _git(Path(wt), "diff", "--no-color", sha, "HEAD")
 
 
+def merges_since(wt: Path, sha: str) -> list[str]:
+    """Merge commits between ``sha`` and HEAD; their diff would carry the merged-in changes."""
+    return _git(Path(wt), "rev-list", "--merges", f"{sha}..HEAD").split()
+
+
 def cleanup(repo_root: Path, wt: Path) -> None:
     """Remove the worktree and its branch. Refuses when the worktree is dirty."""
     repo_root, wt = Path(repo_root), Path(wt)

@@ -725,6 +725,13 @@ def _run_review(
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
+    if kind == "delta" and (merges := worktree.merges_since(wt, since)):
+        raise CliError(
+            f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
+            "merged-in changes in the delta material; rebase onto the base instead; delta review "
+            "needs the reviewed head as an ancestor without base merges (the rebase starts a new "
+            "lineage, so the next review is a primary)"
+        )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
     authors = runners.author_families(wt, head, lineage_base)
@@ -762,7 +769,8 @@ def _run_review(
                     f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks",
                     file=sys.stderr,
                 )
-                chunk_results = [selected[family](diff=chunk) for chunk in chunks]
+                chunk_results = [selected[family](diff=chunk, chunk=(index, len(chunks)))
+                                 for index, chunk in enumerate(chunks, 1)]
                 result = runners.merge_reviews(chunk_results)
                 break
         except RUNNER_FAILURES as exc:

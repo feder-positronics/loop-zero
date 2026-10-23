@@ -1007,7 +1007,7 @@ def test_review_chunks_oversized_diff_with_same_family(
     code, out, err = run(capsys, "review")
 
     assert code == 0 and f"review by {'codex' if chunk_auth else 'claude'}" in out
-    materials, policies, tasks = [], [], []
+    materials, policies, tasks, fragments = [], [], [], []
     for name in (fake_bin / "claude.calls").read_bytes().split(b"\n")[:-1]:
         path = Path(name.decode())
         argv = path.with_suffix(path.suffix + ".argv").read_bytes().decode().split("\0")[:-1]
@@ -1017,10 +1017,14 @@ def test_review_chunks_oversized_diff_with_same_family(
         assert metadata["head"] == head and metadata["kind"] == "primary"
         assert metadata["diff_utf8_bytes"] == len(diff)
         tasks.append(metadata["task_text"])
+        fragments.append(metadata.get("fragment"))
         materials.append(diff)
     assert len(set(policies)) == 1 and len(set(tasks)) == 1 and len(materials) > 1
     full_diff, *chunks = materials
     assert all(len(part) <= 4096 for part in chunks)
+    assert fragments[0] is None and "whole change is complete" in policies[0] and all(
+        f.startswith(f"chunk {i} of ") and f.endswith("whole PR is complete from it")
+        for i, f in enumerate(fragments[1:], 1))
     if chunk_auth:
         assert len(chunks) == 1 and full_diff.startswith(chunks[0])
         header, fallback_diff = (fake_bin / "codex.stdin").read_bytes().split(b"\n", 1)
@@ -1107,6 +1111,21 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     assert policy.encode("utf-8") not in header + diff
     payload = posted_review(gh)
     assert marker(head, "delta") in payload["body"]
+
+
+def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, capsys) -> None:
+    reviewed = head_of(wt)  # intelflo#8393: primary-reviewed head, a merge of main, the delta
+    (repo / "upstream.py").write_text("y = 1\n")
+    git(repo, "add", "upstream.py")
+    git(repo, "commit", "-q", "-m", "landed on main")
+    git(wt, "merge", "-q", "--no-edit", "main")
+    merge = head_of(wt)
+    git(wt, "commit", "-q", "--allow-empty", "-m", "fix after review")
+    prepare_review(wt, gh, fake_bin, history=[rev(reviewed, "primary", state="CHANGES_REQUESTED")])
+    code, out, err = run(capsys, "review")
+    assert code != 0 and out == "" and not (fake_bin / "claude.stdin").exists()
+    assert f"merge commit {merge[:12]} since the reviewed head {reviewed[:12]}" in err
+    assert "rebase onto the base instead; delta review needs the reviewed head as an " in err
 
 
 def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
