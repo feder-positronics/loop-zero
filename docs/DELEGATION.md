@@ -8,10 +8,14 @@ or exception record is required.
 ## Coordinator rollover
 
 At a delivery milestone or roughly 300k context tokens, launch a successor
-with a short handoff, transfer recurring tasks bound to this session, post its
-link and stop. The handoff lists live child IDs, pending results or questions
-and the current reply target; reconcile that work with the successor before
-stopping. A launch notice alone is not a task transfer. After a finished
+with a short handoff, transfer recurring tasks and pending wakeups bound to
+this session, post its link and stop. The handoff is enough for the next
+action: live child IDs, pending results or questions, still-binding decisions
+with their sources and the current reply target; link history instead of
+copying it. Reconcile that work with the successor before stopping. A launch
+notice alone is not a task transfer. A changed decision names the instruction
+it supersedes. After transfer, the retired session forwards late results once,
+with their original task reference, and makes no new decisions. After a finished
 delivery, roll over before monitoring or unrelated follow-ups. Do this
 yourself; do not ask the requester to start it. A bare "continue" means
 continue there.
