@@ -9,9 +9,12 @@ or exception record is required.
 
 At a delivery milestone or roughly 300k context tokens, launch a successor
 with a short handoff, transfer recurring tasks bound to this session, post its
-link and stop. After a finished delivery, roll over before monitoring or
-unrelated follow-ups. Do this yourself; do not ask the requester to start it.
-A bare "continue" means continue there.
+link and stop. The handoff lists live child IDs, pending results or questions
+and the current reply target; reconcile that work with the successor before
+stopping. A launch notice alone is not a task transfer. After a finished
+delivery, roll over before monitoring or unrelated follow-ups. Do this
+yourself; do not ask the requester to start it. A bare "continue" means
+continue there.
 
 ## Resolve the model before delegation
 
@@ -77,6 +80,7 @@ Allowed paths: <owned scope>
 Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
+Launch policy: Children inherit this rule: never approval-required; auto plus "read-only, do not edit" for read-only work, otherwise the parent's mode; after launch, verify pendingRequestCount 0 and a completed tool call.
 Verification: <focused owning tests and applicable coverage, runnable in the sandbox>
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Return: Continue until acceptance evidence exists or a named blocker needs the parent; a progress summary is not completion.
@@ -117,7 +121,10 @@ pending approval (T3 `t3_thread_read`: `pendingRequestCount` 0). Answer an
 approval only within your authority; otherwise cancel, relaunch correctly or
 report the block. Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
-fallback timer, or a bounded blocking wait.
+fallback timer, or a bounded blocking wait. Before arming or rearming a wait,
+reconcile the awaited task's existing terminal result and current remote
+state; after a superseding message or restart, check again before concluding
+"still waiting".
 
 Split oversized scope in the plan rather than imposing brief line limits.
 Resume unfinished delegate sessions instead of restarting. After two repair

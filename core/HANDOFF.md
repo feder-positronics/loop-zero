@@ -21,3 +21,7 @@ Base: <sha>
 (filled by `loopzero review`)
 
 ## Notes
+- <Authorized unfinished work: one next-action owner and its next action or
+  actual external trigger. A consumer waiting for a brief names the producer,
+  which owns sending it or reporting its blocker. An owner decision names the
+  exact question and recipient.>
