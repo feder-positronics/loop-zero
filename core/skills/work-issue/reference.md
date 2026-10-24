@@ -34,6 +34,9 @@ approval and ask again.
   competing deliveries.
 - Review, CI and observable post-merge acceptance waits remain this task;
   neither bypass them nor start another issue.
+- For CI or observation-based acceptance, record the behavior exercised,
+  lane, landed head and interval or sample count. A green run that skipped the
+  required behavior is not closure evidence.
 - After interruption/context loss, re-read the issue, PR head, remote branch,
   CI and open threads before resuming. Follow the
   [contract's resume/wait rules](../../CONTRACT.md#the-six-steps), not memory.
