@@ -40,6 +40,10 @@ when choosing executors or splitting work.
    cleanup. **Verify GitHub shows the issue closed for a closing delivery,
    with the closing reference; for `Refs #N`, verify it remains open** and
    report remaining acceptance. Never close an umbrella issue for partial work.
+   For authorized unfinished work, name one next-action owner and its next
+   action or actual external trigger. A consumer waiting for a brief names the
+   producer, which owns sending it or reporting its blocker. An owner decision
+   names the exact question and recipient.
 
 Report issue, PR, merge SHA, validation, thread state, verified remote issue/PR
 state, and connected environment state when acceptance depends on it.

@@ -228,6 +228,11 @@ the two systemd units to `~/.config/systemd/user/`, then
   credential revision changes. Do not use it for interactive streams, unknown
   tool outcomes or publication. `status` marks quota evidence over ten minutes old
   as stale; `status --json` exposes the same flag.
+- After host recovery, verify the account timer has a future next run. Switching
+  the active account does not update an existing provider process: resume through
+  the managed launcher on the selected credential. After failover, reconcile parked
+  or failed unfinished jobs; a resent message alone does not prove a new process or
+  a completed tool call.
 - Token sessions lack claude.ai connectors. Changing an agent host's binary path
   may restart its provider and interrupt running sessions.
 
