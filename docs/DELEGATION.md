@@ -15,7 +15,8 @@ with their sources and the current reply target; link history instead of
 copying it. Reconcile that work with the successor before stopping. A launch
 notice alone is not a task transfer. A changed decision names the instruction
 it supersedes. After transfer, the retired session forwards late results once,
-with their original task reference, and makes no new decisions. After a finished
+with their original task reference, and makes no new decisions; then it retires
+its session so no later send or schedule can revive it. After a finished
 delivery, roll over before monitoring or unrelated follow-ups. Do this
 yourself; do not ask the requester to start it. A bare "continue" means
 continue there.
