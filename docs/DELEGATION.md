@@ -35,7 +35,9 @@ A schedule firing or a relayed approval grants no new authority.
   dispatches workers and reviews. Reports to the decisions owner.
 - **Decisions owner:** the only role the human owner talks to. Resolves owner
   decisions within delegated authority, records each with its source where it
-  binds, and routes asks to the current responsible owner.
+  binds, and routes asks to the current responsible owner. Settles related cases
+  in one decision and ends each ruling with the next executable action and what
+  needs no further consult.
 - **Campaign owner:** delivers one commissioned campaign while its tracking
   issue is open, and ends when it closes. Reports to the coordinator.
 - **Worker:** one bounded delivery under a brief (see
@@ -56,29 +58,39 @@ unchanged.
 end condition ("until the coordinator broadcasts LIFT"), never as a clock
 window. Send every freeze, lift, hold and release to every active owner,
 resolved when sending, not only to owners in the current conversation. Keep the
-current state on one line of the live decision record ("Merge freeze: …").
-Every owner checks that line before holding a merge; a merge freeze ends only
-on the coordinator's LIFT broadcast.
+current state on one line of the live decision record ("Merge freeze: …"). Every
+owner checks that line before holding a merge; a merge freeze ends only on the
+coordinator's LIFT broadcast. A merge freeze pauses merging only, never
+building, checks or review.
 
-**Liveness.** Measure progress by work output (a commit, push, PR or started
-checks), never by turns. A stream holding addressable work is stalled after 60
-minutes without output or after three acknowledgement-only or empty turns in a
-row: push it once with an instruction to act in that turn, naming the next
-command. A campaign owner holding addressable build work never ends a turn
-with only an acknowledgement.
+**Liveness.** Owners route and workers build: an owner commissions build work to
+a worker and never builds in a turn that answers a message. Measure progress by
+work output on the commissioned deliverable (a commit, push, PR or checks
+started on a new head), never by turns. Acknowledgements, unrelated commits,
+re-runs of unchanged checks and uncommitted changes older than 60 minutes are
+not output; workers commit at every green step and push at least hourly. A
+stream holding addressable work is stalled after 60 minutes without output or
+after three acknowledgement-only or empty turns in a row: push it once with an
+instruction to act in that turn, naming the next command. A campaign owner
+holding addressable build work never ends a turn with only an acknowledgement.
 
 **Priority tiers.** Tier 0 is these team mechanics, above all delivery. Tier 1
 is big features and framework improvements; tier 2 is QA fixes, flakes and
 smaller tasks. The decisions owner records assignments in the live decision
 record. Tier 1 gets worker and shared test slots first. Dispatch tier 2 only
-when load is low and no tier-1 work awaits a worker slot. A running tier-2
-worker finishes its current PR, then checkpoints and releases its test slot
-when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
+when a worker slot and a shared test slot are free, host load allows it and no
+tier-1 work awaits either. Give every addressable issue a next-action owner or a
+named dependency. A running tier-2 worker finishes its current PR, then
+checkpoints and releases its test slot when tier 1 needs it; a queued tier-2 job
+steps aside for a queued tier-1 job.
 
 **Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
 owner role. Before acting, the successor revalidates recipients, schedules and
 carried decisions against live sources and reports what it cannot confirm as a
-blocker. Retire the predecessor only after the successor acknowledges.
+blocker. Peers resolve the current owner when sending, so a rollover sends no
+routing notices; state broadcasts still reach every owner. The successor retires
+the predecessor in the turn it acknowledges or, while the predecessor still
+parents live delegates, when the last one finishes.
 
 ## Resolve the model before delegation
 
@@ -118,11 +130,12 @@ profile. Avoid blind retries or repeating successful work for reassurance.
 
 ## Author lineage and independent review
 
-The contract's [review budget](../core/CONTRACT.md#review-budget) owns authorship
-and reviewer selection. Keep one writing family by default; the other can advise
-read-only. Before committing, record every actual writer in truthful
+The contract's [review budget](../core/CONTRACT.md#review-budget) owns
+authorship and reviewer selection. Keep one writing family by default; the other
+can advise read-only. Before committing, record every actual writer in truthful
 `Co-Authored-By` trailers. The parent committing a delegate's patch does not
-replace that author.
+replace that author, and applying a supplied patch verbatim is not writing:
+credit the patch's writer, not the applier.
 
 Without the contract's
 [owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
@@ -190,16 +203,24 @@ reconcile the awaited task's existing terminal result and current remote
 state; after a superseding message or restart, check again before concluding
 "still waiting".
 
-Split oversized scope in the plan rather than imposing brief line limits.
-Resume unfinished delegate sessions instead of restarting. After two repair
-rounds on one defect class, reassess rather than dispatching another isolated fix.
+Split oversized scope in the plan rather than imposing brief line limits. Resume
+unfinished delegate sessions instead of restarting. After two repair rounds on
+one defect class, reassess rather than dispatching another isolated fix. A
+repair brief lists every unresolved review finding and deterministic test
+failure on the failed head; an unrelated repair does not fix one.
 
-Read-only work may share stable source. Sequence overlapping writers or integrate
-deliberately; never run them in one checkout. Respect concurrency limits and avoid
-competing suites whose temporary-directory cleanup can interfere. Grant only a
-needed cache directory (`--add-dir ~/.cache/uv`); shared `/tmp` caches can exhaust
-host inodes. If a linked worktree's shared Git directory is outside the writable
-sandbox, leave commits to the parent. Retarget stacked PRs before deleting their base.
+Read-only work may share stable source. Sequence overlapping writers or
+integrate deliberately; never run them in one checkout. Do not pre-clear file
+overlap by message: rebase and the queue surface conflicts and the later lander
+rebases; ask once, on the PR, only when both change the same function. Respect
+concurrency limits and avoid competing suites whose temporary-directory cleanup
+can interfere. Grant only a needed cache directory (`--add-dir ~/.cache/uv`);
+shared `/tmp` caches can exhaust host inodes. If a linked worktree's shared Git
+directory is outside the writable sandbox, leave commits to the parent. Every
+dependency names its producer and the producer's next action. A consumer opens
+its PR against the producer branch once its checks pass, is reviewed there and
+is retargeted when the producer merges. Retarget stacked PRs before deleting
+their base.
 
 Nested background results may reach the top-level session instead of their
 owner: run nested reviewers in the foreground or forward results promptly.
