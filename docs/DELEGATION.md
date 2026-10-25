@@ -78,11 +78,11 @@ holding addressable build work never ends a turn with only an acknowledgement.
 is big features and framework improvements; tier 2 is QA fixes, flakes and
 smaller tasks. The decisions owner records assignments in the live decision
 record. Tier 1 gets worker and shared test slots first. Dispatch tier 2 only
-when a worker slot and a shared test slot are free, host load allows it and no
-tier-1 work awaits either. Give every addressable issue a next-action owner or a
-named dependency. A running tier-2 worker finishes its current PR, then
-checkpoints and releases its test slot when tier 1 needs it; a queued tier-2 job
-steps aside for a queued tier-1 job.
+when a worker slot and a shared test slot are free and no tier-1 work awaits
+either; host capacity limits belong in the slot definitions. Give every
+addressable issue a next-action owner or a named dependency. A running tier-2
+worker finishes its current PR, then checkpoints and releases its test slot when
+tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
 
 **Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
 owner role. Before acting, the successor revalidates recipients, schedules and
