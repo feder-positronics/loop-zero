@@ -21,6 +21,65 @@ delivery, roll over before monitoring or unrelated follow-ups. Do this
 yourself; do not ask the requester to start it. A bare "continue" means
 continue there.
 
+## Team roles
+
+A long-running team gives each role one current owner. Owners read state from
+the owning issue and the live decision record, not from earlier sessions.
+Resolve every recipient when sending: the coordinator from the active delivery
+schedule, a campaign owner from its tracking issue, the decisions owner from
+its newest live generation. Never use a remembered ID; escalate ambiguity once.
+A schedule firing or a relayed approval grants no new authority.
+
+- **Coordinator:** owns one repository's delivery, main health and shared
+  delivery infrastructure; drains ready backlog by tier, routes incidents and
+  dispatches workers and reviews. Reports to the decisions owner.
+- **Decisions owner:** the only role the human owner talks to. Resolves owner
+  decisions within delegated authority, records each with its source where it
+  binds, and routes asks to the current responsible owner.
+- **Campaign owner:** delivers one commissioned campaign while its tracking
+  issue is open, and ends when it closes. Reports to the coordinator.
+- **Worker:** one bounded delivery under a brief (see
+  [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
+  or one named blocker.
+- **QA:** a round files reproducible defects in commissioned states, with every
+  occurrence. A retest checks every recorded occurrence at the exact merged
+  revision; the issue closes only on PASS, so repairs use `Refs`. A missing
+  fixture or credential is a blocker, never a PASS.
+- **Monitor and watchdog:** detect regressions and idle work; send one packet
+  or nudge per new finding, and never decide for an owner. A periodic review
+  first asks why an existing mechanism failed and repairs it before adding one.
+
+Fresh bounded runs report deltas only and send nothing when evidence is
+unchanged.
+
+**State broadcasts.** Announce a merge freeze, production window or hold by its
+end condition ("until the coordinator broadcasts LIFT"), never as a clock
+window. Send every freeze, lift, hold and release to every active owner,
+resolved when sending, not only to owners in the current conversation. Keep the
+current state on one line of the live decision record ("Merge freeze: …").
+Every owner checks that line before holding a merge; a merge freeze ends only
+on the coordinator's LIFT broadcast.
+
+**Liveness.** Measure progress by work output (a commit, push, PR or started
+checks), never by turns. A stream holding addressable work is stalled after 60
+minutes without output or after three acknowledgement-only or empty turns in a
+row: push it once with an instruction to act in that turn, naming the next
+command. A campaign owner holding addressable build work never ends a turn
+with only an acknowledgement.
+
+**Priority tiers.** Tier 0 is these team mechanics, above all delivery. Tier 1
+is big features and framework improvements; tier 2 is QA fixes, flakes and
+smaller tasks. The decisions owner records assignments in the live decision
+record. Tier 1 gets worker and shared test slots first. Dispatch tier 2 only
+when load is low and no tier-1 work awaits a worker slot. A running tier-2
+worker finishes its current PR, then checkpoints and releases its test slot
+when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
+
+**Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
+owner role. Before acting, the successor revalidates recipients, schedules and
+carried decisions against live sources and reports what it cannot confirm as a
+blocker. Retire the predecessor only after the successor acknowledges.
+
 ## Resolve the model before delegation
 
 Read `models.toml` at the **task repository's worktree root**, never another
