@@ -28,6 +28,11 @@ def event_number(event: dict) -> int:
 
 
 def main() -> int:
+    with github.api_error_diagnostics():
+        return _run()
+
+
+def _run() -> int:
     # The workflow checks out its trusted default branch, without persisted credentials.
     cfg = config.load("workflow.toml")
     if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
