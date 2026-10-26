@@ -398,46 +398,46 @@ def test_pr_view_rejects_malformed_or_mismatched_rest_detail(gh: FakeGh, invalid
     with pytest.raises(github.GhError):
         github.pr_view(REPO, 7)
 
-
 def test_create_draft_pr_passes_body_file_and_returns_pr(gh: FakeGh) -> None:
     gh.respond_pr_create(pr_json(), branch="lz/x")
     pr = github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body text\n")
-    create = gh.calls[0]
-    argv = create["argv"]
+    argv = gh.argv(0)
     assert argv[:4] == ["api", f"repos/{REPO}/pulls", "--method", "POST"]
-    assert json.loads(create["--input"]) == {"head": "lz/x", "base": "main", "title": "Title",
-                                            "body": "Body text\n", "draft": True}
-    assert pr.number == 7 and pr.is_draft
-    assert len(gh.calls) == 1
-
+    assert json.loads(gh.calls[0]["--input"]) == {"head": "lz/x", "base": "main", "title": "Title", "body": "Body text\n", "draft": True}
+    assert pr.number == 7 and pr.is_draft and len(gh.calls) == 1
 
 @pytest.mark.parametrize("change", [
     {"draft": False}, {"base": {"ref": "other"}},
     {"head": {"sha": HEAD, "ref": "lz/x", "repo": {"full_name": "fork/widgets"}}},
 ])
-def test_create_draft_pr_rejects_inconsistent_response_without_retry(
-    gh: FakeGh, change: dict
-) -> None:
-    detail = rest_pr_json(pr_json(), branch="lz/x")
-    detail.update(change)
-    gh.respond(f"api repos/{REPO}/pulls", detail)
-
+def test_create_draft_pr_rejects_inconsistent_response_without_retry(gh: FakeGh, change: dict) -> None:
+    gh.respond(f"api repos/{REPO}/pulls", rest_pr_json(pr_json(), branch="lz/x") | change)
     with pytest.raises(github.GhError, match="created PR differs"):
         github.create_draft_pr(REPO, "lz/x", "main", "Title", "Body")
-
     assert len(gh.calls) == 1
 
-
-def test_update_body(gh: FakeGh) -> None:
-    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-    github.update_body(REPO, 7, "new body")
+@pytest.mark.parametrize("error,stdout,status", [
+    ("", "", ""), ("not logged in", "", "unavailable"), ("unexpected end of JSON input", "", "unavailable"),
+    ("HTTP 503 ghp_1234567890abcdefghij", "", "503"),
+    ("HTTP 429 rate limit ghp_1234567890abcdefghij", "", "429"), ("secondary rate limit", "", "unavailable"),
+    ("unexpected end of JSON input", "<html>HTTP 404 is not the response status</html>", "unavailable"),
+    ("gh: HTTP 422 details", '{"message":"Validation Failed","errors":[{"message":"body too long"}]}', "422"),
+    ("gh: HTTP 502 proxy", "<html>Bad gateway</html>", "502"),
+])
+def test_update_body(gh: FakeGh, error: str, stdout: str, status: str) -> None:
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {"stdout": stdout, "stderr": error, "exit": bool(error)})
+    if error:
+        with pytest.raises(github.GhError, match=rf"method=PATCH endpoint=/repos/acme/widgets/pulls/7 status={status} request_id=unavailable") as caught:
+            github.update_body(REPO, 7, "new body")
+        text = str(caught.value)
+        assert all(value not in text for value in ("new body", "--input", "ghp_1234567890abcdefghij"))
+        assert error.replace("ghp_1234567890abcdefghij", "[REDACTED]").removeprefix("gh: ") in text and stdout in text
+    else:
+        github.update_body(REPO, 7, "new body")
     assert gh.argv(0)[:4] == ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH"]
-    assert json.loads(gh.calls[0]["--input"]) == {"body": "new body"}
-
-
+    assert json.loads(gh.calls[0]["--input"]) == {"body": "new body"} and len(gh.calls) == 1
+    assert "--include" not in gh.argv(0)
 # --- reviews ---------------------------------------------------------------------------
-
-
 def review(verdict: str = "request_changes", findings: tuple[Finding, ...] = ()) -> ReviewResult:
     return ReviewResult(family="codex", head=HEAD, kind="primary", verdict=verdict,
                         findings=findings, raw="RAW MODEL OUTPUT", model="gpt-5.3-codex",
