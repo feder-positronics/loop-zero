@@ -19,8 +19,9 @@ with their original task reference, and makes no new decisions; then it retires
 its session so no later send or schedule can revive it. After a finished
 delivery, roll over before monitoring or unrelated follow-ups. Do this
 yourself; do not ask the requester to start it. A bare "continue" means
-continue there. Workers report on the owning PR or issue; the coordinator
-reconstructs delivery from live remote state rather than inbound messages.
+continue there. Workers report on the owning PR or issue, directly or through
+the parent; the coordinator reconstructs delivery from live remote state rather
+than inbound messages.
 
 ## Team roles
 
@@ -35,7 +36,8 @@ A schedule firing or a relayed approval grants no new authority.
   delivery infrastructure; drains ready backlog by tier, routes incidents and
   dispatches workers and reviews. May delegate routine dispatch and integration
   to named executors; it keeps main health, merge freezes and holds, shared
-  delivery infrastructure and production observation. Reports to the decisions owner.
+  delivery infrastructure and production observation. Reports to the decisions
+  owner.
 - **Decisions owner:** the only role the human owner talks to. Resolves owner
   decisions within delegated authority, records each with its source where it
   binds, and routes asks to the current responsible owner. Settles related cases
@@ -60,8 +62,9 @@ Each acceptance slice has one dispatch authority: the campaign owner within its
 commission or, for the remainder, the coordinator or the dispatcher it names.
 Record that partition on the existing owning issue or PR. Before commissioning
 pickup, that authority records the worker, branch/worktree or task reference,
-and next action there. Reconcile overlaps before launch; no competing owner launches. A claim
-comment is evidence, not an atomic lock: one authority per slice prevents races.
+and next action there. Reconcile overlaps before launch; no competing owner
+launches. A claim comment is evidence, not an atomic lock: one authority per
+slice prevents races.
 Do not add a claim ledger, service or label system.
 
 Fresh bounded runs send nothing when evidence is unchanged. Workers report deltas
@@ -99,8 +102,9 @@ slots first.
 Bound dispatch by shared resource slots and host guards, never by agent count.
 Implementation work does not require or reserve a test slot; a heavy command
 (see [Briefs and ownership](#briefs-and-ownership)) acquires one only while it
-runs. Host slot counts, load thresholds and quota guards belong in host policy. Tune dispatch from useful output, eligible work supply, review/test wait,
-rework and merge service; reduce new commissions when downstream work piles up.
+runs. Host slot counts, load thresholds and quota guards belong in host policy.
+Tune dispatch from useful output, eligible work supply, review/test wait, rework
+and merge service; reduce new commissions when downstream work piles up.
 Give every addressable issue a next-action owner or a named dependency. A running
 tier-2 worker finishes its current PR, then checkpoints and releases its test slot
 when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
@@ -231,9 +235,9 @@ use a CLI delegate with `--sandbox read-only`.
 
 Launch independent tasks in small concurrent batches within the host's guards
 (host policy). Retain each child task ID and verify every child's first completed
-tool call and zero pending approvals; verify the batch concurrently, without waiting for one child
-to finish its task before launching the next. An unverified child is not proven
-productive capacity.
+tool call and zero pending approvals; verify the batch concurrently, without
+waiting for one child to finish its task before launching the next. An unverified
+child is not proven productive capacity.
 
 Running or working status does not prove progress. Before ending the turn
 after a launch, read the delegate's activity: a completed tool call and no
