@@ -19,7 +19,8 @@ with their original task reference, and makes no new decisions; then it retires
 its session so no later send or schedule can revive it. After a finished
 delivery, roll over before monitoring or unrelated follow-ups. Do this
 yourself; do not ask the requester to start it. A bare "continue" means
-continue there.
+continue there. Workers report on the owning PR or issue; the coordinator
+reconstructs delivery from live remote state rather than inbound messages.
 
 ## Team roles
 
@@ -32,14 +33,18 @@ A schedule firing or a relayed approval grants no new authority.
 
 - **Coordinator:** owns one repository's delivery, main health and shared
   delivery infrastructure; drains ready backlog by tier, routes incidents and
-  dispatches workers and reviews. Reports to the decisions owner.
+  dispatches workers and reviews. May delegate routine dispatch and integration
+  to named executors while retaining main health, merge admission, shared
+  infrastructure and production observation. Reports to the decisions owner.
 - **Decisions owner:** the only role the human owner talks to. Resolves owner
   decisions within delegated authority, records each with its source where it
   binds, and routes asks to the current responsible owner. Settles related cases
   in one decision and ends each ruling with the next executable action and what
   needs no further consult.
 - **Campaign owner:** delivers one commissioned campaign while its tracking
-  issue is open, and ends when it closes. Reports to the coordinator.
+  issue is open, and ends when it closes. Self-dispatches within approved scope
+  and allocated host capacity without per-launch coordinator permission. Reports
+  on the tracking issue; messages the coordinator only for blockers.
 - **Worker:** one bounded delivery under a brief (see
   [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
   or one named blocker.
@@ -51,8 +56,18 @@ A schedule firing or a relayed approval grants no new authority.
   or nudge per new finding, and never decide for an owner. A periodic review
   first asks why an existing mechanism failed and repairs it before adding one.
 
-Fresh bounded runs report deltas only and send nothing when evidence is
-unchanged.
+Each acceptance slice has one dispatch authority: the campaign owner within its
+commission, or the coordinator's named dispatcher for the remainder. Record that
+partition on the existing owning issue or PR. Before commissioning pickup, that
+authority records the worker, branch/worktree or task reference, and next action
+there. Reconcile overlaps before launch; no competing owner launches. A claim
+comment is evidence, not an atomic lock: one authority per slice prevents races.
+Do not add a claim ledger, service or label system.
+
+Fresh bounded runs report deltas on the owning PR or issue and send nothing when
+evidence is unchanged. Message the parent only for a blocker. Count productive
+work by activity, including nested reviewers; report test-slot, review, queue and
+hold waiters separately, excluding them from productive counts.
 
 **State broadcasts.** Announce a merge freeze, production window or hold by its
 end condition ("until the coordinator broadcasts LIFT"), never as a clock
@@ -77,12 +92,16 @@ holding addressable build work never ends a turn with only an acknowledgement.
 **Priority tiers.** Tier 0 is these team mechanics, above all delivery. Tier 1
 is big features and framework improvements; tier 2 is QA fixes, flakes and
 smaller tasks. The decisions owner records assignments in the live decision
-record. Tier 1 gets worker and shared test slots first. Dispatch tier 2 only
-when a worker slot and a shared test slot are free and no tier-1 work awaits
-either; host capacity limits belong in the slot definitions. Give every
-addressable issue a next-action owner or a named dependency. A running tier-2
-worker finishes its current PR, then checkpoints and releases its test slot when
-tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
+record. Honor explicit owner priorities; tier 1 gets dispatch and shared test
+slots first.
+Bound dispatch by shared resource slots and host guards, never by agent count.
+Building does not require or reserve a test slot: acquire one when the command
+needs it. Host slot counts, load thresholds and quota guards belong in host
+policy. Tune dispatch from useful output, eligible work supply, review/test wait,
+rework and merge service; reduce new commissions when downstream work piles up.
+Give every addressable issue a next-action owner or a named dependency. A running
+tier-2 worker finishes its current PR, then checkpoints and releases its test slot
+when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
 
 **Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
 owner role. Before acting, the successor revalidates recipients, schedules and
@@ -147,8 +166,8 @@ Read the exception before mixing writing families. Formal delivery review is
 
 ## Briefs and ownership
 
-Give each writing delegate its own `loopzero start` worktree and a
-self-contained brief:
+Give each writing delegate its own `loopzero start` worktree outside any
+protected production checkout and a self-contained brief:
 
 The first shell command enters that task tree; repeat `cd <own-task-tree> &&`
 at the start of every shell command, including reads and background launches.
@@ -166,10 +185,18 @@ Effort policy: Children inherit this policy; return to the parent before raising
 Launch policy: Children inherit this rule: never approval-required; auto plus "read-only, do not edit" for read-only work, otherwise the parent's mode; after launch, verify pendingRequestCount 0 and a completed tool call.
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and applicable coverage, runnable in the sandbox>
+Integration executor: <named executor for returned heads; parent retains acceptance responsibility>
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
-Return: Continue until acceptance evidence exists or a named blocker needs the parent; a progress summary is not completion.
-Report: <changed files, evidence, check results, deviations, open questions>
+Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none>
+Return: Continue until acceptance evidence exists or a named blocker needs the parent; then follow only the preassigned list, otherwise return. A progress summary is not completion.
+Report: On the owning PR or issue: changed files, evidence, check results, deviations, open questions and next action. Message the parent only for a blocker.
 ```
+
+Before each preassigned follow-up, re-read live issue/PR state and dispatch
+ownership, finish or hand off the current PR, and start a fresh task worktree.
+Do not self-claim arbitrary global backlog. On exhaustion or a blocker, return
+next-action evidence to the dispatch authority through the existing completion
+mechanism and owning PR or issue.
 
 ### Launching a background CLI delegate
 
@@ -199,6 +226,12 @@ narrowest mode within your own authority that runs reads without prompts (T3:
 an instruction boundary, not an OS sandbox; when writes must be impossible,
 use a CLI delegate with `--sandbox read-only`.
 
+Launch independent tasks in small concurrent batches within host guards. Retain
+each child task ID and verify every child's first completed tool call and zero
+pending approvals; verify the batch concurrently, without waiting for one child
+to finish its task before launching the next. An unverified child is not proven
+productive capacity.
+
 Running or working status does not prove progress. Before ending the turn
 after a launch, read the delegate's activity: a completed tool call and no
 pending approval (T3 `t3_thread_read`: `pendingRequestCount` 0). Answer an
@@ -227,7 +260,11 @@ integrate deliberately; never run them in one checkout. Do not pre-clear file
 overlap by message: rebase and the queue surface conflicts and the later lander
 rebases; ask once, on the PR, only when both change the same function. Respect
 concurrency limits and avoid competing suites whose temporary-directory cleanup
-can interfere. Grant only a needed cache directory (`--add-dir ~/.cache/uv`);
+can interfere. Any command using more than one core for more than a minute runs
+under the repository's shared resource/test slots, including builds, type checks,
+formatters and parallel tests. When the host is saturated, shed out-of-slot CPU
+commands before shedding agents; preserve their work. Grant only a needed cache
+directory (`--add-dir ~/.cache/uv`);
 shared `/tmp` caches can exhaust host inodes. If a linked worktree's shared Git
 directory is outside the writable sandbox, leave commits to the parent. Every
 dependency names its producer and the producer's next action. A consumer opens
@@ -259,9 +296,10 @@ new head.
 Nested background results may reach the top-level session instead of their
 owner: run nested reviewers in the foreground or forward results promptly.
 
-The parent owns integration and acceptance: inspect returned diffs and evidence;
-worker success claims are not proof. Run decisive tests unavailable to the
-delegate before review, and required broad verification and `loopzero check`
+The parent owns integration and acceptance, and may name an integration executor
+in the brief: inspect returned diffs and evidence; worker success claims are not
+proof. Route returned heads to that executor. Run decisive tests unavailable to
+the delegate before review, and required broad verification and `loopzero check`
 once per delivery head. If declared checks do not isolate host tools, run a
 focused restricted-PATH probe and report the limitation. Only sandboxed
 `loopzero check` counts as delivery proof; continue under the
