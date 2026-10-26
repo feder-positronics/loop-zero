@@ -344,7 +344,9 @@ def _sandbox_prefix(
     )
     config = _review_config(family, binary, ro_paths)
     if implicit_file:
-        config = replace(config, sandbox_ro=(str(binary),))
+        helper = binary.with_name("codex-code-mode-host")
+        files = (binary, helper) if family == "codex" and helper.is_file() else (binary,)
+        config = replace(config, sandbox_ro=tuple(str(path) for path in files))
     if shutil.which("bwrap") is None:
         raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
     common_dir = _git_dir(cwd, "--git-common-dir", config.env_allowlist)
@@ -375,7 +377,7 @@ def _sandbox_prefix(
                 continue
             roots = (*state_dirs, state_file, *private)
             if (implicit_file and option == "--ro-bind-try"
-                    and source == destination == binary):
+                    and source == destination and str(source) in config.sandbox_ro):
                 roots = (*(root for root in state_dirs
                            if binary == root or not binary.is_relative_to(root)),
                          state_file, *private)

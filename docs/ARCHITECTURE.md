@@ -121,6 +121,10 @@ The [sandbox](../src/loopzero/sandbox.py) bounds check writes, credentials,
 network access and resources. [Reviewer runners](../src/loopzero/runners.py)
 bound source access while allowing the network required by model CLIs; that
 network means the sandbox cannot prevent exfiltration of readable data.
+For a Codex executable installed inside protected native state, the implicit
+runtime mount exposes only the resolved executable and its existing sibling
+`codex-code-mode-host`, read-only. Neighboring history and configuration remain
+hidden; helper aliases into protected state and explicit state mounts fail closed.
 At native review launch the CLI pins checks, publishers and runtime paths to one
 remote PR-base revision, refusing a missing remote ref/workflow unless the operator
 supplies explicit configuration. Reposts and other commands retain their fallback
