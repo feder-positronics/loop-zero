@@ -97,6 +97,11 @@ TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeo
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str] | None] = ContextVar("github_reads", default=None)
+_api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
+_HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
+_GITHUB_TOKEN_RE = re.compile(
+    r"\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{10,})\b"
+)
 
 
 @contextmanager
@@ -112,6 +117,100 @@ def bounded_reads(seconds: float, token: str = ""):
             raise GhError(("gh", "api"), "publication read-back deadline exceeded")
     finally:
         _read_scope.reset(scope)
+
+
+@contextmanager
+def api_error_diagnostics():
+    """Include response headers and safe error details for a trusted API validation."""
+    scope = _api_error_diagnostics.set(True)
+    try:
+        yield
+    finally:
+        _api_error_diagnostics.reset(scope)
+
+
+def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
+    """Split one `gh api --include` response into status, headers and body."""
+    lines = output.splitlines()
+    start = next((index for index, line in enumerate(lines)
+                  if _HTTP_STATUS_RE.match(line)), None)
+    if start is None:
+        return None, {}, output
+    match = _HTTP_STATUS_RE.match(lines[start])
+    assert match is not None
+    status = match.group(1)
+    headers: dict[str, str] = {}
+    index = start + 1
+    while index < len(lines) and lines[index]:
+        name, separator, value = lines[index].partition(":")
+        if separator:
+            headers[name.strip().casefold()] = value.strip()
+        index += 1
+    body = "\n".join(lines[index + 1:]) if index < len(lines) else ""
+    return status, headers, body
+
+
+def _api_method(args: tuple[str, ...]) -> str:
+    for index, arg in enumerate(args[:-1]):
+        if arg in ("--method", "-X"):
+            return args[index + 1].upper()
+    if {"-f", "-F", "--field", "--raw-field", "--input"} & set(args):
+        return "POST"
+    return "GET"
+
+
+def _api_path(args: tuple[str, ...]) -> str:
+    endpoint = args[1] if len(args) > 1 else ""
+    path = endpoint.split("?", 1)[0]
+    if "://" in path:
+        path = path.partition("://")[2].partition("/")[2]
+    return "/" + path.lstrip("/")
+
+
+def _redact_tokens(value: str, token: str = "") -> str:
+    for secret in (token, os.environ.get("GH_TOKEN", ""),
+                   os.environ.get("GITHUB_TOKEN", "")):
+        if secret:
+            value = value.replace(secret, "[REDACTED]")
+    value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
+    value = _GITHUB_TOKEN_RE.sub("[REDACTED]", value)
+    value = re.sub(r"(?i)\b(access_token|auth_token|token|authorization)\s*[:=]\s*"
+                   r"[^\s,;]+", r"\1=[REDACTED]", value)
+    value = re.sub(r"(?i)(https?://[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
+    value = re.sub(r"(?<!\S)(/[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def _api_error_detail(args: tuple[str, ...], stdout: str, stderr: str,
+                      token: str) -> str:
+    status, headers, body = _included_response(stdout)
+    if status is None:
+        match = re.search(r"\bHTTP(?:/\S+)?\s+(\d{3})\b", stderr, re.IGNORECASE)
+        status = match.group(1) if match else "unavailable"
+    request_id = headers.get("x-github-request-id") or "unavailable"
+    message = ""
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        message_value = payload.get("message")
+        if isinstance(message_value, str):
+            message = message_value
+        else:
+            errors = payload.get("errors")
+            if isinstance(errors, list):
+                message = "; ".join(
+                    error["message"] for error in errors
+                    if isinstance(error, dict) and isinstance(error.get("message"), str)
+                )
+    if not message:
+        message = body.strip() or stderr.strip().removeprefix("gh:").strip()
+    message = _redact_tokens(message, token)[:400] or "no response message"
+    return _redact_tokens(
+        f"method={_api_method(args)} endpoint={_api_path(args)} status={status} "
+        f"request_id={request_id} message={message}", token
+    )
 
 
 def _read_only(args: tuple[str, ...]) -> bool:
@@ -146,7 +245,11 @@ def app_token() -> str:
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None) -> str:
-    argv = ("gh", *args)
+    diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
+    request_args = args
+    if diagnostic_api and not {"--include", "-i"} & set(args):
+        request_args = (*args, "--include")
+    argv = ("gh", *request_args)
     scope = _read_scope.get() if _read_only(args) else None
     selected = token if token is not None else (
         scope[1] if scope else (app_token() if _read_only(args) else ""))
@@ -170,16 +273,25 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
             reset = _graphql_reset(args, tail, cwd or Path.cwd(), selected)
+            if diagnostic_api:
+                detail = _api_error_detail(args, done.stdout, done.stderr, selected)
+                if reset:
+                    detail = _redact_tokens(f"{detail} {reset}", selected)
+                raise GhError(("GitHub API request",), detail + "; Rate limited: retry after "
+                              "GitHub's reset or Retry-After; no automatic retry.")
             raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
                           "No automatic retry.")
         if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
             break
         _retry_sleep(delay)
     if done.exit_code != 0:
+        error_command = ("GitHub API request",) if diagnostic_api else argv
+        error_tail = (_api_error_detail(args, done.stdout, done.stderr, selected)
+                      if diagnostic_api else tail)
         if "gh auth login" in tail or "not logged in" in tail.lower():
-            raise GhAuth(argv, f"{tail.rstrip()}\n{GH_AUTH_REMEDY}")
-        raise GhError(argv, tail)
-    return done.stdout
+            raise GhAuth(error_command, f"{error_tail.rstrip()}\n{GH_AUTH_REMEDY}")
+        raise GhError(error_command, error_tail)
+    return _included_response(done.stdout)[2] if diagnostic_api else done.stdout
 
 
 def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:

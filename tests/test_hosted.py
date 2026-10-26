@@ -83,7 +83,7 @@ def test_source_publication_is_bound_to_live_review(publisher, case, blocker, st
 def test_merged_source_refresh_publishes_nothing(publisher):
     publisher.respond(f"api repos/{REPO}/pulls/7", {"head": {"sha": HEAD, "ref": "lz/task"},
                                                     "user": {"login": "author"}, "merged": True})
-    assert hosted.main() == 0 and not [c for c in publisher.calls if "--input" in c]
+    assert hosted.main() == 0 and not [c for c in publisher.calls if "--input" in c] and publisher.argv(0)[-1] == "--include"
 
 
 @pytest.mark.parametrize("error", ["api", "head", "publication", "config"])
@@ -92,7 +92,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
     publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
     if error == "api":
         publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
-                          "", exit=1, stderr="HTTP 503")
+                          {"stdout": "HTTP/2.0 422 Unprocessable Entity\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "stderr": "gh: Service unavailable (HTTP 422)", "exit": 1})
     elif error == "head":
         publisher.respond_pr_view(pr_json(), pr_json(headRefOid="b" * 40))
     elif error == "publication":
@@ -100,7 +100,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
                           {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
-    with pytest.raises((github.GhError, hosted.LoopZeroError)):
+    with pytest.raises((github.GhError, hosted.LoopZeroError), match=(r"method=GET endpoint=/repos/acme/widgets/pulls/7/reviews status=422 request_id=GHREQ-8774 message=Service unavailable \[REDACTED\]" if error == "api" else None)):
         hosted.main()
     statuses = [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
     assert statuses == ([] if error == "config" else ["pending", "pending", "failure"]
