@@ -20,20 +20,30 @@ fails, label any repository-only result partial and make no live-state claim.
 
 Use repository workflow, labels and design statuses. Classify from evidence:
 
-- **Active:** live delivery PR or recent implementation activity.
+- **Claimed:** an assignee or claim comment identifies the commissioned worker and
+  branch/worktree or task, awaiting its first implementation output.
+  Do not recommend duplicate pickup; reconcile stale claims with the dispatch
+  authority rather than treating age as permission to reclaim.
+- **Active:** implementation is underway, supported by recent meaningful output;
+  use Active rather than Claimed once implementation output exists.
+- **Awaiting review/hold/observation:** implementation has evidence, but review,
+  an owner hold or an external observation owns the next action. Name that action
+  and its owner or trigger; an open PR alone does not mean active implementation.
 - **Blocked:** a named dependency, decision, finding or check prevents the next action.
 - **Next:** accepted, sufficiently specified, no live collision.
 - **Needs design:** unresolved material design boundary; established small changes
   need no design artifact.
 - **Unclassified:** insufficient evidence.
 - **Missing issue link:** no linked issue identified.
-- **Missing PR:** claimed active work cannot be reconciled to a live PR or branch.
+- **Missing PR:** Active or awaiting-review work cannot be reconciled to a live PR or branch; Claimed items are exempt until output is expected.
 - **Stale:** exceeds the repository's meaningful-update threshold; otherwise
   report age without inventing a threshold.
 
 Before recommending pickup, re-read the issue, acceptance, linked design,
-branch/worktree claim and competing PRs. Another delivery for the same acceptance
-is a collision to reconcile. Explicit links, closing keywords, shared references
+branch/worktree claim, current dispatch authority and competing PRs. Identify the
+smallest unmet acceptance and whether its next action is implementation, review,
+repair or a real hold. Another delivery for the same acceptance is a collision to
+reconcile. Explicit links, closing keywords, shared references
 and comments outweigh title similarity; native sub-issues outweigh prose
 parentage. Exact worktree/branch matches establish collisions; similar slugs
 only warrant inspection. Use [contract blockers](../../CONTRACT.md#blockers)
@@ -50,6 +60,13 @@ acceptance and evidence that pickup is clear.
 Separate observations from recommendations. A missing issue link alone does
 not prove absence of accepted task context. Omit empty sections and state source
 limits.
+
+For explicitly requested pickup or dispatch, confirm the dispatch authority's
+recorded claim, or write it on the existing owning issue or PR if absent, before
+starting work: assignee or one comment naming the worker, branch/worktree or
+task, and next action. This does not make comments atomic locks; one dispatch
+authority per slice prevents competing pickups. A next-work recommendation
+remains read-only.
 
 For requested grooming, re-read live state, keep each issue to one bounded outcome,
 and report changed fields/relationships. Reminders without concrete work belong

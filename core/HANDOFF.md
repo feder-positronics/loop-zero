@@ -25,3 +25,7 @@ Base: <sha>
   actual external trigger. A consumer waiting for a brief names the producer,
   which owns sending it or reporting its blocker. An owner decision names the
   exact question and recipient.>
+- <When relevant: dispatch owner for this acceptance slice; integration executor
+  for the returned head (parent retains acceptance responsibility); ordered
+  preassigned next item(s), or stop condition. Follow
+  loop-zero docs/DELEGATION.md; do not duplicate host capacity rules here.>
