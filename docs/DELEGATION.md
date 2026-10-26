@@ -150,7 +150,13 @@ Read the exception before mixing writing families. Formal delivery review is
 Give each writing delegate its own `loopzero start` worktree and a
 self-contained brief:
 
+The first shell command enters that task tree; repeat `cd <own-task-tree> &&`
+at the start of every shell command, including reads and background launches.
+Set the launcher's working directory too when supported; never rely on the
+inherited project root.
+
 ```text
+cd <own-task-tree>
 Objective: <one bounded outcome>
 Context: <source text, decisions, files; sandboxed delegates usually lack network/gh>
 Allowed paths: <owned scope>
@@ -158,6 +164,7 @@ Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch policy: Children inherit this rule: never approval-required; auto plus "read-only, do not edit" for read-only work, otherwise the parent's mode; after launch, verify pendingRequestCount 0 and a completed tool call.
+Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and applicable coverage, runnable in the sandbox>
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Return: Continue until acceptance evidence exists or a named blocker needs the parent; a progress summary is not completion.
@@ -196,7 +203,13 @@ Running or working status does not prove progress. Before ending the turn
 after a launch, read the delegate's activity: a completed tool call and no
 pending approval (T3 `t3_thread_read`: `pendingRequestCount` 0). Answer an
 approval only within your authority; otherwise cancel, relaunch correctly or
-report the block. Before yielding on any delegate or long command, arrange a
+report the block. When a verified child stops producing output, re-read its
+pending approvals (T3 `pendingRequestCount`) and terminal task state, including
+provider/capacity failures. Recover or report the blocker in that turn using the
+same authorized routes; a launch-time check is insufficient. Inspect what ran
+before resuming interrupted work. For a terminal delegated task, launch a new
+task with the prior brief and result rather than queueing another message to it.
+Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Before arming or rearming a wait,
 reconcile the awaited task's existing terminal result and current remote
@@ -221,6 +234,27 @@ dependency names its producer and the producer's next action. A consumer opens
 its PR against the producer branch once its checks pass, is reviewed there and
 is retargeted when the producer merges. Retarget stacked PRs before deleting
 their base.
+
+For a stack, agree the configuration with the coordinator: copy the trusted
+base's complete `workflow.toml` to `.loopzero/stack-workflow.toml` and change
+only `[repo].base` to the producer branch (for example `base = "lz/producer"`).
+Keep every check, required CI name, publisher and reviewer setting intact;
+fetch the producer branch into `origin/<producer>` first. From the consumer's
+own task tree, use the same file throughout:
+
+```sh
+loopzero --config .loopzero/stack-workflow.toml check
+loopzero --config .loopzero/stack-workflow.toml pr
+loopzero --config .loopzero/stack-workflow.toml review
+```
+
+`--config` uses explicitly supplied settings instead of trusted-base pinning;
+the coordinator must verify the copy and its one-field difference. Do not
+retarget to main just to launch review. After the producer lands, retarget the
+consumer to main and return to the canonical configuration. If integration or
+rebase changes the head, rerun checks and review under the existing lineage
+budget before readiness and merge; an earlier approval is not evidence for the
+new head.
 
 Nested background results may reach the top-level session instead of their
 owner: run nested reviewers in the foreground or forward results promptly.
