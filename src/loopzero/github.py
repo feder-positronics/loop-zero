@@ -183,7 +183,7 @@ def _redact_tokens(value: str, token: str = "") -> str:
 
 
 def _api_error_detail(args: tuple[str, ...], stdout: str, stderr: str,
-                      token: str) -> str:
+                      token: str, *, message_tail: str | None = None) -> str:
     status, headers, body = _included_response(stdout)
     if status is None:
         match = re.search(r"\bHTTP(?:/\S+)?\s+(\d{3})\b", stderr, re.IGNORECASE)
@@ -207,7 +207,7 @@ def _api_error_detail(args: tuple[str, ...], stdout: str, stderr: str,
                 )
     if not message:
         message = body.strip() or stderr.strip().removeprefix("gh:").strip()
-    message = _redact_tokens(message, token)[:400] or "no response message"
+    message = _redact_tokens(message if message_tail is None else message_tail, token)[:400] or "no response message"
     return _redact_tokens(
         f"method={_api_method(args)} endpoint={_api_path(args)} status={status} "
         f"request_id={request_id} message={message}", token
@@ -247,6 +247,7 @@ def app_token() -> str:
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
+    patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
     request_args = args
     if diagnostic_api and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
@@ -274,8 +275,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
             reset = _graphql_reset(args, tail, cwd or Path.cwd(), selected)
-            if diagnostic_api:
-                detail = _api_error_detail(args, done.stdout, done.stderr, selected)
+            if diagnostic_api or patch_error:
+                detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
+                                           message_tail=None if diagnostic_api else tail)
                 if reset:
                     detail = _redact_tokens(f"{detail} {reset}", selected)
                 raise GhError(("GitHub API request",), detail + "; Rate limited: retry after "
@@ -286,9 +288,10 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             break
         _retry_sleep(delay)
     if done.exit_code != 0:
-        error_command = ("GitHub API request",) if diagnostic_api else argv
-        error_tail = (_api_error_detail(args, done.stdout, done.stderr, selected)
-                      if diagnostic_api else tail)
+        error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
+        error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
+                                        message_tail=None if diagnostic_api else tail)
+                      if diagnostic_api or patch_error else tail)
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, f"{error_tail.rstrip()}\n{GH_AUTH_REMEDY}")
         raise GhError(error_command, error_tail)
