@@ -70,9 +70,9 @@ Do not add a claim ledger, service or label system.
 Fresh bounded runs send nothing when evidence is unchanged. Workers report deltas
 on the owning PR or issue, directly or through the parent, and message the parent
 mid-task only for a blocker. Monitors and watchdogs keep sending one packet or
-nudge per new finding. Count productive work by activity, including nested
-reviewers; report test-slot, review, queue and hold waiters separately, excluding
-them from productive counts.
+nudge per new finding. Count productive work by verified activity (completed tool
+calls or output on the deliverable), including nested reviewers; report test-slot,
+review, queue and hold waiters separately, excluding them from productive counts.
 
 **State broadcasts.** Announce a merge freeze, production window or hold by its
 end condition ("until the coordinator broadcasts LIFT"), never as a clock
@@ -101,13 +101,13 @@ record. Honor explicit owner priorities; tier 1 gets dispatch and shared test
 slots first.
 Bound dispatch by shared resource slots and host guards, never by agent count.
 Implementation work does not require or reserve a test slot; a heavy command
-(see [Briefs and ownership](#briefs-and-ownership)) acquires one only while it
-runs. Host slot counts, load thresholds and quota guards belong in host policy.
+(more than one core for more than a minute) acquires one only while it runs.
+Host slot counts, load thresholds and quota guards belong in host policy.
 Tune dispatch from useful output, eligible work supply, review/test wait, rework
 and merge service; reduce new commissions when downstream work piles up.
 Give every addressable issue a next-action owner or a named dependency. A running
-tier-2 worker finishes its current PR, then checkpoints and releases its test slot
-when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
+tier-2 worker finishes or checkpoints its current heavy command and releases that
+test slot when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
 
 **Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
 owner role. Before acting, the successor revalidates recipients, schedules and
@@ -193,14 +193,14 @@ Shell commands: Keep cleanup/removal and commit operations separate and simple; 
 Verification: <focused owning tests and applicable coverage, runnable in the sandbox>
 Integration executor: <named executor for returned heads; parent retains acceptance responsibility>
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
-Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none>
-Return: Continue until acceptance evidence exists or a named blocker needs the parent; then follow only the preassigned list, otherwise return. A progress summary is not completion.
+Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none; assign only to delegates that can both write Git and post to GitHub themselves>
+Return: Continue until acceptance evidence exists or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
 Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
 ```
 
 Before each preassigned follow-up, re-read live issue/PR state and dispatch
-ownership, return the current head with its evidence (or hand it off), and start
-a fresh task worktree.
+ownership, record the finished item's current head and evidence directly on its
+owning PR or issue, then start a fresh task worktree.
 Do not self-claim arbitrary global backlog. On exhaustion or a blocker, return
 next-action evidence to the dispatch authority through the existing completion
 mechanism and owning PR or issue.

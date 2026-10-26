@@ -52,9 +52,12 @@ when choosing executors or splitting work.
    landed SHA, remaining acceptance, next-action owner and command or trigger to
    the dispatch authority on the owning issue or PR, directly or through the
    parent. When delegated, message the parent mid-task only for a blocker.
-   Continue only to an already commissioned successor in the brief, after
-   rechecking live state and starting its fresh task worktree; otherwise return
-   to that authority.
+   Continue only to an already commissioned successor in the brief if you can
+   write Git and post to GitHub yourself. Before starting it, record the current
+   head first with its evidence directly on this item's owning PR or issue, then
+   recheck live state and start a fresh task worktree. Otherwise get no preassigned
+   follow-ups and return after this one item via your final Report to that
+   authority.
 
 Report issue, PR, merge SHA, validation, thread state, verified remote issue/PR
 state, and connected environment state when acceptance depends on it.

@@ -35,7 +35,7 @@ Use repository workflow, labels and design statuses. Classify from evidence:
   need no design artifact.
 - **Unclassified:** insufficient evidence.
 - **Missing issue link:** no linked issue identified.
-- **Missing PR:** claimed active work cannot be reconciled to a live PR or branch.
+- **Missing PR:** Active or awaiting-review work cannot be reconciled to a live PR or branch; Claimed items are exempt until output is expected.
 - **Stale:** exceeds the repository's meaningful-update threshold; otherwise
   report age without inventing a threshold.
 
@@ -61,11 +61,12 @@ Separate observations from recommendations. A missing issue link alone does
 not prove absence of accepted task context. Omit empty sections and state source
 limits.
 
-For explicitly requested pickup or dispatch, consult the slice's dispatch
-authority and write the claim on the existing owning issue or PR before starting
-work: assignee or one comment naming worker, branch/worktree or task, and next
-action. This does not make comments atomic locks; one dispatch authority per
-slice prevents competing pickups. A next-work recommendation remains read-only.
+For explicitly requested pickup or dispatch, confirm the dispatch authority's
+recorded claim, or write it on the existing owning issue or PR if absent, before
+starting work: assignee or one comment naming the worker, branch/worktree or
+task, and next action. This does not make comments atomic locks; one dispatch
+authority per slice prevents competing pickups. A next-work recommendation
+remains read-only.
 
 For requested grooming, re-read live state, keep each issue to one bounded outcome,
 and report changed fields/relationships. Reminders without concrete work belong
