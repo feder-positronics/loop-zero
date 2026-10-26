@@ -789,65 +789,65 @@ def test_review_refuses_additional_host_state_exposure(
         _review("claude", repo, reviewer_ro_paths=() if exposure == "repository" else (str(exposed),))
     assert not (fake_bin / "claude.stdin").exists()
 
-
-@pytest.mark.parametrize("mode", ["implicit", "explicit", "state_file", "state_root"])
-def test_review_mounts_only_implicit_executable_inside_state(
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch,
-    mode: str,
-) -> None:
+@pytest.mark.parametrize("mode", [
+    "implicit", "explicit", "state_file", "state_root", "real_claude", "real_codex", "codex_helper", "helper_alias",
+])
+def test_review_mounts_only_implicit_runtime_files(fake_bin, tmp_path, fake_bwrap, monkeypatch, mode):
+    real = mode.startswith("real_")
+    if real:
+        (fake_bin / "bwrap").unlink()
+        if not _real_bwrap_works():
+            pytest.skip("real bwrap cannot create sandboxes here")
+    family = "codex" if mode in {"real_codex", "codex_helper", "helper_alias"} else "claude"
     host = tmp_path / "host"
-    host.mkdir()
     state = host / ".codex"
-    state.mkdir()
-    native = state / "packages" / "claude"
-    native.parent.mkdir()
+    native = state / "packages" / family
+    native.parent.mkdir(parents=True)
+    history = native.parent / "history.txt"
+    history.write_text("private history marker")
     if mode == "state_file":
         native = host / ".claude.json"
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.setenv("CODEX_HOME", str(native if mode == "state_root" else state))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    (fake_bin / "claude").replace(native)
-    (fake_bin / "claude").symlink_to(native)
+    helper = native.with_name("codex-code-mode-host")
+    if family == "codex":
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+    if mode == "helper_alias":
+        helper.unlink()
+        helper.symlink_to(history)
+    if real:
+        guard = "test ! -e " + shlex.quote(str(history)) + " || exit 70\n"
+        if family == "codex":
+            native.write_text("#!/bin/sh\n"
+                "if [ \"$1\" = --version ]; then echo codex-cli 0.164.0; exit; fi\n"
+                "if [ \"$2\" = --help ]; then echo --ignore-user-config; exit; fi\n"
+                + guard + shlex.quote(str(helper)) + " || exit 71\n"
+                "while [ \"$1\" != --output-last-message ]; do shift; done\n"
+                "printf '%s' " + shlex.quote(json.dumps(APPROVE)) + " > \"$2\"\n"
+                "echo '{\"type\":\"thread.started\",\"thread_id\":\"test\",\"usage\":{\"input_tokens\":1}}'\n")
+        else:
+            native.write_text("#!/bin/sh\ncat >/dev/null\n" + guard + "printf '%s\\n' "
+                              + shlex.quote(json.dumps(_claude_envelope(APPROVE))) + "\n")
+        native.chmod(0o755)
+    else:
+        source = (_fake_codex(fake_bin, json.dumps(APPROVE)) if family == "codex"
+                  else _fake_claude(fake_bin, _claude_envelope(APPROVE)))
+        source.replace(native)
+    (fake_bin / family).symlink_to(native)
     repo = tmp_path / "repo"
     repo.mkdir()
-    if mode == "implicit":
-        assert _review("claude", repo).verdict == "approve"
-        assert _pairs(_bwrap_argv(fake_bwrap), "--ro-bind-try") == [(str(native), str(native))]
-        assert (str(state), str(state)) not in _pairs(_bwrap_argv(fake_bwrap), "--ro-bind")
-        return
-    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
-        _review("claude", repo, reviewer_ro_paths=(str(native),) if mode == "explicit" else ())
-    assert not (fake_bin / "claude.stdin").exists()
-
-
-@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-def test_real_review_executes_state_binary_without_exposing_sibling_history(
-    fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    host = tmp_path / "host"
-    state = host / ".codex"
-    native = state / "packages" / "claude"
-    native.parent.mkdir(parents=True)
-    history = native.parent / "history.txt"
-    history.write_text("private history marker")
-    native.write_text("#!/bin/sh\ncat >/dev/null\ntest ! -e " + shlex.quote(str(history))
-                      + " || exit 70\nprintf '%s\\n' "
-                      + shlex.quote(json.dumps(_claude_envelope(APPROVE))) + "\n")
-    native.chmod(0o755)
-    (fake_bin / "bwrap").unlink()  # Override this module's autouse fake for the kernel proof.
-    (fake_bin / "claude").symlink_to(native)
-    monkeypatch.setenv("HOME", str(host))
-    monkeypatch.setenv("CODEX_HOME", str(state))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
-    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
-        monkeypatch.delenv(name, raising=False)
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    assert _review("claude", repo).verdict == "approve"
-    assert history.read_text() == "private history marker"
-    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
-        _review("claude", repo, reviewer_ro_paths=(str(native.parent),))
+    if real or mode in {"implicit", "codex_helper"}:
+        assert _review(family, repo).verdict == "approve"
+        assert history.read_text() == "private history marker"
+        if not real:
+            expected = [native, helper] if family == "codex" else [native]
+            assert _pairs(_bwrap_argv(fake_bwrap), "--ro-bind-try") == [(str(p), str(p)) for p in expected]
+    if mode not in {"implicit", "codex_helper", "real_codex"}:
+        with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+            _review(family, repo, reviewer_ro_paths=(str(native.parent if real else native),)
+                    if real or mode == "explicit" else ())
 
 
 @pytest.mark.parametrize("mount", ["system", "git"])
