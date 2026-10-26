@@ -131,22 +131,23 @@ def api_error_diagnostics():
 
 def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
     """Split one `gh api --include` response into status, headers and body."""
-    lines = output.splitlines()
-    start = next((index for index, line in enumerate(lines)
-                  if _HTTP_STATUS_RE.match(line)), None)
-    if start is None:
+    head, separator, body = output.partition("\r\n\r\n")
+    line_separator = "\r\n"
+    if not separator:
+        head, separator, body = output.partition("\n\n")
+        line_separator = "\n"
+    if not separator:
         return None, {}, output
-    match = _HTTP_STATUS_RE.match(lines[start])
-    assert match is not None
+    lines = head.split(line_separator)
+    match = _HTTP_STATUS_RE.match(lines[0])
+    if match is None:
+        return None, {}, output
     status = match.group(1)
     headers: dict[str, str] = {}
-    index = start + 1
-    while index < len(lines) and lines[index]:
-        name, separator, value = lines[index].partition(":")
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
         if separator:
             headers[name.strip().casefold()] = value.strip()
-        index += 1
-    body = "\n".join(lines[index + 1:]) if index < len(lines) else ""
     return status, headers, body
 
 
