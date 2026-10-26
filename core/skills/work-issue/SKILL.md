@@ -17,8 +17,13 @@ when choosing executors or splitting work.
    choices the issue cannot answer.
 2. Before editing, check issue state, branches, open/merged PRs and prior
    partial deliveries for this exact issue. Reconcile closed, shipped or
-   competing work before implementing. Verify the remote before mutation and
-   the connected environment before relying on reported production state.
+   competing work before implementing. Consult the existing dispatch authority
+   for this acceptance slice, if any; confirm its recorded claim or, if absent,
+   record the worker, branch/worktree or task, and next action on the owning issue
+   before pickup.
+   A comment is evidence, not an atomic lock; do not launch overlapping work.
+   Verify the remote before mutation and the connected environment before relying
+   on reported production state.
 3. Run `loopzero start issue-<number>-<slug>`. Write observable Acceptance
    and the issue link in task Notes.
    **Partial delivery uses `Refs #N`**, including incidents needing an
@@ -43,7 +48,13 @@ when choosing executors or splitting work.
    For authorized unfinished work, name one next-action owner and its next
    action or actual external trigger. A consumer waiting for a brief names the
    producer, which owns sending it or reporting its blocker. An owner decision
-   names the exact question and recipient.
+   names the exact question and recipient. Return acceptance evidence, PR/head or
+   landed SHA, remaining acceptance, next-action owner and command or trigger to
+   the dispatch authority on the owning issue or PR, directly or through the
+   parent. When delegated, message the parent mid-task only for a blocker.
+   Continue only to an already commissioned successor in the brief, after
+   rechecking live state and starting its fresh task worktree; otherwise return
+   to that authority.
 
 Report issue, PR, merge SHA, validation, thread state, verified remote issue/PR
 state, and connected environment state when acceptance depends on it.
