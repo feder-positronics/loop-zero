@@ -1023,3 +1023,64 @@ existing capability probe selects that flag. It also confirmed `-c`, `-m`,
 The existing argv's TOML `developer_instructions` string, reasoning-effort override
 and `mcp_servers={}` remain compatible; no argv or config-policy change is needed.
 No global installation change or live model call was used.
+
+
+### Codex 0.164.0 instruction-channel verification — October 26, 2026
+
+Following loop-zero PRs [#290](https://github.com/feder-positronics/loop-zero/pull/290)
+and [#304](https://github.com/feder-positronics/loop-zero/pull/304),
+`git ls-remote https://github.com/openai/codex 'refs/tags/rust-v0.164.0*'`
+resolved annotated tag object `fe3b29455488c2e189e43ad5526a107900c5e1b7`
+to peeled source commit `6aaac694803004a63c6f393d153c96d22521a6b9`.
+A shallow checkout in `~/.cache/intelflo-scratch/lz-codex-0164/codex-source`
+was compared with rust-v0.163.0 (`83086188ae0614bd882818ff1aa23f3194962012`):
+
+- [CLI TOML parsing](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/utils/cli/src/config_override.rs#L49),
+  [recognized developer_instructions](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/config/src/config_toml.rs#L254),
+  [CLI layer assembly](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/config/src/loader/mod.rs#L426),
+  [ConfigBuilder resolution](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/config/mod.rs#L1574)
+  and [harness-over-config precedence](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/config/mod.rs#L4168)
+  preserve the configured instruction string. Strict CLI-key validation remains
+  [conditional on strict_config](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/config/src/loader/mod.rs#L255).
+- Exec [parses overrides](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/lib.rs#L354), supplies
+  [no harness instruction override](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/lib.rs#L606), and passes
+  overrides to [ConfigBuilder](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/lib.rs#L617) and the
+  [in-process client](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/lib.rs#L731). The client
+  [forwards both CLI and loader overrides](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/app-server-client/src/lib.rs#L277)
+  to [ConfigManager](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/app-server/src/in_process.rs#L430), which
+  [retains them for configuration loading](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/app-server/src/config_manager.rs#L265).
+- [Session copy](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/session/mod.rs#L932),
+  [initial rendering](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/session/mod.rs#L4573) and
+  [message emission](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/session/mod.rs#L4762) retain the
+  [developer role and unchanged instruction text](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/context/developer_instructions.rs#L29).
+  [Fragment rendering](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/context-fragments/src/fragment.rs#L94) and
+  [aggregation](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/context_manager/updates.rs#L10) now use
+  [message_from_parts](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/context-fragments/src/annotated_content.rs#L146),
+  which preserves role and [content](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/context-fragments/src/annotated_content.rs#L220).
+  This refactor adds content-source metadata and typed content bodies; it does
+  not demote, replace or wrap the configured text. The guardian-only alternative
+  does not apply to [SessionSource::Exec](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/lib.rs#L744), per
+  [the guardian predicate](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/core/src/guardian/review.rs#L91).
+- [--ignore-user-config](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/cli.rs#L44) remains advertised;
+  exec [sets the loader option](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/exec/src/lib.rs#L384), and the loader
+  [returns an empty user layer without reading the file](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/config/src/loader/mod.rs#L515).
+  CLI overrides still enter separately. Auth still uses CODEX_HOME; this flag
+  does not claim to suppress all system, managed or project configuration.
+- The [Clap version declaration](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/cli/src/main.rs#L120),
+  [package name](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/cli/Cargo.toml#L2) and
+  [workspace version](https://github.com/openai/codex/blob/6aaac694803004a63c6f393d153c96d22521a6b9/codex-rs/Cargo.toml#L168) retain `codex-cli 0.164.0`,
+  matching loop-zero's anchored version regex.
+
+The compared config, exec, app-server, session and rendering paths retain the
+properties loop-zero depends on. Other changes include managed config metadata,
+MITM configuration validation, worktree feature gating and MCP cancellation
+metadata; none breaks this instruction/config transport. No breaking link was found.
+
+Read-only probes of the installed
+`~/.codex/packages/standalone/releases/0.164.0-x86_64-unknown-linux-musl/bin/codex`
+returned `codex-cli 0.164.0` (exit 0) and `exec --help` (exit 0) advertising
+`--ignore-user-config`, `-c`, `-m`, `--json`, `--sandbox`, `--cd`, `--ephemeral`,
+`--skip-git-repo-check`, `--output-schema`, `--output-last-message` and stdin `-`.
+Binary SHA256: `b93f6811d3f653f0fb83be4050d857fb9abbb111dfa2ce160563327daff7f306`.
+This is research evidence, not a runtime hash gate or backend attestation.
+No installation change or live model call was used for verification.
