@@ -6,20 +6,144 @@ Hosted callers must serialize refreshes per PR and invalidate before review edit
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 from pathlib import Path
 
-from loopzero import config, github
+from loopzero import config, github, runners
 from loopzero.types import LoopZeroError
 
-REVIEW_MARKER_RE = re.compile(
-    r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
-    r"kind=(primary|delta)(?:\s+source=(?:model|repost))?\s*-->"
-)
+REVIEW_MARKER_RE = runners.REVIEW_MARKER_RE
 CONTEXT = "Loop-zero Eligibility"
 
 
-def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...]) -> dict | None:
+# OD v40 2026-10-27 adjudication, ruling SHA256 d572145304f36bb175c30088967c3caf5d7ce0dec548e4215831126db81629cf.
+# Immutable incident identities in trusted code, not a reusable override or local registry.
+_RECOVERY_TARGETS = {9179: "f3e8d79d49214163a395d760144002048c3c564f",
+                     9284: "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
+                     9275: "aab1b62bb242f62da4ceebcb593b0725942074e0"}
+_RECOVERY_RECEIPTS = {
+    5667990257: (
+        9179,
+        "f3e8d79d49214163a395d760144002048c3c564f",
+        "336f13462fd1efdbfea9f471576ad311d2313907f0abef492cb6ede4dc0d0396",
+        "c8c63420dcb8a81dad25f49424cfdbd092b7461675d3c1d585be1033829a2810",
+    ),
+    5667628969: (
+        9284,
+        "b68e719fcf964951dacb8cbea9649b93316c366c",
+        "66023a1fc660f0907f47ad8e851ae4234e9eaf2ac97cb41912a00a47d9e91381",
+        "3f2b403f04e799a50526a10b76bc5b02a17214662a6e901f3b10f231c109355d",
+    ),
+    5667664997: (
+        9284,
+        "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
+        "c5fbf52fbe7aef3e7999082eb51232cad3f86af069c5fcc586a2c8871bfb0cf7",
+        "4cb0982d405fc2a95f8a7eef3a3d2924b2af11ea4c1bcab6cfa995aaa272e8e1",
+    ),
+    5666873014: (
+        9275,
+        "da55dd044369edccb4e8cf44b033396cc25cbd7e",
+        "64422d33ab7989a0d20454f3c7031c5fe7168cb7138215243d53c776a5630f9f",
+        "991fe6fcb60254eb4413f4403ef26b5ef4b4973386ee1c5bc4e452ce26ef0cdd",
+    ),
+    5667433401: (
+        9275,
+        "3f8c01e550641cf00ee9dc6079eae5535342aa5e",
+        "359526e22837d958741b9516598e37b50a8ae1d1ef3989ddb7972be02a0efc6e",
+        "030164aa4de085c653161c01d271ad43e030ea70ea2d855242935e7721e7d35d",
+    ),
+}
+
+
+def review_envelopes(body: str) -> tuple[str, list[dict]]:
+    """Decode only the publisher's raw-output block, not quoted findings/prose."""
+    if not isinstance(body, str):
+        return "", []
+    match = re.search(r"<details><summary>Raw reviewer output</summary>\s*```\s*\n(.*?)\n```", body, re.DOTALL)
+    if not match:
+        return "", []
+    raw = match[1].strip()
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw, []
+    envelopes = value if isinstance(value, list) else [value]
+    return raw, envelopes if all(isinstance(item, dict) for item in envelopes) else []
+
+
+def recovery_reviews(repo: str, number: int, target: str, reviews: list[dict]) -> tuple[int, ...]:
+    """The complete named incident must match before any spent marker is adjudicated."""
+    if repo != "feder-positronics/intelflo" or _RECOVERY_TARGETS.get(number) != target:
+        return ()
+    expected = {key: row for key, row in _RECOVERY_RECEIPTS.items() if row[0] == number}
+    matched = []
+    for review in reviews:
+        row = expected.get(review.get("id"))
+        if not row:
+            continue
+        body = review.get("body") or ""
+        raw, envelopes = review_envelopes(body)
+        if (review.get("commit_id") == row[1]
+                and (review.get("user") or {}).get("login") == "loopzero-feder-positronics[bot]"
+                and hashlib.sha256(body.encode()).hexdigest() == row[2]
+                and hashlib.sha256(raw.encode()).hexdigest() == row[3]
+                and len(envelopes) == 1 and runners.codex_fatal_startup(envelopes[0])):
+            matched.append(review["id"])
+    return tuple(matched) if len(matched) == len(expected) and len(set(matched)) == len(expected) else ()
+
+
+def recovery_target(repo: str, number: int) -> str | None:
+    return _RECOVERY_TARGETS.get(number) if repo == "feder-positronics/intelflo" else None
+
+
+def recovery_inspection(evidence: dict | None, head: str) -> bool:
+    return bool(evidence and evidence["head"] == head and evidence["complete"]
+                and all(call["fatal"] == "absent" and call["inspection"] == "verified"
+                        and call["reported"] == {"model": "gpt-6-astra", "effort": "medium"}
+                        for call in evidence["calls"]))
+
+
+def review_projection(review: dict, head: str, repo: str, number: int):
+    """Only the anchored leading machine block; model prose/fences are never searched."""
+    body = review.get("body") or ""
+    block, span = runners.leading_review_block(body)
+    positions = [i for i, line in enumerate(block) if line.lstrip().startswith("<!-- loopzero:codex-evidence")]
+    if not positions:
+        return False, None
+    try:
+        if positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
+            return True, None
+        if len(block) > 2 and (len(block) != 3 or not re.fullmatch(
+                r"<!-- loopzero:adjudication v=1 replaces=[0-9]+(?:,[0-9]+)* target=" + head + r" -->", block[2])):
+            return True, None
+        marker = REVIEW_MARKER_RE.fullmatch(block[0])
+        evidence = runners.decode_codex_evidence(block[1])
+        if (not marker or marker[1] != head or marker[2] != evidence["kind"]
+                or evidence["repo"] != repo or evidence["pr"] != number
+                or evidence["head"] != head or evidence["publisher"] != (review.get("user") or {}).get("login")
+                or review.get("commit_id") != head or not evidence["complete"]):
+            return True, None
+        return True, evidence
+    except (ValueError, TypeError, KeyError):
+        return True, None
+
+
+def recovery_baseline(number: int, reviews: list[dict]) -> bool:
+    # Retained 9179 primary5664567936@bd5169 has the fatal startup error (proof ad1a851f).
+    # It is NOT an adjudicated sixth receipt; no valid baseline can be supplied under this ruling.
+    return number != 9179
+
+
+def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> str:
+    ids = recovery_reviews(repo, number, head, reviews)
+    return ("\n<!-- loopzero:adjudication v=1 replaces=" + ",".join(map(str, ids))
+            + " target=" + head + " -->") if ids else ""
+
+
+def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
+                    repo: str = "", number: int = 0) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
     trusted = {login.casefold() for login in publishers}
     latest = next((r for r in reversed(reviews)
@@ -34,11 +158,27 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...])
     verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or any(
         f"**{value}**" in body for value in ("approve", "request_changes")
     )
+    present, evidence = review_projection(latest, head, repo, number)
+    if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
+        return None
+    _, envelopes = review_envelopes(body)
+    if not present and any(runners.codex_fatal_startup(item) for item in envelopes):
+        return None
+    if recovery_target(repo, number):
+        if _RECOVERY_TARGETS[number] != head or not recovery_inspection(evidence, head):
+            return None
+        ids = recovery_reviews(repo, number, head, reviews)
+        suffix = recovery_suffix(repo, number, head, reviews)
+        leading = body.splitlines()
+        if (not ids or len(leading) < 3 or leading[2] != suffix.lstrip("\n")
+                or not recovery_baseline(number, reviews)):
+            return None
     return latest if verdict else None
 
 
-def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...]) -> str | None:
-    return head if eligible_review(reviews, head, publishers) else None
+def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
+                  repo: str = "", number: int = 0) -> str | None:
+    return head if eligible_review(reviews, head, publishers, repo=repo, number=number) else None
 
 
 def evaluate(repo: str, number: int, head: str, base: str,
@@ -58,7 +198,7 @@ def evaluate(repo: str, number: int, head: str, base: str,
         if len(batch) < 100:
             break
         page += 1
-    result = github.readiness(repo, pr, base, (), reviewed_head(reviews, head, publishers),
+    result = github.readiness(repo, pr, base, (), reviewed_head(reviews, head, publishers, repo=repo, number=number),
                               allow_behind=True)
     if github.pr_view(repo, number).head_sha != head:
         return github.Readiness(False, ("source head changed during eligibility refresh",))

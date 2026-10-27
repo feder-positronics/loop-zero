@@ -5,9 +5,12 @@ Host authentication is bound read-write into the sandbox HOME so OAuth refreshes
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import tempfile
 from dataclasses import replace
@@ -525,8 +528,459 @@ def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None
     return settings
 
 
+def codex_fatal_startup(envelope: object) -> bool:
+    """Specific native fatal error items, never quoted evidence or a tool-count rule."""
+    if not isinstance(envelope, dict) or envelope.get("type") != "codex_exec_result":
+        return False
+    events = envelope.get("events", ())
+    if not isinstance(events, (list, tuple)):
+        return False
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        item = event.get("item", {})
+        if (isinstance(item, dict) and event.get("type") == "item.completed" and item.get("type") == "error"
+                and re.match(r"\ACode Mode is unavailable because failed to spawn code-mode host "
+                             r"[^\n]*codex-code-mode-host(?:\.exe)?: [^\n]+"
+                             r"Code mode will fail closed(?:[.;]|$)", str(item.get("message", "")))):
+            return True
+    return False
+
+
+# Canonical publisher-derived Codex transport; complete native raw remains private.
+CODEX_HEADER = "<!-- loopzero:codex-evidence v=1 "
+CODEX_HEADER_LIMIT = 8192
+REVIEW_MARKER_RE = re.compile(
+    r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
+    r"kind=(primary|delta)(?:\s+source=(?:model|repost))?\s*-->"
+)
+
+
+def leading_review_block(body):
+    """Return logical lines and their ORIGINAL contiguous span, without separator normalization."""
+    block, offset, end = [], 0, 0
+    for segment in body.splitlines(keepends=True):
+        line = segment.splitlines()[0]
+        if not line.lstrip().startswith("<!-- loopzero:"):
+            break
+        block.append(line)
+        end = offset + len(line)
+        offset += len(segment)
+    return block, body[:end]
+
+
+def _unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _evidence_json(text):
+    return json.loads(text, object_pairs_hook=_unique_object)
+
+
+def _bounded_int(value, minimum=1):
+    return type(value) is int and minimum <= value <= 2**31 - 1
+
+
+def _identifier(value, limit=128):
+    return (
+        isinstance(value, str) and len(value) <= limit and re.fullmatch(r"[A-Za-z0-9_.:-]+", value)
+    )
+
+
+def _hex(value, length):
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{" + str(length) + "}", value)
+
+
+def _valid_codex_evidence(value):
+    """Strict closed schema, including exact context/order/offset bounds; no coercion."""
+    fields = {
+        "version",
+        "family",
+        "repo",
+        "pr",
+        "head",
+        "kind",
+        "publisher",
+        "receipt",
+        "raw_sha256",
+        "raw_bytes",
+        "complete",
+        "chunk_count",
+        "calls",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        return False
+    if (
+        type(value["version"]) is not int
+        or value["version"] != 1
+        or value["family"] != "codex"
+        or not isinstance(value["repo"], str)
+        or len(value["repo"]) > 256
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", value["repo"])
+        or not _bounded_int(value["pr"])
+        or not _hex(value["head"], 40)
+        or value["kind"] not in {"primary", "delta"}
+        or not isinstance(value["publisher"], str)
+        or len(value["publisher"]) > 128
+        or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:\[bot\])?", value["publisher"])
+        or value["receipt"] != f".loopzero/review-{value['head'][:12]}-{value['kind']}.json"
+        or not _hex(value["raw_sha256"], 64)
+        or not _bounded_int(value["raw_bytes"])
+        or type(value["complete"]) is not bool
+        or not _bounded_int(value["chunk_count"])
+        or not isinstance(value["calls"], list)
+        or len(value["calls"]) != value["chunk_count"]
+    ):
+        return False
+    sessions, ranges = set(), set()
+    for index, call in enumerate(value["calls"], 1):
+        keys = {
+            "index",
+            "session",
+            "requested",
+            "reported",
+            "fatal",
+            "inspection",
+            "base",
+            "diff_sha256",
+        }
+        if not isinstance(call, dict):
+            return False
+        if call.get("inspection") == "verified":
+            keys |= {"head_event", "diff_event"}
+        if (
+            set(call) != keys
+            or not _bounded_int(call["index"])
+            or call["index"] != index
+            or not _identifier(call["session"])
+            or call["session"] in sessions
+            or call["fatal"] not in {"present", "absent", "unknown"}
+            or call["inspection"] not in {"verified", "unknown"}
+            or not _hex(call["base"], 40)
+            or not _hex(call["diff_sha256"], 64)
+        ):
+            return False
+        sessions.add(call["session"])
+        ranges.add((call["base"], call["diff_sha256"]))
+        for label in ("requested", "reported"):
+            settings = call[label]
+            if not isinstance(settings, dict) or set(settings) != {"model", "effort"}:
+                return False
+            for key, limit in (("model", 128), ("effort", 32)):
+                if settings[key] is not None and not _identifier(settings[key], limit):
+                    return False
+        if call["inspection"] == "verified":
+            for label in ("head_event", "diff_event"):
+                event = call[label]
+                if (
+                    not isinstance(event, dict)
+                    or set(event) != {"id", "start", "end"}
+                    or not _identifier(event["id"])
+                    or not _bounded_int(event["start"], 0)
+                    or not _bounded_int(event["end"])
+                    or not event["start"] < event["end"] <= value["raw_bytes"]
+                    or (label == "head_event" and event["end"] - event["start"] != 40)
+                ):
+                    return False
+    return len(ranges) == 1
+
+
+def valid_codex_evidence(value):
+    try:
+        return bool(_valid_codex_evidence(value))
+    except KeyError, TypeError, ValueError:
+        return False
+
+
+def encode_codex_evidence(value):
+    if not valid_codex_evidence(value):
+        raise RunnerBadOutput("codex: invalid native evidence projection")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
+    if len(header.encode()) > CODEX_HEADER_LIMIT:
+        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; HOLD")
+    return header
+
+
+def decode_codex_evidence(header):
+    """Only one canonical ASCII field; its leading placement is checked by eligibility."""
+    if not isinstance(header, str) or not header.isascii() or len(header) > CODEX_HEADER_LIMIT:
+        raise ValueError("invalid evidence header")
+    match = re.fullmatch(re.escape(CODEX_HEADER) + r"([A-Za-z0-9_-]+) -->", header)
+    if not match:
+        raise ValueError("invalid evidence encoding")
+    token = match[1]
+    data = base64.b64decode(token + "=" * (-len(token) % 4), altchars=b"-_", validate=True)
+    value = _evidence_json(data)
+    if not valid_codex_evidence(value) or encode_codex_evidence(value) != header:
+        raise ValueError("noncanonical or invalid evidence")
+    return value
+
+
+def _inspection_commands(command, cwd):
+    """Conservative shell grammar: explicit repo anchor, immutable range, no echo/expansion."""
+    try:
+        words = shlex.split(command)
+        if len(words) == 3 and Path(words[0]).name in {"sh", "bash"} and words[1] in {"-c", "-lc"}:
+            command = words[2]
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>`$()\n")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        groups = [[]]
+        for word in lexer:
+            if word == "&&":
+                groups.append([])
+            else:
+                groups[-1].append(word)
+        operations, anchored = [], False
+        for group in groups:
+            if len(group) == 2 and group[0] == "cd" and group[1].startswith("/"):
+                anchored = group[1] == cwd
+                continue
+            if not group or group.pop(0) != "git":
+                return []
+            local = anchored
+            if group[:1] == ["-C"] and len(group) >= 3:
+                local = group[1] == cwd
+                group = group[2:]
+            if not local:
+                return []
+            if group[:1] == ["--no-pager"]:
+                group = group[1:]
+            if group == ["rev-parse", "HEAD"]:
+                operations.append(("head",))
+            elif group[:1] == ["diff"]:
+                args = [
+                    part
+                    for part in group[1:]
+                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv"}
+                ]
+                if len(args) != 2 or not all(_hex(part, 40) for part in args):
+                    return []
+                operations.append(("diff", *args))
+            else:
+                return []
+        return operations
+    except ValueError, TypeError:
+        return []
+
+
+def _native_inspection(envelope, context):
+    started, completed, found = {}, set(), {}
+    for event in envelope["events"]:
+        item = event.get("item")
+        if (
+            not isinstance(item, dict)
+            or item.get("type") != "command_execution"
+            or not _identifier(item.get("id"))
+        ):
+            continue
+        if event.get("type") == "item.started":
+            if item["id"] in started:
+                return {}
+            started[item["id"]] = item.get("command")
+            continue
+        if event.get("type") == "item.completed":
+            if item["id"] in completed:
+                return {}
+            completed.add(item["id"])
+        output, command = item.get("aggregated_output"), item.get("command")
+        if (
+            event.get("type") != "item.completed"
+            or item.get("status") != "completed"
+            or type(item.get("exit_code")) is not int
+            or item["exit_code"] != 0
+            or not isinstance(output, str)
+            or not isinstance(command, str)
+            or started.get(item["id"]) != command
+        ):
+            continue
+        operations = _inspection_commands(command, context["cwd"])
+        data = output.encode("utf-8")
+        for operation in operations:
+            if operation == ("head",):
+                match = re.search(rb"(?m)^" + context["head"].encode() + rb"(?=\r?$)", data)
+                if match:
+                    found["head_event"] = {
+                        "id": item["id"],
+                        "start": match.start(),
+                        "end": match.end(),
+                    }
+            elif operation == ("diff", context["base"], context["head"]):
+                match = re.search(rb"(?m)^diff --git ", data)
+                if match:
+                    start, end = match.start(), match.start() + context["diff_bytes"]
+                    if (
+                        end <= len(data)
+                        and hashlib.sha256(data[start:end]).hexdigest() == context["diff_sha256"]
+                    ):
+                        found["diff_event"] = {"id": item["id"], "start": start, "end": end}
+    return found if set(found) == {"head_event", "diff_event"} else {}
+
+
+def _codex_evidence(result):
+    """Pure extraction from complete normalized raw; caller/model summaries are never inputs."""
+    try:
+        decoded = _evidence_json(result.raw)
+    except ValueError:
+        if result.provenance:
+            raise RunnerBadOutput("codex: malformed complete native raw") from None
+        return None  # historical transport-only rendering, never native execution evidence
+    envelopes = decoded if isinstance(decoded, list) else [decoded]
+    if all(isinstance(item, dict) and "review_context" not in item for item in envelopes):
+        return None  # valid legacy native receipt: ordinary UNKNOWN, not retrospective failure
+    if len(envelopes) != result.chunk_count:
+        raise RunnerBadOutput("codex: incomplete evidence chunks")
+    calls, common, sessions = [], None, set()
+    for index, envelope in enumerate(envelopes, 1):
+        context = envelope.get("review_context")
+        if not isinstance(context, dict):
+            raise RunnerBadOutput("codex: missing recorded review context")
+        binding = {
+            key: context.get(key)
+            for key in (
+                "repo",
+                "pr",
+                "publisher",
+                "head",
+                "kind",
+                "base",
+                "diff_sha256",
+                "diff_bytes",
+                "cwd",
+            )
+        }
+        if common is None:
+            common = binding
+        if (
+            binding != common
+            or context.get("head") != result.head
+            or context.get("kind") != result.kind
+            or type(context.get("index")) is not int
+            or context["index"] != index
+            or type(context.get("chunks")) is not int
+            or context["chunks"] != len(envelopes)
+            or not _bounded_int(context.get("diff_bytes"), 0)
+            or not isinstance(context.get("cwd"), str)
+            or not context["cwd"].startswith("/")
+            or any(
+                not _hex(context.get(key), 64)
+                for key in (
+                    "fragment_sha256",
+                    "prompt_sha256",
+                    "policy_sha256",
+                    "source_sha256",
+                    "binary_sha256",
+                    "argv_sha256",
+                )
+            )
+        ):
+            raise RunnerBadOutput("codex: inconsistent evidence context/chunk order")
+        session, events = envelope.get("session_id"), envelope.get("events")
+        if (
+            not _identifier(session)
+            or session in sessions
+            or not isinstance(events, list)
+            or not events
+        ):
+            raise RunnerBadOutput("codex: missing or duplicate native session")
+        sessions.add(session)
+        if (
+            any(not isinstance(event, dict) for event in events)
+            or [e.get("thread_id") for e in events if e.get("type") == "thread.started"]
+            != [session]
+            or any(key in event and event[key] != session
+                   for event in events for key in ("thread_id", "session_id"))
+            or events[-1].get("type") != "turn.completed"
+            or events[-1].get("usage") != envelope.get("token_usage")
+            or any(e.get("type") == "turn.failed" for e in events)
+            or sum(e.get("type") == "turn.completed" for e in events) != 1
+        ):
+            raise RunnerBadOutput("codex: incomplete/mixed native terminal evidence")
+        final = [
+            e.get("item", {}).get("text")
+            for e in events
+            if e.get("type") == "item.completed"
+            and isinstance(e.get("item"), dict)
+            and e["item"].get("type") == "agent_message"
+        ]
+        if not final or _evidence_json(final[-1]) != _evidence_json(envelope["final_message"]):
+            raise RunnerBadOutput("codex: native final verdict is missing")
+        last_message = max(
+            i
+            for i, e in enumerate(events)
+            if e.get("type") == "item.completed"
+            and isinstance(e.get("item"), dict)
+            and e["item"].get("type") == "agent_message"
+        )
+        if any(
+            e.get("type") == "item.completed"
+            and e.get("item", {}).get("type") == "command_execution"
+            for e in events[last_message + 1 :]
+        ):
+            raise RunnerBadOutput("codex: native verdict precedes inspection")
+        requests = result.provenance.get("requested_settings", [])
+        if len(requests) != len(envelopes) or requests[index - 1] != context.get("requested"):
+            raise RunnerBadOutput("codex: requested settings/context mismatch")
+        settings = {
+            label: {
+                key: (source.get(key) if _identifier(source.get(key), limit) else None)
+                for key, limit in (("model", 128), ("effort", 32))
+            }
+            for label, source in (
+                ("requested", context.get("requested", {})),
+                ("reported", envelope.get("reported_settings", {})),
+            )
+        }
+        inspection = _native_inspection(envelope, context)
+        calls.append(
+            {
+                "index": index,
+                "session": session,
+                **settings,
+                "fatal": "present" if codex_fatal_startup(envelope) else "absent",
+                "inspection": "verified" if inspection else "unknown",
+                **inspection,
+                "base": context["base"],
+                "diff_sha256": context["diff_sha256"],
+            }
+        )
+    value = {
+        "version": 1,
+        "family": "codex",
+        "repo": common["repo"],
+        "pr": common["pr"],
+        "head": result.head,
+        "kind": result.kind,
+        "publisher": common["publisher"],
+        "receipt": f".loopzero/review-{result.head[:12]}-{result.kind}.json",
+        "raw_sha256": hashlib.sha256(result.raw.encode("utf-8")).hexdigest(),
+        "raw_bytes": len(result.raw.encode("utf-8")),
+        "complete": True,
+        "chunk_count": len(calls),
+        "calls": calls,
+    }
+    if not valid_codex_evidence(value):
+        raise RunnerBadOutput("codex: invalid full native evidence")
+    return value
+
+
+def codex_evidence(result):
+    if result.family != "codex":
+        return None
+    if not validate_runner_result(result):
+        raise RunnerBadOutput("codex: invalid complete native result")
+    return _codex_evidence(result)
+
 def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str, object], str]:
     events = _json_lines(stdout)
+    if codex_fatal_startup({"type": "codex_exec_result", "events": events}):
+        raise RunnerBadOutput("codex: fatal Code Mode startup failure", _tail(stdout))
     session_id = next(
         (
             str(event[key])
@@ -657,7 +1111,7 @@ def _review_claude(
 
 def _review_codex(
     prompt: str, *, policy: str, cwd: Path, head: str, kind: str, timeout: int,
-    ro_paths: tuple[str, ...], model: str | None, effort: str | None,
+    ro_paths: tuple[str, ...], model: str | None, effort: str | None, review_context: dict | None = None,
 ) -> ReviewResult:
     with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
         home = Path(tmp)
@@ -694,6 +1148,10 @@ def _review_codex(
             f"{sandbox.SANDBOX_HOME}/last.json",
             "-",
         ]
+        if review_context is not None:
+            review_context = {**review_context,
+                "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "argv_sha256": hashlib.sha256(json.dumps([*prefix, *argv]).encode()).hexdigest()}
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
@@ -707,6 +1165,10 @@ def _review_codex(
     except (json.JSONDecodeError, ValueError) as exc:
         raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
     provenance, raw = _codex_provenance(done.stdout, done.stderr, message)
+    if review_context is not None:
+        envelope = _evidence_json(raw)
+        envelope["review_context"] = review_context
+        raw = json.dumps(envelope, separators=(",", ":"))
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     return replace(
@@ -730,6 +1192,7 @@ def review_with(
     model: str | None = None,
     effort: str | None = None,
     chunk: tuple[int, int] | None = None,
+    review_context: dict | None = None,
 ) -> ReviewResult:
     """Run one review of ``diff`` at ``head`` with the given model family."""
     if family not in REVIEWER_FAMILIES:
@@ -738,9 +1201,22 @@ def review_with(
         raise ValueError(f"unknown review kind {kind!r}; expected 'primary' or 'delta'")
     prompt = build_prompt(kind=kind, head=head, task_text=task_text, diff=diff, chunk=chunk)
     adapter = _review_claude if family == "claude" else _review_codex
+    policy, extra = _review_policy(kind), {}
+    if family == "codex" and review_context is not None:
+        context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
+                   "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
+                   "fragment_sha256": hashlib.sha256(diff.encode()).hexdigest()}
+        policy += (" If commissioned inspection is required, retain actual completed head and pinned-diff reads. "
+                   "Use git -C " + json.dumps(context["cwd"]) + " rev-parse HEAD and git -C "
+                   + json.dumps(context["cwd"]) + " diff --no-color " + context["base"] + " " + head
+                   + "; separate native calls in the same session qualify. Do not echo evidence or use moving refs.")
+        context.update(prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
+                       policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
+                       source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
+        extra["review_context"] = context
     return adapter(
-        prompt, policy=_review_policy(kind), cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
-        ro_paths=reviewer_ro_paths, model=model, effort=effort,
+        prompt, policy=policy, cwd=cwd.resolve(), head=head, kind=kind, timeout=timeout,
+        ro_paths=reviewer_ro_paths, model=model, effort=effort, **extra,
     )
 
 
@@ -754,6 +1230,8 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     findings = tuple(finding for result in results for finding in result.findings)
     verdict = "request_changes" if any(r.verdict == "request_changes" for r in results) else "approve"
     envelopes = [json.loads(result.raw) for result in results]
+    if any(codex_fatal_startup(envelope) for envelope in envelopes):
+        raise RunnerBadOutput("codex: fatal Code Mode startup failure")
     sessions = [str(result.provenance["session_id"]) for result in results]
     provenance: dict[str, object] = {
         "family": first.family,
@@ -907,6 +1385,7 @@ def validate_runner_result(result: ReviewResult) -> bool:
         provenance_ok = (
             envelope_sessions == sessions
             and all(item.get("type") == "codex_exec_result" for item in envelopes)
+            and not any(codex_fatal_startup(item) for item in envelopes)
             and all(isinstance(item, dict) for item in usages)
             and provenance.get("token_usage") == expected_usage
         )
@@ -931,7 +1410,14 @@ def validate_runner_result(result: ReviewResult) -> bool:
     verdict = "request_changes" if any(
         item.verdict == "request_changes" for item in parsed
     ) else "approve"
-    return result.findings == findings and result.verdict == verdict
+    if result.findings != findings or result.verdict != verdict:
+        return False
+    if result.family == "codex":
+        try:
+            _codex_evidence(result)
+        except (RunnerBadOutput, ValueError, KeyError, TypeError, AttributeError):
+            return False
+    return True
 
 
 # --------------------------------------------------------------------------- family

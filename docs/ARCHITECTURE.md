@@ -37,8 +37,8 @@ and branch protection remains essential.
 
 Local `.loopzero/task.md` is working handoff context, rendered into the PR.
 The CLI also writes a head-bound checks receipt and saved review output in
-`.loopzero/` for local readiness and reposting. These are disposable execution
-artifacts, not a second authoritative delivery history. Local readiness requires
+`.loopzero/` for local readiness and reposting. They do not form a second authoritative delivery history; new Codex native audit
+receipts have the restricted retention requirement described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Losing local artifacts may
 require rerunning checks or review, and never creates a hosted approval.
@@ -173,6 +173,42 @@ core native provenance, independently of optional reporting. Recovery considers 
 exact historical renderer only when the saved artifact lacks requested_settings;
 present malformed metadata cannot activate it. New publication/repost uses qualified
 wording, while publisher/head/findings/session/publication checks remain unchanged.
+Codex's specific structured fatal Code Mode startup event invalidates a result
+before publication, in every chunk and when validating saved/reposted evidence.
+The shared predicate does not classify quoted text or require a generic tool
+count. Eligibility rejects fatal latest evidence without reviving an older
+approval. The [bounded incident adjudication](../core/CONTRACT.md#fatal-codex-startup-failures-and-the-2026-10-27-adjudication)
+lives in trusted eligibility code: five immutable receipt identities/digests
+and exact recovery targets, reused for budget selection and local/hosted
+eligibility. Original records/findings remain; successful replacements append
+a linkage marker and count normally. Mismatched identities, unknown commissioned
+inspection/model/effort evidence, target drift and the invalid retained9179
+baseline fail closed. No override flag, local counter or separate registry is
+introduced; a second explicit deployment and OD admission remain necessary.
+New Codex publication derives one canonical v1 `codex-evidence` comment from the
+complete validated private native stream, across every ordered chunk/session.
+It immediately follows the byte-zero review marker, before any adjudication or
+human text. The anchored leading block is limited to 8192 bytes; strict schema,
+canonical ASCII base64url JSON, context and bounds checks reject malformed or
+ambiguous projections without legacy fallback. The projection binds publisher,
+repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
+raw digest/byte count, completeness and per-call requested/reported settings,
+fatal classification and attributable inspection event/range facts. It publishes
+no commands, source contents or private paths. Codex's human transcript display
+is a sanitized retention notice; Claude's existing rendering stays unchanged.
+Local publication, saved-result replay and exact confirmation regenerate these
+facts from complete raw, never the public transcript tail or a saved summary.
+The restricted existing receipt and writer clone remain until completion and a
+verified archive handoff; task cleanup cannot discard that audit evidence.
+Hosted eligibility trusts the configured publisher's projection and live identity,
+state, head and latest ordering. It cannot recompute private raw or defeat a
+coherent forgery by a trusted publisher/editor; native claims do not attest the
+backend. Ordinary legacy/truncated/tool-free evidence remains UNKNOWN under its
+existing contract; new named recoveries require complete attributable evidence.
+Separate successful native head and immutable-range diff commands in one session
+can qualify when explicit repository anchors, event outcomes and exact output
+match the pinned head/diff. Echoes, ambiguous shell, wrong repositories, unresolved
+refs, failed commands and cross-session combinations cannot supply that proof.
 Native runner failures distinguish subscription exhaustion from transient throttling:
 weekly/session-limit text and Claude's blocking-limit terminal reason identify quota;
 HTTP 429 alone does not. This classification neither switches accounts nor retries

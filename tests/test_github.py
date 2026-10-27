@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from dataclasses import replace
@@ -456,10 +457,11 @@ FINDINGS = (
                                  "🙂" * 150_000 + "END"],
                          ids=["empty", "ascii-boundary", "unicode-boundary", "long", "unicode"])
 @pytest.mark.parametrize("prefix", ["", "<!-- loopzero:review head=abc kind=primary -->"])
-def test_post_review_payload(gh: FakeGh, raw: str, prefix: str) -> None:
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> None:
     arm_review(gh)
     loose = Finding("suggestion", None, None, "Loose suggestion", "Preserve this finding.")
-    result = replace(review(findings=(*FINDINGS, loose)), raw=raw)
+    result = replace(review(findings=(*FINDINGS, loose)), raw=raw, family=family)
     github.post_review(REPO, 7, HEAD, result, body_prefix=prefix)
     assert calls_for(gh, FILES_KEY)[0]["argv"] == [
         "api", FILES_KEY.split(" ", 1)[1], "--method", "GET", "-F", "per_page=100", "-F", "page=1"]
@@ -486,9 +488,15 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str) -> None:
     assert "**request_changes** (1 critical, 2 important, 2 suggestion)" in body
     assert loose.title in body and loose.body in body
     assert len(body.encode("utf-8")) < 65_536 and result.raw == raw
-    assert ("Transcript truncated" in body) == (len(raw.encode("utf-8")) > 30_000)
-    tail = raw.encode("utf-8")[-30_000:].decode("utf-8", errors="ignore")
-    assert tail + "\n```\n</details>" in body
+    if family == "claude":
+        assert ("Transcript truncated" in body) == (len(raw.encode("utf-8")) > 30_000)
+        tail = raw.encode("utf-8")[-30_000:].decode("utf-8", errors="ignore")
+        assert tail + "\n```\n</details>" in body
+    else:
+        assert "Transcript truncated" not in body and "restricted local review receipt" in body
+        assert hashlib.sha256(raw.encode()).hexdigest() in body
+        if raw:
+            assert raw not in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
 

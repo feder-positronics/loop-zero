@@ -117,6 +117,66 @@ can edit/resolve evidence; branch protection and CI enforce the gates.
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
 
+### Fatal Codex startup failures and the 2026-10-27 adjudication
+
+A native structured fatal startup event reporting that Code Mode cannot spawn
+its host invalidates the attempt even if the process exits zero and emits a
+parseable verdict. It consumes no new budget and must not be published, merged
+with chunks or replayed from a saved result. Quoted diagnostic text and absence
+of tool calls alone do not invalidate a review.
+
+OD v40's reviewed incident adjudication applies only to IntelFlo reviews
+5667990257, 5667628969, 5667664997, 5666873014 and 5667433401. Trusted code pins
+the repository, PR, publisher, review ID, original head, full body/raw digests
+and authorized recovery target. All original publications, markers, authorship,
+findings and historical dispositions remain unchanged. A replacement appends
+an adjudication marker linking these IDs and its exact target; subsequent
+replacement reviews count normally. No generic override or retrospective
+error scan exists, and an invalid latest review cannot revive an older one.
+
+PR9284 at1b836da3a29e31cb08a9fab19f0f567711e7ab4a and PR9275 at
+aab1b62bb242f62da4ceebcb593b0725942074e0 require full-scope primary inspection.
+Required evidence must be attributable: a successful native read showing the
+current head and relevant diff, with the commissioned native model/effort
+claims known (gpt-6-astra/medium). Requested flags, final prose, a generic tool
+call or the separate runtime canary cannot supply that evidence. Unknown means
+HOLD. These conditions apply to the named commissioned recoveries, not to
+legitimate tool-free reviews whose evidence is entirely in their prompt.
+PR9179's retained primary5664567936 is itself invalid; its conditional delta
+recovery remains blocked, with no sixth adjudication. Head drift returns to OD.
+PR9220 remains outside this adjudication under the existing escalation rule.
+
+The new validation/adjudication revision requires its own normal check,
+independent review, merge and a separately verified deployment before these
+held product reviews may resume. Deploying the earlier helper-mount fix alone
+does not authorize recovery. Operational OD admission still requires evidence
+of independence and the exact commissioned inspection; renderer text does not
+attest backend identity.
+
+### Complete Codex evidence and public transport
+
+New Codex publications retain the complete native raw privately in the existing
+head/kind review receipt. A canonical v1 publisher-derived evidence comment follows
+the byte-zero review marker immediately, before adjudication and human text. Its
+anchored machine block is at most 8192 bytes; invalid, duplicate, noncanonical or
+context-mismatched evidence blocks eligibility without reviving older approval.
+The summary binds repository/PR/publisher/head/kind, exact UTF-8 raw SHA256 and byte
+count, relative receipt reference, all ordered calls/sessions and their native
+fatal, settings and inspection facts. Header overflow is HOLD, never truncation.
+Public output excludes private native commands, paths and source contents; local
+publication, saved replay and confirmation derive facts from complete raw rather
+than rendered tails or supplied summaries. Retain the restricted receipt/clone
+until completion and a verified archive handoff. Hosted readers trust the existing
+publisher; a digest is neither inspection nor backend attestation, and cannot
+prevent coherent forgery by that trusted publisher/editor.
+
+Required named recovery inspection may use separate successful head/diff commands
+in the same native session, with explicit repository and immutable range binding,
+actual completed event outcomes and exact pinned output. Quoted/echoed commands,
+wrong repositories, moving refs, ambiguous shells and cross-session evidence stay
+UNKNOWN. Ordinary legacy or tool-free evidence retains its own contract; missing
+required new recovery evidence is HOLD, with no sixth historical adjudication.
+
 ### Owner-approved contributor-review exception
 
 Only the mixed-authoring route following Marcin's IntelFlo #6234 direction

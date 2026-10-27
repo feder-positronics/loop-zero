@@ -82,7 +82,7 @@ class ReviewResult:
     kind: str  # "primary" | "delta"
     verdict: str  # "approve" | "request_changes"
     findings: tuple[Finding, ...]
-    raw: str  # untouched model output for the PR comment
+    raw: str  # complete native envelope(s), retained privately; public views are sanitized
     model: str | None = None
     duration_s: float | None = None
     provenance: dict[str, object] = field(default_factory=dict)
