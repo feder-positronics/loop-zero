@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
+from loopzero import runners
 from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult
@@ -560,7 +561,24 @@ def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
 
 
 def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,
-                 legacy_settings: bool = False) -> str:
+                 legacy_settings: bool = False, legacy_display: bool = False,
+                 publication: tuple[str, int] | None = None) -> str:
+    evidence = None
+    if result.family == "codex":
+        evidence = (runners.codex_evidence(result) if result.provenance
+                    else runners._codex_evidence(result))
+    if evidence is not None:
+        if legacy_display or publication and (evidence["repo"], evidence["pr"]) != publication:
+            raise runners.RunnerBadOutput("codex: publication context mismatch")
+        first, separator, rest = prefix.partition("\n")
+        marker = runners.REVIEW_MARKER_RE.fullmatch(first)
+        header = runners.encode_codex_evidence(evidence)
+        if not marker or marker[1] != result.head or marker[2] != result.kind:
+            raise runners.RunnerBadOutput("codex: invalid/oversized leading machine block")
+        prefix = first + "\n" + header + (separator + rest if separator else "")
+        _, span = runners.leading_review_block(prefix)
+        if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
+            raise runners.RunnerBadOutput("codex: oversized leading machine block; HOLD")
     counts = {s: sum(1 for f in result.findings if f.severity == s) for s in
               ("critical", "important", "suggestion")}
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
@@ -583,6 +601,9 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         lines.append("\nSettings per native call (CLI claims, not backend attestation):")
         for index, call in enumerate(review_settings(result), 1):
             request, reported = call["requested"], call["reported"]
+            if result.family == "codex":
+                request, reported = ({key: value if runners._identifier(value, 128 if key == "model" else 32) else None
+                                      for key, value in settings.items()} for settings in (request, reported))
             lines.append(f"- Call {index}: requested model {request['model'] or 'unknown'} "
                          f"(effort {request['effort'] or 'unknown'}); "
                          f"CLI-reported model {reported['model'] or 'unknown'} "
@@ -591,6 +612,10 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
     raw = result.raw
+    if result.family == "codex" and not legacy_display:
+        raw = ("Native Codex transcript retained in the restricted local review receipt; "
+               "public evidence is publisher-derived, not backend attestation. "
+               "Exact raw SHA256: " + hashlib.sha256(result.raw.encode()).hexdigest())
     encoded = raw.encode("utf-8")
     if len(encoded) > 30_000:
         raw = encoded[-30_000:].decode("utf-8", errors="ignore")
@@ -638,7 +663,8 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
 
 
 def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
-                   body_prefix: str, *, legacy_settings: bool = False) -> dict:
+                   body_prefix: str, *, legacy_settings: bool = False,
+                   legacy_display: bool = False) -> dict:
     """Regenerate the publication content from the runner result and current PR diff."""
     commentable, anchor = _diff_map(repo, number)
     comments: list[dict] = []
@@ -657,7 +683,8 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
     return {
         "commit_id": head_sha,
-        "body": _review_body(result, loose, body_prefix, legacy_settings=legacy_settings),
+        "body": _review_body(result, loose, body_prefix, legacy_settings=legacy_settings,
+                             legacy_display=legacy_display, publication=(repo, number)),
         "comments": comments,
     }
 

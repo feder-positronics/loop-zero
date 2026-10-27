@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import importlib.metadata
 import io
 import json
+import os
 import random
 import re
 import sys
@@ -209,11 +211,17 @@ class Marker:
 
 
 def _lineage_markers(wt: Path, reviews: list[dict], head: str,
-                     publishers: tuple[str, ...] = ()) -> list[Marker]:
+                     publishers: tuple[str, ...] = (), *, repo: str = "", number: int = 0) -> list[Marker]:
     """Trusted publisher markers on their named commits within this head's ancestry."""
     found: list[Marker] = []
+    adjudicated = eligibility.recovery_reviews(repo, number, head, reviews)
+    if eligibility.recovery_target(repo, number) and (
+            not adjudicated or not eligibility.recovery_baseline(number, reviews)):
+        raise CliError("historical recovery target/receipt/baseline is unverified; HOLD for owner")
     trusted = {login.casefold() for login in publishers}
     for review in reviews:
+        if review.get("id") in adjudicated:
+            continue
         body = review.get("body") or ""
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
@@ -255,7 +263,7 @@ def _readiness(
 ) -> github.Readiness:
     review = eligibility.eligible_review(
         reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
-        head, config.review_publishers or (github.login(),),
+        head, config.review_publishers or (github.login(),), repo=config.repo, number=pr.number,
     )
     review_at = review.get("submitted_at") if review else None
     # GitHub's UTC submission time predates this process; monotonic time cannot date it.
@@ -573,11 +581,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         if not saved:
             reviews = _pr_reviews(config.repo, pr.number)
         kind = saved[0] if saved else _decide_kind(
-            _lineage_markers(wt, reviews, head, config.review_publishers), head
+            _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )[0]
     else:
         kind, reviewed = _decide_kind(
-            _lineage_markers(wt, reviews, head, config.review_publishers), head
+            _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
@@ -606,15 +614,14 @@ def cmd_review(args: argparse.Namespace) -> int:
         else:
             reviews = _pr_reviews(config.repo, pr.number)
         allowed, _ = _decide_kind(
-            _lineage_markers(wt, reviews, head, config.review_publishers), head
+            _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
-        prefix = _repost_prefix(result)
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
-                                 runtime_source=runtime_source)
+                                 runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
         except sandbox.SandboxUnavailable as exc:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
@@ -625,6 +632,14 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"dirty before False, dirty after {final_dirty}"
             )
         prefix = review_marker(head, kind, "model")
+    suffix = eligibility.recovery_suffix(config.repo, pr.number, head, reviews)
+    evidence = runners.codex_evidence(result)
+    if evidence is not None and (evidence["repo"], evidence["pr"], evidence["publisher"]) != (config.repo, pr.number, publisher):
+        raise CliError("native publication context changed; HOLD")
+    if suffix and not eligibility.recovery_inspection(evidence, head):
+        _save_review(wt, result)  # retain unknown commissioned evidence without publishing it
+        raise CliError("recovery inspection/model/effort evidence is unknown; HOLD for owner")
+    prefix = _repost_prefix(result, suffix) if args.repost else prefix + suffix
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     try:
         github.post_review(
@@ -657,9 +672,9 @@ def _review_verdict(result: ReviewResult) -> int:
     return 0 if result.verdict == "approve" else 5  # the exit code is the verdict, as for check
 
 
-def _repost_prefix(result: ReviewResult) -> str:
+def _repost_prefix(result: ReviewResult, suffix: str = "") -> str:
     sessions = result.provenance["session_ids"]
-    return review_marker(result.head, result.kind, "repost") + "\n" + (
+    return review_marker(result.head, result.kind, "repost") + suffix + "\n" + (
         "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
         + ": " + ", ".join(f"`{session}`" for session in sessions)
     )
@@ -676,7 +691,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "")
+    adjudicated = eligibility.recovery_reviews(config.repo, pr.number, result.head, reviews)
+    evidence = [r for r in reviews if r.get("id") not in adjudicated
+                and "loopzero:review" in (r.get("body") or "")
                 and (r.get("commit_id") == result.head or any(
                     m.group(1) == result.head for m in REVIEW_MARKER_RE.finditer(r["body"])))]
     fresh = github.pr_view(config.repo, pr.number)
@@ -685,12 +702,14 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     if not evidence:
         return False
     if (publisher.casefold() not in {name.casefold() for name in trusted}
-            or eligibility.eligible_review(reviews, result.head, trusted) is None):
+            or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number) is None):
         raise CliError("publication is revoked, pending or untrusted")
+    suffix = eligibility.recovery_suffix(config.repo, pr.number, result.head, reviews)
     payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
-                                      legacy_settings=legacy)
+                                      legacy_settings=legacy, legacy_display=display)
+                for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
                 for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
-                for prefix in (review_marker(result.head, result.kind), _repost_prefix(result))]
+                for prefix in (review_marker(result.head, result.kind) + suffix, _repost_prefix(result, suffix))]
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
@@ -722,6 +741,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
 def _run_review(
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
     model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
+    publication: tuple[str, int, str] | None = None,
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
@@ -755,6 +775,10 @@ def _run_review(
             runners.review_with, family, cwd=wt, head=head, kind=kind, task_text=task,
             reviewer_ro_paths=config.reviewer_ro_paths,
             model=model or (settings.model if settings else None), effort=chosen,
+            review_context=({"repo": config.repo, "pr": publication[1], "publisher": publication[2],
+                             "head": head, "kind": kind, "base": since,
+                             "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
+                             "diff_bytes": len(diff.encode())} if publication and family == "codex" else None),
         )
     if runtime_source:
         print(runtime_source)
@@ -826,11 +850,15 @@ def _review_file(wt: Path, head: str, kind: str) -> Path:
 
 def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None) -> None:
     path = _review_file(wt, result.head, result.kind)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.chmod(0o700)
     data = dataclasses.asdict(result)
     if publication is not None:
         data["publication"] = publication
-    path.write_text(json.dumps(data, indent=2) + "\n")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
+    with os.fdopen(os.open(path, flags, 0o600), "w") as output:
+        os.fchmod(output.fileno(), 0o600)
+        output.write(json.dumps(data, indent=2) + "\n")
 
 
 def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
@@ -872,6 +900,16 @@ def _pr_readiness(
 
 
 def _cleanup(wt: Path) -> None:
+    for path in (wt / ".loopzero").glob("review-*.json"):
+        try:
+            saved = json.loads(path.read_text())
+            native = json.loads(saved.get("raw", "null"))
+            envelopes = native if isinstance(native, list) else [native]
+            if saved.get("family") == "codex" and any(isinstance(item, dict) and "review_context" in item for item in envelopes):
+                print("retaining native review receipt and task clone pending verified archive handoff")
+                return
+        except (ValueError, OSError, AttributeError, TypeError):
+            raise CliError("review audit storage is unreadable; retaining task clone") from None
     root = _repo_root(wt)
     try:
         worktree.cleanup(root, wt)
@@ -1214,7 +1252,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
-    markers = _lineage_markers(wt, reviews, head, config.review_publishers)
+    markers = _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")

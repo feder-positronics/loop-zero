@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import cli, github, mergify
-from loopzero.types import CheckReport, CheckResult, ReviewResult
+from loopzero.types import CheckReport, CheckResult
 from tests.conftest import git
 from tests.test_github import (
     FakeGh,
@@ -23,7 +23,14 @@ from tests.test_github import (
     rest_pr_json,
     threads_json,
 )
-from tests.test_runners import APPROVE, CHANGES, _claude_envelope, _fake_claude, _fake_codex
+from tests.test_runners import (
+    APPROVE,
+    CHANGES,
+    _claude_envelope,
+    _fake_claude,
+    _fake_codex,
+    _native_codex_result,
+)
 from tests.test_sandbox import FAKE_BWRAP
 
 REPO = "acme/widgets"
@@ -1312,7 +1319,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
     def review_with(family, **kwargs):
         if family == "claude":
             raise cli.runners.RunnerBadOutput("claude: timed out", "partial")
-        return ReviewResult("codex", head, "primary", "approve", (), "{}")
+        return _native_codex_result(head, publisher=LOGIN, cwd=str(wt))
 
     monkeypatch.setattr(cli.runners, "review_with", review_with)
     code, out, err = run(capsys, "review")

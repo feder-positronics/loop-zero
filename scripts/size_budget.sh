@@ -16,9 +16,12 @@ set -euo pipefail
 # (owner approval 2026-10-07, caps 4950/6950); all check commands remain.
 # Remaining R2-R4 accepted improvements, owning proofs and formal-review repairs
 # (owner approval 2026-10-07, caps 5250/7600); all check commands remain.
-SRC_CAP=5250
+# OD approval 2026-10-27: structured startup validation, closed-five adjudication, local/hosted eligibility and owning regressions.
+# OD approval 2026-10-27: complete Codex raw transport, strict public projection and preserved boundary proofs.
+SRC_CAP=6000
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
-TESTS_CAP=7900
+# OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
+TESTS_CAP=9250
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

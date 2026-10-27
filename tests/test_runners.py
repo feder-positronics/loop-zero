@@ -35,6 +35,96 @@ CHANGES = {
     ],
 }
 
+def _native_codex_result(
+    head,
+    *,
+    base="b" * 40,
+    patch="diff --git a/feature.py b/feature.py\n+corrected",
+    repo="acme/widgets",
+    number=7,
+    publisher="bot",
+    cwd="/synthetic/repo",
+    session="native-session",
+    index=1,
+    chunks=1,
+):
+    """Synthetic native stream with explicit immutable commands, terminal and caller pins."""
+    import dataclasses
+    import hashlib
+
+    from loopzero import runners
+
+    payload = json.dumps(APPROVE)
+    usage = {"input_tokens": 10, "output_tokens": 2}
+    command = f"git -C {cwd} rev-parse HEAD && git -C {cwd} diff --no-color {base} {head}"
+    item = {"id": "read-1", "type": "command_execution", "command": command}
+    events = [
+        {"type": "thread.started", "thread_id": session},
+        {"type": "item.started", "item": {**item, "status": "in_progress"}},
+        {
+            "type": "item.completed",
+            "item": {
+                **item,
+                "status": "completed",
+                "exit_code": 0,
+                "aggregated_output": head + "\n" + patch + "\n",
+            },
+        },
+        {
+            "type": "item.completed",
+            "item": {"id": "final", "type": "agent_message", "text": payload},
+        },
+        {"type": "turn.completed", "usage": usage},
+    ]
+    settings = {"model": "gpt-6-astra", "effort": "medium"}
+    context = {
+        "repo": repo,
+        "pr": number,
+        "publisher": publisher,
+        "head": head,
+        "kind": "primary",
+        "base": base,
+        "diff_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+        "diff_bytes": len(patch.encode()),
+        "cwd": cwd,
+        "index": index,
+        "chunks": chunks,
+        "requested": settings,
+        **{
+            key: "1" * 64
+            for key in (
+                "fragment_sha256",
+                "prompt_sha256",
+                "policy_sha256",
+                "source_sha256",
+                "binary_sha256",
+                "argv_sha256",
+            )
+        },
+    }
+    raw = json.dumps(
+        {
+            "type": "codex_exec_result",
+            "session_id": session,
+            "token_usage": usage,
+            "final_message": payload,
+            "events": events,
+            "reported_settings": settings,
+            "review_context": context,
+        }
+    )
+    result = runners.parse_review(APPROVE, family="codex", head=head, kind="primary", raw=raw)
+    return dataclasses.replace(
+        result,
+        provenance={
+            "family": "codex",
+            "session_id": session,
+            "session_ids": [session],
+            "token_usage": usage,
+            "requested_settings": [settings],
+        },
+    )
+
 def _argv(bin_dir: Path, name: str) -> list[str]:
     return (bin_dir / f"{name}.argv").read_text().split("\0")[:-1]
 
@@ -136,7 +226,12 @@ def _fake_codex(
         cat > "$out" <<'MSG'
         {last_message}
         MSG
-        echo '{{"type":"thread.started","thread_id":"{session_id}"}}'
+        count_file="{bin_dir}/codex.calls"
+        count=1; [ ! -f "$count_file" ] || count=$(( $(cat "$count_file") + 1 ))
+        printf '%s' "$count" > "$count_file"
+        sid="{session_id}"; [ "$count" -eq 1 ] || sid="$sid-$count"
+        echo '{{"type":"thread.started","thread_id":"'"$sid"'"}}'
+        printf '%s\\n' {shlex.quote(json.dumps({"type":"item.completed","item":{"id":"final","type":"agent_message","text":last_message}}))}
         echo '{{"type":"turn.completed","usage":{{"input_tokens":{tokens},"output_tokens":2}}}}'
         exit {exit_code}
         """,
