@@ -214,9 +214,10 @@ def _lineage_markers(wt: Path, reviews: list[dict], head: str,
                      publishers: tuple[str, ...] = (), *, repo: str = "", number: int = 0) -> list[Marker]:
     """Trusted publisher markers on their named commits within this head's ancestry."""
     found: list[Marker] = []
-    adjudicated = eligibility.recovery_reviews(repo, number, head, reviews)
-    if eligibility.recovery_target(repo, number) and (
-            not adjudicated or not eligibility.recovery_baseline(number, reviews)):
+    target = eligibility.recovery_target(repo, number)
+    adjudicated = eligibility.recovery_reviews(repo, number, target, reviews)
+    if target and (not adjudicated or not eligibility.recovery_baseline(number, reviews)
+                   or (target != head and not _is_ancestor(wt, target, head))):
         raise CliError("historical recovery target/receipt/baseline is unverified; HOLD for owner")
     trusted = {login.casefold() for login in publishers}
     for review in reviews:
@@ -691,7 +692,8 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    adjudicated = eligibility.recovery_reviews(config.repo, pr.number, result.head, reviews)
+    adjudicated = eligibility.recovery_reviews(
+        config.repo, pr.number, eligibility.recovery_target(config.repo, pr.number), reviews)
     evidence = [r for r in reviews if r.get("id") not in adjudicated
                 and "loopzero:review" in (r.get("body") or "")
                 and (r.get("commit_id") == result.head or any(

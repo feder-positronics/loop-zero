@@ -199,19 +199,33 @@ def test_adjudication_matches_complete_pinned_incident_only(number, change):
 
 
 @pytest.mark.parametrize("number", TARGETS)
+@pytest.mark.parametrize("position", ["exact", "descendant", "non_descendant"])
 def test_replacement_budget_counts_normally_and_originals_are_unchanged(
-    number, tmp_path, monkeypatch
+    number, tmp_path, monkeypatch, position
 ):
+    from .conftest import git
+
+    git(tmp_path, "init", "-q")
+    git(tmp_path, "commit", "--allow-empty", "-qm", "pinned target")
+    pinned = git(tmp_path, "rev-parse", "HEAD").strip()
+    monkeypatch.setitem(eligibility._RECOVERY_TARGETS, number, pinned)
+    git(tmp_path, "commit", "--allow-empty", "-qm", "repair")
+    target = pinned if position == "exact" else git(tmp_path, "rev-parse", "HEAD").strip()
+    if position == "non_descendant":
+        monkeypatch.setitem(eligibility._RECOVERY_TARGETS, number, target)
+        target = pinned
     rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == number])
     snapshot = copy.deepcopy(rows)
-    monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
-    target = TARGETS[number]
 
     def markers(history):
         return cli._lineage_markers(
             tmp_path, history, target, PUBLISHER, repo="feder-positronics/intelflo", number=number
         )
 
+    if position == "non_descendant":
+        with pytest.raises(cli.CliError, match="unverified; HOLD"):
+            markers(rows)
+        return
     assert cli._decide_kind(markers(rows), target) == ("primary", None)
     replacement = {
         "id": 999,
@@ -250,11 +264,12 @@ def test_real_startup_repost_refuses_before_any_publication(wt, gh, fake_bin, ca
     assert not (fake_bin / "codex.stdin").exists() and not (fake_bin / "claude.stdin").exists()
 
 
-def inspected_replacement(number):
+def inspected_replacement(number, head=None):
+    head = head or TARGETS[number]
     row = copy.deepcopy(next(r for r in RECEIPTS if r["number"] == number))
-    row.update(id=999, commit_id=TARGETS[number])
+    row.update(id=999, commit_id=head)
     native = _native_codex_result(
-        TARGETS[number], repo=row["repo"], number=number, publisher=PUBLISHER[0]
+        head, repo=row["repo"], number=number, publisher=PUBLISHER[0]
     )
     return publish_replacement(row, json.loads(native.raw))
 
@@ -326,11 +341,12 @@ def test_recovered_eligibility_requires_actual_attributable_inspection(number, c
 
 
 @pytest.mark.parametrize("mutation", ["publisher", "body", "id", "head", "target"])
+@pytest.mark.parametrize("position", ["exact", "descendant"])
 def test_mismatched_historical_identity_holds_budget_and_eligibility(
-    tmp_path, monkeypatch, mutation
+    tmp_path, monkeypatch, gh, mutation, position
 ):
     rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == 9284])
-    target = TARGETS[9284]
+    target = TARGETS[9284] if position == "exact" else "e" * 40
     if mutation == "publisher":
         rows[0]["user"]["login"] = "stranger"
     if mutation == "body":
@@ -341,12 +357,24 @@ def test_mismatched_historical_identity_holds_budget_and_eligibility(
         rows[0]["commit_id"] = "b" * 40
     if mutation == "target":
         target = "c" * 40
-    monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
+        gh.respond(f"api repos/feder-positronics/intelflo/compare/{TARGETS[9284]}...{target}", {
+            "status": "diverged", "merge_base_commit": {"sha": "d" * 40},
+        })
+    monkeypatch.setattr(cli, "_is_ancestor", lambda *a: mutation != "target")
     with pytest.raises(cli.CliError, match="unverified; HOLD"):
         cli._lineage_markers(
             tmp_path, rows, target, PUBLISHER, repo="feder-positronics/intelflo", number=9284
         )
-    assert eligible_recovery([*rows, inspected_replacement(9284)], 9284, target) is None
+    assert eligible_recovery([*rows, inspected_replacement(9284, target)], 9284, target) is None
+
+
+@pytest.mark.parametrize("comparison", [None, [], {}, {"status": "ahead"},
+    {"status": "ahead", "merge_base_commit": {"sha": "d" * 40}},
+    {"status": "behind", "merge_base_commit": {"sha": TARGETS[9284]}}])
+def test_recovery_eligibility_refuses_unverified_ancestry(gh, comparison):
+    head = "c" * 40
+    gh.respond(f"api repos/feder-positronics/intelflo/compare/{TARGETS[9284]}...{head}", comparison)
+    assert eligible_recovery([*RECEIPTS, inspected_replacement(9284, head)], 9284, head) is None
 
 
 @pytest.mark.parametrize("number", [9179, 9173, 9174, 9175])
@@ -384,17 +412,23 @@ def test_adjudicated_primary_recovers_without_changing_other_receipts(tmp_path, 
     ],
 )
 @pytest.mark.parametrize("number", [9284, 9275])
+@pytest.mark.parametrize("position", ["exact", "descendant", "non_descendant"])
 def test_local_hosted_agree_and_historical_findings_stay_blocking(
-    wt, gh, case, monkeypatch, number
+    wt, gh, case, monkeypatch, number, position
 ):
     from loopzero import github
     from loopzero.types import CheckReport, Config
     from tests.test_github import marker, pr_json, rest_pr_json, thread, threads_json
 
-    target = TARGETS[number]
+    pinned = TARGETS[number]
+    target = pinned if position == "exact" else "c" * 40
+    gh.respond(f"api repos/feder-positronics/intelflo/compare/{pinned}...{target}", {
+        "status": "ahead" if position == "descendant" else "diverged",
+        "merge_base_commit": {"sha": pinned if position == "descendant" else "d" * 40},
+    })
     repository = "feder-positronics/intelflo"
     rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == number])
-    replacement = inspected_replacement(number)
+    replacement = inspected_replacement(number, target)
     if case in {"repost", "repost_confirmation"}:
         native = result(replacement)
         suffix = eligibility.recovery_suffix(repository, number, target, RECEIPTS)
@@ -419,7 +453,7 @@ def test_local_hosted_agree_and_historical_findings_stay_blocking(
     )
     gh.respond("api graphql", threads_json(*nodes))
     cfg = Config(repository, "main", (), (), "squash", ("codex",), review_publishers=PUBLISHER)
-    if case in {"publication_recovery", "repost_confirmation"}:
+    if case in {"publication_recovery", "repost_confirmation"} and position != "non_descendant":
         gh.respond(f"api repos/{repository}/pulls/{number}/files", [])
         gh.respond(
             f"api repos/{repository}/pulls/{number}/reviews/999/comments?per_page=100&page=1", []
@@ -437,7 +471,8 @@ def test_local_hosted_agree_and_historical_findings_stay_blocking(
     assert (
         local.ready
         is hosted.ready
-        is (case in {"valid", "publication_recovery", "repost", "repost_confirmation"})
+        is (position != "non_descendant" and case in {
+            "valid", "publication_recovery", "repost", "repost_confirmation"})
     )
     assert local.reasons == hosted.reasons
     if case == "open_finding":
