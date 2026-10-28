@@ -316,6 +316,13 @@ explain why the guide remains accurate. A reviewer checks that claim against the
 diff, challenges misplaced ownership and distinguishes shipped behavior from
 proposals and dated observations.
 
+The existing repository coordinator or T3 integration maintainer also follows
+[T3 upstream review](T3-UPSTREAM.md): weekly reading during active use and review
+before relevant upgrades or compatibility repairs. This is maintenance triage,
+not a new scheduler or permission to adopt upstream policy. Version-specific
+comparisons remain dated evidence; the running tools and instructions must be
+reconciled with matching source before changing the integration.
+
 Run `python3 scripts/check_architecture_docs.py [BASE]`. It compares the base
 (default: merge-base of HEAD and `origin/main`) with the working tree, including
 new files, and validates local Markdown links and anchors in this guide, the docs

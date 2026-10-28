@@ -334,6 +334,11 @@ focused restricted-PATH probe and report the limitation. Only sandboxed
 
 ## Configuration and upgrades
 
+Follow [T3 upstream review](T3-UPSTREAM.md) weekly during active use and before
+relevant upgrades or compatibility repairs. Compare the running environment's
+tools and instructions with version-matched source before adopting upstream
+developments; discovery does not authorize an upgrade or change delivery policy.
+
 [models.toml](../models.toml) owns selections; skills link here. Consumers
 maintain their own copy. Version 1 has profiles with `provider`, `model`, `effort`,
 optional same-field alternatives, and category-to-profile mappings. Verify
