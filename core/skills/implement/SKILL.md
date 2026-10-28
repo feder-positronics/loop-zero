@@ -25,6 +25,16 @@ executors or splitting work.
    implementation, not mirrored calculations, mock calls, or internal steps.
    **Watch regression tests fail on pre-fix code and record the failing output
    line in task Notes.** A test passing without the fix proves nothing.
+   When acceptance depends on UI/runtime behavior, observe it running within
+   actual task permissions; keep required unobserved acceptance open and name
+   its next-action owner.
+   Connect acceptance, full tested revision, observed before/after and evidence
+   in Notes or human Validation outside generated checks. Link the required
+   pre-fix line in Notes rather than copying the evidence into another record.
+   Example: “Expired sessions must be rejected. Before: accepted on <old SHA>;
+   after: HTTP 401 on <tested SHA>, observed in <test output or recording>.
+   Device behavior unobserved; consumer QA owns the device check.” Use actual
+   revisions and observations; earlier-head evidence is not a current gate verdict.
 4. Iterate with focused checks; commit small steps describing the change,
    without unrelated formatting. Record trade-offs and deliberately skipped
    work in Notes before committing.
