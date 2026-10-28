@@ -141,7 +141,9 @@ def recovery_target(repo: str, number: int) -> str | None:
 def recovery_inspection(evidence: dict | None, head: str) -> bool:
     return bool(evidence and evidence["head"] == head and evidence["complete"]
                 and all(call["fatal"] == "absent" and call["inspection"] == "verified"
-                        and call["reported"] == {"model": "gpt-6-astra", "effort": "medium"}
+                        and all((call["reported"][key] if call["reported"][key] is not None
+                                 else call.get("configured", {}).get(key)) == expected
+                                for key, expected in (("model", "gpt-6-astra"), ("effort", "medium")))
                         for call in evidence["calls"]))
 
 

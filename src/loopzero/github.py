@@ -598,7 +598,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
     if not legacy_settings:
-        lines.append("\nSettings per native call (CLI claims, not backend attestation):")
+        lines.append("\nSettings per native call (launch configuration and CLI claims, not backend attestation):")
         for index, call in enumerate(review_settings(result), 1):
             request, reported = call["requested"], call["reported"]
             if result.family == "codex":
@@ -608,6 +608,9 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
                          f"(effort {request['effort'] or 'unknown'}); "
                          f"CLI-reported model {reported['model'] or 'unknown'} "
                          f"(effort {reported['effort'] or 'unknown'})")
+            configured = call["configured"]
+            lines[-1] += (f"; configured model {configured['model'] or 'unknown'} "
+                          f"(effort {configured['effort'] or 'unknown'})")
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]

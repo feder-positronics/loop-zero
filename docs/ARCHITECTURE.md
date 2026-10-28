@@ -161,11 +161,18 @@ backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.
 
-Reviewer settings are optional reporting in the existing provenance container.
+Reviewer settings distinguish requested values, explicit launch configuration and
+optional native reporting in the existing provenance container.
 Adapters retain per-call requests; publication derives CLI claims from each retained
 native envelope, ignoring unqualified compatibility fields and optional reported
-metadata. Claude raw output stays unchanged; normalized Codex evidence retains only
-bounded recognized model/effort claims, with absent evidence reported as unknown.
+metadata. Adapters record configured values only for model/effort flags they
+explicitly pass at launch; missing flags stay unknown. Claude stores this record in
+provenance while its raw output stays unchanged; normalized Codex evidence retains only
+bounded recognized model/effort claims, with absent claims reported as unknown. Per-call configured values remain separately
+labelled in human output and optional Codex projection fields; they never become
+CLI-reported claims. Missing native recovery settings may use these launch records,
+but conflicting reported values still HOLD. Legacy requested/model/effort metadata
+cannot backfill a missing launch record.
 Chunk merge pads missing request entries and preserves their native-call order.
 Legacy model/effort fields retain their historical adapter meanings for loading;
 qualified summaries never use them as execution evidence. Eligibility still checks
@@ -193,7 +200,7 @@ human text. The anchored leading block is limited to 8192 bytes; strict schema,
 canonical ASCII base64url JSON, context and bounds checks reject malformed or
 ambiguous projections without legacy fallback. The projection binds publisher,
 repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
-raw digest/byte count, completeness and per-call requested/reported settings,
+raw digest/byte count, completeness and per-call requested/reported/configured settings,
 fatal classification and attributable inspection event/range facts. It publishes
 no commands, source contents or private paths. Codex's human transcript display
 is a sanitized retention notice; Claude's existing rendering stays unchanged.
