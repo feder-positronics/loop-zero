@@ -1,0 +1,176 @@
+{
+  "type": "codex_exec_result",
+  "session_id": "redacted-session-9275",
+  "token_usage": {
+    "input_tokens": 223400,
+    "cached_input_tokens": 161536,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 953,
+    "reasoning_output_tokens": 269
+  },
+  "final_message": "{\"verdict\": \"approve\", \"findings\": []}",
+  "events": [
+    {
+      "type": "thread.started",
+      "thread_id": "redacted-session-9275"
+    },
+    {
+      "type": "turn.started"
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_0",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/review-9275\" rev-parse HEAD'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_0",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/review-9275\" rev-parse HEAD'",
+        "aggregated_output": "aab1b62bb242f62da4ceebcb593b0725942074e0\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/review-9275\" diff --no-color 18ebc57040e5b5f6152980cbc66dfcedcfea44c9 aab1b62bb242f62da4ceebcb593b0725942074e0'",
+        "aggregated_output": "",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_1",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/review-9275\" diff --no-color 18ebc57040e5b5f6152980cbc66dfcedcfea44c9 aab1b62bb242f62da4ceebcb593b0725942074e0'",
+        "aggregated_output": "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-old\n+new\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git status --short'",
+        "aggregated_output": "[source output redacted]\n",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_2",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git status --short'",
+        "aggregated_output": "[source output redacted]\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_3",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git status --short'",
+        "aggregated_output": "[source output redacted]\n",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_3",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git status --short'",
+        "aggregated_output": "[source output redacted]\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_4",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git status --short'",
+        "aggregated_output": "[source output redacted]\n",
+        "exit_code": null,
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_4",
+        "type": "command_execution",
+        "command": "/bin/bash -lc 'git status --short'",
+        "aggregated_output": "[source output redacted]\n",
+        "exit_code": 0,
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_5",
+        "type": "agent_message",
+        "text": "{\"verdict\": \"approve\", \"findings\": []}"
+      }
+    },
+    {
+      "type": "turn.completed",
+      "usage": {
+        "input_tokens": 223400,
+        "cached_input_tokens": 161536,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 953,
+        "reasoning_output_tokens": 269
+      }
+    }
+  ],
+  "reported_settings": {
+    "model": null,
+    "effort": null
+  },
+  "review_context": {
+    "repo": "feder-positronics/intelflo",
+    "pr": 9275,
+    "publisher": "loopzero-feder-positronics[bot]",
+    "head": "aab1b62bb242f62da4ceebcb593b0725942074e0",
+    "kind": "primary",
+    "base": "18ebc57040e5b5f6152980cbc66dfcedcfea44c9",
+    "diff_sha256": "cde46076590910c372e517dfde5fd538d20c6257a08a356295b7a13d41cae265",
+    "diff_bytes": 97,
+    "cwd": "/synthetic/review-9275",
+    "index": 1,
+    "chunks": 1,
+    "requested": {
+      "model": "gpt-6-astra",
+      "effort": "medium"
+    },
+    "fragment_sha256": "cde46076590910c372e517dfde5fd538d20c6257a08a356295b7a13d41cae265",
+    "prompt_sha256": "1d196467298fa7d6c4a158a37066341a7722283a8c87d9dfadb87fef3f4d082f",
+    "policy_sha256": "61b3cc645fc004d7017aa3b5800db2a3e4a003218564d1374ffb84e439c6cdb2",
+    "source_sha256": "641a2bcd16a5eccb850831a65d97d3a55b9120a50695c90cdb201ed76dca8db1",
+    "binary_sha256": "c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5",
+    "argv_sha256": "49241cf66a83bc1faeadabab7118772de7082f44036110484e99e48b8065b2b0"
+  }
+}

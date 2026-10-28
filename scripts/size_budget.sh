@@ -21,7 +21,8 @@ set -euo pipefail
 SRC_CAP=6000
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
-TESTS_CAP=9250
+# OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
+TESTS_CAP=9311
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

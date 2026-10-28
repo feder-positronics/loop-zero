@@ -502,7 +502,7 @@ def _setting(value: object) -> str | None:
 
 
 def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None]]]:
-    """Derive ordered CLI claims from evidence; optional requests never grant eligibility."""
+    """Keep native claims, launch configuration and optional requests distinct."""
     try:
         decoded = json.loads(result.raw)
         envelopes = decoded if isinstance(decoded, list) else [decoded]
@@ -512,6 +512,8 @@ def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None
         envelopes = [{}] * result.chunk_count
     requested = result.provenance.get("requested_settings", [])
     requested = requested if isinstance(requested, list) else []
+    configured = result.provenance.get("configured_settings", [])
+    configured = configured if isinstance(configured, list) else []
     settings = []
     for index, envelope in enumerate(envelopes):
         envelope = envelope if isinstance(envelope, dict) else {}
@@ -525,7 +527,13 @@ def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None
             evidence = envelope.get("reported_settings")
             evidence = evidence if isinstance(evidence, dict) else {}
             reported = {key: _setting(evidence.get(key)) for key in ("model", "effort")}
-        settings.append({"requested": {key: _setting(request.get(key)) for key in ("model", "effort")},
+        pinned = (
+            (configured[index] if index < len(configured) else {})
+            if result.family == "claude" else envelope.get("configured_settings", {})
+        )
+        pinned = pinned if isinstance(pinned, dict) else {}
+        settings.append({"configured": {key: _setting(pinned.get(key)) for key in ("model", "effort")},
+                         "requested": {key: _setting(request.get(key)) for key in ("model", "effort")},
                          "reported": reported})
     return settings
 
@@ -653,6 +661,8 @@ def _valid_codex_evidence(value):
         }
         if not isinstance(call, dict):
             return False
+        if "configured" in call:
+            keys.add("configured")
         if call.get("inspection") == "verified":
             keys |= {"head_event", "diff_event"}
         if (
@@ -669,7 +679,7 @@ def _valid_codex_evidence(value):
             return False
         sessions.add(call["session"])
         ranges.add((call["base"], call["diff_sha256"]))
-        for label in ("requested", "reported"):
+        for label in ("requested", "reported", *(("configured",) if "configured" in call else ())):
             settings = call[label]
             if not isinstance(settings, dict) or set(settings) != {"model", "effort"}:
                 return False
@@ -939,6 +949,11 @@ def _codex_evidence(result):
                 ("reported", envelope.get("reported_settings", {})),
             )
         }
+        if "configured_settings" in envelope:
+            configured = envelope["configured_settings"]
+            if not isinstance(configured, dict) or configured != context.get("requested"):
+                raise RunnerBadOutput("codex: configured settings/context mismatch")
+            settings["configured"] = configured
         inspection = _native_inspection(envelope, context)
         calls.append(
             {
@@ -1070,6 +1085,7 @@ def _review_claude(
         auth_binds = _auth_binds("claude", home)
         prefix, config, binary = _sandbox_prefix("claude", cwd, home, ro_paths, auth_binds)
         argv[0] = str(binary)
+        configured = {"model": model or None, "effort": effort or None}  # explicit --model/--effort above
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CLAUDE_AUTH_ENV), timeout=timeout,
@@ -1104,6 +1120,7 @@ def _review_claude(
     reported_model = ", ".join(models) or None
     provenance = _claude_provenance(envelope, raw)
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
+    provenance["configured_settings"] = [configured]
     return replace(
         parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
         model=reported_model or model, effort=effort,
@@ -1150,6 +1167,7 @@ def _review_codex(
             f"{sandbox.SANDBOX_HOME}/last.json",
             "-",
         ]
+        configured = {"model": model or None, "effort": effort or None}  # explicit -m/-c above
         if review_context is not None:
             review_context = {**review_context,
                 "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -1167,10 +1185,11 @@ def _review_codex(
     except (json.JSONDecodeError, ValueError) as exc:
         raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
     provenance, raw = _codex_provenance(done.stdout, done.stderr, message)
+    envelope = _evidence_json(raw)
+    envelope["configured_settings"] = configured
     if review_context is not None:
-        envelope = _evidence_json(raw)
         envelope["review_context"] = review_context
-        raw = json.dumps(envelope, separators=(",", ":"))
+    raw = json.dumps(envelope, separators=(",", ":"))
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     return replace(
@@ -1240,6 +1259,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         "session_id": sessions[0],
         "session_ids": sessions,
         "requested_settings": [call["requested"] for result in results for call in review_settings(result)],
+        "configured_settings": [call["configured"] for result in results for call in review_settings(result)],
     }
     if first.family == "claude":
         provenance.update(

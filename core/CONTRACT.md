@@ -140,8 +140,11 @@ PR9284 at1b836da3a29e31cb08a9fab19f0f567711e7ab4a and PR9275 at
 aab1b62bb242f62da4ceebcb593b0725942074e0 require full-scope primary inspection.
 Required evidence must be attributable: a successful native read showing the
 current head and relevant diff, with the commissioned native model/effort
-claims known (gpt-6-astra/medium). Requested flags, final prose, a generic tool
-call or the separate runtime canary cannot supply that evidence. Unknown means
+claims known (gpt-6-astra/medium). OD ruling 123 permits a missing native setting
+claim to use the adapter's separately labelled configured record of a value it
+explicitly passed on the launch command line. A conflicting native claim still
+holds recovery; requested metadata alone, final prose, a generic tool call or the
+separate runtime canary cannot supply that evidence. Old receipts are not backfilled. Unknown means
 HOLD. These conditions apply to the named commissioned recoveries, not to
 legitimate tool-free reviews whose evidence is entirely in their prompt.
 PR9179 at f3e8d79d49214163a395d760144002048c3c564f requires the same full-scope
