@@ -153,7 +153,12 @@ match the pinned receipt checks. The same primary recovery applies to PR9173 at
 f07d09b764c0a8c06929bf0f02b877a58a4c1ca4, PR9174 at
 c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b and PR9175 at
 6e80b6ce590cc308792b914d8f02f5416ef77765. Only their named fatal receipts are
-adjudicated; all other reviews remain counted. Head drift returns to OD.
+adjudicated; all other reviews remain counted. OD ruling 125(a) permits a repair
+head descending from its pinned target to receive one ordinary full-scope primary
+review at the current head. Historical receipts are verified against their own
+pinned target; the existing adjudication suffix names the reviewed current head.
+Non-descendants and foreign or tampered receipts remain HOLD. Configured evidence,
+exact-head, clean-tree and duplicate-review guards remain unchanged.
 PR9220 remains outside this adjudication under the existing escalation rule.
 
 The new validation/adjudication revision requires its own normal check,

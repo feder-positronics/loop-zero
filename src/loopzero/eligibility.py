@@ -113,7 +113,7 @@ def review_envelopes(body: str) -> tuple[str, list[dict]]:
     return raw, envelopes if all(isinstance(item, dict) for item in envelopes) else []
 
 
-def recovery_reviews(repo: str, number: int, target: str, reviews: list[dict]) -> tuple[int, ...]:
+def recovery_reviews(repo: str, number: int, target: str | None, reviews: list[dict]) -> tuple[int, ...]:
     """The complete named incident must match before any spent marker is adjudicated."""
     if repo != "feder-positronics/intelflo" or _RECOVERY_TARGETS.get(number) != target:
         return ()
@@ -178,7 +178,7 @@ def recovery_baseline(number: int, reviews: list[dict]) -> bool:
 
 
 def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> str:
-    ids = recovery_reviews(repo, number, head, reviews)
+    ids = recovery_reviews(repo, number, recovery_target(repo, number), reviews)
     return ("\n<!-- loopzero:adjudication v=1 replaces=" + ",".join(map(str, ids))
             + " target=" + head + " -->") if ids else ""
 
@@ -205,15 +205,22 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     _, envelopes = review_envelopes(body)
     if not present and any(runners.codex_fatal_startup(item) for item in envelopes):
         return None
-    if recovery_target(repo, number):
-        if _RECOVERY_TARGETS[number] != head or not recovery_inspection(evidence, head):
+    if target := recovery_target(repo, number):
+        if not recovery_inspection(evidence, head):
             return None
-        ids = recovery_reviews(repo, number, head, reviews)
+        ids = recovery_reviews(repo, number, target, reviews)
         suffix = recovery_suffix(repo, number, head, reviews)
         leading = body.splitlines()
         if (not ids or len(leading) < 3 or leading[2] != suffix.lstrip("\n")
                 or not recovery_baseline(number, reviews)):
             return None
+        if head != target:
+            comparison = github.api_get(f"repos/{repo}/compare/{target}...{head}")
+            if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
+                return None
+            merge_base = comparison.get("merge_base_commit")
+            if not isinstance(merge_base, dict) or merge_base.get("sha") != target:
+                return None
     return latest if verdict else None
 
 
@@ -224,7 +231,7 @@ def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...], *
 
 def evaluate(repo: str, number: int, head: str, base: str,
              publishers: tuple[str, ...]) -> github.Readiness:
-    """Re-fetch reviews and threads; no local receipts, CI identity, ancestry or source execution."""
+    """Re-fetch reviews and threads; no local receipts, CI identity or source execution."""
     if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
     pr = github.pr_view(repo, number)

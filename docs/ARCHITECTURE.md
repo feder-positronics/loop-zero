@@ -189,7 +189,11 @@ lives in trusted eligibility code: eleven immutable receipt identities/digests
 and exact recovery targets, reused for budget selection and local/hosted
 eligibility. Original records/findings remain; successful replacements append
 a linkage marker and count normally. Mismatched identities, unknown commissioned
-inspection/model/effort evidence and target drift fail closed. PR9179's baseline
+inspection/model/effort evidence and non-descendant heads fail closed. Receipts
+are adjudicated against their own pinned target even after a repair commit;
+local Git ancestry and hosted immutable-SHA REST comparison admit descendants
+for ordinary full-scope primary review at the current head, with the existing
+suffix and review guards. PR9179's baseline
 requires its pinned primary and delta receipts to match the existing incident check.
 No override flag, local counter or separate registry is
 introduced; a second explicit deployment and OD admission remain necessary.
