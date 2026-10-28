@@ -19,11 +19,51 @@ CONTEXT = "Loop-zero Eligibility"
 
 
 # OD v40 2026-10-27 adjudication, ruling SHA256 d572145304f36bb175c30088967c3caf5d7ce0dec548e4215831126db81629cf.
+# OD v41 ruling 113 Notes 1–2 add only the six proven retained startup failures.
 # Immutable incident identities in trusted code, not a reusable override or local registry.
-_RECOVERY_TARGETS = {9179: "f3e8d79d49214163a395d760144002048c3c564f",
+_RECOVERY_TARGETS = {9173: "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
+                     9174: "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
+                     9175: "6e80b6ce590cc308792b914d8f02f5416ef77765",
+                     9179: "f3e8d79d49214163a395d760144002048c3c564f",
                      9284: "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
                      9275: "aab1b62bb242f62da4ceebcb593b0725942074e0"}
 _RECOVERY_RECEIPTS = {
+    5664087591: (
+        9173,
+        "074a3e6996d2815c318787f1ea88558b9f42ac0f",
+        "5199f71e0494c0316ad6ba38b1fa34c5e623257358cec7e099f3ccf589feaaf6",
+        "378ef6549f1217aa08ab4b14e4ed541c487f7ddc19984e48b21c5a96d4ddbbb6",
+    ),
+    5665739371: (
+        9173,
+        "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
+        "846fd82cf586e85654012de1d7eb271a93f1a4c440b06e13f2f9f952a5f6eb67",
+        "1dc00276651a2d2c2c0114a124d50c427ce7d17b540e14f341355f9e1eb02f5a",
+    ),
+    5664104781: (
+        9174,
+        "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
+        "acc92bb127db9f2402ba1085480f47146039f1260c67dd433715e46d51eeb271",
+        "68f0acaf342b443bb87f9beb7c94b3d40f37b29ac9ab286048daf4795da1f496",
+    ),
+    5664194446: (
+        9175,
+        "6e3f73a3a245352143cd155acbca104ee5ff6407",
+        "35ceeb61e9ed58476feb2702eb9d29cd624592e518dec0b77ecf53fdac0e5b4b",
+        "6193089860cb66898f1bfb6c74533144bf4632b2c8b0c7b11ed100f7fb8cce2d",
+    ),
+    5665844550: (
+        9175,
+        "6e80b6ce590cc308792b914d8f02f5416ef77765",
+        "50c5e9e695519d1fb1103f46456cfe156b891b7b09b57467b1e4f7be48346eb5",
+        "f83317d1d4085ad4f967d9b69222d4a08895ab4dcbe9ba0d1829d38289682212",
+    ),
+    5664567936: (
+        9179,
+        "bd5169e399a4767c33f710523b64d22d6ed56841",
+        "c27fe3cbeaac5e2bfdf7fcb958733174206723ebf706a18274557709fab39421",
+        "bcd2bf92a33a074ac2880abca7af1cd0ae047d1cfa9b58c3afc325e12379bc8c",
+    ),
     5667990257: (
         9179,
         "f3e8d79d49214163a395d760144002048c3c564f",
@@ -131,9 +171,8 @@ def review_projection(review: dict, head: str, repo: str, number: int):
 
 
 def recovery_baseline(number: int, reviews: list[dict]) -> bool:
-    # Retained 9179 primary5664567936@bd5169 has the fatal startup error (proof ad1a851f).
-    # It is NOT an adjudicated sixth receipt; no valid baseline can be supplied under this ruling.
-    return number != 9179
+    return number != 9179 or bool(recovery_reviews(
+        "feder-positronics/intelflo", number, _RECOVERY_TARGETS[number], reviews))
 
 
 def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> str:
