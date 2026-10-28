@@ -359,3 +359,58 @@ outside the watched surfaces. Changes to the architecture boundary require
 updating the checker selections as well as the guide. Keep version-specific
 external compatibility research in a dated note with verified primary sources,
 leaving this guide evergreen.
+
+### Explicit native Sol+Astra model-level pair
+
+The candidate CLI supports an explicit operator `review --sol-astra-pair
+REPO#PR@HEAD` channel. Repository configuration cannot enable this temporary
+model-level exception. Both fixed Codex models execute the same immutable full
+primary range; default author-family filtering remains unchanged otherwise.
+This does not claim cross-provider independence. Each genuine native 1/1
+context, session and exact raw stays separate inside the typed pair, rather
+than being relabeled as diff chunks. Native transport sidecars retain full
+stdout/stderr/exit privately before failure classification; model failures stop
+without fallback, and retained attempts prevent an automatic second launch.
+
+The bounded evidence-v2 projection binds both validated evidence-v1 leaves,
+the exact operator/publication context, raw/provenance digests, finding union
+and reconciliation commitment. Its pair marker requires the v2 block; missing
+or invalid pair data cannot fall back to legacy evidence. A disagreement holds
+publication until an operator inspects both saved outputs and uses `--repost
+--sol-astra-pair REPO#PR@HEAD --pair-reconcile REASON`. This retains the entire
+union and most severe verdict; it cannot dismiss findings or approve a
+request-changes result. A unanimous union is recorded explicitly. Confirmation
+may recognize a genuine request-changes publication while readiness still
+holds. One ordinary primary budget remains unchanged.
+
+Publication, saved/repost/confirmation and hosted eligibility share this
+validation. Public output omits raw commands, source contents and private
+paths; the restricted receipt and native sidecars remain retained for archive
+handoff. Digests are integrity commitments under the existing trusted
+publisher boundary, not cryptographic model/backend attestation. A coherent
+malicious publisher or operator remains outside that boundary. Hosted code
+must separately adopt the new parser before operational pair publication; a
+local candidate and fake tests do not establish hosted deployment. No external
+report/JSON importer or T3-envelope reconstruction path is provided.
+
+Pair capture now derives the original prompt commitment from the caller's actual
+`build_prompt` inputs before either native result is accepted. The same commitment
+is retained in the typed aggregate and both public member records; saved replay
+and hosted validation require it to match rather than accepting task-only drift.
+An exclusive, restricted head/kind attempt receipt is flushed before dispatch;
+competing or interrupted attempts remain blocked without reacquisition. Its
+state blocks subsequent dispatch after success, failure or process interruption.
+Outputs already delivered to the capture callback are retained; interruption before
+that callback may leave a reservation without output, which requires inspection.
+The existing ProcTimeout transport carries separate received stdout/stderr and
+measured elapsed time, retaining `.output` as its compatible stdout alias. A
+supervisor timeout has unknown native exit, distinct from an observed native124.
+Historical commissioned recovery remains v1-only and explicitly rejects v2.
+
+The native pair attempt reservation prevents overlapping or repeated process dispatches.
+Its file is flushed and fsynced before dispatch, but this is not a universal host-crash,
+power-loss, filesystem, or disk-failure durability guarantee. Adapter transport receipts
+retain stdout/stderr first, then a separate attempt-bound private final-file snapshot
+before exit classification and temporary HOME cleanup. Complete snapshots preserve exact
+bytes as base64 with length and SHA-256; absent, unreadable, or partial files are labelled
+honestly and cannot produce an approval. These private receipts are not public evidence.

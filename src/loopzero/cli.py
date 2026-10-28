@@ -566,6 +566,16 @@ def cmd_review(args: argparse.Namespace) -> int:
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
+    pair_grant = getattr(args, "sol_astra_pair", None)
+    pair_note = getattr(args, "pair_reconcile", "")
+    if pair_note and not args.repost:
+        raise CliError("reconcile only the saved pair after inspecting both actual outputs")
+    if pair_grant:
+        from loopzero import native_pair
+        if pair_grant != native_pair.authority(config.repo, pr.number, head) or args.model:
+            raise CliError("native pair requires exact explicit operator repo#PR@head and fixed models")
+    elif pair_note:
+        raise CliError("pair reconciliation requires explicit operator pair context")
     if not args.repost:
         config, runtime_source = _review_launch_config(args, wt, config)
     token = github.app_token()  # one identity for the publisher check and the post
@@ -591,12 +601,18 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
-        if not any(family not in authors for family in config.reviewers):
+        if not pair_grant and not any(family not in authors for family in config.reviewers):
             raise IndependentReviewerUnavailable(
                 _independence_message(authors, excluded, [], config.reviewers)
             )
         result = _load_review(wt, head, kind)
-        if result.family in authors:
+        if bool(result.members) != bool(pair_grant):
+            raise CliError("saved pair requires the same explicit operator context")
+        if result.members:
+            from loopzero import native_pair
+            result = native_pair.compose(result.members, pair_grant, pair_note or result.reconciliation,
+                                         prompt_sha256=result.pair_prompt_sha256)
+        if result.family in authors and not pair_grant:
             raise IndependentReviewerUnavailable(
                 f"saved reviewer family {result.family} contributed to this PR lineage; "
                 "run without --repost to obtain an independent review"
@@ -622,7 +638,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     else:
         try:
             result = _run_review(wt, config, head, kind, reviewed, args.model, args.effort,
-                                 runtime_source=runtime_source, publication=(config.repo, pr.number, publisher))
+                                 runtime_source=runtime_source, publication=(config.repo, pr.number, publisher),
+                                 pair_grant=pair_grant, pair_note=pair_note)
         except sandbox.SandboxUnavailable as exc:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
@@ -632,9 +649,13 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"worktree changed during review: HEAD before {head}, HEAD after {final_head}; "
                 f"dirty before False, dirty after {final_dirty}"
             )
-        prefix = review_marker(head, kind, "model")
+        prefix = review_marker(head, kind, "pair" if result.members else "model")
     suffix = eligibility.recovery_suffix(config.repo, pr.number, head, reviews)
-    evidence = runners.codex_evidence(result)
+    try:
+        evidence = runners.codex_evidence(result)
+    except runners.RunnerBadOutput:
+        _save_review(wt, result)
+        raise
     if evidence is not None and (evidence["repo"], evidence["pr"], evidence["publisher"]) != (config.repo, pr.number, publisher):
         raise CliError("native publication context changed; HOLD")
     if suffix and not eligibility.recovery_inspection(evidence, head):
@@ -675,7 +696,7 @@ def _review_verdict(result: ReviewResult) -> int:
 
 def _repost_prefix(result: ReviewResult, suffix: str = "") -> str:
     sessions = result.provenance["session_ids"]
-    return review_marker(result.head, result.kind, "repost") + suffix + "\n" + (
+    return review_marker(result.head, result.kind, "pair-repost" if result.members else "repost") + suffix + "\n" + (
         "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
         + ": " + ", ".join(f"`{session}`" for session in sessions)
     )
@@ -704,14 +725,15 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     if not evidence:
         return False
     if (publisher.casefold() not in {name.casefold() for name in trusted}
-            or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number) is None):
+            or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number,
+                                           publication_only=bool(result.members)) is None):
         raise CliError("publication is revoked, pending or untrusted")
     suffix = eligibility.recovery_suffix(config.repo, pr.number, result.head, reviews)
     payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
                                       legacy_settings=legacy, legacy_display=display)
                 for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
                 for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
-                for prefix in (review_marker(result.head, result.kind) + suffix, _repost_prefix(result, suffix))]
+                for prefix in (review_marker(result.head, result.kind, "pair" if result.members else "model") + suffix, _repost_prefix(result, suffix))]
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
@@ -744,6 +766,7 @@ def _run_review(
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
     model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
     publication: tuple[str, int, str] | None = None,
+    pair_grant: str | None = None, pair_note: str = "",
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
@@ -756,6 +779,8 @@ def _run_review(
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
+    if pair_grant:
+        return _run_native_pair(wt, config, head, kind, diff, task, publication, pair_grant, pair_note, effort, since)
     authors = runners.author_families(wt, head, lineage_base)
     candidates = [family for family in config.reviewers if family not in authors]
     failures: list[str] = []
@@ -819,6 +844,47 @@ def _run_review(
     return result
 
 
+def _run_native_pair(wt, config, head, kind, diff, task, publication, grant, note, effort, base):
+    from loopzero import native_pair
+    chosen, prompt = native_pair.request(config, head, kind, diff, task, publication, grant, effort, base)
+    receipt = _review_file(wt, head, kind)
+    if receipt.exists() or list(receipt.parent.glob(f"{receipt.stem}-pair-*-native.json")):
+        raise CliError("native pair attempt already retained; inspect it, do not retry models")
+    receipt.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    receipt.parent.chmod(0o700)
+    attempt = receipt.with_name(receipt.stem + "-pair-attempt.json")
+    try:
+        fd = os.open(attempt, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except FileExistsError as exc:
+        raise CliError("native pair attempt already reserved; inspect retained state, do not retry models") from exc
+    with os.fdopen(fd, "w+") as reservation:
+        state = {"native_pair_attempt": True, "authority": grant, "head": head, "kind": kind,
+                 "base": base, "prompt_sha256": prompt, "diff_sha256": native_pair.digest(diff),
+                 "models": native_pair.MODELS, "effort": chosen, "started_utc": datetime.now(UTC).isoformat()}
+        def update(status, error=None):
+            state.update(state=status, error=error, updated_utc=datetime.now(UTC).isoformat())
+            reservation.seek(0)
+            json.dump(state, reservation)
+            reservation.truncate()
+            reservation.flush()
+            os.fsync(reservation.fileno())
+        update("started")  # process-level ownership exists before the first native dispatch
+        def capture(index, event):
+            suffix = "last" if set(event) == {"output_last_message"} else "native"
+            path = receipt.with_name(f"{receipt.stem}-pair-{index}-{suffix}.json")
+            with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600), "w") as output:
+                json.dump({"native_pair_transport": True, "attempt": attempt.name,
+                           "model": native_pair.MODELS[index - 1], **event}, output)
+        try:
+            result = native_pair.run(wt, config, head, kind, diff, task, publication, grant, note, effort, base, capture)
+        except BaseException as exc:
+            update("interrupted" if isinstance(exc, (KeyboardInterrupt, SystemExit)) else "failed",
+                   type(exc).__name__ + ": " + str(exc))
+            raise
+        update("native_complete")
+        return result
+
+
 def _independence_message(
     authors: set[str], excluded: list[str], failures: list[str], configured: tuple[str, ...]
 ) -> str:
@@ -880,10 +946,23 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
         if data.get("kind") != kind:
             raise ValueError("saved review kind mismatch")
         findings = tuple(Finding(**f) for f in data["findings"])
-        result = ReviewResult(**{**data, "findings": findings})
+        members = []
+        for member in data.pop("members", []):
+            if member.get("members") or member.get("pair_authority") or member.get("pair_prompt_sha256") is not None:
+                raise ValueError("nested pair")
+            members.append(ReviewResult(**{**member, "findings": tuple(Finding(**f) for f in member["findings"]), "members": ()}))
+        result = ReviewResult(**{**data, "findings": findings, "members": tuple(members)})
     except (KeyError, TypeError, ValueError) as exc:
         raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
-    if not runners.validate_runner_result(result):
+    valid = runners.validate_runner_result(result)
+    if result.members and not valid:
+        from loopzero import native_pair
+        try:
+            native_pair.evidence(result, require_reconciliation=False)
+            valid = True  # still cannot publish without explicit reconciliation
+        except (runners.RunnerBadOutput, ValueError, TypeError, KeyError, AttributeError):
+            pass
+    if not valid:
         raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch")
     return result
 
@@ -907,7 +986,7 @@ def _cleanup(wt: Path) -> None:
             saved = json.loads(path.read_text())
             native = json.loads(saved.get("raw", "null"))
             envelopes = native if isinstance(native, list) else [native]
-            if saved.get("family") == "codex" and any(isinstance(item, dict) and "review_context" in item for item in envelopes):
+            if saved.get("members") or saved.get("native_pair_transport") or saved.get("native_pair_attempt") or saved.get("family") == "codex" and any(isinstance(item, dict) and "review_context" in item for item in envelopes):
                 print("retaining native review receipt and task clone pending verified archive handoff")
                 return
         except (ValueError, OSError, AttributeError, TypeError):
@@ -1293,7 +1372,9 @@ def build_parser() -> argparse.ArgumentParser:
         func=cmd_check
     )
     sub.add_parser("pr", help="push and open or refresh the draft PR").set_defaults(func=cmd_pr)
-    review = sub.add_parser("review", help="run one model review and post it on the PR")
+    review = sub.add_parser("review", help="run native review and post one canonical review")
+    review.add_argument("--sol-astra-pair", metavar="REPO#PR@HEAD", help="explicit operator model-level exception; both native full reviews required")
+    review.add_argument("--pair-reconcile", default="", help="operator reconciliation retaining all findings and the most severe verdict")
     review.add_argument(
         "--repost", action="store_true", help="post the saved review for HEAD without a model"
     )

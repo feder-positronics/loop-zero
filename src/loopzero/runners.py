@@ -12,6 +12,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -255,6 +256,7 @@ def _run(
     env_allowlist: tuple[str, ...],
     timeout: int,
     family: str,
+    capture=None,
 ) -> _proc.Completed:
     try:
         done = _proc.run(
@@ -268,7 +270,12 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
+        if capture:
+            capture({"exit_code": None, "stdout": exc.stdout, "stderr": exc.stderr,
+                     "duration_s": exc.duration_s, "timeout": True})
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", _tail(exc.output)) from exc
+    if capture:
+        capture({"exit_code": done.exit_code, "stdout": done.stdout, "stderr": done.stderr, "duration_s": done.duration_s})
     if done.exit_code != 0:
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
@@ -503,6 +510,8 @@ def _setting(value: object) -> str | None:
 
 def review_settings(result: ReviewResult) -> list[dict[str, dict[str, str | None]]]:
     """Keep native claims, launch configuration and optional requests distinct."""
+    if result.members:
+        return [call for member in result.members for call in review_settings(member)]
     try:
         decoded = json.loads(result.raw)
         envelopes = decoded if isinstance(decoded, list) else [decoded]
@@ -562,7 +571,7 @@ CODEX_HEADER = "<!-- loopzero:codex-evidence v=1 "
 CODEX_HEADER_LIMIT = 8192
 REVIEW_MARKER_RE = re.compile(
     r"<!--\s*loopzero:review\s+(?:v=1\s+)?head=([0-9a-fA-F]{7,40})\s+"
-    r"kind=(primary|delta)(?:\s+source=(?:model|repost))?\s*-->"
+    r"kind=(primary|delta)(?:\s+source=(?:model|repost|pair|pair-repost))?\s*-->"
 )
 
 
@@ -607,6 +616,9 @@ def _hex(value, length):
 
 
 def _valid_codex_evidence(value):
+    if isinstance(value, dict) and value.get("version") == 2:
+        from loopzero import native_pair
+        return native_pair.valid_public(value)
     """Strict closed schema, including exact context/order/offset bounds; no coercion."""
     fields = {
         "version",
@@ -713,7 +725,9 @@ def encode_codex_evidence(value):
     if not valid_codex_evidence(value):
         raise RunnerBadOutput("codex: invalid native evidence projection")
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
-    header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
+    from loopzero import native_pair
+    prefix = native_pair.HEADER if value.get("version") == 2 else CODEX_HEADER
+    header = prefix + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
     if len(header.encode()) > CODEX_HEADER_LIMIT:
         raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; HOLD")
     return header
@@ -723,7 +737,9 @@ def decode_codex_evidence(header):
     """Only one canonical ASCII field; its leading placement is checked by eligibility."""
     if not isinstance(header, str) or not header.isascii() or len(header) > CODEX_HEADER_LIMIT:
         raise ValueError("invalid evidence header")
-    match = re.fullmatch(re.escape(CODEX_HEADER) + r"([A-Za-z0-9_-]+) -->", header)
+    from loopzero import native_pair
+    prefix = native_pair.HEADER if header.startswith(native_pair.HEADER) else CODEX_HEADER
+    match = re.fullmatch(re.escape(prefix) + r"([A-Za-z0-9_-]+) -->", header)
     if not match:
         raise ValueError("invalid evidence encoding")
     token = match[1]
@@ -988,6 +1004,9 @@ def _codex_evidence(result):
 
 
 def codex_evidence(result):
+    if result.members or result.pair_authority or result.pair_prompt_sha256 is not None:
+        from loopzero import native_pair
+        return native_pair.evidence(result)
     if result.family != "codex":
         return None
     if not validate_runner_result(result):
@@ -1128,9 +1147,41 @@ def _review_claude(
     )
 
 
+def _codex_final_file(path: Path) -> dict:
+    """Bound a no-follow snapshot to the initial size of an owned regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return {"status": "absent"}
+    except OSError as exc:
+        return {"status": "unreadable", "error_type": type(exc).__name__}
+    data = bytearray()
+    status, error = "complete", None
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1:
+            return {"status": "unreadable", "error_type": "NotOwnedRegularFile"}
+        while len(data) < before.st_size:
+            block = os.read(fd, min(65536, before.st_size - len(data)))
+            if not block:
+                break
+            data.extend(block)
+        after = os.fstat(fd)
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns) or len(data) != after.st_size:
+            status = "partial"
+    except (OSError, MemoryError) as exc:
+        status, error = "partial" if data else "unreadable", type(exc).__name__
+    finally:
+        os.close(fd)
+    return {"status": status, "error_type": error, "byte_count": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes_base64": base64.b64encode(data).decode("ascii")}
+
+
 def _review_codex(
     prompt: str, *, policy: str, cwd: Path, head: str, kind: str, timeout: int,
     ro_paths: tuple[str, ...], model: str | None, effort: str | None, review_context: dict | None = None,
+    capture=None,
 ) -> ReviewResult:
     with tempfile.TemporaryDirectory(prefix="loopzero-review-home-") as tmp:
         home = Path(tmp)
@@ -1172,12 +1223,25 @@ def _review_codex(
             review_context = {**review_context,
                 "binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                 "argv_sha256": hashlib.sha256(json.dumps([*prefix, *argv]).encode()).hexdigest()}
+        final = None
+        def capture_transport(event):
+            nonlocal final
+            capture(event)  # streams survive even if the subsequent file snapshot fails
+            final = _codex_final_file(last_file)
+            capture({"output_last_message": final})
         done = _run(
             [*prefix, *argv], cwd=cwd, prompt=prompt,
             env_allowlist=(*config.env_allowlist, *CODEX_AUTH_ENV), timeout=timeout,
             family="codex",
+            **({"capture": capture_transport} if capture else {}),
         )
-        message = last_file.read_text(encoding="utf-8") if last_file.exists() else ""
+        final = final if final is not None else _codex_final_file(last_file)
+        if final["status"] not in ("complete", "absent"):
+            raise RunnerBadOutput("codex: final message file could not be read completely")
+        try:
+            message = base64.b64decode(final.get("bytes_base64", "")).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RunnerBadOutput("codex: final message is not UTF-8") from exc
     if not message.strip():
         raise RunnerBadOutput("codex: no final message written", _tail(done.stdout + done.stderr))
     try:
@@ -1214,6 +1278,7 @@ def review_with(
     effort: str | None = None,
     chunk: tuple[int, int] | None = None,
     review_context: dict | None = None,
+    capture=None,
 ) -> ReviewResult:
     """Run one review of ``diff`` at ``head`` with the given model family."""
     if family not in REVIEWER_FAMILIES:
@@ -1223,6 +1288,10 @@ def review_with(
     prompt = build_prompt(kind=kind, head=head, task_text=task_text, diff=diff, chunk=chunk)
     adapter = _review_claude if family == "claude" else _review_codex
     policy, extra = _review_policy(kind), {}
+    if capture is not None:
+        if family != "codex":
+            raise ValueError("native pair capture requires codex")
+        extra["capture"] = capture
     if family == "codex" and review_context is not None:
         context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
                    "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
@@ -1348,6 +1417,13 @@ def _split_bytes(text: str, budget: int) -> list[str]:
 
 def validate_runner_result(result: ReviewResult) -> bool:
     """Return whether saved provenance agrees with the provider envelope(s)."""
+    if result.members or result.pair_authority or result.pair_prompt_sha256 is not None:
+        from loopzero import native_pair
+        try:
+            native_pair.evidence(result)
+            return True
+        except (RunnerBadOutput, ValueError, TypeError, KeyError, AttributeError):
+            return False
     provenance = result.provenance
     if (
         not isinstance(provenance, dict)

@@ -19,12 +19,13 @@ set -euo pipefail
 # OD approval 2026-10-27: structured startup validation, closed-five adjudication, local/hosted eligibility and owning regressions.
 # OD approval 2026-10-27: complete Codex raw transport, strict public projection and preserved boundary proofs.
 # OD ruling 125(a), ruling 123 Note 1: measured source overage +7 (6000 -> 6007).
-SRC_CAP=6007
+# OD40 2026-10-28: reviewed full native pair, private failed-output retention and shared consumers; exact owning coverage, zero headroom.
+SRC_CAP=6471
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
-TESTS_CAP=9346
+TESTS_CAP=10510
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \
