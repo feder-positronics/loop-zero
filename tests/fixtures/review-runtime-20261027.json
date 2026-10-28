@@ -63,18 +63,5 @@
     },
     "submitted_at": "2026-10-27T13:01:51Z",
     "html_url": "https://github.com/feder-positronics/intelflo/pull/9275#pullrequestreview-5667433401"
-  },
-  {
-    "repo": "feder-positronics/intelflo",
-    "number": 9179,
-    "id": 5664567936,
-    "commit_id": "bd5169e399a4767c33f710523b64d22d6ed56841",
-    "body": "<!-- loopzero:review v=1 head=bd5169e399a4767c33f710523b64d22d6ed56841 kind=primary source=model -->\nloopzero primary review by codex on `bd5169e399a4767c33f710523b64d22d6ed56841`, 31.7s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17c9b-58aa-7332-9626-0762d371161d\",\"token_usage\":{\"input_tokens\":52126,\"cached_input_tokens\":25856,\"cache_write_input_tokens\":0,\"output_tokens\":341,\"reasoning_output_tokens\":272},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17c9b-58aa-7332-9626-0762d371161d\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":52126,\"cached_input_tokens\":25856,\"cache_write_input_tokens\":0,\"output_tokens\":341,\"reasoning_output_tokens\":272}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
-    "state": "COMMENTED",
-    "user": {
-      "login": "loopzero-feder-positronics[bot]"
-    },
-    "submitted_at": "2026-10-27T09:05:50Z",
-    "html_url": "https://github.com/feder-positronics/intelflo/pull/9179#pullrequestreview-5664567936"
   }
 ]

@@ -1,0 +1,80 @@
+[
+  {
+    "repo": "feder-positronics/intelflo",
+    "number": 9179,
+    "id": 5664567936,
+    "commit_id": "bd5169e399a4767c33f710523b64d22d6ed56841",
+    "body": "<!-- loopzero:review v=1 head=bd5169e399a4767c33f710523b64d22d6ed56841 kind=primary source=model -->\nloopzero primary review by codex on `bd5169e399a4767c33f710523b64d22d6ed56841`, 31.7s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17c9b-58aa-7332-9626-0762d371161d\",\"token_usage\":{\"input_tokens\":52126,\"cached_input_tokens\":25856,\"cache_write_input_tokens\":0,\"output_tokens\":341,\"reasoning_output_tokens\":272},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17c9b-58aa-7332-9626-0762d371161d\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":52126,\"cached_input_tokens\":25856,\"cache_write_input_tokens\":0,\"output_tokens\":341,\"reasoning_output_tokens\":272}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "loopzero-feder-positronics[bot]"
+    },
+    "submitted_at": "2026-10-27T09:05:50Z",
+    "html_url": "https://github.com/feder-positronics/intelflo/pull/9179#pullrequestreview-5664567936"
+  },
+  {
+    "repo": "feder-positronics/intelflo",
+    "number": 9173,
+    "id": 5664087591,
+    "commit_id": "074a3e6996d2815c318787f1ea88558b9f42ac0f",
+    "body": "<!-- loopzero:review v=1 head=074a3e6996d2815c318787f1ea88558b9f42ac0f kind=primary source=model -->\nloopzero primary review by codex on `074a3e6996d2815c318787f1ea88558b9f42ac0f`, 20.8s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17c7a-e5ed-7ac2-a561-7c88c5b0431b\",\"token_usage\":{\"input_tokens\":61257,\"cached_input_tokens\":30336,\"cache_write_input_tokens\":0,\"output_tokens\":218,\"reasoning_output_tokens\":116},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17c7a-e5ed-7ac2-a561-7c88c5b0431b\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":61257,\"cached_input_tokens\":30336,\"cache_write_input_tokens\":0,\"output_tokens\":218,\"reasoning_output_tokens\":116}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "loopzero-feder-positronics[bot]"
+    },
+    "submitted_at": "2026-10-27T08:30:13Z",
+    "html_url": "https://github.com/feder-positronics/intelflo/pull/9173#pullrequestreview-5664087591"
+  },
+  {
+    "repo": "feder-positronics/intelflo",
+    "number": 9173,
+    "id": 5665739371,
+    "commit_id": "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
+    "body": "<!-- loopzero:review v=1 head=f07d09b764c0a8c06929bf0f02b877a58a4c1ca4 kind=delta source=model -->\nloopzero delta review by codex on `f07d09b764c0a8c06929bf0f02b877a58a4c1ca4`, 13.0s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17cf3-4a99-70b1-855b-5841c054384d\",\"token_usage\":{\"input_tokens\":42893,\"cached_input_tokens\":33536,\"cache_write_input_tokens\":0,\"output_tokens\":120,\"reasoning_output_tokens\":38},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17cf3-4a99-70b1-855b-5841c054384d\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":42893,\"cached_input_tokens\":33536,\"cache_write_input_tokens\":0,\"output_tokens\":120,\"reasoning_output_tokens\":38}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "loopzero-feder-positronics[bot]"
+    },
+    "submitted_at": "2026-10-27T10:41:35Z",
+    "html_url": "https://github.com/feder-positronics/intelflo/pull/9173#pullrequestreview-5665739371"
+  },
+  {
+    "repo": "feder-positronics/intelflo",
+    "number": 9174,
+    "id": 5664104781,
+    "commit_id": "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
+    "body": "<!-- loopzero:review v=1 head=c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b kind=primary source=model -->\nloopzero primary review by codex on `c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b`, 19.0s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17c7c-5e3f-7ed1-9e67-68bfff9b13ff\",\"token_usage\":{\"input_tokens\":47992,\"cached_input_tokens\":36096,\"cache_write_input_tokens\":0,\"output_tokens\":188,\"reasoning_output_tokens\":129},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17c7c-5e3f-7ed1-9e67-68bfff9b13ff\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":47992,\"cached_input_tokens\":36096,\"cache_write_input_tokens\":0,\"output_tokens\":188,\"reasoning_output_tokens\":129}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "loopzero-feder-positronics[bot]"
+    },
+    "submitted_at": "2026-10-27T08:31:48Z",
+    "html_url": "https://github.com/feder-positronics/intelflo/pull/9174#pullrequestreview-5664104781"
+  },
+  {
+    "repo": "feder-positronics/intelflo",
+    "number": 9175,
+    "id": 5664194446,
+    "commit_id": "6e3f73a3a245352143cd155acbca104ee5ff6407",
+    "body": "<!-- loopzero:review v=1 head=6e3f73a3a245352143cd155acbca104ee5ff6407 kind=primary source=model -->\nloopzero primary review by codex on `6e3f73a3a245352143cd155acbca104ee5ff6407`, 17.3s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17c82-8efa-7473-9f20-6f4d1f492074\",\"token_usage\":{\"input_tokens\":54644,\"cached_input_tokens\":27136,\"cache_write_input_tokens\":0,\"output_tokens\":150,\"reasoning_output_tokens\":77},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17c82-8efa-7473-9f20-6f4d1f492074\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":54644,\"cached_input_tokens\":27136,\"cache_write_input_tokens\":0,\"output_tokens\":150,\"reasoning_output_tokens\":77}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "loopzero-feder-positronics[bot]"
+    },
+    "submitted_at": "2026-10-27T08:38:32Z",
+    "html_url": "https://github.com/feder-positronics/intelflo/pull/9175#pullrequestreview-5664194446"
+  },
+  {
+    "repo": "feder-positronics/intelflo",
+    "number": 9175,
+    "id": 5665844550,
+    "commit_id": "6e80b6ce590cc308792b914d8f02f5416ef77765",
+    "body": "<!-- loopzero:review v=1 head=6e80b6ce590cc308792b914d8f02f5416ef77765 kind=delta source=model -->\nloopzero delta review by codex on `6e80b6ce590cc308792b914d8f02f5416ef77765`, 11.6s: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (CLI claims, not backend attestation):\n- Call 1: requested model gpt-6-astra (effort medium); CLI-reported model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\"type\":\"codex_exec_result\",\"session_id\":\"01a17cfb-dda3-7503-95b6-dc395cbfcea9\",\"token_usage\":{\"input_tokens\":43476,\"cached_input_tokens\":21632,\"cache_write_input_tokens\":0,\"output_tokens\":159,\"reasoning_output_tokens\":57},\"final_message\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\",\"events\":[{\"type\":\"thread.started\",\"thread_id\":\"01a17cfb-dda3-7503-95b6-dc395cbfcea9\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"error\",\"message\":\"Code Mode is unavailable because failed to spawn code-mode host /home/marcin/.codex/packages/standalone/releases/0.163.0-x86_64-unknown-linux-musl/bin/codex-code-mode-host: host executable was not found. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.\"}},{\"type\":\"turn.started\"},{\"type\":\"item.completed\",\"item\":{\"id\":\"item_1\",\"type\":\"agent_message\",\"text\":\"{\\\"verdict\\\":\\\"approve\\\",\\\"findings\\\":[]}\"}},{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":43476,\"cached_input_tokens\":21632,\"cache_write_input_tokens\":0,\"output_tokens\":159,\"reasoning_output_tokens\":57}}],\"reported_settings\":{\"model\":null,\"effort\":null}}\n```\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "loopzero-feder-positronics[bot]"
+    },
+    "submitted_at": "2026-10-27T10:50:56Z",
+    "html_url": "https://github.com/feder-positronics/intelflo/pull/9175#pullrequestreview-5665844550"
+  }
+]

@@ -127,7 +127,8 @@ of tool calls alone do not invalidate a review.
 
 OD v40's reviewed incident adjudication applies only to IntelFlo reviews
 5667990257, 5667628969, 5667664997, 5666873014 and 5667433401. OD v41 ruling
-113 Note 1 adds only retained primary5664567936 for the same incident. Trusted code pins
+113 Notes 1–2 add only retained primary5664567936 and the proven startup failures
+5664087591, 5665739371, 5664104781, 5664194446 and 5665844550. Trusted code pins
 the repository, PR, publisher, review ID, original head, full body/raw digests
 and authorized recovery target. All original publications, markers, authorship,
 findings and historical dispositions remain unchanged. A replacement appends
@@ -145,7 +146,11 @@ HOLD. These conditions apply to the named commissioned recoveries, not to
 legitimate tool-free reviews whose evidence is entirely in their prompt.
 PR9179 at f3e8d79d49214163a395d760144002048c3c564f requires the same full-scope
 primary inspection after both its retained primary5664567936 and delta5667990257
-match the pinned receipt checks. Head drift returns to OD.
+match the pinned receipt checks. The same primary recovery applies to PR9173 at
+f07d09b764c0a8c06929bf0f02b877a58a4c1ca4, PR9174 at
+c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b and PR9175 at
+6e80b6ce590cc308792b914d8f02f5416ef77765. Only their named fatal receipts are
+adjudicated; all other reviews remain counted. Head drift returns to OD.
 PR9220 remains outside this adjudication under the existing escalation rule.
 
 The new validation/adjudication revision requires its own normal check,

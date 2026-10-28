@@ -15,8 +15,12 @@ from tests.test_runners import APPROVE, _fake_claude, _fake_codex, _native_codex
 repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
 fake_bwrap = test_runners.fake_bwrap
 
-RECEIPTS = json.loads((Path(__file__).parent / "fixtures/review-runtime-20261027.json").read_text())
+RECEIPTS = [row for date in ("20261027", "20261028") for row in json.loads(
+    (Path(__file__).parent / f"fixtures/review-runtime-{date}.json").read_text())]
 TARGETS = {
+    9173: "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
+    9174: "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
+    9175: "6e80b6ce590cc308792b914d8f02f5416ef77765",
     9179: "f3e8d79d49214163a395d760144002048c3c564f",
     9284: "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
     9275: "aab1b62bb242f62da4ceebcb593b0725942074e0",
@@ -148,7 +152,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
             _review("codex", tmp_path)
 
 
-@pytest.mark.parametrize("number", [9179, 9284, 9275])
+@pytest.mark.parametrize("number", TARGETS)
 @pytest.mark.parametrize(
     "change",
     [
@@ -194,7 +198,7 @@ def test_adjudication_matches_complete_pinned_incident_only(number, change):
     assert bool(found) is (change == "none")
 
 
-@pytest.mark.parametrize("number", [9284, 9275])
+@pytest.mark.parametrize("number", TARGETS)
 def test_replacement_budget_counts_normally_and_originals_are_unchanged(
     number, tmp_path, monkeypatch
 ):
@@ -255,7 +259,7 @@ def inspected_replacement(number):
     return publish_replacement(row, json.loads(native.raw))
 
 
-@pytest.mark.parametrize("number", [9284, 9275])
+@pytest.mark.parametrize("number", TARGETS)
 @pytest.mark.parametrize(
     "change",
     [
@@ -345,23 +349,25 @@ def test_mismatched_historical_identity_holds_budget_and_eligibility(
     assert eligible_recovery([*rows, inspected_replacement(9284)], 9284, target) is None
 
 
-def test_9179_adjudicated_primary_recovers_without_changing_other_receipts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("number", [9179, 9173, 9174, 9175])
+def test_adjudicated_primary_recovers_without_changing_other_receipts(tmp_path, monkeypatch, number):
     snapshot = copy.deepcopy(RECEIPTS)
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
-    assert eligibility.recovery_baseline(9179, RECEIPTS)
-    for number in (9284, 9275, 9220):
-        assert eligibility.recovery_baseline(number, RECEIPTS)
-    rows = [r for r in RECEIPTS if r["number"] == 9179]
-    markers = cli._lineage_markers(
-        tmp_path, rows, TARGETS[9179], PUBLISHER,
-        repo="feder-positronics/intelflo", number=9179,
-    )
-    assert cli._decide_kind(markers, TARGETS[9179]) == ("primary", None)
-    assert eligible_recovery([*RECEIPTS, inspected_replacement(9179)], 9179, TARGETS[9179])
-    for omitted in (5664567936, 5667990257):
-        assert not eligibility.recovery_baseline(
-            9179, [r for r in RECEIPTS if r["id"] != omitted]
+    assert eligibility.recovery_baseline(number, RECEIPTS)
+    for other in (9284, 9275, 9220):
+        assert eligibility.recovery_baseline(other, RECEIPTS)
+    rows = [r for r in RECEIPTS if r["number"] == number]
+    def markers(history):
+        return cli._lineage_markers(
+            tmp_path, history, TARGETS[number], PUBLISHER,
+            repo="feder-positronics/intelflo", number=number,
         )
+    assert cli._decide_kind(markers(rows), TARGETS[number]) == ("primary", None)
+    assert eligible_recovery([*rows, inspected_replacement(number)], number, TARGETS[number])
+    for omitted in rows:
+        incomplete = [r for r in rows if r["id"] != omitted["id"]]
+        with pytest.raises(cli.CliError, match="unverified; HOLD"):
+            markers(incomplete)
     assert RECEIPTS == snapshot
 
 
