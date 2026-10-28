@@ -1084,3 +1084,72 @@ returned `codex-cli 0.164.0` (exit 0) and `exec --help` (exit 0) advertising
 Binary SHA256: `b93f6811d3f653f0fb83be4050d857fb9abbb111dfa2ce160563327daff7f306`.
 This is research evidence, not a runtime hash gate or backend attestation.
 No installation change or live model call was used for verification.
+
+### Codex 0.165.0 instruction-channel verification — October 28, 2026
+
+Following [#290](https://github.com/feder-positronics/loop-zero/pull/290),
+reviewed the [release notes](https://github.com/openai/codex/releases/tag/rust-v0.165.0)
+and [tag diff](https://github.com/openai/codex/compare/rust-v0.164.0...rust-v0.165.0).
+`git ls-remote` resolved annotated tag `rust-v0.165.0`, object
+`e374836b2728d9b7aa981c2902649e640a2edaa8`, to source commit
+`360319d8dee62d87e2d59fc0c21805d79519cfed`. A fresh shallow source clone at
+`~/.cache/intelflo-scratch/r114-codex0165/codex-source` was compared with latest
+verified 0.164.0, commit `6aaac694803004a63c6f393d153c96d22521a6b9`:
+
+- [TOML override parsing](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/utils/cli/src/config_override.rs#L49),
+  [recognized developer_instructions](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/config/src/config_toml.rs#L256),
+  [CLI layer assembly](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/config/src/loader/mod.rs#L426),
+  [ConfigBuilder](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/config/mod.rs#L1574) and
+  [harness-over-config precedence](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/config/mod.rs#L4197)
+  retain the configured string. Unknown-key validation remains
+  [strict-mode-only](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/config/src/loader/mod.rs#L263).
+- Exec [parses overrides](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/exec/src/lib.rs#L354), supplies
+  [no harness instruction override](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/exec/src/lib.rs#L606), and forwards
+  them to [ConfigBuilder](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/exec/src/lib.rs#L617) and
+  [the in-process client](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/exec/src/lib.rs#L731).
+  [Client forwarding](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/app-server-client/src/lib.rs#L277),
+  [ConfigManager construction](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/app-server/src/in_process.rs#L430) and
+  [thread config loading](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/app-server/src/config_manager.rs#L565)
+  are unchanged; JSON output and ephemeral mode do not replace the override.
+- [Session copy](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/session/mod.rs#L938),
+  [context assembly](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/session/mod.rs#L4648) and
+  [message emission](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/session/mod.rs#L4837)
+  preserve [developer role and exact text](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/context/developer_instructions.rs#L29).
+  [Fragment rendering](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/context-fragments/src/fragment.rs#L94),
+  [aggregation](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/context_manager/updates.rs#L10) and
+  [response construction](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/context-fragments/src/annotated_content.rs#L146)
+  are byte-identical to 0.164.0. The separate Guardian branch still excludes Exec.
+- [AGENTS discovery](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/agents_md.rs#L58) and
+  [user-role rendering](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/context/user_instructions.rs#L23)
+  are unchanged, including existing project trust and size limits. Repository
+  instructions remain a native authority surface, not inert review data.
+- [ignore-user-config loading](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/config/src/loader/mod.rs#L515) still
+  returns an empty user layer, while [home resolution](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/utils/home-dir/src/lib.rs#L13) is unchanged.
+  Exec retains [ephemeral transport](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/exec/src/lib.rs#L1461); session
+  [persistence](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/session/session.rs#L1077) and
+  [state DB](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/session/session.rs#L1196) remain disabled for ephemeral sessions.
+  loop-zero's private HOME and auth-only bind still exclude host config/history;
+  this does not claim to suppress managed or project configuration.
+- [Code Mode helper discovery](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/install-context/src/lib.rs#L175) retains
+  the sibling executable fallback. That file only moves tests; `code-mode`,
+  `code-mode-host` and `code-mode-runtime` have no tag diff. Existing helper-only
+  mounting and [spawn-error text](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/code-mode/src/remote_session/connection.rs#L76) remain compatible.
+
+The inspected changes add GCP provider handling, Guardian timeout settings,
+attached/forked-thread behavior, model-specific history/notes text and
+[memory v2 selection for fresh profiles](https://github.com/openai/codex/blob/360319d8dee62d87e2d59fc0c21805d79519cfed/codex-rs/core/src/config/mod.rs#L3648).
+These do not demote the configured reviewer policy or expose host state through
+loop-zero's existing mounts. Required instruction/config transport and isolation
+properties remain intact; no breaking link was found.
+
+Read-only probes of the installed
+`~/.codex/packages/standalone/releases/0.165.0-x86_64-unknown-linux-musl/bin/codex`
+returned `codex-cli 0.165.0` and `exec --help` (both exit 0), including
+`--ignore-user-config`, `-c`, `-m`, `--json`, `--sandbox danger-full-access`,
+`--cd`, `--ephemeral`, `--skip-git-repo-check`, `--output-schema`,
+`--output-last-message` and stdin `-`. Codex SHA256:
+`c06a67fd8ac76508dc78bd99ce20c9f317b8d568beda59485f3f4134df9962d5`;
+its existing sibling `codex-code-mode-host` SHA256:
+`522935d4392ec9674fab60b239b5495992c6a93e4deb65113a216b6f5451ccd4`.
+These hashes are research evidence, not runtime hash gates or backend attestation.
+No live model call, independent review, installation change or adoption was run.
