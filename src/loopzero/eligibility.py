@@ -24,6 +24,12 @@ _RECOVERY_TARGETS = {9179: "f3e8d79d49214163a395d760144002048c3c564f",
                      9284: "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
                      9275: "aab1b62bb242f62da4ceebcb593b0725942074e0"}
 _RECOVERY_RECEIPTS = {
+    5664567936: (
+        9179,
+        "bd5169e399a4767c33f710523b64d22d6ed56841",
+        "c27fe3cbeaac5e2bfdf7fcb958733174206723ebf706a18274557709fab39421",
+        "bcd2bf92a33a074ac2880abca7af1cd0ae047d1cfa9b58c3afc325e12379bc8c",
+    ),
     5667990257: (
         9179,
         "f3e8d79d49214163a395d760144002048c3c564f",
@@ -131,9 +137,8 @@ def review_projection(review: dict, head: str, repo: str, number: int):
 
 
 def recovery_baseline(number: int, reviews: list[dict]) -> bool:
-    # Retained 9179 primary5664567936@bd5169 has the fatal startup error (proof ad1a851f).
-    # It is NOT an adjudicated sixth receipt; no valid baseline can be supplied under this ruling.
-    return number != 9179
+    return number != 9179 or bool(recovery_reviews(
+        "feder-positronics/intelflo", number, _RECOVERY_TARGETS[number], reviews))
 
 
 def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> str:

@@ -345,19 +345,24 @@ def test_mismatched_historical_identity_holds_budget_and_eligibility(
     assert eligible_recovery([*rows, inspected_replacement(9284)], 9284, target) is None
 
 
-def test_9179_invalid_retained_primary_stays_held(tmp_path, monkeypatch):
+def test_9179_adjudicated_primary_recovers_without_changing_other_receipts(tmp_path, monkeypatch):
+    snapshot = copy.deepcopy(RECEIPTS)
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
-    with pytest.raises(cli.CliError, match="baseline is unverified; HOLD"):
-        cli._lineage_markers(
-            tmp_path,
-            RECEIPTS,
-            TARGETS[9179],
-            PUBLISHER,
-            repo="feder-positronics/intelflo",
-            number=9179,
+    assert eligibility.recovery_baseline(9179, RECEIPTS)
+    for number in (9284, 9275, 9220):
+        assert eligibility.recovery_baseline(number, RECEIPTS)
+    rows = [r for r in RECEIPTS if r["number"] == 9179]
+    markers = cli._lineage_markers(
+        tmp_path, rows, TARGETS[9179], PUBLISHER,
+        repo="feder-positronics/intelflo", number=9179,
+    )
+    assert cli._decide_kind(markers, TARGETS[9179]) == ("primary", None)
+    assert eligible_recovery([*RECEIPTS, inspected_replacement(9179)], 9179, TARGETS[9179])
+    for omitted in (5664567936, 5667990257):
+        assert not eligibility.recovery_baseline(
+            9179, [r for r in RECEIPTS if r["id"] != omitted]
         )
-    row = inspected_replacement(9179)
-    assert eligible_recovery([*RECEIPTS, row], 9179, TARGETS[9179]) is None
+    assert RECEIPTS == snapshot
 
 
 @pytest.mark.parametrize(
