@@ -23,6 +23,26 @@ continue there. Workers report on the owning PR or issue, directly or through
 the parent; the coordinator reconstructs delivery from live remote state rather
 than inbound messages.
 
+**Provider-portable handoff.** If an owner's provider is exhausted or unavailable,
+use a fresh successor on another provider or model only within an explicit
+standing route; preserve commissioned choices and runtime permissions. Otherwise
+report the unavailable route and wait for owner direction. Confirm the old
+writer and its tool tree have stopped or are fenced before the successor acts.
+Keep the existing handoff file current after consequential decisions, so recovery
+never depends on a final summary from the failed session. Include the owning
+issue/PR and evidence links; current authority, holds and decision sources;
+worktree path, branch, head and dirty state; checks and interrupted tool outcomes;
+live child/task IDs, pending results or decisions, schedules and wakeups; current
+reply target and the next authorized action. State lives in Git/GitHub plus this
+handoff, not in provider memory or a provider-specific resume token.
+The successor first reconciles live remote state and uncertain external effects;
+a lost tool response is not proof the write failed. Adopt partial work without
+resetting or cleaning away the diff, and never replay whole commands blindly.
+Revalidate holds and recipients, then confirm child and wakeup ownership transfer
+before retiring the predecessor. Start with read-only coordination; if the new
+family writes, retain every writer's truthful attribution and recheck independent
+review eligibility. A provider change grants no new authority or review exception.
+
 ## Team roles
 
 A long-running team gives each role one current owner. Owners read state from
