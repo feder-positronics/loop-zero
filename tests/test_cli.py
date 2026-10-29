@@ -189,8 +189,11 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     lines = out.splitlines()
     assert code == 0 and lines[-1] == "PASS"
     assert lines[0].startswith("checks pinned to origin/main@")
-    assert lines[1:3] == ["running: echo ok", "running: test -f README.md"]
-    assert lines[3].startswith("exit 0") and lines[3].endswith("  echo ok")
+    assert lines[1] == "running: echo ok"
+    assert lines[2].startswith("stage 1/2: exit 0 (")
+    assert lines[3] == "running: test -f README.md"
+    assert lines[4].startswith("stage 2/2: exit 0 (")
+    assert lines[5].startswith("exit 0") and lines[5].endswith("  echo ok")
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
     assert report["dirty"] is False

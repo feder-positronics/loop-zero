@@ -65,7 +65,11 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    focused tests start early. `check` runs deterministic checks in a read-only
    source sandbox. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
-   progress before each command. Trusted-base commands remain authoritative;
+   progress before each command, metadata-only stage heartbeats every 30 seconds
+   (including silent children), and exit code/duration immediately after each stage.
+   Heartbeats stop on completion or cancellation and never supply a verdict; child
+   streams remain captured for the existing final report and failing output tail.
+   Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.

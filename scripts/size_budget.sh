@@ -22,12 +22,16 @@ set -euo pipefail
 # OD40 2026-10-28: reviewed full native pair, private failed-output retention and shared consumers; exact owning coverage, zero headroom.
 # OD48 2026-10-29: main-only integration growth +75 source / +134 tests;
 # PR-owned deltas unchanged (+539/+1298); exact 6546/10644, zero headroom.
-SRC_CAP=6546
+# OD48 ruling 2026-10-29 (#321): metadata-only stage liveness is a tiny CLI change;
+# exact own +35 source / +93 tests on original 776bc1f6 (6007/9346).
+# Main 917a3237 adds +539/+1298 to that base (6546/10644); only main-growth
+# shifts are authorized: integrated caps 6581/10737, zero headroom.
+SRC_CAP=6581
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
-TESTS_CAP=10644
+TESTS_CAP=10737
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

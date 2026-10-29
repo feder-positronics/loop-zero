@@ -379,3 +379,93 @@ def test_real_sandbox_uv_run_offline(git_repo):
 
 def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
     return [(argv[i + 1], argv[i + 2]) for i, a in enumerate(argv) if a == flag]
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_silent_stage_reports_live_metadata_then_completion(
+    git_repo, bwrap_log, monkeypatch, exit_code
+):
+    import re
+    import time
+
+    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
+    events = []
+    monkeypatch.setenv("LZ_KEEP", "credential-value")
+    command = f'sleep 0.3; echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
+    cfg = make_config(checks=(command, "echo next"))
+    report = sandbox.run_checks(
+        cfg, git_repo, progress=lambda command: events.append(command), status=events.append
+    )
+    assert report.results[0].exit_code == exit_code
+    assert report.results[0].tail == "credential-value\nprivate-stderr"
+    statuses = [event for event in events if event not in cfg.checks]
+    heartbeats = [event for event in statuses if "running" in event]
+    assert heartbeats and all(re.fullmatch(
+        r"stage [12]/2: running \([0-9]+\.[0-9]s elapsed\)", event
+    ) for event in heartbeats)
+    completion = next(event for event in statuses if f"exit {exit_code}" in event)
+    assert re.fullmatch(rf"stage 1/2: exit {exit_code} \([0-9]+\.[0-9]s\)", completion)
+    assert all("private" not in event and "credential-value" not in event for event in statuses)
+    assert any(event.startswith("stage 1/2: running") for event in statuses)
+    assert all(not event.startswith("stage 1/2: running")
+               for event in events[events.index(completion) + 1:])
+    if exit_code:
+        assert len(report.results) == 1 and "echo next" not in events
+        assert statuses[-1] == completion
+    else:
+        assert events.index(completion) < events.index("echo next")
+        assert statuses[-1].startswith("stage 2/2: exit 0")
+    stopped = list(events)
+    time.sleep(0.1)
+    assert events == stopped
+
+
+def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log, monkeypatch):
+    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 30.0)
+    events = []
+    report = sandbox.run_checks(
+        make_config(checks=("echo secret; exit 17", "echo never")), git_repo,
+        status=events.append,
+    )
+    assert len(events) == 1 and events[0].startswith("stage 1/2: exit 17 (")
+    assert report.results[0].tail == "secret" and len(report.results) == 1
+    assert not report.ok
+
+
+def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, monkeypatch):
+    import time
+
+    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
+    events = []
+    report = sandbox.run_checks(
+        make_config(checks=("echo private; exec sleep 5", "echo never")), git_repo,
+        timeout=0.2, status=events.append,
+    )
+    assert any("running" in event for event in events)
+    assert events[-1].startswith("stage 1/2: exit 124 (")
+    assert all("private" not in event for event in events)
+    assert len(report.results) == 1 and not report.ok
+    assert report.results[0].tail == "private\n\n[loopzero] timed out after 0.2s"
+    stopped = list(events)
+    time.sleep(0.1)
+    assert events == stopped
+
+
+def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch):
+    import signal
+    import time
+
+    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
+    events = []
+
+    def cancel(message):
+        events.append(message)
+        if len(events) == 1:
+            os.kill(os.getpid(), signal.SIGINT)
+
+    with pytest.raises(KeyboardInterrupt):
+        sandbox.run_checks(make_config(checks=("exec sleep 5",)), git_repo, status=cancel)
+    assert events and all("running" in event for event in events)
+    stopped = list(events)
+    time.sleep(0.1)
+    assert events == stopped
