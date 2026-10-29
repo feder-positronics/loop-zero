@@ -1250,7 +1250,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"dirty:    {'yes' if worktree.is_dirty(wt) else 'no'}")
     pr = github.pr_for_branch(config.repo, branch)
     if pr is None:
-        print("pr:       none (run `loopzero pr`)")
+        print("pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)")
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
