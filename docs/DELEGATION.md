@@ -311,6 +311,14 @@ one defect class, reassess rather than dispatching another isolated fix. A
 repair brief lists every unresolved review finding and deterministic test
 failure on the failed head; an unrelated repair does not fix one.
 
+Consult and artifact reviews outside a PR use the same budget: one full review, then at
+most one delta per artifact. Reviewers classify each finding as blocking (it can cause an
+unsafe or unintended effect, a missed stop or a false admission) or follow-up, and attach
+a validated minimal patch for each blocking one. The owner applies that patch verbatim,
+verifies the resulting bytes and tests, and does not reopen review; follow-ups wait.
+Builders change only what the brief names and keep regenerated evidence inside its
+declared allowlist; a scope-only or metadata finding never earns another round.
+
 Read-only work may share stable source. Sequence overlapping writers or
 integrate deliberately; never run them in one checkout. Do not pre-clear file
 overlap by message: rebase and the queue surface conflicts and the later lander
