@@ -611,7 +611,8 @@ def cmd_exec(providers: str, argv: list[str]) -> int:
     if not argv:
         sys.exit("ai-accounts: missing command")
     base = dict(os.environ)
-    if "claude" in providers.split(","):
+    # Caller-owned credentials and billing routes skip managed-account admission.
+    if "claude" in providers.split(",") and not caller_credentials("claude", base):
         STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
         with open(STATE / ".lock", "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)

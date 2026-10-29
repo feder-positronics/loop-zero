@@ -31,8 +31,8 @@ SRC_CAP=6581
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
-# Marcin approval 2026-10-29: ai-accounts reserve guard, per-window resets and fallback proofs (+75).
-TESTS_CAP=10812
+# Marcin approval 2026-10-29: ai-accounts reserve guard, per-window resets and fallback and caller-credential proofs (+85).
+TESTS_CAP=10822
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

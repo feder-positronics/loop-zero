@@ -331,3 +331,13 @@ def test_exec_prefers_account_under_reserve(helper, monkeypatch):
     monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
     assert helper.cmd_exec('claude', ['fake']) == 127
     assert children[0]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-b'
+
+
+@pytest.mark.parametrize('key', ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'])
+def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
+    monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
+    monkeypatch.setenv(key, 'caller-owned')
+    children = []
+    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
+    assert helper.cmd_exec('claude', ['fake']) == 127
+    assert children[0][key] == 'caller-owned'
