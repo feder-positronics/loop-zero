@@ -203,20 +203,37 @@ inherited project root.
 ```text
 cd <own-task-tree>
 Objective: <one bounded outcome>
-Context: <source text, decisions, files; sandboxed delegates usually lack network/gh>
+Context: <source text, decisions, files, and requester's wording/link authorizing the finish point; sandboxed delegates usually lack network/gh>
 Allowed paths: <owned scope>
 Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch policy: Children inherit this rule: never approval-required; auto plus "read-only, do not edit" for read-only work, otherwise the parent's mode; after launch, verify pendingRequestCount 0 and a completed tool call.
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
-Verification: <focused owning tests and applicable coverage, runnable in the sandbox>
-Integration executor: <named executor for returned heads; parent retains acceptance responsibility>
+Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
+Integration executor: <named executor for returned heads and one owner of any readiness/merge waiter; parent retains acceptance responsibility>
 Parent verification: <broad suites and loopzero check; delegates do not repeat these or start reviewers>
 Follow-ups: <ordered list of 1–2 already commissioned, bounded items, or none; assign only to delegates that can both write Git and post to GitHub themselves>
-Return: Continue until acceptance evidence exists or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
+Return: <authorized finish: evidence, readiness, or merge; deployment needs its own commission>. Continue until that boundary or a named blocker needs the parent; then follow only the preassigned list, otherwise return. Delegates that cannot do both: write Git and post to GitHub themselves (including sandboxed delegates, delegates without GitHub access, or delegates unable to write the shared Git directory) get no preassigned follow-ups and return after one item via their final Report. A progress summary is not completion.
 Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
 ```
+
+Example using those fields, with an illustrative requester instruction:
+
+```text
+Context: Requester said “prepare the fix for review; leave it unmerged” (<request link>).
+Verification: Focused regression and browser observation on the local fixture, within existing task permissions; report unavailable proof.
+Integration executor: Parent integrates and owns the sole loopzero ready --wait; child starts no waiter.
+Return: Tested changes and evidence to parent; parent finishes through readiness, leaving merge to the requester.
+```
+
+The source request supplies authority; neither this example nor a finish label
+grants it. Route genuine human blockers through the parent or current decisions
+owner; that owner uses the available harness question tool with the PR/task link,
+exact decision and recommended option first. If unavailable or unanswered,
+preserve the authorized work and report the blocker and next owner;
+silence is not approval. T3 watches are wakeups, not additional readiness waiters;
+the watch owner unwatches before handing control to a person.
 
 Before each preassigned follow-up, re-read live issue/PR state and dispatch
 ownership, record the finished item's current head and evidence directly on its
