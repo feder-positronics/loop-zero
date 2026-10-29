@@ -19,11 +19,15 @@ class ToolMissing(LoopZeroError):
 
 
 class ProcTimeout(LoopZeroError):
-    """The command did not finish within the timeout; `output` holds what it printed."""
+    """Supervisor timeout with received streams/elapsed; output aliases legacy stdout."""
 
-    def __init__(self, message: str, output: str = "") -> None:
+    def __init__(
+        self, message: str, output: str = "", *, stderr: str = "", duration_s: float | None = None
+    ) -> None:
         super().__init__(message)
-        self.output = output
+        self.output = self.stdout = output  # compatibility alias, not merged streams
+        self.stderr = stderr
+        self.duration_s = duration_s
 
 
 @dataclass(frozen=True)
@@ -88,8 +92,13 @@ def run(
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
         out = out or ""
+        err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        elapsed = time.monotonic() - started
         raise ProcTimeout(
-            f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}", out
+            f"{' '.join(argv)}: timed out after {timeout:g}s\n{tail(out)}",
+            out,
+            stderr=err or "",
+            duration_s=elapsed,
         ) from exc
     return Completed(
         exit_code=proc.returncode,
