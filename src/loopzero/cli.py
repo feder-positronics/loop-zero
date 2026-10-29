@@ -482,7 +482,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {command}", flush=True))
+            f"running: {command}", flush=True),
+            status=lambda message: print(message, flush=True))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2

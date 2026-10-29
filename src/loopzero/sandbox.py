@@ -6,8 +6,10 @@ import re
 import resource
 import shutil
 import tempfile
+import threading
+import time
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from os.path import commonpath
 from pathlib import Path
 
@@ -17,6 +19,7 @@ from .types import CheckReport, CheckResult, Config, LoopZeroError
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
+HEARTBEAT_INTERVAL = 30.0
 SANDBOX_HOME = "/tmp/home"
 # Only these system directories are exposed read-only by default; home tool paths
 # require explicit `[checks] ro_paths`. Host homes, sockets and processes stay hidden.
@@ -37,8 +40,13 @@ class SandboxUnavailable(LoopZeroError):
 
 
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
-               progress: Callable[[str], None] | None = None) -> CheckReport:
-    """Preflight and run checks in the same sandbox, stopping at the first failure."""
+               progress: Callable[[str], None] | None = None,
+               status: Callable[[str], None] | None = None) -> CheckReport:
+    """Run checks, stopping at the first failure; status emits only stage metadata.
+
+    progress receives each command before launch, as before. Optional status receives
+    heartbeats from a reporting thread and completion from the calling thread.
+    """
     worktree = worktree.resolve()
     if shutil.which("bwrap") is None:
         raise SandboxUnavailable(
@@ -71,10 +79,15 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         probe(config, worktree, prefix)
         missing, preparations = _preflight(config, worktree)
         results = [missing] if missing else []
-        for index, command in enumerate(() if missing else (*preparations, *config.checks)):
+        commands = () if missing else (*preparations, *config.checks)
+        for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            result = _run_one(config, worktree, prefix, command, timeout)
+            with _stage_status(status, index + 1, len(commands)):
+                result = _run_one(config, worktree, prefix, command, timeout)
+            if status:
+                status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
+                       f"({result.duration_s:.1f}s)")
             if index >= len(preparations) or result.exit_code:
                 results.append(result)
             if result.exit_code != 0:
@@ -88,6 +101,27 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
+
+
+@contextmanager
+def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int):
+    stopped = threading.Event()
+    started = time.monotonic()
+
+    def heartbeat():
+        while not stopped.wait(HEARTBEAT_INTERVAL):
+            status(f"stage {ordinal}/{total}: running "
+                   f"({time.monotonic() - started:.1f}s elapsed)")
+
+    reporter = threading.Thread(target=heartbeat, daemon=True) if status else None
+    if reporter:
+        reporter.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        if reporter:
+            reporter.join()
 
 
 def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
