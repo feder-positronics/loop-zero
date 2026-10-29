@@ -2107,7 +2107,7 @@ def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
     code, out, _ = run(capsys, "status")
     assert code == 0
     assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
-    assert "pr:       none" in out
+    assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
     code, out, _ = run(capsys, "status")
