@@ -23,4 +23,9 @@ and setup.
   design rationale, dated reviewer evidence and native compatibility limits.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
+- [T3-UPSTREAM.md](T3-UPSTREAM.md) — periodic T3 Code/Orchestrator reading,
+  version-aware source verification, ownership and bounded adoption.
+- [design/2026-10-28-t3-orchestration-workflow-adaptations.md](design/2026-10-28-t3-orchestration-workflow-adaptations.md) —
+  dated video/skill/upstream research, cross-model discussion and ranked proposals;
+  only the upstream-reading documentation is commissioned here.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.
