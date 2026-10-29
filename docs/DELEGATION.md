@@ -114,6 +114,18 @@ after three acknowledgement-only or empty turns in a row: push it once with an
 instruction to act in that turn, naming the next command. A campaign owner
 holding addressable build work never ends a turn with only an acknowledgement.
 
+**Periodic progress review.** An owner holding live deadlines reviews progress
+on a fixed cadence, more often while a production window or a deadline within
+two hours is live. Each review picks the one objective with the nearest
+deadline, reads fresh evidence (remote state, the responsible owner's latest
+items, host load), names its bottleneck and weakest assumption, and makes one
+concrete adjustment or records why none is needed. It logs one line: objective,
+finding, adjustment, and whether another mechanism already caught it. Drop the
+review when it stops finding what nothing else catches. Read every claim the
+decision rests on from the remote before ruling: reported work shortages, "in
+the queue", and the change class from the PR file list. A stale draft is not
+ownership. Cadence and wiring belong in host policy.
+
 **Priority tiers.** Tier 0 is these team mechanics, above all delivery. Tier 1
 is big features and framework improvements; tier 2 is QA fixes, flakes and
 smaller tasks. The decisions owner records assignments in the live decision
