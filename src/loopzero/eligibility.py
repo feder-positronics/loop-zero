@@ -139,7 +139,8 @@ def recovery_target(repo: str, number: int) -> str | None:
 
 
 def recovery_inspection(evidence: dict | None, head: str) -> bool:
-    return bool(evidence and evidence["head"] == head and evidence["complete"]
+    return bool(isinstance(evidence, dict) and evidence.get("version") == 1
+                and evidence["head"] == head and evidence["complete"]
                 and all(call["fatal"] == "absent" and call["inspection"] == "verified"
                         and all((call["reported"][key] if call["reported"][key] is not None
                                  else call.get("configured", {}).get(key)) == expected
@@ -153,7 +154,7 @@ def review_projection(review: dict, head: str, repo: str, number: int):
     block, span = runners.leading_review_block(body)
     positions = [i for i, line in enumerate(block) if line.lstrip().startswith("<!-- loopzero:codex-evidence")]
     if not positions:
-        return False, None
+        return (True, None) if any("source=pair" in m[0] for m in REVIEW_MARKER_RE.finditer(body)) else (False, None)
     try:
         if positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
             return True, None
@@ -162,6 +163,9 @@ def review_projection(review: dict, head: str, repo: str, number: int):
             return True, None
         marker = REVIEW_MARKER_RE.fullmatch(block[0])
         evidence = runners.decode_codex_evidence(block[1])
+        pair_marker = "source=pair" in block[0]
+        if pair_marker != (evidence.get("version") == 2):
+            return True, None
         if (not marker or marker[1] != head or marker[2] != evidence["kind"]
                 or evidence["repo"] != repo or evidence["pr"] != number
                 or evidence["head"] != head or evidence["publisher"] != (review.get("user") or {}).get("login")
@@ -184,7 +188,7 @@ def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> s
 
 
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
-                    repo: str = "", number: int = 0) -> dict | None:
+                    repo: str = "", number: int = 0, publication_only: bool = False) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
     trusted = {login.casefold() for login in publishers}
     latest = next((r for r in reversed(reviews)
@@ -200,7 +204,8 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
         f"**{value}**" in body for value in ("approve", "request_changes")
     )
     present, evidence = review_projection(latest, head, repo, number)
-    if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
+    if present and (evidence is None or (evidence.get("version") == 2 and not publication_only and evidence["verdict"] != "approve")
+                    or (evidence.get("version") != 2 and any(call["fatal"] != "absent" for call in evidence["calls"]))):
         return None
     _, envelopes = review_envelopes(body)
     if not present and any(runners.codex_fatal_startup(item) for item in envelopes):

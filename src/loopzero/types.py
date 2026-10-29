@@ -88,3 +88,8 @@ class ReviewResult:
     provenance: dict[str, object] = field(default_factory=dict)
     chunk_count: int = 1
     effort: str | None = None
+
+    members: tuple[ReviewResult, ...] = ()  # independent full native reviews, never chunks
+    reconciliation: str = ""  # explicit operator reason retaining the complete union
+    pair_authority: str | None = None  # exact operator repo#PR@head binding
+    pair_prompt_sha256: str | None = None  # original caller build_prompt commitment
