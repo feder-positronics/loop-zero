@@ -168,6 +168,7 @@ def test_launch_then_pin_survives_active_change(helper, monkeypatch, capsys):
     helper.set_active('claude', 'b')
     child = []
     monkeypatch.setattr(helper.os, 'execvpe', lambda executable, argv, env: child.append(env))
+    monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
     helper.main(['exec', 'claude', '--identity', launch['identity'], '--', 'real-harness'])
     assert child[0]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-a'
     assert child[0]['AI_ACCOUNTS_CLAUDE_IDENTITY'] == launch['identity']
@@ -256,3 +257,87 @@ def test_partial_or_unidentified_codex_auth_keeps_strict_revision(helper, creden
     helper.write_private(auth, credential + ' ')
     assert helper.managed_name('codex', inherited) is None
     assert helper.exhausted('codex', revision, 'm')['outcome'] == 'unmanaged'
+
+
+@pytest.mark.parametrize('used,weekly_reset', [(.4, 2000), (1, 2000), (.4, None)])
+def test_probe_retains_each_window_reset(helper, monkeypatch, used, weekly_reset):
+    headers = {'anthropic-ratelimit-unified-5h-utilization': str(used),
+               'anthropic-ratelimit-unified-7d-utilization': str(used),
+               'anthropic-ratelimit-unified-5h-reset': '1000'}
+    if weekly_reset is not None:
+        headers['anthropic-ratelimit-unified-7d-reset'] = str(weekly_reset)
+    monkeypatch.setattr(helper, '_http', lambda req: (200, headers, b''))
+    result = helper.probe_claude_model('fake', 'fake')
+    assert result['util'] == {'5h': used, '7d': used}
+    assert result['resets'] == {'5h': 1000, '7d': weekly_reset}
+    assert result['reset'] == (2000 if used == 1 else None)
+
+
+@pytest.mark.parametrize('window,used,age,cache,owner,allowed', [
+    ('7d', .85, 0, 'ok', False, False), ('5h', .85, 0, 'ok', False, False),
+    ('7d', .84, 1200, 'ok', False, True), ('5h', .84, 0, 'ok', False, True),
+    ('7d', .1, 1201, 'ok', False, False), ('7d', .1, 0, 'missing', False, False),
+    ('7d', .1, 0, 'broken', False, False), ('7d', .1, 0, 'account', False, False),
+    ('7d', 1, 1201, 'ok', True, True), ('7d', 1, 0, 'missing', True, True)])
+@pytest.mark.parametrize('pinned', [False, True])
+def test_exec_reserve_policy(helper, monkeypatch, capsys, window, used, age, cache, owner, allowed, pinned):
+    monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
+    if owner:
+        monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
+    monkeypatch.setattr(helper, 'now', lambda: 10000)
+    result = {'models': {'fake': {'util': {window: used}, 'resets': {window: 2000}}}}
+    status = {'checked_at': helper.now() - age, 'providers': {'claude': {'accounts': {'a': result}}}}
+    if cache == 'account':
+        status['providers']['claude']['accounts'] = {}
+    if cache != 'missing':
+        helper.write_private(helper.STATE / 'status.json', '{' if cache == 'broken' else json.dumps(status))
+    children = []
+    monkeypatch.setattr(helper.os, 'execvpe', lambda *args: children.append(args))
+    monkeypatch.setattr(helper, 'probe_claude_model', lambda *args: pytest.fail('exec must not probe'))
+    args = ['exec', 'claude']
+    if pinned:
+        args += ['--identity', helper.identity('claude', 'a')]
+    code = helper.main([*args, '--', 'fake-cli'])
+    assert code == (127 if allowed else 3)
+    assert bool(children) is allowed
+    stderr = capsys.readouterr().err
+    if not allowed:
+        assert 'account a' in stderr
+        if used == .85:
+            assert window in stderr and '85%' in stderr and helper.iso(2000) in stderr
+
+
+def test_exec_binds_approved_selection_and_preserves_explicit_auth(helper, monkeypatch):
+    monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
+    original = helper.with_accounts
+    def rotate(providers, base, selected=None):
+        helper.set_active('claude', 'b')
+        return original(providers, base, selected)
+    monkeypatch.setattr(helper, 'with_accounts', rotate)
+    children = []
+    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
+    assert helper.cmd_exec('claude', ['fake']) == 127
+    assert children[-1]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-a'
+    assert original('claude', {}, {'claude': None}) == {}
+    assert original('claude', {'ANTHROPIC_API_KEY': 'explicit'}, {'claude': 'a'}) == {'ANTHROPIC_API_KEY': 'explicit'}
+
+
+def test_exec_prefers_account_under_reserve(helper, monkeypatch):
+    monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
+    accounts = {n: {'models': {'m': {'util': {'7d': used}}}} for n, used in (('a', .9), ('b', .5))}
+    status = {'checked_at': helper.now(), 'providers': {'claude': {'accounts': accounts}}}
+    helper.write_private(helper.STATE / 'status.json', json.dumps(status))
+    children = []
+    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
+    assert helper.cmd_exec('claude', ['fake']) == 127
+    assert children[0]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-b'
+
+
+@pytest.mark.parametrize('key', ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'])
+def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
+    monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
+    monkeypatch.setenv(key, 'caller-owned')
+    children = []
+    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
+    assert helper.cmd_exec('claude', ['fake']) == 127
+    assert children[0][key] == 'caller-owned'

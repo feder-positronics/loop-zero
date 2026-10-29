@@ -32,6 +32,13 @@ An account is usable below AI_ACCOUNTS_MARGIN (default 0.95) of every limit wind
 Claude accounts authenticate with CLAUDE_CODE_OAUTH_TOKEN; Codex accounts with CODEX_HOME
 ("main" is ~/.codex). The monitor keeps the current account while it is in the best
 available tier and switches otherwise, preferring the least-used account.
+
+Claude status includes weekly-used=NUM% and JSON weekly_used_percent (null if unknown),
+from the overall 7d window. Only exec (including --identity) refuses non-owner Claude
+launches at >=85% cached weekly or five-hour usage, or with missing/unreadable
+or older than 20 minutes cached status, exiting 3. AI_ACCOUNTS_CLAUDE_OWNER=1 bypasses
+this guard; unknown window values stay unknown. This is not fleet-wide enforcement. Direct T3 launches, run
+and CLI shims are outside this guard.
 """
 from __future__ import annotations
 
@@ -54,6 +61,7 @@ from pathlib import Path
 
 STATE = Path(os.environ.get("AI_ACCOUNTS_HOME", Path.home() / ".local/state/ai-accounts"))
 MARGIN = float(os.environ.get("AI_ACCOUNTS_MARGIN", "0.95"))
+CLAUDE_NON_OWNER_LIMIT = 85
 CODEX_MAIN = Path.home() / ".codex"
 CLAUDE_TIERS = ((2, "fable+opus", ("claude-fable-5-1", "claude-opus-5-5")),
                 (1, "opus", ("claude-opus-5-5",)))
@@ -231,7 +239,8 @@ def account_env(provider: str, name: str | None = None) -> dict[str, str]:
     return {**env, marker(provider): identity(provider, name)}
 
 
-def with_accounts(providers: str, base: dict[str, str]) -> dict[str, str]:
+def with_accounts(providers: str, base: dict[str, str],
+                  selected: dict[str, str | None] | None = None) -> dict[str, str]:
     """Rebind verified managed inheritance; caller credentials and billing always win."""
     env = dict(base)
     for provider in providers.split(","):
@@ -241,7 +250,10 @@ def with_accounts(providers: str, base: dict[str, str]) -> dict[str, str]:
         if any(env.get(key) for key in EXPLICIT_ROUTES[provider]):
             continue
         if not env.get(credential) or managed_name(provider, env) is not None:
-            env.update(account_env(provider))
+            if selected is None or provider not in selected:
+                env.update(account_env(provider))
+            elif selected[provider] is not None:
+                env.update(account_env(provider, selected[provider]))
     return env
 
 
@@ -277,10 +289,15 @@ def probe_claude_model(token: str, model: str) -> dict:
     ok = code == 200 and not rejected and all(u < MARGIN for u in util.values())
     # The binding claims are the rejected or over-margin ones; usable again after the last resets.
     binding = set(rejected) | {k for k, u in util.items() if u >= MARGIN}
-    resets = [int(headers.get(f"{prefix}{k}-reset", "0")) for k in binding]
+    windows = set(util) | set(rejected) | {k[len(prefix):-len("-reset")] for k in headers
+                                         if k.startswith(prefix) and k.endswith("-reset")}
+    window_resets = {k: int(headers[f"{prefix}{k}-reset"])
+                     if f"{prefix}{k}-reset" in headers else None for k in windows}
+    # Legacy aggregate: latest known reset among binding windows only.
+    resets = [window_resets[k] for k in binding if window_resets[k] is not None]
     return {"http": code, "ok": ok, "util": util, "rejected": rejected,
             "org": headers.get("anthropic-organization-id"),
-            "reset": max(resets) if resets and not ok else None}
+            "resets": window_resets, "reset": max(resets) if resets and not ok else None}
 
 
 def check_claude(name: str) -> dict:
@@ -300,7 +317,7 @@ def check_claude(name: str) -> dict:
     tier = next((t for t, _, needed in CLAUDE_TIERS if all(models[m]["ok"] for m in needed)), 0)
     usable = next((needed for t, _, needed in CLAUDE_TIERS if t == tier), tuple(models))
     util = max((u for m in usable for u in models[m]["util"].values()), default=0.0)
-    # When the best tier is lost, report when it comes back.
+    # Legacy aggregate next_reset: when the best tier can come back.
     resets = [models[m]["reset"] for m in CLAUDE_TIERS[0][2] if models[m]["reset"]]
     org = next((m["org"] for m in models.values() if m.get("org")), None)
     return {"tier": tier, "util": util, "models": models, "email": claude_email(name, org),
@@ -460,6 +477,45 @@ def select(provider: str, results: dict[str, dict], current: str | None) -> str 
                key=lambda n: known[n].get("util", 1.0))
 
 
+def claude_weekly_used_percent(result: dict) -> float | None:
+    """Overall weekly window; short and model-specific windows are separate limits."""
+    values = [m["util"]["7d"] for m in result.get("models", {}).values()
+              if "7d" in m.get("util", {})]
+    return max(values) * 100 if values else None
+
+
+def claude_exec_refusal(name: str | None) -> str | None:
+    if name is None or os.environ.get("AI_ACCOUNTS_CLAUDE_OWNER") == "1":
+        return None
+    reason = None
+    try:
+        status = json.loads((STATE / "status.json").read_text())
+        result = status["providers"]["claude"]["accounts"][name]
+        if not isinstance(result, dict) or now() - status["checked_at"] > 1200:
+            reason = "cached status missing or older than 20 minutes"
+        else:
+            for window in ("7d", "5h"):
+                for model in result.get("models", {}).values():
+                    percent = model.get("util", {}).get(window)
+                    if percent is not None and percent * 100 >= CLAUDE_NON_OWNER_LIMIT:
+                        reset = model.get("resets", {}).get(window)
+                        reason = f"{window} window {percent * 100:g}% used (limit 85%)"
+                        reason += f"; resets {iso(reset)}" if reset is not None else "; reset unknown"
+                        break
+                if reason:
+                    break
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        reason = "cached status missing or unreadable"
+    return reason
+
+
+def claude_exec_allowed(name: str | None) -> bool:
+    reason = claude_exec_refusal(name)
+    if reason is not None:
+        print(f"ai-accounts: refusing Claude launch for account {name}: {reason}.", file=sys.stderr)
+    return reason is None
+
+
 def check(quiet: bool = False) -> dict:
     STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
     with open(STATE / ".lock", "w") as lock:
@@ -478,6 +534,9 @@ def check(quiet: bool = False) -> dict:
                     sync_codex_home(codex_home(n))
             probe = check_claude if provider == "claude" else check_codex
             results = {n: probe(n) for n in names}
+            if provider == "claude":
+                for result in results.values():
+                    result["weekly_used_percent"] = claude_weekly_used_percent(result)
             current = active(provider)
             chosen = select(provider, results, current)
             if chosen and chosen != current:
@@ -513,8 +572,15 @@ def print_status(status: dict) -> None:
             line = f" {mark}{name:<10} {r.get('email') or '?':<26} {tiers[r['tier']]:<11}"
             if "util" in r:
                 line += f" max-used {r['util']:.0%}"
+            if provider == "claude":
+                percent = claude_weekly_used_percent(r)
+                line += f" weekly-used={percent:g}%" if percent is not None else " weekly-used=unknown"
+                for window in ("7d", "5h"):
+                    resets = {m.get("resets", {}).get(window) for m in r.get("models", {}).values()}
+                    known = sorted(t for t in resets if t is not None)
+                    line += f" {window}-reset=" + (",".join(iso(t) for t in known) or "unknown")
             if r.get("next_reset"):
-                line += f"  resets {iso(r['next_reset'])}"
+                line += f"  aggregate-reset {iso(r['next_reset'])}"
             if r.get("error"):
                 line += f"  {r['error']}"
             print(line)
@@ -544,7 +610,23 @@ def cmd_add(provider: str, name: str) -> int:
 def cmd_exec(providers: str, argv: list[str]) -> int:
     if not argv:
         sys.exit("ai-accounts: missing command")
-    os.execvpe(argv[0], argv, with_accounts(providers, dict(os.environ)))
+    base = dict(os.environ)
+    # Caller-owned credentials and billing routes skip managed-account admission.
+    if "claude" in providers.split(",") and not caller_credentials("claude", base):
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with open(STATE / ".lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            name = active("claude")
+            # The monitor switches only at the 95% margin; prefer any account under the reserve.
+            if claude_exec_refusal(name) is not None:
+                name = next((n for n in accounts("claude") if claude_exec_refusal(n) is None), name)
+            if not claude_exec_allowed(name):
+                return 3
+            # Bind this approved selection; a later rotation cannot change env.
+            env = with_accounts(providers, base, {"claude": name})
+    else:
+        env = with_accounts(providers, base)
+    os.execvpe(argv[0], argv, env)
     return 127
 
 
@@ -636,6 +718,8 @@ def cmd_pinned_exec(provider: str, revision: str, argv: list[str]) -> int:
         print(json.dumps({"outcome": "unsupported" if provider not in PROVIDERS else "unmanaged",
                           "provider": provider, "changed": False}))
         return 2
+    if provider == "claude" and not claude_exec_allowed(name):
+        return 3
     os.execvpe(argv[0], argv, env)
     return 127
 
@@ -806,6 +890,9 @@ def main(argv: list[str]) -> int:
         status["stale"] = now() - status.get("checked_at", 0) > 600
         for provider, info in status.get("providers", {}).items():
             info["active"] = active(provider)
+            if provider == "claude":
+                for result in info["accounts"].values():
+                    result["weekly_used_percent"] = claude_weekly_used_percent(result)
         if "--json" in argv:
             print(json.dumps(status, indent=1))
         else:

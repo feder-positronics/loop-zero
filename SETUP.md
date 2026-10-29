@@ -202,6 +202,17 @@ the two systemd units to `~/.config/systemd/user/`, then
   Claude prefers Fable and Opus, then Opus only; Codex prefers every model
   available. At 95% of any limit an account counts as spent. `ai-accounts status`
   shows accounts, emails, tiers and resets.
+- Claude probes retain each window's utilization (`util`) and reset (`resets`, null
+  when absent), including healthy windows. Legacy `reset` and `next_reset` are
+  aggregate availability estimates; status labels 7d and 5h resets separately.
+  `weekly_used_percent` is the overall 7d usage, null when unknown.
+- Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
+  at >=85% overall weekly or five-hour utilization, or when that account's cached
+  status is missing, unreadable or older than 20 minutes. The last 15 weekly points
+  are reserved for required reviews and essential decisions; use
+  `AI_ACCOUNTS_CLAUDE_OWNER=1` for that work to bypass the guard. No hysteresis is
+  stored. Direct T3 launches, `run` and CLI shims remain outside this guard;
+  this is not fleet-wide enforcement. Admission does not probe accounts.
 - Each shim starts the real CLI on the selected account and keeps the shims first on
   its PATH. Verified helper-managed credentials inherited by a later command can
   rebind; explicit OAuth tokens, API keys and `CODEX_HOME` values remain caller-owned.
