@@ -22,6 +22,19 @@ label local/staging data production. Restate provenance when requesting
 production-change approval. If the source proves wrong, disclose it, void the
 approval and ask again.
 
+## Inherited work
+
+Before continuing an existing branch or PR, identify which acceptance remains
+unmet. Inspect relevant base changes since divergence and competing deliveries
+for that acceptance slice. On the owning issue or PR, recommend **continue**,
+**rework**, or **propose closure**, with the evidence; obsolete work need not be
+rebased first. Closure, history rewriting and replacement PRs still need their
+applicable authorization. Continue in place by default, preserving original
+commits and contributor credit under the [handoff rules](../../../docs/DELEGATION.md#coordinator-rollover).
+When authorized integration rewrites commits, use `git range-diff` to inspect
+what changed, then obtain behavior proof, checks and review for the resulting
+head under the existing rules. A series comparison is not behavior proof.
+
 ## Integration, waiting and re-entry
 
 - Without a base merge queue, defer a merely-behind branch's rebase during

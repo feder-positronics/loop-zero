@@ -24,8 +24,11 @@ when choosing executors or splitting work.
    A comment is evidence, not an atomic lock; do not launch overlapping work.
    Verify the remote before mutation and the connected environment before relying
    on reported production state.
-3. Run `loopzero start issue-<number>-<slug>`. Write observable Acceptance
-   and the issue link in task Notes.
+   When continuing inherited work, apply the [relevance checkpoint](reference.md#inherited-work)
+   before integrating its branch; a conflict-free update alone does not establish acceptance.
+3. For a new delivery, run `loopzero start issue-<number>-<slug>`; for an
+   inherited loop-zero delivery, retain its task worktree and branch after
+   reconciling ownership. Write observable Acceptance and the issue link in task Notes.
    **Partial delivery uses `Refs #N`**, including incidents needing an
    observation window after merge. Closing keywords belong only to deliveries
    completing all issue acceptance. Inspect rendered PR descriptions and commit
