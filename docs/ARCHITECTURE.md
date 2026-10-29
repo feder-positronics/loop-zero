@@ -279,7 +279,12 @@ reads up to twice (2/5 seconds). Waits use bounded backoff and one waiter per PR
 direct `gh` polling adds shared account load and cannot replace the wait command.
 A rate limit is a waiting dependency, not permission to turn missing evidence green.
 The optional host ai-accounts helper owns managed credential selection and exact-model
-eligibility under its existing lock. Nonsecret launch identities pin credential bindings
+eligibility under its existing lock. Its Claude exec reserve guard (including pinned
+identities) refuses non-owner launches at 85% weekly or five-hour usage, or with
+missing/unreadable account status or status older than 20 minutes. The owner environment
+override permits required work; direct T3, run and shims are outside this guard.
+Per-window resets include healthy windows; legacy reset fields remain aggregates.
+Nonsecret launch identities pin credential bindings
 (Codex account principals survive routine OAuth refreshes);
 explicit caller credentials and billing routes remain unchanged. Harnesses own safe live
 session replacement, including effects and native history. The shim does not replay
