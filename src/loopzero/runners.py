@@ -1013,7 +1013,35 @@ def codex_evidence(result):
         raise RunnerBadOutput("codex: invalid complete native result")
     return _codex_evidence(result)
 
-def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str, object], str]:
+def _codex_rollout_settings(home: Path, session_id: str) -> dict:
+    """Read only unambiguous native settings for this private session."""
+    unknown = {"model": None, "effort": None}
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        return unknown
+    try:
+        paths = list((home / ".codex/sessions").glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
+        if len(paths) != 1:
+            return unknown
+        records = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines()]
+        if any(not isinstance(record, dict) for record in records):
+            return unknown
+        metadata = [record.get("payload") for record in records if record.get("type") == "session_meta"]
+        if (len(metadata) != 1 or not isinstance(metadata[0], dict)
+                or metadata[0].get("id") != session_id
+                or metadata[0].get("cli_version") not in _CODEX_INSTRUCTION_VERSIONS):
+            return unknown
+        contexts = [record.get("payload") for record in records if record.get("type") == "turn_context"]
+        if not contexts or any(not isinstance(context, dict) for context in contexts):
+            return unknown
+        claims = [{key: _setting(context.get(key)) for key in unknown} for context in contexts]
+        return claims[0] if all(claims[0].values()) and all(claim == claims[0] for claim in claims) else unknown
+    except (OSError, ValueError, TypeError):
+        return unknown
+
+
+def _codex_provenance(
+    stdout: str, stderr: str, message: str, *, home: Path | None = None,
+) -> tuple[dict[str, object], str]:
     events = _json_lines(stdout)
     if codex_fatal_startup({"type": "codex_exec_result", "events": events}):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure", _tail(stdout))
@@ -1049,10 +1077,12 @@ def _codex_provenance(stdout: str, stderr: str, message: str) -> tuple[dict[str,
             "codex: execution output lacks session/token provenance", _tail(stdout + stderr)
         )
     clean_stderr = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
-    claims = {key: _setting(match.group(1).strip()) if match else None for key, match in (
-        ("model", _CODEX_REPORTED_MODEL_RE.search(clean_stderr)),
-        ("effort", _CODEX_EFFORT_RE.search(clean_stderr)),
-    )}
+    banners = {"model": _CODEX_REPORTED_MODEL_RE.search(clean_stderr),
+               "effort": _CODEX_EFFORT_RE.search(clean_stderr)}
+    claims = {key: _setting(match.group(1).strip()) if match else None for key, match in banners.items()}
+    if (home is not None and not any(banners.values())
+            and [event.get("thread_id") for event in events if event.get("type") == "thread.started"] == [session_id]):
+        claims = _codex_rollout_settings(home, session_id)
     envelope = {
         "type": "codex_exec_result",
         "session_id": session_id,
@@ -1208,7 +1238,6 @@ def _review_codex(
             "danger-full-access",
             "--cd",
             str(cwd),
-            "--ephemeral",
             "--skip-git-repo-check",
             "-c",
             "mcp_servers={}",
@@ -1242,13 +1271,13 @@ def _review_codex(
             message = base64.b64decode(final.get("bytes_base64", "")).decode("utf-8")
         except UnicodeDecodeError as exc:
             raise RunnerBadOutput("codex: final message is not UTF-8") from exc
+        provenance, raw = _codex_provenance(done.stdout, done.stderr, message, home=home)
     if not message.strip():
         raise RunnerBadOutput("codex: no final message written", _tail(done.stdout + done.stderr))
     try:
         payload = _extract_json_object(message)
     except (json.JSONDecodeError, ValueError) as exc:
         raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
-    provenance, raw = _codex_provenance(done.stdout, done.stderr, message)
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
     if review_context is not None:
