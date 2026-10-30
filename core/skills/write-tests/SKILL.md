@@ -1,40 +1,33 @@
 ---
 name: write-tests
-description: Add or improve behavior-focused coverage when testing is the task; use fix-failing-tests for observed failures.
+description: Add or improve behavior-focused coverage when testing is the task; use diagnose for observed failures.
 ---
 
 # Write Tests
 
-Add the smallest useful tests for a named user or system contract and regression
-risk. Follow [the contract](../../CONTRACT.md) in the task worktree, inheriting
-the outer task's worktree when nested. Confirm branch and `.loopzero/task.md`
-before editing. Do not change product behavior merely to increase coverage.
+Protect a named behavior and regression risk with the smallest faithful tests.
+Follow [the contract](../../CONTRACT.md). Do not change product behavior merely
+to increase coverage; route product repairs to [implement](../implement/SKILL.md)
+and observed failures to [diagnose](../diagnose/SKILL.md).
 
-Choose the cheapest faithful boundary: unit tests for deterministic logic with
-stable collaborators and no real network/database; integration tests for real
-queries, transactions, isolation, constraints, serialization and adapters;
-end-to-end tests for critical journeys that cannot be proved below the assembled
-system.
+Choose the cheapest faithful public boundary: unit tests for deterministic logic,
+integration tests for real storage/adapters and end-to-end tests for journeys
+that need the assembled system. Report missing seams rather than extracting
+production code solely for testing convenience. Use independent oracles for
+outputs, transitions and effects; mock calls, snapshots, internal steps or copied
+implementation calculations alone are insufficient.
 
-Exercise stable public seams. Repeated private access or a harness as complex
-as the behavior signals a missing seam: report it rather than extracting
-production code solely for testing convenience. Use an independent oracle for
-observable outputs, transitions or boundary effects. Mock calls, internal steps,
-snapshots or duplicated implementation calculations alone are insufficient.
-
-Cover applicable success, denial/isolation, validation, transitions and failures
-without a case quota. Follow repository placement, fixture, marker and naming
-conventions. Keep fixtures minimal, isolated and deterministic; avoid timing
-tolerance, shared mutable state, duplicate cases and assertions repeating mock
-configuration.
-
-For a bug fix or behavior change, observe the regression test failing on
-pre-fix code for the intended behavior and record the failing line in
-`.loopzero/task.md` Notes. An infrastructure failure does not count.
+Cover material success, denial/isolation, validation, transitions and failures.
+Follow repository conventions with minimal, deterministic, isolated fixtures;
+avoid shared mutable state, timing tolerance and duplicate cases. For bug fixes,
+observe the regression test fail on pre-fix code; only when that is impossible,
+explain the oracle and its limits. Infrastructure failures do not demonstrate
+regression detection.
 Coverage-only tests may pass existing code.
 
-Run focused tests during development, then the narrow neighboring suite and
-contract delivery checks. Record commands and results in task Notes. Exit when
-each test protects its named contract, regression failure evidence exists,
-checks pass and added brittleness is lower than the risk protected. Route
-necessary product changes to [implement](../implement/SKILL.md).
+Run focused and affected neighboring tests, then contract delivery checks.
+Record commands, results and limits in task Notes.
+
+After this step, resume the commissioned outcome within the authorized finish,
+or hand over its remaining acceptance; after two unsuccessful repairs,
+reconsider the route.

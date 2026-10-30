@@ -12,13 +12,13 @@ except for broad `review` and `design-mockup`, which were adapted from intelflo.
 | `security-review` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/security-review/SKILL.md` | adapted |
 | `diagnose` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/diagnose/SKILL.md` | adapted |
 | `write-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/write-tests/SKILL.md` | adapted |
-| `fix-failing-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/fix-failing-tests/SKILL.md` | adapted |
+| `fix-failing-tests` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/fix-failing-tests/SKILL.md` | merged into `diagnose` |
 | `refine-code` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/refine-code/SKILL.md` | adapted |
-| `review-design-doc` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/review-design-doc/SKILL.md` | adapted |
-| `refine-design-doc` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/refine-design-doc/SKILL.md` | adapted |
+| `review-design-doc` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/review-design-doc/SKILL.md` | merged into `review` |
+| `refine-design-doc` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/refine-design-doc/SKILL.md` | merged into `write-design-doc` |
 | `explain` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/explain/SKILL.md` | adapted |
 | `backlog` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/backlog/SKILL.md` | adapted |
-| `remove-dead-code` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/remove-dead-code/SKILL.md` | adapted |
+| `remove-dead-code` | https://github.com/feder-positronics/loop-zero | `0415d321` | `core/skills/remove-dead-code/SKILL.md` | merged into `refine-code` |
 | `review` | https://github.com/feder-positronics/intelflo | `7188cb3f582dd2c1a349fccd06097d89d42d67eb` | `.cursor/skills/review/SKILL.md` | adapted |
 | `design-mockup` | https://github.com/feder-positronics/intelflo | `7188cb3f582dd2c1a349fccd06097d89d42d67eb` | `.cursor/skills/design-mockup/SKILL.md` | adapted |
 

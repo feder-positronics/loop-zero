@@ -35,9 +35,9 @@ Return only code-review's JSON. Secret exposure or a reachable exploit is
 `critical`; a missing control on a real boundary is `important`; hardening is
 a `suggestion`. Both blocking severities require `request_changes`.
 
-Put a two-to-four-sentence threat model in the first finding's `body`.
-With no defects, use one `suggestion` titled `Threat model`.
-Never echo secrets, tokens, credentials, or PII in findings.
-
 Finish after assessing each changed boundary and plausible attacker-controlled
-path, stating residual uncertainty, and completing the verdict.
+path. Uncertainty that prevents a verdict is code-review's missing-evidence
+`critical` finding; never add fields outside its JSON.
+
+Empty findings are valid when no defects are found.
+Never echo secrets, tokens, credentials, or PII in findings.

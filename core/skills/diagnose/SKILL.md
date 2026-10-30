@@ -1,47 +1,40 @@
 ---
 name: diagnose
-description: Prove the cause of a newly observed failure; use fix-failing-tests when the cause is understood.
+description: Diagnose failures and, when commissioned, repair the product, oracle or environment that owns them.
 ---
 
 # Diagnose
 
-Follow [the contract](../../CONTRACT.md). Return a demonstrated cause and the
-smallest repair and validation contract; stop before implementation.
+Follow [the contract](../../CONTRACT.md). Establish expected and observed behavior,
+environment, exact command and output; find a small reliable reproduction.
+Distinguish local, staging and production evidence. Check tools, dependencies,
+network and sandbox without treating an infrastructure failure as a product bug.
+Use documented setup and frozen-lockfile procedures for demonstrably stale
+dependencies; do not update shared dependencies merely because tools are missing.
 
-1. Capture expected and observed behavior, environment, data source, exact
-   command and output. Find one small, reliable reproduction that fails for the
-   defect and would pass after repair. Distinguish local, staging and production
-   evidence.
-2. Check missing tools, network, sandbox and stale dependencies. When a configured
-   check exercises the reproduction, `loopzero check` tests that sandbox only;
-   it cannot exclude environmental causes elsewhere.
-3. For intermittent failures, find when the rate changed and what landed then.
-   Compare failure rate or another measurable proxy across commits around the
-   onset. Aggregate captured logs, dumps and timings before adding instrumentation.
-   Test “infrastructure” or “unrelated” as hypotheses. Use one investigation
-   worktree for disposable experiments; batch hosted instrumentation per set of
-   hypotheses.
-4. Rank competing explanations with evidence for and against each. Run an
-   experiment that separates the leaders, then rerank. Confirm the cause by
-   predicting and observing a result that distinguishes it from alternatives.
-   Correlation and symptom disappearance are insufficient; avoid speculative
-   patches.
-5. Return reproduction, ranked and rejected hypotheses, discriminating evidence,
-   cause, blast radius, smallest repair, validation and uncertainty. Route proven
-   test repairs to [fix-failing-tests](../fix-failing-tests/SKILL.md), other changes
-   to [implement](../implement/SKILL.md).
+Rank competing hypotheses from evidence. Use discriminating experiments and
+predicted observations to establish cause; correlation or symptom disappearance
+is insufficient. For intermittent failures, use enough observations to distinguish
+improvement from chance. Aggregate available logs before adding instrumentation.
 
-Use synthetic or local data first. Redact secrets, database URLs, personal data
-and user content before quoting or persisting evidence. Temporary instrumentation
-needs authority, must avoid sensitive output, and must be recorded and removed.
-Production code edits, remote restarts and remote data mutations require explicit
-authority; production-derived experiments must be in scope with cleanup or recovery
-defined beforehand. Reproduction scripts must not commit, tag or push.
+Determine whether product, test oracle or environment owns the defect. When
+commissioned to repair, fix the smallest correct owner, rerun the exact reproducer
+and affected tests, and follow delivery through [implement](../implement/SKILL.md).
+Never weaken assertions, delete coverage or broaden retries/timeouts without
+support that the old oracle was wrong. Never change product to mask infrastructure
+failure. Diagnosis-only commissions stop before implementation.
 
-If reproduction or proof is unavailable, report attempts and the exact missing
-evidence or authority. Stop at out-of-scope repairs. For a shared gate blocked
-by an unproven cause, report its failure rate and blocked deliveries for a requester
-decision about retry or quarantine.
+Use synthetic/local data first; redact secrets, database URLs, personal data and
+user content from evidence. Instrumentation needs authority, safe output and
+recorded removal. Production edits, remote restarts and data mutations require
+explicit authority; production-derived experiments need scope and cleanup or
+recovery defined beforehand. Reproduction scripts must not commit, tag or push.
 
-Never declare an intermittent failure fixed on insufficient passing runs:
-at a prior 30% failure rate, two passes occur about half the time by chance.
+Report reproduction, cause, rejected hypotheses, discriminating evidence, blast
+radius, repair, validation and uncertainty. If proof is unavailable, name attempts
+and missing evidence or authority. Keep out-of-scope repairs open; report shared
+gate impact for requester decisions about retry or quarantine.
+
+After this step, resume the commissioned outcome within the authorized finish,
+or hand over its remaining acceptance; after two unsuccessful repairs,
+reconsider the route.
