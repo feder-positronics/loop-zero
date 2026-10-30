@@ -172,7 +172,18 @@ native envelope, ignoring unqualified compatibility fields and optional reported
 metadata. Adapters record configured values only for model/effort flags they
 explicitly pass at launch; missing flags stay unknown. Claude stores this record in
 provenance while its raw output stays unchanged; normalized Codex evidence retains only
-bounded recognized model/effort claims, with absent claims reported as unknown. Per-call configured values remain separately
+bounded recognized model/effort claims. Stderr banners take precedence; without a
+banner, the adapter reads the exact JSON thread's native session rollout before
+private HOME cleanup. It requires one matching rollout, matching session metadata,
+a reviewed CLI version and consistent complete turn-context settings; missing,
+malformed, ambiguous or mismatched evidence remains unknown. Codex session
+persistence is enabled only in the existing temporary private HOME, which is
+removed after capture. Rollout reads stay inside that HOME and reuse the owned,
+single-link regular-file snapshot reader, opening without following symlinks or
+blocking on special files and refusing files over 8 MiB before reading. Reviewers
+can write these session files, so their claims retain the existing trusted
+publisher boundary and do not prevent coherent forgery or attest the backend.
+Per-call configured values remain separately
 labelled in human output and optional Codex projection fields; they never become
 CLI-reported claims. Missing native recovery settings may use these launch records,
 but conflicting reported values still HOLD. Legacy requested/model/effort metadata

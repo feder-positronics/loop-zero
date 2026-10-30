@@ -217,6 +217,18 @@ meta-directives; native repository instructions remain an instruction surface.
 Codex instruction transport requires a source-reviewed version before model input:
 0.160.1, 0.161.0, 0.162.1, 0.163.0, 0.164.0 or 0.165.0; other versions fail closed.
 
+Codex model/effort claims come first from its stderr banner. When no banner is
+present, the runner reads the native rollout in its private temporary HOME before
+cleanup: exactly one file must match the JSON stream's thread ID, with matching
+session metadata, a reviewed CLI version and consistent complete turn settings.
+Missing, malformed, ambiguous or mismatched evidence stays UNKNOWN; requested
+settings never supply actual claims. Session persistence is confined to that
+temporary HOME, which is removed after capture. Rollouts must remain inside that
+HOME and pass the owned, single-link regular-file snapshot checks with no-follow,
+nonblocking open and an 8 MiB pre-read limit. Native session files are writable
+by the reviewer; these reports do not attest the backend or prevent coherent
+forgery under the existing trusted publisher boundary.
+
 ## Failure
 
 Fail closed on missing tools and command errors; preserve the failing command

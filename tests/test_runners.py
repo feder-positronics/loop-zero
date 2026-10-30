@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import textwrap
 import tomllib
@@ -188,9 +189,15 @@ def _fake_codex(
     tokens: int = 123,
     version: str = "codex-cli 0.161.0",
     version_exit: int = 0,
+    rollout: str | None = None,
 ) -> Path:
     """Fake ``codex`` that checks argv shape and writes ``last_message`` to -o file."""
     stderr = stderr.replace("\n", "\n        ")
+    rollout_script = "" if rollout is None else (
+        'mkdir -p "$codex_home/sessions/2026/10/30"\n'
+        "printf '%s\\n' " + shlex.quote(rollout)
+        + ' > "$codex_home/sessions/2026/10/30/rollout-test-$sid.jsonl"'
+    )
     return _script(
         bin_dir,
         "codex",
@@ -230,6 +237,7 @@ def _fake_codex(
         count=1; [ ! -f "$count_file" ] || count=$(( $(cat "$count_file") + 1 ))
         printf '%s' "$count" > "$count_file"
         sid="{session_id}"; [ "$count" -eq 1 ] || sid="$sid-$count"
+        {rollout_script.replace(chr(10), chr(10) + '        ')}
         echo '{{"type":"thread.started","thread_id":"'"$sid"'"}}'
         printf '%s\\n' {shlex.quote(json.dumps({"type":"item.completed","item":{"id":"final","type":"agent_message","text":last_message}}))}
         echo '{{"type":"turn.completed","usage":{{"input_tokens":{tokens},"output_tokens":2}}}}'
@@ -1066,7 +1074,7 @@ def test_codex_approve(
     # Codex's inner bwrap cannot nest inside loop-zero's; the outer sandbox bounds it.
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert "--ignore-user-config" in argv
-    assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" in argv
+    assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
@@ -1200,3 +1208,65 @@ def test_author_families_excludes_base_and_includes_all_lineage_trailers(git_rep
     head = _commit(git_repo, "repair\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
                    "Co-Authored-By: GPT <gpt@openai.com>")
     assert author_families(git_repo, head, base) == {"claude", "codex"}
+
+
+@pytest.mark.parametrize("case", ["valid", "banner", "missing", "mismatch", "ambiguous", "malformed", "conflict", "no-thread", "no-effort", "no-version", "duplicate-meta", "symlink", "fifo", "oversize", "parentlink"])
+def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case):
+    from loopzero import runners
+
+    sid = "codex-session-123"
+    records = [
+        {"type": "session_meta", "payload": {"id": sid, "cli_version": "0.165.0"}},
+        {"type": "turn_context", "payload": {"model": "native-model", "effort": "high"}},
+    ]
+    if case == "mismatch":
+        records[0]["payload"]["id"] = "another-session"
+    if case == "conflict":
+        records.append({"type": "turn_context", "payload": {"model": "other", "effort": "low"}})
+    if case == "no-effort":
+        records[1]["payload"].pop("effort")
+    if case == "no-version":
+        records[0]["payload"].pop("cli_version")
+    if case == "duplicate-meta":
+        records.append(records[0])
+    rollout = "\n".join(json.dumps(record) for record in records)
+    if case == "malformed":
+        rollout += "\n{"
+    _fake_codex(fake_bin, json.dumps(APPROVE), rollout=rollout if case not in ("missing", "ambiguous", "no-thread") else None,
+                stderr="model: banner-model\nreasoning effort: low" if case == "banner" else "")
+    if case in ("ambiguous", "no-thread", "symlink", "fifo", "oversize", "parentlink"):
+        home = tmp_path / "private-home"
+        sessions = home / ".codex/sessions/2026/10/30"
+        sessions.mkdir(parents=True)
+        for name in ("one", "two") if case == "ambiguous" else ("one",):
+            (sessions / f"rollout-{name}-{sid}.jsonl").write_text(rollout)
+        path = sessions / f"rollout-one-{sid}.jsonl"
+        if case in ("symlink", "fifo"):
+            path.unlink()
+            if case == "symlink":
+                target = home / "native.jsonl"
+                target.write_text(rollout)
+                path.symlink_to(target)
+            else:
+                os.mkfifo(path)
+        if case == "oversize":
+            with path.open("ab") as stream:
+                stream.truncate(8 * 1024 * 1024 + 1)
+        if case == "parentlink":
+            outside = tmp_path / "outside"
+            sessions.rename(outside)
+            sessions.symlink_to(outside, target_is_directory=True)
+        events = [{"type": "thread.started", "thread_id": sid}] if case != "no-thread" else []
+        events += [{"type": "turn.completed", "usage": {"input_tokens": 1}}]
+        _, raw = runners._codex_provenance("\n".join(map(json.dumps, events)),
+                                           f"session id: {sid}", "{}", home=home)
+    else:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        result = _review("codex", repo, model="requested-model", effort="medium")
+        raw = result.raw
+        assert not Path((fake_bin / "codex.home").read_text()).exists()
+    expected = ({"model": "banner-model", "effort": "low"} if case == "banner" else
+                {"model": "native-model", "effort": "high"} if case == "valid" else
+                {"model": None, "effort": None})
+    assert json.loads(raw)["reported_settings"] == expected
