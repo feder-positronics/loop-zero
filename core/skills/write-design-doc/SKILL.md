@@ -1,6 +1,6 @@
 ---
 name: write-design-doc
-description: Create an exploration, ADR, initiative, blueprint, or guide when a durable design artifact is needed or requested.
+description: "Create or refine a durable design contract: exploration, ADR, initiative, blueprint or guide."
 ---
 
 # Write Design Doc

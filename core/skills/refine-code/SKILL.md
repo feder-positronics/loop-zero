@@ -1,6 +1,6 @@
 ---
 name: refine-code
-description: Simplify a user-named or current-task diff while preserving observable behavior and public contracts.
+description: Simplify a named or current-task diff, or delete evidenced dead code when explicitly commissioned, while preserving supported contracts.
 ---
 
 # Refine Code
