@@ -200,9 +200,11 @@ before publication, in every chunk and when validating saved/reposted evidence.
 The shared predicate does not classify quoted text or require a generic tool
 count. Eligibility rejects fatal latest evidence without reviving an older
 approval. The [bounded incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
-lives in trusted eligibility code: eleven immutable receipt identities/digests
-and exact recovery targets, reused for budget selection and local/hosted
-eligibility. Original records/findings remain; successful replacements append
+lives in trusted eligibility code: two immutable receipt identities/digests
+and the remaining open PR9179 recovery target, reused for budget selection and local/hosted
+eligibility. OD v58 retired the five closed targets and their nine receipt pins;
+the dated adjudication record and historical regression fixtures remain unchanged.
+Original records/findings remain; successful replacements append
 a linkage marker and count normally. Mismatched identities, unknown commissioned
 inspection/model/effort evidence and non-descendant heads fail closed. Receipts
 are adjudicated against their own pinned target even after a repair commit;
