@@ -223,7 +223,11 @@ cleanup: exactly one file must match the JSON stream's thread ID, with matching
 session metadata, a reviewed CLI version and consistent complete turn settings.
 Missing, malformed, ambiguous or mismatched evidence stays UNKNOWN; requested
 settings never supply actual claims. Session persistence is confined to that
-temporary HOME, which is removed after capture.
+temporary HOME, which is removed after capture. Rollouts must remain inside that
+HOME and pass the owned, single-link regular-file snapshot checks with no-follow,
+nonblocking open and an 8 MiB pre-read limit. Native session files are writable
+by the reviewer; these reports do not attest the backend or prevent coherent
+forgery under the existing trusted publisher boundary.
 
 ## Failure
 

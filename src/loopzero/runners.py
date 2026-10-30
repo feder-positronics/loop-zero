@@ -1020,9 +1020,12 @@ def _codex_rollout_settings(home: Path, session_id: str) -> dict:
         return unknown
     try:
         paths = list((home / ".codex/sessions").glob(f"*/*/*/rollout-*-{session_id}.jsonl"))
-        if len(paths) != 1:
+        if len(paths) != 1 or not paths[0].resolve().is_relative_to(home.resolve()):
             return unknown
-        records = [json.loads(line) for line in paths[0].read_text(encoding="utf-8").splitlines()]
+        snapshot = _codex_final_file(paths[0], max_bytes=8 * 1024 * 1024)
+        if snapshot["status"] != "complete":
+            return unknown
+        records = [json.loads(line) for line in base64.b64decode(snapshot["bytes_base64"]).decode("utf-8").splitlines()]
         if any(not isinstance(record, dict) for record in records):
             return unknown
         metadata = [record.get("payload") for record in records if record.get("type") == "session_meta"]
@@ -1177,7 +1180,7 @@ def _review_claude(
     )
 
 
-def _codex_final_file(path: Path) -> dict:
+def _codex_final_file(path: Path, *, max_bytes: int | None = None) -> dict:
     """Bound a no-follow snapshot to the initial size of an owned regular file."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -1191,6 +1194,8 @@ def _codex_final_file(path: Path) -> dict:
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1:
             return {"status": "unreadable", "error_type": "NotOwnedRegularFile"}
+        if max_bytes is not None and before.st_size > max_bytes:
+            return {"status": "unreadable", "error_type": "FileTooLarge"}
         while len(data) < before.st_size:
             block = os.read(fd, min(65536, before.st_size - len(data)))
             if not block:

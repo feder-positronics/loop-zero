@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import textwrap
 import tomllib
@@ -1209,7 +1210,7 @@ def test_author_families_excludes_base_and_includes_all_lineage_trailers(git_rep
     assert author_families(git_repo, head, base) == {"claude", "codex"}
 
 
-@pytest.mark.parametrize("case", ["valid", "banner", "missing", "mismatch", "ambiguous", "malformed", "conflict", "no-thread", "no-effort", "no-version", "duplicate-meta"])
+@pytest.mark.parametrize("case", ["valid", "banner", "missing", "mismatch", "ambiguous", "malformed", "conflict", "no-thread", "no-effort", "no-version", "duplicate-meta", "symlink", "fifo", "oversize", "parentlink"])
 def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case):
     from loopzero import runners
 
@@ -1233,12 +1234,28 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case
         rollout += "\n{"
     _fake_codex(fake_bin, json.dumps(APPROVE), rollout=rollout if case not in ("missing", "ambiguous", "no-thread") else None,
                 stderr="model: banner-model\nreasoning effort: low" if case == "banner" else "")
-    if case in ("ambiguous", "no-thread"):
+    if case in ("ambiguous", "no-thread", "symlink", "fifo", "oversize", "parentlink"):
         home = tmp_path / "private-home"
         sessions = home / ".codex/sessions/2026/10/30"
         sessions.mkdir(parents=True)
         for name in ("one", "two") if case == "ambiguous" else ("one",):
             (sessions / f"rollout-{name}-{sid}.jsonl").write_text(rollout)
+        path = sessions / f"rollout-one-{sid}.jsonl"
+        if case in ("symlink", "fifo"):
+            path.unlink()
+            if case == "symlink":
+                target = home / "native.jsonl"
+                target.write_text(rollout)
+                path.symlink_to(target)
+            else:
+                os.mkfifo(path)
+        if case == "oversize":
+            with path.open("ab") as stream:
+                stream.truncate(8 * 1024 * 1024 + 1)
+        if case == "parentlink":
+            outside = tmp_path / "outside"
+            sessions.rename(outside)
+            sessions.symlink_to(outside, target_is_directory=True)
         events = [{"type": "thread.started", "thread_id": sid}] if case != "no-thread" else []
         events += [{"type": "turn.completed", "usage": {"input_tokens": 1}}]
         _, raw = runners._codex_provenance("\n".join(map(json.dumps, events)),

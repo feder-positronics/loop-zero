@@ -178,7 +178,12 @@ private HOME cleanup. It requires one matching rollout, matching session metadat
 a reviewed CLI version and consistent complete turn-context settings; missing,
 malformed, ambiguous or mismatched evidence remains unknown. Codex session
 persistence is enabled only in the existing temporary private HOME, which is
-removed after capture. Per-call configured values remain separately
+removed after capture. Rollout reads stay inside that HOME and reuse the owned,
+single-link regular-file snapshot reader, opening without following symlinks or
+blocking on special files and refusing files over 8 MiB before reading. Reviewers
+can write these session files, so their claims retain the existing trusted
+publisher boundary and do not prevent coherent forgery or attest the backend.
+Per-call configured values remain separately
 labelled in human output and optional Codex projection fields; they never become
 CLI-reported claims. Missing native recovery settings may use these launch records,
 but conflicting reported values still HOLD. Legacy requested/model/effort metadata
