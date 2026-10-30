@@ -146,6 +146,15 @@ prefer an existing simpler route to another isolated fix or check. Measure
 progress by what became usable, unblocked or safer. When a subtask closes, its
 owner keeps the remaining outcome or hands it over on the owning issue.
 
+**Workflow health.** Keeping delivery lean is a standing duty, not a tier. A
+broken workflow that blocks delivery is the bottleneck: repair it at once.
+Otherwise improve it in the background, never on the path of a release or
+recovery, and only for a problem that occurred at least twice: a stop, a wait,
+an owner intervention or a quota hit, each linked to its record. Each change
+names those occurrences, prefers repairing or removing to adding, and is
+reverted if the problem recurs or the change causes new stops. During an
+incident, change the workflow only to remove or bypass a step.
+
 **Done and unknown.** Report merged, deployed, visible to users and still
 restricted as separate claims; an outcome is done when its user-facing check
 passes and every remaining restriction has an owner. Acceptance for delivery
