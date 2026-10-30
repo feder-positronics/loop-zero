@@ -18,24 +18,10 @@ REVIEW_MARKER_RE = runners.REVIEW_MARKER_RE
 CONTEXT = "Loop-zero Eligibility"
 
 
-# OD v40 2026-10-27 adjudication, ruling SHA256 d572145304f36bb175c30088967c3caf5d7ce0dec548e4215831126db81629cf.
-# OD v58 2026-10-30: closed targets and receipts retired; only open PR9179 remains.
-# Immutable incident identities in trusted code, not a reusable override or local registry.
-_RECOVERY_TARGETS = {9179: "f3e8d79d49214163a395d760144002048c3c564f"}
-_RECOVERY_RECEIPTS = {
-    5664567936: (
-        9179,
-        "bd5169e399a4767c33f710523b64d22d6ed56841",
-        "c27fe3cbeaac5e2bfdf7fcb958733174206723ebf706a18274557709fab39421",
-        "bcd2bf92a33a074ac2880abca7af1cd0ae047d1cfa9b58c3afc325e12379bc8c",
-    ),
-    5667990257: (
-        9179,
-        "f3e8d79d49214163a395d760144002048c3c564f",
-        "336f13462fd1efdbfea9f471576ad311d2313907f0abef492cb6ede4dc0d0396",
-        "c8c63420dcb8a81dad25f49424cfdbd092b7461675d3c1d585be1033829a2810",
-    ),
-}
+# OD v59 2026-10-30: all incident targets and receipts retired after closure.
+# Retain empty registries to bound retirement without changing ordinary review logic.
+_RECOVERY_TARGETS = {}
+_RECOVERY_RECEIPTS = {}
 
 
 def review_envelopes(body: str) -> tuple[str, list[dict]]:
@@ -118,8 +104,7 @@ def review_projection(review: dict, head: str, repo: str, number: int):
 
 
 def recovery_baseline(number: int, reviews: list[dict]) -> bool:
-    return number != 9179 or bool(recovery_reviews(
-        "feder-positronics/intelflo", number, _RECOVERY_TARGETS[number], reviews))
+    return True
 
 
 def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> str:
