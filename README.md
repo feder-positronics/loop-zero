@@ -71,12 +71,13 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
    your repo root and set `repo.name`, `checks.commands` and `required_ci`.
 3. Make sure `git`, `gh auth status`, `bwrap` and `claude` or `codex` work in
    your shell (details in [SETUP.md](SETUP.md)).
-4. Point your agents at the four entry skills in [core/skills](core/skills):
-   `plan`, `implement`, `work-issue`, and `write-design-doc`. Use the catalog's
-   methods, including `diagnose`, `review`, and `security-review`, as needed. Optional
-   TypeSafe guidance lives in [integrations/typesafe-ai](integrations/typesafe-ai).
-   Follow [agent setup](SETUP.md#connect-your-agent) using a source
-   checkout at the same pinned revision as the CLI.
+4. Install the [core/skills](core/skills) once per machine from a source
+   checkout at the same pinned revision as the CLI
+   ([agent setup](SETUP.md#connect-your-agent)). Entry skills are `plan`,
+   `implement`, `work-issue` and `write-design-doc`; use the catalog's other
+   methods as needed. Repositories keep no skill copies and customise through
+   `AGENTS.md` and the docs it links. Optional TypeSafe guidance lives in
+   [integrations/typesafe-ai](integrations/typesafe-ai).
 5. For integrations that need API keys, follow
    [credential setup](SETUP.md#api-keys-for-local-agents). TypeSafe uses
    `TYPESAFE_API_KEY` or `~/.config/typesafe/api-key`; no key is needed for

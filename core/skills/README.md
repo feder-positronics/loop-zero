@@ -1,8 +1,9 @@
 # Skill routing
 
 Use [delegation guidance](../../docs/DELEGATION.md) and the task repository's
-`models.toml` for subagents. `plan`, `implement`, `work-issue` and `typesafe-ai`
-are discoverable under `.agents/skills`.
+`models.toml` for subagents. Install these skills once per machine
+([setup](../../SETUP.md#connect-your-agent)); repositories keep no copies and add
+project detail through `AGENTS.md` and the docs it links.
 
 For API-key integrations, follow the [credential convention](../CREDENTIALS.md)
 and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
