@@ -33,6 +33,9 @@ before pushing; publish and review every pushed head within that budget. Batch
 all substantive and mechanical repairs into one delta head. Preserve an approved
 head unless necessary changes require renewed checks and review. Suggestions
 must not expand scope. Merge only with authority; otherwise finish at readiness.
+Never merge main into a reviewed branch. Rebase your own commits onto
+origin/main BEFORE review. If a conflict appears AFTER review: rebase (drop any
+merge), check, then one fresh whole-PR primary; that is the PR's one fresh lineage.
 
 Do not bypass the sandbox, change the check list or enable `[checks].network`
 to pass checks. Report base failures rather than work around them. Only you
