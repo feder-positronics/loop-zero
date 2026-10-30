@@ -199,21 +199,15 @@ Codex's specific structured fatal Code Mode startup event invalidates a result
 before publication, in every chunk and when validating saved/reposted evidence.
 The shared predicate does not classify quoted text or require a generic tool
 count. Eligibility rejects fatal latest evidence without reviving an older
-approval. The [bounded incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
-lives in trusted eligibility code: two immutable receipt identities/digests
-and the remaining open PR9179 recovery target, reused for budget selection and local/hosted
-eligibility. OD v58 retired the five closed targets and their nine receipt pins;
-the dated adjudication record and historical regression fixtures remain unchanged.
-Original records/findings remain; successful replacements append
-a linkage marker and count normally. Mismatched identities, unknown commissioned
-inspection/model/effort evidence and non-descendant heads fail closed. Receipts
-are adjudicated against their own pinned target even after a repair commit;
-local Git ancestry and hosted immutable-SHA REST comparison admit descendants
-for ordinary full-scope primary review at the current head, with the existing
-suffix and review guards. PR9179's baseline
-requires its pinned primary and delta receipts to match the existing incident check.
-No override flag, local counter or separate registry is
-introduced; a second explicit deployment and OD admission remain necessary.
+approval. OD v59 retired the final PR9179 target and its two receipt pins after
+successor IntelFlo #9782 merged and #9179 closed as superseded. The
+[bounded incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
+is now historical: runtime target and receipt registries are empty and the
+incident-only baseline restriction is removed. Recovery helpers remain inert
+with no pinned targets; all PRs use ordinary eligibility and review budgets.
+The dated adjudication account, original records/findings and shared historical
+regression fixtures remain retained evidence. No override flag, local counter
+or separate registry is introduced.
 New Codex publication derives one canonical v1 `codex-evidence` comment from the
 complete validated private native stream, across every ordered chunk/session.
 It immediately follows the byte-zero review marker, before any adjudication or

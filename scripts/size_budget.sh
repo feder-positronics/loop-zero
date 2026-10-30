@@ -29,13 +29,14 @@ set -euo pipefail
 # OD v58 2026-10-30: Codex 0.165 native rollout provenance (banner-less --json), fail-closed; exact own +34 source / +70 tests, zero headroom.
 # OD v58 2026-10-30: fatal-startup lineage markers and projection parity; exact own +1 source / +11 tests, zero headroom.
 # OD v58 2026-10-30: retire five closed recovery targets and nine receipts; exact own -59 source / -3 tests, zero headroom.
-SRC_CAP=6557
+# OD v59 2026-10-30: retire the final closed recovery target and two receipts; exact own -15 source / -304 tests, zero headroom.
+SRC_CAP=6542
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
 # Marcin approval 2026-10-29: ai-accounts reserve guard, per-window resets and fallback and caller-credential proofs (+85).
-TESTS_CAP=10900
+TESTS_CAP=10596
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \
