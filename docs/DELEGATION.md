@@ -53,11 +53,11 @@ its newest live generation. Never use a remembered ID; escalate ambiguity once.
 A schedule firing or a relayed approval grants no new authority.
 
 - **Coordinator:** owns one repository's delivery, main health and shared
-  delivery infrastructure; drains ready backlog by tier, routes incidents and
-  dispatches workers and reviews. May delegate routine dispatch and integration
-  to named executors; it keeps main health, merge freezes and holds, shared
-  delivery infrastructure and production observation. Reports to the decisions
-  owner.
+  delivery infrastructure; drains ready backlog toward the current goal, routes
+  incidents and dispatches workers and reviews. May delegate routine dispatch
+  and integration to named executors; it keeps main health, merge freezes and
+  holds, shared delivery infrastructure and production observation. Reports to
+  the decisions owner.
 - **Decisions owner:** the only role the human owner talks to. Resolves owner
   decisions within delegated authority, records each with its source where it
   binds, and routes asks to the current responsible owner. Settles related cases
@@ -94,14 +94,18 @@ nudge per new finding. Count productive work by verified activity (completed too
 calls or output on the deliverable), including nested reviewers; report test-slot,
 review, queue and hold waiters separately, excluding them from productive counts.
 
-**State broadcasts.** Announce a merge freeze, production window or hold by its
-end condition ("until the coordinator broadcasts LIFT"), never as a clock
-window. Send every freeze, lift, hold and release to every active owner,
-resolved when sending, not only to owners in the current conversation. Keep the
-current state on one line of the live decision record ("Merge freeze: …"). Every
-owner checks that line before holding a merge; a merge freeze ends only on the
-coordinator's LIFT broadcast. A merge freeze pauses merging only, never
-building, checks or review.
+**Holds and freezes.** The live decision record is the only authority: one line
+per merge freeze, production window or hold ("Merge freeze: …") naming the
+hazard, its owner, the end condition and when it is next re-decided. A clock
+time may trigger that re-decision; without a named hazard or owner preference
+it is never an end condition or a start floor. Changing the line is the
+decision. Broadcast each change to every active owner, resolved when sending,
+only so they reread it; a missing message never extends a hold. Every owner
+reads the line before holding a merge or release; an unreadable or ambiguous
+line blocks, and expiry or silence grants nothing. Renewing a hold names the
+hazard still present and why waiting is safer than the available route;
+restating the original reason is not enough. A merge freeze pauses merging
+only, never building, checks or review.
 
 **Liveness.** Owners route and workers build: an owner commissions build work to
 a worker and never builds in a turn that answers a message. Measure progress by
@@ -118,28 +122,57 @@ holding addressable build work never ends a turn with only an acknowledgement.
 on a fixed cadence, more often while a production window or a deadline within
 two hours is live. Each review picks the one objective with the nearest
 deadline, reads fresh evidence (remote state, the responsible owner's latest
-items, host load), names its bottleneck and weakest assumption, and makes one
-concrete adjustment or records why none is needed. It logs one line: objective,
-finding, adjustment, and whether another mechanism already caught it. Drop the
-review when it stops finding what nothing else catches. Read every claim the
-decision rests on from the remote before ruling: reported work shortages, "in
-the queue", and the change class from the PR file list. A stale draft is not
-ownership. Cadence and wiring belong in host policy.
+items, host load), names its bottleneck and weakest assumption, asks whether
+the current sequence is still needed for the objective rather than only how to
+speed it up, and makes one concrete adjustment or records why none is needed.
+It logs one line: objective, finding, adjustment, and whether another mechanism
+already caught it. Judge it by changed next actions and shortened real
+blockages, not by its own finding count; drop it when it stops changing what
+happens. Read every claim the decision rests on from the remote before ruling:
+reported work shortages, "in the queue", and the change class from the PR file
+list. A stale draft is not ownership. Cadence and wiring belong in host policy.
 
-**Priority tiers.** Tier 0 is these team mechanics, above all delivery. Tier 1
-is big features and framework improvements; tier 2 is QA fixes, flakes and
-smaller tasks. The decisions owner records assignments in the live decision
-record. Honor explicit owner priorities; tier 1 gets dispatch and shared test
-slots first.
+**Goal first.** Each owner holds its commissioned outcome (for example
+"ordinary changes reach users") and treats its plan as replaceable; finishing
+a step, package or subtask never redefines success. Within the human owner's
+explicit priorities, recorded by the decisions owner in the live decision
+record, work on whatever most limits that outcome now: implementation,
+readiness, CI, review recovery or deployment. Separate constraints (owner
+authority, a demonstrated hazard) from assumptions (an inherited sequence, a
+preferred tool, an estimated start time); repetition does not make an
+assumption binding. Two repair rounds on one mechanism or defect class, or two
+stops caused by tooling rather than the product, mean reassessing the route:
+prefer an existing simpler route to another isolated fix or check. Measure
+progress by what became usable, unblocked or safer. When a subtask closes, its
+owner keeps the remaining outcome or hands it over on the owning issue.
+
+**Workflow health.** Keeping delivery lean is a standing duty, not a tier. A
+broken workflow that blocks delivery is the bottleneck: repair it at once.
+Otherwise improve it in the background, never on the path of a release or
+recovery, and only for a problem that occurred at least twice: a stop, a wait,
+an owner intervention or a quota hit, each linked to its record. Each change
+names those occurrences, prefers repairing or removing to adding, and is
+reverted if the problem recurs or the change causes new stops. During an
+incident, change the workflow only to remove or bypass a step.
+
+**Done and unknown.** Report merged, deployed, visible to users and still
+restricted as separate claims; an outcome is done when its user-facing check
+passes and every remaining restriction has an owner. Acceptance for delivery
+infrastructure exercises its real consumer, including switching to the change
+and back. A failed observation (empty logs, an unreachable check, a broken
+evidence file) is unknown: never a PASS, and not by itself proof that the
+product failed. The owner decides whether that unknown blocks the next
+operation or another observation suffices.
+
 Bound dispatch by shared resource slots and host guards, never by agent count.
 Implementation work does not require or reserve a test slot; a heavy command
 (more than one core for more than a minute) acquires one only while it runs.
 Host slot counts, load thresholds and quota guards belong in host policy.
 Tune dispatch from useful output, eligible work supply, review/test wait, rework
 and merge service; reduce new commissions when downstream work piles up.
-Give every addressable issue a next-action owner or a named dependency. A running
-tier-2 worker finishes or checkpoints its current heavy command and releases that
-test slot when tier 1 needs it; a queued tier-2 job steps aside for a queued tier-1 job.
+Give every addressable issue a next-action owner or a named dependency. Work on
+the current bottleneck gets dispatch and shared test slots first; other running
+work finishes or checkpoints its current heavy command and releases its slot.
 
 **Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
 owner role. Before acting, the successor revalidates recipients, schedules and
@@ -306,16 +339,19 @@ state; after a superseding message or restart, check again before concluding
 "still waiting".
 
 Split oversized scope in the plan rather than imposing brief line limits. Resume
-unfinished delegate sessions instead of restarting. After two repair rounds on
-one defect class, reassess rather than dispatching another isolated fix. A
-repair brief lists every unresolved review finding and deterministic test
-failure on the failed head; an unrelated repair does not fix one.
+unfinished delegate sessions instead of restarting; reassess repeated repairs as
+in [Goal first](#team-roles). A repair brief lists every unresolved review
+finding and deterministic test failure on the failed head; an unrelated repair
+does not fix one.
 
 Consult and artifact reviews outside a PR use the same budget: one full review, then at
 most one delta per artifact. Reviewers classify each finding as blocking (it can cause an
-unsafe or unintended effect, a missed stop or a false admission) or follow-up, and attach
-a validated minimal patch for each blocking one. The owner applies that patch verbatim,
-verifies the resulting bytes and tests, and does not reopen review; follow-ups wait.
+unsafe or unintended effect, a missed stop or a false admission) or follow-up. A blocking
+finding states the concrete failure scenario, its consequence and the smallest correction;
+a patch is optional. Without a failure scenario it is a follow-up. The owner checks its
+premise against the actual system (independent reviewers can share a wrong premise); the
+implementer integrates the correction and proves the behavior, without reopening review.
+Follow-ups wait.
 Builders change only what the brief names and keep regenerated evidence inside its
 declared allowlist; a scope-only or metadata finding never earns another round.
 
