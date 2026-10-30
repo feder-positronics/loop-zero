@@ -19,45 +19,10 @@ CONTEXT = "Loop-zero Eligibility"
 
 
 # OD v40 2026-10-27 adjudication, ruling SHA256 d572145304f36bb175c30088967c3caf5d7ce0dec548e4215831126db81629cf.
-# OD v41 ruling 113 Notes 1–2 add only the six proven retained startup failures.
+# OD v58 2026-10-30: closed targets and receipts retired; only open PR9179 remains.
 # Immutable incident identities in trusted code, not a reusable override or local registry.
-_RECOVERY_TARGETS = {9173: "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
-                     9174: "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
-                     9175: "6e80b6ce590cc308792b914d8f02f5416ef77765",
-                     9179: "f3e8d79d49214163a395d760144002048c3c564f",
-                     9284: "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
-                     9275: "aab1b62bb242f62da4ceebcb593b0725942074e0"}
+_RECOVERY_TARGETS = {9179: "f3e8d79d49214163a395d760144002048c3c564f"}
 _RECOVERY_RECEIPTS = {
-    5664087591: (
-        9173,
-        "074a3e6996d2815c318787f1ea88558b9f42ac0f",
-        "5199f71e0494c0316ad6ba38b1fa34c5e623257358cec7e099f3ccf589feaaf6",
-        "378ef6549f1217aa08ab4b14e4ed541c487f7ddc19984e48b21c5a96d4ddbbb6",
-    ),
-    5665739371: (
-        9173,
-        "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
-        "846fd82cf586e85654012de1d7eb271a93f1a4c440b06e13f2f9f952a5f6eb67",
-        "1dc00276651a2d2c2c0114a124d50c427ce7d17b540e14f341355f9e1eb02f5a",
-    ),
-    5664104781: (
-        9174,
-        "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
-        "acc92bb127db9f2402ba1085480f47146039f1260c67dd433715e46d51eeb271",
-        "68f0acaf342b443bb87f9beb7c94b3d40f37b29ac9ab286048daf4795da1f496",
-    ),
-    5664194446: (
-        9175,
-        "6e3f73a3a245352143cd155acbca104ee5ff6407",
-        "35ceeb61e9ed58476feb2702eb9d29cd624592e518dec0b77ecf53fdac0e5b4b",
-        "6193089860cb66898f1bfb6c74533144bf4632b2c8b0c7b11ed100f7fb8cce2d",
-    ),
-    5665844550: (
-        9175,
-        "6e80b6ce590cc308792b914d8f02f5416ef77765",
-        "50c5e9e695519d1fb1103f46456cfe156b891b7b09b57467b1e4f7be48346eb5",
-        "f83317d1d4085ad4f967d9b69222d4a08895ab4dcbe9ba0d1829d38289682212",
-    ),
     5664567936: (
         9179,
         "bd5169e399a4767c33f710523b64d22d6ed56841",
@@ -69,30 +34,6 @@ _RECOVERY_RECEIPTS = {
         "f3e8d79d49214163a395d760144002048c3c564f",
         "336f13462fd1efdbfea9f471576ad311d2313907f0abef492cb6ede4dc0d0396",
         "c8c63420dcb8a81dad25f49424cfdbd092b7461675d3c1d585be1033829a2810",
-    ),
-    5667628969: (
-        9284,
-        "b68e719fcf964951dacb8cbea9649b93316c366c",
-        "66023a1fc660f0907f47ad8e851ae4234e9eaf2ac97cb41912a00a47d9e91381",
-        "3f2b403f04e799a50526a10b76bc5b02a17214662a6e901f3b10f231c109355d",
-    ),
-    5667664997: (
-        9284,
-        "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
-        "c5fbf52fbe7aef3e7999082eb51232cad3f86af069c5fcc586a2c8871bfb0cf7",
-        "4cb0982d405fc2a95f8a7eef3a3d2924b2af11ea4c1bcab6cfa995aaa272e8e1",
-    ),
-    5666873014: (
-        9275,
-        "da55dd044369edccb4e8cf44b033396cc25cbd7e",
-        "64422d33ab7989a0d20454f3c7031c5fe7168cb7138215243d53c776a5630f9f",
-        "991fe6fcb60254eb4413f4403ef26b5ef4b4973386ee1c5bc4e452ce26ef0cdd",
-    ),
-    5667433401: (
-        9275,
-        "3f8c01e550641cf00ee9dc6079eae5535342aa5e",
-        "359526e22837d958741b9516598e37b50a8ae1d1ef3989ddb7972be02a0efc6e",
-        "030164aa4de085c653161c01d271ad43e030ea70ea2d855242935e7721e7d35d",
     ),
 }
 

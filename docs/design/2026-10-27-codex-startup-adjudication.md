@@ -1,10 +1,17 @@
 # 2026-10-27 Codex startup-failure adjudication
 
-Status: in force, implemented in trusted eligibility code
+Status: in force only for open PR9179, implemented in trusted eligibility code
 (`src/loopzero/eligibility.py`). Moved from the
 [delivery contract](../../core/CONTRACT.md#fatal-codex-startup-failures) on
 2026-10-30 so the contract keeps only the general rule; the scope and recovery
 conditions below are unchanged.
+
+OD v58 retired runtime targets 9173, 9174, 9175, 9275 and 9284 and their nine
+receipt identities on 2026-10-30 after verifying that all five PRs were closed
+(9174 and 9275 merged). PR9179 remains open with its original target and both
+receipt identities. The original incident account below and its retained
+regression fixtures remain historical evidence; this retirement grants no
+override or permission to remove a target while its PR is open.
 
 OD v40's reviewed incident adjudication applies only to IntelFlo reviews
 5667990257, 5667628969, 5667664997, 5666873014 and 5667433401. OD v41 ruling

@@ -18,12 +18,7 @@ fake_bwrap = test_runners.fake_bwrap
 RECEIPTS = [row for date in ("20261027", "20261028") for row in json.loads(
     (Path(__file__).parent / f"fixtures/review-runtime-{date}.json").read_text())]
 TARGETS = {
-    9173: "f07d09b764c0a8c06929bf0f02b877a58a4c1ca4",
-    9174: "c3e1e2f2fcfbdac413aaa3b9388e8837bfe1be9b",
-    9175: "6e80b6ce590cc308792b914d8f02f5416ef77765",
     9179: "f3e8d79d49214163a395d760144002048c3c564f",
-    9284: "1b836da3a29e31cb08a9fab19f0f567711e7ab4a",
-    9275: "aab1b62bb242f62da4ceebcb593b0725942074e0",
 }
 PUBLISHER = ("loopzero-feder-positronics[bot]",)
 
@@ -163,7 +158,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
             _review("codex", tmp_path)
 
 
-@pytest.mark.parametrize("number", TARGETS)
+@pytest.mark.parametrize("number", [9179, 9173, 9174, 9175, 9275, 9284])
 @pytest.mark.parametrize(
     "change",
     [
@@ -183,7 +178,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
 def test_adjudication_matches_complete_pinned_incident_only(number, change):
     rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == number])
     repo = "feder-positronics/intelflo"
-    target = TARGETS[number]
+    target = TARGETS.get(number, "e" * 40)
     selected = number
     if change == "repo":
         repo = "elsewhere/intelflo"
@@ -206,7 +201,9 @@ def test_adjudication_matches_complete_pinned_incident_only(number, change):
     if change == "duplicate":
         rows.append(copy.deepcopy(rows[0]))
     found = eligibility.recovery_reviews(repo, selected, target, rows)
-    assert bool(found) is (change == "none")
+    assert bool(found) is (change == "none" and number == 9179)
+    assert set(eligibility._RECOVERY_TARGETS) == {9179}
+    assert set(eligibility._RECOVERY_RECEIPTS) == {5664567936, 5667990257}
 
 
 @pytest.mark.parametrize("number", TARGETS)
@@ -356,8 +353,8 @@ def test_recovered_eligibility_requires_actual_attributable_inspection(number, c
 def test_mismatched_historical_identity_holds_budget_and_eligibility(
     tmp_path, monkeypatch, gh, mutation, position
 ):
-    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == 9284])
-    target = TARGETS[9284] if position == "exact" else "e" * 40
+    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == 9179])
+    target = TARGETS[9179] if position == "exact" else "e" * 40
     if mutation == "publisher":
         rows[0]["user"]["login"] = "stranger"
     if mutation == "body":
@@ -368,27 +365,27 @@ def test_mismatched_historical_identity_holds_budget_and_eligibility(
         rows[0]["commit_id"] = "b" * 40
     if mutation == "target":
         target = "c" * 40
-        gh.respond(f"api repos/feder-positronics/intelflo/compare/{TARGETS[9284]}...{target}", {
+        gh.respond(f"api repos/feder-positronics/intelflo/compare/{TARGETS[9179]}...{target}", {
             "status": "diverged", "merge_base_commit": {"sha": "d" * 40},
         })
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: mutation != "target")
     with pytest.raises(cli.CliError, match="unverified; HOLD"):
         cli._lineage_markers(
-            tmp_path, rows, target, PUBLISHER, repo="feder-positronics/intelflo", number=9284
+            tmp_path, rows, target, PUBLISHER, repo="feder-positronics/intelflo", number=9179
         )
-    assert eligible_recovery([*rows, inspected_replacement(9284, target)], 9284, target) is None
+    assert eligible_recovery([*rows, inspected_replacement(9179, target)], 9179, target) is None
 
 
 @pytest.mark.parametrize("comparison", [None, [], {}, {"status": "ahead"},
     {"status": "ahead", "merge_base_commit": {"sha": "d" * 40}},
-    {"status": "behind", "merge_base_commit": {"sha": TARGETS[9284]}}])
+    {"status": "behind", "merge_base_commit": {"sha": TARGETS[9179]}}])
 def test_recovery_eligibility_refuses_unverified_ancestry(gh, comparison):
     head = "c" * 40
-    gh.respond(f"api repos/feder-positronics/intelflo/compare/{TARGETS[9284]}...{head}", comparison)
-    assert eligible_recovery([*RECEIPTS, inspected_replacement(9284, head)], 9284, head) is None
+    gh.respond(f"api repos/feder-positronics/intelflo/compare/{TARGETS[9179]}...{head}", comparison)
+    assert eligible_recovery([*RECEIPTS, inspected_replacement(9179, head)], 9179, head) is None
 
 
-@pytest.mark.parametrize("number", [9179, 9173, 9174, 9175])
+@pytest.mark.parametrize("number", [9179])
 def test_adjudicated_primary_recovers_without_changing_other_receipts(tmp_path, monkeypatch, number):
     snapshot = copy.deepcopy(RECEIPTS)
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
@@ -422,7 +419,7 @@ def test_adjudicated_primary_recovers_without_changing_other_receipts(tmp_path, 
         "repost_confirmation",
     ],
 )
-@pytest.mark.parametrize("number", [9284, 9275])
+@pytest.mark.parametrize("number", [9179])
 @pytest.mark.parametrize("position", ["exact", "descendant", "non_descendant"])
 def test_local_hosted_agree_and_historical_findings_stay_blocking(
     wt, gh, case, monkeypatch, number, position
@@ -488,11 +485,11 @@ def test_local_hosted_agree_and_historical_findings_stay_blocking(
     assert local.reasons == hosted.reasons
     if case == "open_finding":
         assert any("open important" in reason for reason in local.reasons)
-    original_ids = (5667628969, 5667664997) if number == 9284 else (5666873014, 5667433401)
+    original_ids = (5664567936, 5667990257)
     assert [r for r in reviews if r["id"] in original_ids][:2] == rows
 
 
-@pytest.mark.parametrize("number", [9284, 9275])
+@pytest.mark.parametrize("number", [9179])
 def test_saved_target_repost_publishes_canonical_block(wt, gh, monkeypatch, number):
     from argparse import Namespace
 
