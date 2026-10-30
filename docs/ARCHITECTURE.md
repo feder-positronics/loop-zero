@@ -188,7 +188,7 @@ Codex's specific structured fatal Code Mode startup event invalidates a result
 before publication, in every chunk and when validating saved/reposted evidence.
 The shared predicate does not classify quoted text or require a generic tool
 count. Eligibility rejects fatal latest evidence without reviving an older
-approval. The [bounded incident adjudication](../core/CONTRACT.md#fatal-codex-startup-failures-and-the-2026-10-27-adjudication)
+approval. The [bounded incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
 lives in trusted eligibility code: eleven immutable receipt identities/digests
 and exact recovery targets, reused for budget selection and local/hosted
 eligibility. Original records/findings remain; successful replacements append
