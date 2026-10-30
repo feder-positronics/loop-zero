@@ -107,7 +107,7 @@ def test_real_startup_exit_zero_never_publishes(wt, gh, fake_bin, capsys, row):
 
 
 @pytest.mark.parametrize(
-    "mode", ["clean", "quoted", "path", "version", "after_tool", "unrelated_error", "quoted_error"]
+    "mode", ["clean", "quoted", "path", "version", "after_tool", "unrelated_error", "quoted_error", "projected_quote"]
 )
 def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkeypatch, mode):
     row = copy.deepcopy(RECEIPTS[0])
@@ -128,10 +128,15 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
         fatal["item"]["message"] = fatal["item"]["message"].replace("0.164.0", "9.999.1")
     native = raw if mode != "clean" else {**raw, "events": []}
     body = cli.review_marker(row["commit_id"], "primary") + "\n<details><summary>Raw reviewer output</summary>\n```\n" + json.dumps(native) + "\n```\n</details>"
-    review = {**row, "body": body}
+    if mode == "projected_quote":
+        clean = _native_codex_result(row["commit_id"], repo="a/b", number=1, publisher=PUBLISHER[0])
+        body = body.replace("\n", "\n" + runners.encode_codex_evidence(runners.codex_evidence(clean)) + "\n\n", 1)
+    review = {**row, "body": body, "state": "APPROVED"}
+    if mode == "projected_quote":
+        assert eligibility.eligible_review([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
-    markers = cli._lineage_markers(tmp_path, [review], row["commit_id"], PUBLISHER)
-    assert bool(markers) == (mode in ("clean", "quoted", "unrelated_error", "quoted_error"))
+    markers = cli._lineage_markers(tmp_path, [review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
+    assert bool(markers) == (mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"))
     script = _fake_codex(fake_bin, json.dumps(APPROVE))
     if mode == "after_tool":
         tool = {
@@ -144,14 +149,14 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
                 "printf '%s\\n' '" + json.dumps(tool) + '\'\necho \'{"type":"thread.started"',
             )
         )
-    if mode != "clean":
+    if mode not in ("clean", "projected_quote"):
         script.write_text(
             script.read_text().replace(
                 'echo \'{"type":"thread.started"',
                 "printf '%s\\n' '" + json.dumps(fatal) + '\'\necho \'{"type":"thread.started"',
             )
         )
-    if mode in ("clean", "quoted", "unrelated_error", "quoted_error"):
+    if mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"):
         assert _review("codex", tmp_path).verdict == "approve"
     else:
         with pytest.raises(runners.RunnerBadOutput, match="Code Mode"):

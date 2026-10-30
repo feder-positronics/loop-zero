@@ -27,14 +27,14 @@ set -euo pipefail
 # Main 917a3237 adds +539/+1298 to that base (6546/10644); only main-growth
 # shifts are authorized: integrated caps 6581/10737, zero headroom.
 # OD v58 2026-10-30: Codex 0.165 native rollout provenance (banner-less --json), fail-closed; exact own +34 source / +70 tests, zero headroom.
-# OD v58 2026-10-30: fatal-startup lineage markers; exact own +1 source / +6 tests, zero headroom.
+# OD v58 2026-10-30: fatal-startup lineage markers and projection parity; exact own +1 source / +11 tests, zero headroom.
 SRC_CAP=6616
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
 # Marcin approval 2026-10-29: ai-accounts reserve guard, per-window resets and fallback and caller-credential proofs (+85).
-TESTS_CAP=10898
+TESTS_CAP=10903
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

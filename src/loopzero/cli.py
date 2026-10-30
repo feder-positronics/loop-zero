@@ -222,8 +222,8 @@ def _lineage_markers(wt: Path, reviews: list[dict], head: str,
     trusted = {login.casefold() for login in publishers}
     for review in reviews:
         body = review.get("body") or ""
-        if review.get("id") in adjudicated or any(
-                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
+        if review.get("id") in adjudicated or (not eligibility.review_projection(review, head, repo, number)[0] and any(
+                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1])):
             continue
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
