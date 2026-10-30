@@ -6,9 +6,9 @@ description: Review a frozen code diff against acceptance criteria and emit JSON
 # Code Review
 
 Review one frozen diff without editing the tree. Read [the contract](../../CONTRACT.md),
-the PR body, and surrounding code. Confirm the exact head; review the full diff
-for a primary, only changes since the reviewed commit for a delta. The contract
-owns review eligibility and budget.
+the PR body, and surrounding code. Confirm the exact head and follow the
+contract's [scope and budget](../../CONTRACT.md#review-budget) and
+[missing-evidence rule](../../CONTRACT.md#findings); never approve blind.
 
 ## Judge
 
@@ -50,6 +50,3 @@ suggestions or an empty list.
 
 Anchor findings precisely. `path` and `line` may be `null` when no precise
 location exists; `loopzero review` anchors such blocking findings on a changed file.
-
-If the diff or required evidence is unavailable, return `request_changes` with
-exactly one `critical` finding explaining what is missing. Never approve blind.

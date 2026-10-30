@@ -5,48 +5,31 @@ description: Decide the response to each existing PR review finding: post factua
 
 # Resolve Findings
 
-Read PR objective/acceptance, exact threads, affected code and current head.
-Use [staleness re-verification](reference.md#staleness-re-verification) when
-the head moved. Findings stay in PR threads, never issues, backlogs or tracking files.
+Read the PR acceptance, exact threads, affected code and current head. Verify
+each finding's premise on that head; use
+[staleness re-verification](reference.md#staleness-re-verification) as needed.
+Findings stay in PR threads, never issues, backlogs or tracking files.
 
-## Decide each thread
+Fix valid blocking findings within commissioned scope or hand off bounded repairs
+and validation through [response handoff](reference.md#response-handoff).
+Explain repaired, inapplicable or unsupported findings in-thread with verified
+evidence using `loopzero resolve`; never resolve silently. Suggestions are optional.
+Requester-reserved, irreversible or acceptance/scope/cost changes and external
+commitments require direction.
 
-- State failure and acceptance conditions; verify applicability on current head.
-- Valid `critical`/`important`: hand off the narrowest fix and validation.
-- Already fixed, inapplicable or unsupported: **verify on current head, then
-  post the reply yourself with `loopzero resolve <id> "<evidence-backed reason>"`**.
-  Replying is not implementation.
-- Suggestions are optional; do not expand scope for them.
-- Requester-reserved, irreversible, acceptance/scope/cost changes or external
-  commitments need requester direction; never infer it.
+Do not manipulate severity; corrections need evidence in-thread, and critical or
+security-path downgrades need requester authority. For conflicting findings,
+reconcile their acceptance and impact. New critical evidence requires a separate
+authorized PR review thread rather than silently expanding this batch.
 
-Give each supplied thread one status: bounded fix, factual rejection,
-reviewer-confirmed duplicate, deferred suggestion or requester decision.
-Hand fixes to the narrowest implementation or documentation step using
-[response handoff](reference.md#response-handoff); that step replies with the
-fix commit after applying it.
+When a second review flags the same file or defect class, audit every producer,
+consumer, caller, reader and transition of that class before the next repair.
+After three `request_changes` primaries on one PR, split it or return to
+[plan](../plan/SKILL.md) and tell the requester why. Follow the contract's
+[review budget and lineage-reset rule](../../CONTRACT.md#review-budget).
+Return accepted repairs to delivery; bounded fixes alone do not complete the
+commissioned outcome.
 
-Preserve severity unless corrected with evidence in the thread. Critical or
-security-path downgrades need requester authority; identifying findings as the
-same defect needs reviewer confirmation there. For conflicting findings,
-satisfy higher-impact acceptance and re-evaluate the other. After a response
-fails twice, choose another evidence-backed route or ask if none remains.
-
-Do not add findings to the batch. Genuinely new critical evidence stops
-adjudication and requires a separate authorized PR review thread.
-
-## Repeated findings and review budget
-
-Follow the [review budget](../../CONTRACT.md#review-budget).
-A second review flagging the same file or defect class requires a `deep`
-profile audit of the whole class—every producer/consumer, caller, reader and
-transition—then one repair, not individual patches.
-
-**A delta requesting changes leaves no further delta.** After fixes, squash/amend
-so **neither reviewed commit remains an ancestor of HEAD**, then request a new
-primary. A fresh lineage resets budget, not the problem or the count: after
-three `request_changes` primaries on one PR, split or return to `plan` and
-explain why to the requester.
-
-Exit when every supplied open blocking thread has a bounded fix with validation or
-reasoned reply, with no inferred requester authority. Threads remain the record.
+After this step, resume the commissioned outcome within the authorized finish,
+or hand over its remaining acceptance; after two unsuccessful repairs,
+reconsider the route.

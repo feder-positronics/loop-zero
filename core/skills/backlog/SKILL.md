@@ -5,74 +5,26 @@ description: Recommend next work or report live GitHub backlog state through a r
 
 # Backlog
 
-Return a live view another actor can continue from. For “what should I pick up
-next?”, recommend an evidence-backed next item. Report observed drift and missing
-issue links as observations. If no item is justified, name the blocker or evidence gap
-and the next action. Keep GitHub and the repository read-only unless mutation is
-explicitly requested; recommending pickup does not start it (no branch, worktree
-or `loopzero start`). Use `gh api --method GET` for REST reads with fields.
+Answer the requested live-state question from current GitHub and repository
+evidence. Default to read-only: a pickup recommendation does not start work or
+create a branch/worktree. Use REST `gh api --method GET`; confirm repository and
+access. Inspect relevant issues, acceptance, comments, designs, linked PRs,
+checks and threads, plus local branches/worktrees for collisions.
 
-GitHub owns remote state. Confirm repository and authenticated access; inspect
-relevant open issues, linked/closing PRs, labels, relationships, comments,
-checks, review threads, timestamps and design artifacts. Local branches and
-registered worktrees supply independent collision evidence. If live access
-fails, label any repository-only result partial and make no live-state claim.
+Separate observations from recommendations. If live access fails, label the
+result partial/repository-only and make no live-state claims. Age alone does
+not release a claim or establish staleness without a repository threshold.
+Explicit links and exact branch/worktree matches outweigh title similarity;
+missing issue links alone do not prove absent task context. Use
+[contract blockers](../../CONTRACT.md#blockers) for readiness.
 
-Use repository workflow, labels and design statuses. Classify from evidence:
+For pickup, identify unmet acceptance, ownership, collisions and the smallest
+next action. Reconcile stale claims with dispatch authority; do not duplicate
+accepted work. If no pickup is justified, name missing evidence or the actual
+hold, owner and next action. Route authorized pickup to
+[work-issue](../work-issue/SKILL.md), design to
+[write-design-doc](../write-design-doc/SKILL.md), briefs to [explain](../explain/SKILL.md).
 
-- **Claimed:** an assignee or claim comment identifies the commissioned worker and
-  branch/worktree or task, awaiting its first implementation output.
-  Do not recommend duplicate pickup; reconcile stale claims with the dispatch
-  authority rather than treating age as permission to reclaim.
-- **Active:** implementation is underway, supported by recent meaningful output;
-  use Active rather than Claimed once implementation output exists.
-- **Awaiting review/hold/observation:** implementation has evidence, but review,
-  an owner hold or an external observation owns the next action. Name that action
-  and its owner or trigger; an open PR alone does not mean active implementation.
-- **Blocked:** a named dependency, decision, finding or check prevents the next action.
-- **Next:** accepted, sufficiently specified, no live collision.
-- **Needs design:** unresolved material design boundary; established small changes
-  need no design artifact.
-- **Unclassified:** insufficient evidence.
-- **Missing issue link:** no linked issue identified.
-- **Missing PR:** Active or awaiting-review work cannot be reconciled to a live PR or branch; Claimed items are exempt until output is expected.
-- **Stale:** exceeds the repository's meaningful-update threshold; otherwise
-  report age without inventing a threshold.
-
-Before recommending pickup, re-read the issue, acceptance, linked design,
-branch/worktree claim, current dispatch authority and competing PRs. Identify the
-smallest unmet acceptance and whether its next action is implementation, review,
-repair or a real hold. Another delivery for the same acceptance is a collision to
-reconcile. Explicit links, closing keywords, shared references
-and comments outweigh title similarity; native sub-issues outweigh prose
-parentage. Exact worktree/branch matches establish collisions; similar slugs
-only warrant inspection. Use [contract blockers](../../CONTRACT.md#blockers)
-for readiness, not labels. Reassess complexity after design settles; it describes
-judgment, not executor preference.
-
-Lead with the recommendation for next-work questions, current delivery/blockers
-for re-entry. Include relevant links, observed state, defined priority,
-parentage, acceptance/design gaps, dependencies, collisions, age, last meaningful
-evidence, classification rationale and smallest next action, with unrequested
-GitHub writes offered for requester approval. For delegation, include bounded
-acceptance and evidence that pickup is clear.
-
-Separate observations from recommendations. A missing issue link alone does
-not prove absence of accepted task context. Omit empty sections and state source
-limits.
-
-For explicitly requested pickup or dispatch, confirm the dispatch authority's
-recorded claim, or write it on the existing owning issue or PR if absent, before
-starting work: assignee or one comment naming the worker, branch/worktree or
-task, and next action. This does not make comments atomic locks; one dispatch
-authority per slice prevents competing pickups. A next-work recommendation
-remains read-only.
-
-For requested grooming, re-read live state, keep each issue to one bounded outcome,
-and report changed fields/relationships. Reminders without concrete work belong
-as dated-review recommendations in their owning issue/design, not new items.
-
-Route delivery to [work-issue](../work-issue/SKILL.md), missing design to
-[write-design-doc](../write-design-doc/SKILL.md), design convergence to
-[refine-design-doc](../refine-design-doc/SKILL.md), narrative briefs to
-[explain](../explain/SKILL.md).
+For requested grooming, reread live state and report changed fields or
+relationships. Reminders without concrete work belong as dated-review
+recommendations on their owning issue/design.

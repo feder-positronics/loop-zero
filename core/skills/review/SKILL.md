@@ -8,7 +8,11 @@ description: Assess a non-diff artifact, system, architecture, workflow, agent c
 Return a ranked, evidence-backed judgment at the requested altitude.
 Route diffs to [code-review](../code-review/SKILL.md), adding
 [security-review](../security-review/SKILL.md) for changed trust boundaries.
-Route design artifacts to [review-design-doc](../review-design-doc/SKILL.md).
+For designs, read [design guidance](../write-design-doc/reference.md) and
+[design lenses](design-reference.md). Judge sufficiency for the
+next actor, respecting settled decisions unless their premises fail. Separate
+wording from material defects; do not demand detail irrelevant to that action.
+Return design findings in the response; publish to PR threads only when authorized.
 
 Read the target and context for purpose, constraints, consumers, and acceptance.
 Question premises, trace material claims to sources, probe edge cases and
@@ -30,5 +34,9 @@ Select relevant lenses:
 
 State scope, uncertainty, and limits. For findings, use
 [contract severities](../../CONTRACT.md#findings) and one synthesis.
-Leave the target unchanged. Live-task findings belong in PR review threads;
+Leave the target unchanged. Do not create findings files. Live-task findings belong in PR review threads;
 other actionable discussion belongs in its issue or PR, never a separate store.
+
+After this step, resume the commissioned outcome within the authorized finish,
+or hand over its remaining acceptance; after two unsuccessful repairs,
+reconsider the route.

@@ -1,39 +1,24 @@
 ---
 name: grill-me
-description: Stress-test a plan through one decision question per reply when asked to grill it or when consequential choices are coupled.
+description: Stress-test a plan and settle consequential choices, asking one question at a time when requester input is needed.
 ---
 
 # Grill Me
 
-Settle material branches of one plan without implementing it.
+Settle material branches of a plan without implementing it. Ground premises in
+the supplied plan, issue, task and code; label unverifiable premises as assumptions.
+Respect settled decisions unless evidence invalidates their premise.
 
-Every grilling reply, including the first, states a recommendation, the strongest
-rejected alternative and the premise that makes the recommendation win, then
-asks **exactly one short choice-based question**. Do not bundle questions.
+Resolve choices answered by evidence; recommend and assume reversible delegated
+choices. Requester-reserved choices or changes to acceptance, scope, cost or
+external commitments need direction. When requester input is needed, ask one
+consequential question at a time, with a recommendation, strongest alternative
+and deciding premise. Do not make questions a ceremony for every reply.
 
-Start from the supplied plan and settled requester decisions. Ground factual
-premises in the issue, task and current code; state any premise you cannot
-verify as an explicit assumption rather than withholding the question. For a high-impact, low-confidence, evidence-conflicted or genuinely
-plausible alternative, make the deciding premise the question's focus.
+“Your call” retains the recommendation as assumed. If evidence collapses a
+premise, reconsider the plan. On fatigue or “wrap up”, summarize settled choices,
+remaining questions and their owners; defer the remainder.
 
-Classify material branches:
-
-- Evidence or an existing decision answers it: lock it with grounding.
-- Reversible and explicitly delegated: recommend and assume it.
-- Requester-reserved, outside delegated authority, or changing acceptance, scope,
-  cost or external commitments: ask.
-- Irrelevant to the outcome: defer with a reason.
-
-“Your call” retains the recommendation as assumed. Do not reopen settled choices.
-
-Give decisions stable short IDs and record status (`Locked`, `Assumed`,
-`Deferred`), decision/evidence, strongest rejected alternative, deciding premise,
-and implementation consequence or next owner. Keep issue-backed records in the
-issue; after `loopzero start`, use `.loopzero/task.md` Notes for PR handoff.
-Before exit place the complete record there. If neither home exists, ask which
-issue/task owns it; do not create a tracker or call an unplaced record complete.
-
-If a fact collapses the premise, stop and re-scope. If a question loops twice,
-decide within scope or defer. On fatigue or “wrap up”, summarize and defer the
-remainder immediately. Normal completion requires every material branch to have
-a status and the requester to confirm the record once.
+After this step, resume the commissioned outcome within the authorized finish,
+or hand over its remaining acceptance; after two unsuccessful repairs,
+reconsider the route.

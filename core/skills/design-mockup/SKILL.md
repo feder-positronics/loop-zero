@@ -5,39 +5,25 @@ description: Explore a UI direction with a standalone HTML/CSS mockup before pro
 
 # Design Mockup
 
-Make an interaction and visual hierarchy inspectable while changes are cheap.
-Keep the artifact clearly non-production; omit backend implementation.
+Make the UI decision inspectable in a clearly non-production artifact; omit
+backend implementation. Read the request, design, existing surface and relevant
+component, token and browser guidance. Identify actors, scenarios, consequential
+states and the question to settle. Distinguish assumptions from settled decisions.
 
-Read the request, issue/task, relevant design and existing surface. Identify
-actors, jobs, scenarios, consequential states and the design question. Inspect
-available component catalogs, tokens, theme/layout guidance, prior mockups and
-browser-testing instructions. Otherwise infer only from production UI and state
-the limit. Reuse recognizable patterns while allowing better composition;
-compare directions only when they help decide.
+Default to portable standalone HTML/CSS with bounded inline interaction, semantic
+responsive markup, realistic data and no remote runtime or production dependency.
+Use the documented location or `docs/design/mockups/YYYY-MM-DD-feature-name.html`.
+Controls must work or be plainly non-functional. Demonstrate transitions only
+when they inform the decision; state production gaps and component mappings.
 
-Save at the documented mockup location or
-`docs/design/mockups/YYYY-MM-DD-feature-name.html`. Use semantic, responsive HTML,
-accessible states, theme tokens and realistic data exposing relevant hard cases:
-long labels, density, truncation, empty/loading/error states, permissions or
-destructive actions.
+Inspect states, viewports and accessibility material to the decision, including
+keyboard/focus, names, contrast, overflow and supported themes as relevant.
+Report inspected conditions and unavailable checks honestly. Seek stakeholder
+validation when required; otherwise label material direction assumed and vetoable.
+Record the artifact and assumptions in task Notes and follow
+[the contract](../../CONTRACT.md) for delivery. Finish by stating what the mockup
+settled and the next decision.
 
-Keep CSS and bounded interaction JavaScript inline, title the page as a mockup,
-and avoid remote runtime dependencies, production imports or an application-server
-requirement. Demonstrate consequential transitions, hierarchy and feedback.
-Controls must work or be plainly non-functional; use static alternatives when
-interaction does not inform the design question.
-
-Inspect representative desktop and mobile widths, keyboard order/focus,
-headings/landmarks, control names, contrast, reduced motion, overflow, zoom and
-both themes when supported. Report inspected conditions and unavailable
-browser-dependent checks.
-
-Document mappings to existing components/tokens, production gaps and visual
-assumptions distinct from settled architecture. Seek stakeholder validation
-when required; otherwise mark material direction assumed and vetoable.
-
-For loop-zero tasks, record artifact path and material assumptions in
-`.loopzero/task.md` Notes, then follow [the contract](../../CONTRACT.md) for
-delivery checks after the owner commits. Finish when realistic states make the
-decision inspectable, relevant checks work, controls are honest, and translation
-gaps and assumptions are explicit.
+After this step, resume the commissioned outcome within the authorized finish,
+or hand over its remaining acceptance; after two unsuccessful repairs,
+reconsider the route.
