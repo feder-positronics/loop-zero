@@ -59,7 +59,10 @@ the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
 ```sh
-SRC=~/.local/share/loopzero/source    # symlink to the pinned checkout
+CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
+SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
+mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
+ln -sfn "$CHECKOUT" "$SRC.new" && mv -T "$SRC.new" "$SRC"
 for d in "$SRC"/core/skills/*/; do
   n=$(basename "$d")
   ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
