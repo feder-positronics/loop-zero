@@ -221,9 +221,10 @@ def _lineage_markers(wt: Path, reviews: list[dict], head: str,
         raise CliError("historical recovery target/receipt/baseline is unverified; HOLD for owner")
     trusted = {login.casefold() for login in publishers}
     for review in reviews:
-        if review.get("id") in adjudicated:
-            continue
         body = review.get("body") or ""
+        if review.get("id") in adjudicated or any(
+                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
+            continue
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
             continue
