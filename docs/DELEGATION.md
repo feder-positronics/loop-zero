@@ -118,19 +118,48 @@ after three acknowledgement-only or empty turns in a row: push it once with an
 instruction to act in that turn, naming the next command. A campaign owner
 holding addressable build work never ends a turn with only an acknowledgement.
 
-**Periodic progress review.** An owner holding live deadlines reviews progress
-on a fixed cadence, more often while a production window or a deadline within
-two hours is live. Each review picks the one objective with the nearest
-deadline, reads fresh evidence (remote state, the responsible owner's latest
-items, host load), names its bottleneck and weakest assumption, asks whether
-the current sequence is still needed for the objective rather than only how to
-speed it up, and makes one concrete adjustment or records why none is needed.
-It logs one line: objective, finding, adjustment, and whether another mechanism
-already caught it. Judge it by changed next actions and shortened real
-blockages, not by its own finding count; drop it when it stops changing what
-happens. Read every claim the decision rests on from the remote before ruling:
-reported work shortages, "in the queue", and the change class from the PR file
-list. A stale draft is not ownership. Cadence and wiring belong in host policy.
+**Event-triggered review.** Review progress when evidence shows something is
+off, not on a clock. Host policy decides which signals wake an owner (for
+example eligible work waiting while slots are free, a Liveness stall, a
+merge-authorised green PR left unqueued, or a hold past its re-decide time) and
+wakes only the owner concerned, with that one finding; an unchanged finding
+does not wake again, and an unreadable source is unknown. On a wake, read every
+claim the decision rests on from the remote: reported work shortages, "in the
+queue", the change class from the PR file list. A stale draft is not
+ownership. Record one entry: the outcome and its current condition, the
+obstacle, the next step with its predicted effect and check time, and at that
+check the actual result. Judge reviews by changed next actions and shortened
+blockages; a daily check keeps or reverts each adjustment against its numbers.
+
+**Retrospectives.** The outcome owner records a retro, in loop-zero and in
+consumers, when any of these occurs:
+
+1. A production or delivery outage (one that stops reviews, the queue or
+   deploys for everyone), a failed or unintended deployment, or an executed
+   breach of an explicit authority or protected-checkout rule. A demonstrated
+   main defect counts at once; otherwise a required or correctness-nightly
+   check still failing on main 60 minutes after its first failure.
+   Administrative monitors and review-eligibility jobs do not count.
+2. An executed corrective rollback of code, a deployment or configuration.
+   Unused contingencies and planned switch-back tests do not count.
+3. A hold that misses its re-decide time or restricts a commissioned outcome
+   for 24 hours; renewals do not reset its age, and a retro never lifts it.
+4. The human owner, or the decisions owner for them, corrects an evidenced
+   wrong claim, unauthorised restriction, lost ownership or failed
+   continuation. Approvals, priorities and plain questions do not count.
+5. Addressable work still stalled 60 minutes after its Liveness push;
+   legitimate dependency, queue and hold waits do not count.
+6. A second independent occurrence of the same workflow failure (a stop,
+   wait, corrective intervention or quota hit), linked to the first.
+
+Routine releases need none. Count independent causes once, never retries or
+collateral. Write one `Retro:` comment per causal episode on its owning issue
+or PR, after recovery, and update it with new evidence: what happened and for
+how long; expected versus actual; the existing mechanism that should have
+caught it, or "none: capacity or uncertainty"; and up to two actions (a repair,
+a deletion or a check inside an existing mechanism) with owner, observable
+result and check date, or why none remains. Workflow health still governs
+any change.
 
 **Goal first.** Each owner holds its commissioned outcome (for example
 "ordinary changes reach users") and treats its plan as replaceable; finishing
