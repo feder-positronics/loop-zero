@@ -27,6 +27,12 @@ runs, full checks) detached, so a harness that ends your turn cannot kill it:
 then wait for `LOG.exit`. Codex 0.165 sends SIGTERM (exit 143) to such
 children (openai/codex#46702); drop this once a fixed release is verified.
 
+Treat /tmp as disposable: only running-command logs, build output and browser
+runs belong there. Keep receipts, evidence, review artifacts and handoffs on the
+PR or issue, or in the durable scratch your repository's instructions name. Make
+task checkouts as worktrees of an existing clone, not new clones, and remove
+yours once its PR merges or closes and everything is pushed.
+
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget). Check the clean committed head
 before pushing; publish and review every pushed head within that budget. Batch
