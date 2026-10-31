@@ -429,7 +429,7 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
 
 # These releases have a source-reviewed configuration-to-developer-role path.
 _CODEX_INSTRUCTION_VERSIONS = frozenset({
-    "0.160.1", "0.161.0", "0.162.1", "0.163.0", "0.164.0", "0.165.0",
+    "0.160.1", "0.161.0", "0.162.1", "0.163.0", "0.164.0", "0.165.0", "0.166.0",
 })
 
 
