@@ -49,11 +49,32 @@ Keep a source checkout at the same pinned revision as the CLI. The Python wheel
 contains the CLI package; the source checkout supplies `core/skills`, the shared
 contract, credential guidance, and supporting references.
 
-Point your agent's repository instructions at that checkout's
-`core/skills/README.md` and `core/CREDENTIALS.md`. Use the relevant skill from
-the catalog for each task. Keep the source directory structure intact so
-relative links resolve; copying an individual `SKILL.md` loses its references.
-Keep those instructions in `AGENTS.md`: Codex and Claude Code (v2.1.277 or
+Install the skills once per machine, not per repository: link each directory
+under the checkout's `core/skills` into `~/.agents/skills` (Codex) and
+`~/.claude/skills` (Claude Code). Link through one stable path that you repoint
+when you upgrade the CLI, so skills and CLI move together, and keep the previous
+revision for rollback. Never edit the linked checkout. Both harnesses follow a
+symlinked skill directory and resolve its relative links from the real files, so
+the contract and references stay reachable. Do not also keep copies of these
+skills in a repository: both would load.
+
+```sh
+CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
+SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
+mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
+ln -sfn "$CHECKOUT" "$SRC.new" && mv -T "$SRC.new" "$SRC"
+for d in "$SRC"/core/skills/*/; do
+  n=$(basename "$d")
+  ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
+  ln -sfn "$SRC/core/skills/$n" ~/.claude/skills/"$n"
+done
+```
+
+Repositories customise through documentation only: `AGENTS.md`, including
+folder-level `AGENTS.md` files, and the docs it links ("when X, read Y"). Project
+docs add project detail; they never relax the contract. Point your agent's
+repository instructions at the checkout's `core/skills/README.md` and
+`core/CREDENTIALS.md`. Keep those instructions in `AGENTS.md`: Codex and Claude Code (v2.1.277 or
 later) both read it directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
 `CLAUDE.local.md` on the same path; Claude reads any of them instead of
 `AGENTS.md`. Claude cannot read `AGENTS.md` directly with third-party providers
@@ -61,10 +82,7 @@ such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
 first session after an install or upgrade; there, use a local, untracked
 `CLAUDE.md` containing `@AGENTS.md`. `/memory` lists the loaded files.
 For TypeSafe work, explicitly request [typesafe-ai](integrations/typesafe-ai/SKILL.md)
-from the optional integrations. In this repository, `.agents/skills` links
-`plan`, `implement`, `work-issue`, and `typesafe-ai` to their canonical skills
-for discovery. Other consumers must
-connect their own agent.
+from the optional integrations.
 
 For model routing, copy [models.toml](models.toml) into the consuming repository,
 adjust its models and efforts to the available runtimes, and point repository
