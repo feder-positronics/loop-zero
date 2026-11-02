@@ -28,3 +28,8 @@ hold, owner and next action. Route authorized pickup to
 For requested grooming, reread live state and report changed fields or
 relationships. Reminders without concrete work belong as dated-review
 recommendations on their owning issue/design.
+
+For count requests, state the consumer repository's counting rule and reconcile
+every open issue into counted work, standing tracking or unclassified; show held
+work and classification gaps explicitly. Use consumer AGENTS.md conventions
+rather than inventing labels or another state store.
