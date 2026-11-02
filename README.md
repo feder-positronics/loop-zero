@@ -124,6 +124,8 @@ Settings and semantics the example does not spell out:
 - [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — contributor module map.
 - [docs/BACKLOG.md](docs/BACKLOG.md) — a readable backlog: problems, goals,
   ongoing duties and one pinned "Work still to do" summary.
+- [docs/CODE-HEALTH.md](docs/CODE-HEALTH.md) — keeping a repository lean:
+  recurring audits that report only new findings and never delete on their own.
 
 ## License
 

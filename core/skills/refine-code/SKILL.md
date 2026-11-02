@@ -17,8 +17,9 @@ as semantic until equivalence is demonstrated. Route new behavior, abstraction
 boundaries or weakened tests to [implement](../implement/SKILL.md).
 
 Deletion of code outside the current task diff requires explicit requester
-commissioning. Choose a clean rollback commit before a deletion batch; if any
-check fails, restore the whole batch to it before debugging.
+commissioning; an audit finding ([code health](../../../docs/CODE-HEALTH.md))
+is a lead, not a commission. Choose a clean rollback commit before a deletion
+batch; if any check fails, restore the whole batch to it before debugging.
 
 For deletion, establish that supported consumers, including dynamic entry points,
 registries, reflection, plugins, configuration, generated consumers and public
