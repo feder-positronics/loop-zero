@@ -161,6 +161,14 @@ a deletion or a check inside an existing mechanism) with owner, observable
 result and check date, or why none remains. Workflow health still governs
 any change.
 
+Close the loop on a schedule that host policy sets. A daily check rules on
+every action whose check date has arrived: keep, revert or extend once with a
+reason. It also pushes the owner of any trigger event still missing its retro.
+An action more than a day overdue counts as an occurrence under trigger 6. A
+weekly audit covers every dimension of the fleet against its sources, rechecks
+whether earlier actions were shipped, used and effective, and names at least one
+mechanism to delete, or why none qualifies.
+
 **Goal first.** Each owner holds its commissioned outcome (for example
 "ordinary changes reach users") and treats its plan as replaceable; finishing
 a step, package or subtask never redefines success. Within the human owner's
