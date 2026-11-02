@@ -23,6 +23,8 @@ and setup.
   design rationale, dated reviewer evidence and native compatibility limits.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
+- [BACKLOG.md](BACKLOG.md) — readable-backlog convention: three issue kinds,
+  one to-do number, a pinned summary and a short next-up list.
 - [T3-UPSTREAM.md](T3-UPSTREAM.md) — periodic T3 Code/Orchestrator reading,
   version-aware source verification, ownership and bounded adoption.
 - [design/2026-10-28-t3-orchestration-workflow-adaptations.md](design/2026-10-28-t3-orchestration-workflow-adaptations.md) —
