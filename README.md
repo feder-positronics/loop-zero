@@ -122,6 +122,8 @@ Settings and semantics the example does not spell out:
 - [integrations/](integrations/) — optional vendor integration skills.
 - [SETUP.md](SETUP.md) — install, configure, first run.
 - [docs/REWRITE-SPEC.md](docs/REWRITE-SPEC.md) — contributor module map.
+- [docs/BACKLOG.md](docs/BACKLOG.md) — a readable backlog: problems, goals,
+  ongoing duties and one pinned "Work still to do" summary.
 
 ## License
 
