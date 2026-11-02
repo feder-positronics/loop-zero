@@ -23,8 +23,10 @@ earlier head cannot establish a current gate verdict.
 
 Run a command expected to take more than about two minutes (builds, browser
 runs, full checks) detached, so a harness that ends your turn cannot kill it:
-`setsid nohup bash -c '<cmd> >LOG 2>&1; echo $? >LOG.exit' </dev/null >/dev/null 2>&1 &`,
-then wait for `LOG.exit`. Codex 0.165 sends SIGTERM (exit 143) to such
+`setsid nohup bash -c 'echo $$ >LOG.pid; <cmd> >LOG 2>&1; echo $? >LOG.exit' </dev/null >/dev/null 2>&1 &`,
+then wait for `LOG.exit`. To cancel, check `LOG.exit` first, then run
+`kill -- -$(cat LOG.pid)`; never `pkill -f`, which also matches your own shell
+(`$!` is not the job: `setsid` may fork). Codex 0.165 sends SIGTERM (exit 143) to such
 children (openai/codex#46702); drop this once a fixed release is verified.
 
 Treat /tmp as disposable: only running-command logs, build output and browser

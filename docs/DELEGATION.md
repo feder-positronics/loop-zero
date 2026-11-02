@@ -339,7 +339,8 @@ codex exec --model <resolved-model> -c model_reasoning_effort=<resolved-effort> 
 echo $! ><pid-file>
 ```
 
-Record `$!` and use `kill -0 <pid>`, never `pgrep -f`: pattern matching also
+Record `$!` and use `kill -0 <pid>` to wait and `kill <pid>` to cancel, never
+`pgrep -f` or `pkill -f`: pattern matching also
 finds the waiting shell and can wait forever. Prefer completion notifications
 to reading output files. Wait on long commands with blocking calls (Codex:
 yield at least 30 seconds), not second-by-second polling.
