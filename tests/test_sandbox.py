@@ -452,20 +452,20 @@ def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, m
 
 
 def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch):
-    import signal
-    import time
-
+    import threading
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    events = []
+    observed, events, reporters = threading.Event(), [], []
 
-    def cancel(message):
+    def heartbeat(message):
         events.append(message)
-        if len(events) == 1:
-            os.kill(os.getpid(), signal.SIGINT)
+        reporters.append(threading.current_thread())
+        observed.set()
 
+    def cancel(*args):
+        assert observed.wait(5), "no running heartbeat before cancellation"
+        raise KeyboardInterrupt
+    monkeypatch.setattr(sandbox, "_run_one", cancel)
     with pytest.raises(KeyboardInterrupt):
-        sandbox.run_checks(make_config(checks=("exec sleep 5",)), git_repo, status=cancel)
+        sandbox.run_checks(make_config(), git_repo, status=heartbeat)
     assert events and all("running" in event for event in events)
-    stopped = list(events)
-    time.sleep(0.1)
-    assert events == stopped
+    assert all(not reporter.is_alive() for reporter in reporters)
