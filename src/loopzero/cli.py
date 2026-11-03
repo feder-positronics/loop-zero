@@ -747,13 +747,11 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
             raise CliError("conflicting or ambiguous review publication")
         comments = _rest_rows(
             f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
-        fields = ("path", "line", "side", "body")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
                 or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 for c in comments)
-                or sorted((tuple(c.get(k) for k in fields) for c in comments), key=repr)
-                != sorted((tuple(c[k] for k in fields) for c in expected["comments"]), key=repr)):
+                or not _published_comments_match(comments, expected["comments"])):
             raise CliError("review finding contents or locations differ from saved publication")
     if _pr_reviews(config.repo, pr.number) != reviews:
         raise CliError("review evidence changed during publication recovery")
@@ -762,6 +760,36 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
             or worktree.head(wt) != result.head or worktree.is_dirty(wt)):
         raise CliError("head or worktree changed during publication recovery")
     return True
+
+
+def _published_comments_match(comments: list[dict], expected: list[dict]) -> bool:
+    """Match list-endpoint comments, where null line/side means GitHub omitted the location."""
+    if len(comments) != len(expected):
+        return False
+    candidates = [
+        [i for i, saved in enumerate(expected)
+         if comment.get("path") == saved.get("path")
+         and comment.get("body") == saved.get("body")
+         and all(comment.get(field) is None or comment.get(field) == saved.get(field)
+                 for field in ("line", "side"))]
+        for comment in comments
+    ]
+    if any(not matches for matches in candidates):
+        return False
+    # Preserve multiset semantics if identical path/body comments have different anchors.
+    assigned: dict[int, int] = {}
+
+    def assign(comment_index: int, visited: set[int]) -> bool:
+        for saved_index in candidates[comment_index]:
+            if saved_index in visited:
+                continue
+            visited.add(saved_index)
+            if saved_index not in assigned or assign(assigned[saved_index], visited):
+                assigned[saved_index] = comment_index
+                return True
+        return False
+
+    return all(assign(i, set()) for i in sorted(range(len(comments)), key=lambda i: len(candidates[i])))
 
 
 def _run_review(

@@ -487,6 +487,64 @@ def test_large_publication_confirmation_and_hosted_agreement(
         assert eligibility.evaluate(repo, 7, head, "main", ("bot",)).ready
 
 
+@pytest.mark.parametrize(
+    ("change", "confirmed"),
+    [
+        (None, True),  # list endpoint omits locations; individual endpoint has them
+        ("path", False),
+        ("body", False),
+        ("commit", False),
+        ("line", False),
+        ("side", False),
+    ],
+)
+def test_publication_confirmation_tolerates_only_unknown_list_locations(
+    native, monkeypatch, change, confirmed
+):
+    result = native[0]()
+    repo, number, publisher = "acme/widgets", 7, "bot"
+    cfg = Config(repo, "main", (), (), "squash", ("codex",), review_publishers=(publisher,))
+    pr = github.PR(number, "https://example.test/pr/7", result.head, "main", True, "OPEN", "MERGEABLE")
+    body = cli.review_marker(result.head, result.kind)
+    saved = {"path": "large.txt", "line": 1, "side": "RIGHT", "body": "Finding body"}
+    review = row(result, body)
+    listed_comment = {
+        **saved,
+        "line": None,
+        "side": None,
+        "commit_id": result.head,
+        "pull_request_review_id": review["id"],
+        "user": {"login": publisher},
+    }
+    if change == "path":
+        listed_comment["path"] = "other.txt"
+    elif change == "body":
+        listed_comment["body"] = "Different body"
+    elif change == "commit":
+        listed_comment["commit_id"] = "different-commit"
+    elif change == "line":
+        listed_comment["line"] = 2
+    elif change == "side":
+        listed_comment["side"] = "LEFT"
+
+    monkeypatch.setattr(github, "pr_view", lambda *_args, **_kwargs: pr)
+    monkeypatch.setattr(cli, "_pr_reviews", lambda *_args: [review])
+    monkeypatch.setattr(cli, "_rest_rows", lambda *_args: [listed_comment])
+    monkeypatch.setattr(github, "review_payload", lambda *_args, **_kwargs: {
+        "body": body, "comments": [saved]
+    })
+    monkeypatch.setattr(eligibility, "recovery_target", lambda *_args: result.head)
+    monkeypatch.setattr(eligibility, "recovery_reviews", lambda *_args: ())
+    monkeypatch.setattr(eligibility, "recovery_suffix", lambda *_args: "")
+    monkeypatch.setattr(eligibility, "eligible_review", lambda *_args, **_kwargs: review)
+
+    if confirmed:
+        assert cli._confirm_review(native[2], cfg, pr, result, publisher, [review])
+    else:
+        with pytest.raises(cli.CliError, match="review finding contents or locations differ"):
+            cli._confirm_review(native[2], cfg, pr, result, publisher, [review])
+
+
 @pytest.mark.parametrize("location", ["provenance", "model_prose", "model_fence"])
 def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, location):
     result = native[0]()
