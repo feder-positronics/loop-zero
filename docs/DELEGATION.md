@@ -111,6 +111,8 @@ hazard still present and why waiting is safer than the available route;
 restating the original reason is not enough. A merge freeze pauses merging
 only, never building, checks or review.
 
+**Release plan review.** Before GO, verify each named backup/database provider, recovery point, CLI and identity against live infrastructure now; none is a window-time gate. Avoid short-deadline human receipts; default to agent-readable evidence; name human-only receipts in advance with the person's confirmed availability. Before fencing, require the full product/browser suites to run green (executed, not skipped) on the release head combined with current main; never first-run in-window. Reconcile newest scheduled main run of these suites; explain/fix red first. Refresh if inputs change. Keep fence-before-landing; never merge early for the run. Set step caps from measured queue/deploy/abort durations. Waiter expiry isn't dequeue: verify queue state. Abort order unchanged.
+
 **Liveness.** Owners route and workers build: an owner commissions build work to
 a worker and never builds in a turn that answers a message. Measure progress by
 work output on the commissioned deliverable (a commit, push, PR or checks
