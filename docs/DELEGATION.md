@@ -123,7 +123,20 @@ those suites; explain or fix red first; refresh if inputs change. Keep the
 production fence in place before landing; never merge early solely to obtain
 that suite run. Set per-step caps from measured queue, deploy and abort
 durations. Waiter expiry is not dequeue: verify queue state. Keep the approved
-plan's abort order unchanged.
+plan's abort order unchanged. Compare candidate and control on main by exact
+signature and mechanism, not aggregate red counts; record immutable heads, workflow
+version, run/job/test, assertion, setup and environment. A shared failure on
+comparable main is `KNOWN-RED-ON-MAIN`: record its issue, repair owner and expiry
+in the release packet. That attribution alone does not veto release; existing
+release gates still apply. Candidate-only, new or different signatures and
+missing, cancelled or skipped coverage remain unresolved, never green. Green main
+does not prove a candidate regression. Required checks stay strict: attribution
+never overrides `loopzero ready`/`merge` or required CI. Any narrow exclusion to
+make a required check nonblocking must be changed and reviewed in its owning
+consumer. Quarantine only after diagnosis; name the exact test/signature, cause
+evidence, issue, owner, fixed calendar expiry and exit criterion. Keep it running,
+nonblocking and reported. Expiry returns it to blocking unless renewed with
+evidence. Prefer fixing; no suite-wide skip, retry-until-green or hidden xfail.
 
 **Liveness.** Owners route and workers build: an owner commissions build work to
 a worker and never builds in a turn that answers a message. Measure progress by
