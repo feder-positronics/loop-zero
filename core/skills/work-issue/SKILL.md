@@ -17,6 +17,9 @@ claims. Apply [inherited-work guidance](reference.md#inherited-work) to continua
 Retain an inherited task worktree or use `loopzero start` for a new delivery.
 Record observable acceptance and the issue link. Deliver through
 [implement](../implement/SKILL.md), using applicable [safeguards](reference.md).
+As an unattended worker, never use an ask-the-user or request-input tool. Send
+one message with a blocker or question to the parent (or owner named in the
+brief), then end the turn.
 Recheck collisions before publication and again before merge, rereading live
 acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
 Merge only when authorized and the contract's gates pass; otherwise stop at readiness.

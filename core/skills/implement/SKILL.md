@@ -10,6 +10,10 @@ and affected interfaces. Confirm the task worktree and branch. Follow
 [credential conventions](../../CREDENTIALS.md) and
 [delegation guidance](../../../docs/DELEGATION.md).
 
+As an unattended worker, never use an ask-the-user or request-input tool. Send
+one message with a blocker or question to the parent (or owner named in the
+brief), then end the turn.
+
 Implement bounded acceptance with behavior proof; use
 [write-tests](../write-tests/SKILL.md) for test design. For a bug fix, watch the
 regression test fail on pre-fix code and record where in Notes; a test that passes
