@@ -718,8 +718,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     adjudicated = eligibility.recovery_reviews(
         config.repo, pr.number, eligibility.recovery_target(config.repo, pr.number), reviews)
     evidence = [r for r in reviews if r.get("id") not in adjudicated
-                and "loopzero:review" in (r.get("body") or "")
-                and (r.get("commit_id") == result.head or any(
+                and "loopzero:review" in (r.get("body") or "") and (r.get("commit_id") == result.head or any(
                     m.group(1) == result.head for m in REVIEW_MARKER_RE.finditer(r["body"])))]
     fresh = github.pr_view(config.repo, pr.number)
     if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
@@ -740,26 +739,21 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
         review_id = review.get("id")
-        if (expected is None or review.get("commit_id") != result.head
-                or review.get("state") not in states
+        if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
             raise CliError("conflicting or ambiguous review publication")
-        comments = _rest_rows(
-            f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
-        saved_comments = expected["comments"]
+        comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
                 or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 for c in comments)
                 or sorted((c.get("path"), c.get("body")) for c in comments)
-                != sorted((c.get("path"), c.get("body")) for c in saved_comments)
+                != sorted((c.get("path"), c.get("body")) for c in expected["comments"])
                 or any((c.get("line") is not None or c.get("side") is not None)
-                       and not any(c.get("path") == saved.get("path")
-                                   and c.get("body") == saved.get("body")
-                                   and (c.get("line") is None or c.get("line") == saved.get("line"))
-                                   and (c.get("side") is None or c.get("side") == saved.get("side"))
-                                   for saved in saved_comments) for c in comments)):
+                       and not any((c.get("path"), c.get("body")) == (s.get("path"), s.get("body"))
+                                   and all(c.get(k) is None or c.get(k) == s.get(k) for k in ("line", "side"))
+                                   for s in expected["comments"]) for c in comments)):
             raise CliError("review finding contents or locations differ from saved publication")
     if _pr_reviews(config.repo, pr.number) != reviews:
         raise CliError("review evidence changed during publication recovery")

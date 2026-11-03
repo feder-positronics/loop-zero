@@ -423,18 +423,15 @@ def test_large_publication_confirmation_and_hosted_agreement(
         task.write_text("Inspect the delta")
         tool = fake_bin / "codex"
         selected = merge_base if kind == "delta_wrong_range" else reviewed
-        old_range = f"{merge_base!r},{reviewed!r}"
-        new_range = f"{selected!r},{head!r}"
+        old_range, new_range = f"{merge_base!r},{reviewed!r}", f"{selected!r},{head!r}"
         tool.write_text(tool.read_text().replace(old_range, new_range))
-        result = cli._run_review(
-            native[2], cfg, head, "delta", reviewed, publication=(repo, 7, "bot")
-        )
+        result = cli._run_review(native[2], cfg, head, "delta", reviewed,
+                                 publication=(repo, 7, "bot"))
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
         delta_diff = git(native[2], "diff", "--no-color", reviewed, head).strip().encode()
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
         assert eligibility.recovery_inspection(proof, head) is (kind == "delta")
-        # Synthetic target routing only; the93 owning cases retain exact historical pins.
         monkeypatch.setattr(eligibility, "recovery_target", lambda *_: head)
         monkeypatch.setitem(eligibility._RECOVERY_TARGETS, 7, head)
         monkeypatch.setattr(eligibility, "recovery_reviews", lambda *_: (999,))
@@ -446,6 +443,11 @@ def test_large_publication_confirmation_and_hosted_agreement(
     gh.respond(f"api repos/{repo}/pulls/7/files", [])
     rendered = github.review_payload(repo, 7, head, result, prefix)["body"]
     review = row(result, rendered)
+    if kind == "normal":
+        expected_comment = {"path": "large.txt", "line": 1, "side": "RIGHT", "body": "Finding body"}
+        listed_comment = dict(expected_comment, line=None, side=None, commit_id=head,
+                              pull_request_review_id=100, user={"login": "bot"})
+        monkeypatch.setattr(github, "review_payload", lambda *_a, **_k: {"body": rendered, "comments": [expected_comment]})
     if kind == "tampered_digest":
         line = rendered.splitlines()[1]
         value = runners.decode_codex_evidence(line)
@@ -453,96 +455,36 @@ def test_large_publication_confirmation_and_hosted_agreement(
         review["body"] = rendered.replace(line, packed(value))
     if kind == "changed_raw":
         result = dataclasses.replace(result, raw=json.dumps(json.loads(result.raw), indent=2))
-    gh.respond(
-        f"api repos/{repo}/pulls/7",
-        rest_pr_json(pr_json(headRefOid=head, mergeStateStatus="CLEAN")),
-    )
+    gh.respond(f"api repos/{repo}/pulls/7",
+               rest_pr_json(pr_json(headRefOid=head, mergeStateStatus="CLEAN")))
     gh.respond(f"api repos/{repo}/pulls/7/reviews?per_page=100&page=1", [review])
-    gh.respond(f"api repos/{repo}/pulls/7/reviews/100/comments?per_page=100&page=1", [])
+    gh.respond(f"api repos/{repo}/pulls/7/reviews/100/comments?per_page=100&page=1", [listed_comment] if kind == "normal" else [])
     gh.respond("api graphql", threads_json())
     gitdir = native[2] / ".git/info/exclude"
     gitdir.write_text(gitdir.read_text() + "\n.loopzero/\n")
     cli._save_review(native[2], result)
     cli._save_report(native[2], CheckReport(head, False, ()))
     pr = github.pr_view(repo, 7)
-    local = cli._readiness(native[2], cfg, pr, head, [review])
     assert (
-        local.ready
+        cli._readiness(native[2], cfg, pr, head, [review]).ready
         is eligibility.evaluate(repo, 7, head, "main", ("bot",)).ready
         is (kind != "delta_wrong_range")
     )
     if kind == "delta_wrong_range":
-        assert not eligibility.recovery_inspection(
-            eligibility.review_projection(review, head, repo, 7)[1], head
-        )
+        assert not eligibility.recovery_inspection(eligibility.review_projection(review, head, repo, 7)[1], head)
         with pytest.raises(cli.CliError, match="revoked"):
             cli._confirm_review(native[2], cfg, pr, result, "bot", [review])
     elif kind in ("tampered_digest", "changed_raw"):
         with pytest.raises(cli.CliError, match="conflicting or ambiguous"):
             cli._confirm_review(native[2], cfg, github.pr_view(repo, 7), result, "bot", [review])
-        # A coherent trusted-publisher edit is outside hosted authenticity guarantees.
-        assert eligibility.evaluate(repo, 7, head, "main", ("bot",)).ready
     else:
         assert cli._confirm_review(native[2], cfg, github.pr_view(repo, 7), result, "bot", [review])
-        assert eligibility.evaluate(repo, 7, head, "main", ("bot",)).ready
-
-
-@pytest.mark.parametrize(
-    ("change", "confirmed"),
-    [
-        (None, True),  # list endpoint omits locations; individual endpoint has them
-        ("path", False),
-        ("body", False),
-        ("commit", False),
-        ("line", False),
-        ("side", False),
-    ],
-)
-def test_publication_confirmation_tolerates_only_unknown_list_locations(
-    native, monkeypatch, change, confirmed
-):
-    result = native[0]()
-    repo, number, publisher = "acme/widgets", 7, "bot"
-    cfg = Config(repo, "main", (), (), "squash", ("codex",), review_publishers=(publisher,))
-    pr = github.PR(number, "https://example.test/pr/7", result.head, "main", True, "OPEN", "MERGEABLE")
-    body = cli.review_marker(result.head, result.kind)
-    saved = {"path": "large.txt", "line": 1, "side": "RIGHT", "body": "Finding body"}
-    review = row(result, body)
-    listed_comment = {
-        **saved,
-        "line": None,
-        "side": None,
-        "commit_id": result.head,
-        "pull_request_review_id": review["id"],
-        "user": {"login": publisher},
-    }
-    if change == "path":
-        listed_comment["path"] = "other.txt"
-    elif change == "body":
-        listed_comment["body"] = "Different body"
-    elif change == "commit":
-        listed_comment["commit_id"] = "different-commit"
-    elif change == "line":
-        listed_comment["line"] = 2
-    elif change == "side":
-        listed_comment["side"] = "LEFT"
-
-    monkeypatch.setattr(github, "pr_view", lambda *_args, **_kwargs: pr)
-    monkeypatch.setattr(cli, "_pr_reviews", lambda *_args: [review])
-    monkeypatch.setattr(cli, "_rest_rows", lambda *_args: [listed_comment])
-    monkeypatch.setattr(github, "review_payload", lambda *_args, **_kwargs: {
-        "body": body, "comments": [saved]
-    })
-    monkeypatch.setattr(eligibility, "recovery_target", lambda *_args: result.head)
-    monkeypatch.setattr(eligibility, "recovery_reviews", lambda *_args: ())
-    monkeypatch.setattr(eligibility, "recovery_suffix", lambda *_args: "")
-    monkeypatch.setattr(eligibility, "eligible_review", lambda *_args, **_kwargs: review)
-
-    if confirmed:
-        assert cli._confirm_review(native[2], cfg, pr, result, publisher, [review])
-    else:
-        with pytest.raises(cli.CliError, match="review finding contents or locations differ"):
-            cli._confirm_review(native[2], cfg, pr, result, publisher, [review])
+        if kind == "normal":
+            for field, value in (("path", "other.txt"), ("body", "Different body"),
+                                 ("commit_id", "different-commit"), ("line", 2), ("side", "LEFT")):
+                monkeypatch.setattr(cli, "_rest_rows", lambda *_args, f=field, v=value: [{**listed_comment, f: v}])
+                with pytest.raises(cli.CliError, match="review finding contents or locations differ"):
+                    cli._confirm_review(native[2], cfg, pr, result, "bot", [review])
 
 
 @pytest.mark.parametrize("location", ["provenance", "model_prose", "model_fence"])
