@@ -69,7 +69,10 @@ A schedule firing or a relayed approval grants no new authority.
   on the tracking issue; messages the coordinator only for blockers.
 - **Worker:** one bounded delivery under a brief (see
   [Briefs and ownership](#briefs-and-ownership)); returns acceptance evidence
-  or one named blocker.
+  or one named blocker. An unattended worker never uses an ask-the-user or
+  request-input tool: send one message with any blocker or question to its
+  parent (or the owner named in the brief), then end the turn. A child that
+  asks directly is treated as blocked.
 - **QA:** a round files reproducible defects in commissioned states, with every
   occurrence. A retest checks every recorded occurrence at the exact merged
   revision; the issue closes only on PASS, so repairs use `Refs`. A missing
@@ -93,6 +96,7 @@ mid-task only for a blocker. Monitors and watchdogs keep sending one packet or
 nudge per new finding. Count productive work by verified activity (completed tool
 calls or output on the deliverable), including nested reviewers; report test-slot,
 review, queue and hold waiters separately, excluding them from productive counts.
+Children waiting on a question or approval are waiters, not productive work.
 
 **Holds and freezes.** The live decision record is the only authority: one line
 per merge freeze, production window or hold ("Merge freeze: …") naming the
@@ -117,6 +121,9 @@ stream holding addressable work is stalled after 60 minutes without output or
 after three acknowledgement-only or empty turns in a row: push it once with an
 instruction to act in that turn, naming the next command. A campaign owner
 holding addressable build work never ends a turn with only an acknowledgement.
+At every wake and handover, parents check live children for waiting questions or
+approvals by reading their thread state, including the pending-request count and
+pending-request list. Answer within authority or route the request to the owner.
 
 **Event-triggered review.** Review progress when evidence shows something is
 off, not on a clock. Host policy decides which signals wake an owner (for
@@ -290,7 +297,7 @@ Allowed paths: <owned scope>
 Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
-Launch policy: Children inherit this rule: never approval-required; auto plus "read-only, do not edit" for read-only work, otherwise the parent's mode; after launch, verify pendingRequestCount 0 and a completed tool call.
+Launch policy: Children inherit this rule: never approval-required; use auto only for read-only children and say "read-only, do not edit" in the brief; a child that runs commands or edits inherits the parent's mode, because auto can stall on approval review. After launch, verify pendingRequestCount 0 and a completed tool call.
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
 Integration executor: <named executor for returned heads and one owner of any readiness/merge waiter; parent retains acceptance responsibility>
@@ -310,10 +317,11 @@ Return: Tested changes and evidence to parent; parent finishes through readiness
 ```
 
 The source request supplies authority; neither this example nor a finish label
-grants it. Route genuine human blockers through the parent or current decisions
-owner; that owner uses the available harness question tool with the PR/task link,
-exact decision and recommended option first. If unavailable or unanswered,
-preserve the authorized work and report the blocker and next owner;
+grants it. An unattended child never uses the ask-the-user or request-input
+tool: send one message with a blocker or question to the parent or current
+decisions owner, then end the turn. The owner uses the available harness question
+tool with the PR/task link, exact decision and recommended option. If unavailable
+or unanswered, preserve authorized work and report the blocker and next owner;
 silence is not approval. T3 watches are wakeups, not additional readiness waiters;
 the watch owner unwatches before handing control to a person.
 
