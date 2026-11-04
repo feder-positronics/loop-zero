@@ -23,6 +23,8 @@ and setup.
   design rationale, dated reviewer evidence and native compatibility limits.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
+- [WORKFLOW.md](WORKFLOW.md) — plain-language diagrams: idea to merged, review
+  budget, who does what.
 - [BACKLOG.md](BACKLOG.md) — readable-backlog convention: three issue kinds,
   one to-do number, a pinned summary and a short next-up list.
 - [CODE-HEALTH.md](CODE-HEALTH.md) — code-health convention: recurring audits,
