@@ -29,6 +29,8 @@ ownership and the contributor routine that keeps documentation current.
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
 | `loopzero merge [--wait[=SECONDS]]` | Recheck readiness and merge; optionally wait for required checks and landing before cleanup. |
 
+For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
+
 `loopzero status` prints where the current branch is in that sequence.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
