@@ -55,3 +55,5 @@ commit, never checks, hooks or scripts. If acceptance requires unlisted paths,
 update task and PR first; request scope decisions for expanded proof seams or
 ownership. If interrupted, preserve an adoptable diff and report remaining
 acceptance, checks and findings under the contract's handoff rules.
+
+After a merge/queue failure, an authorized requeue means posting `@mergifyio queue <queue>` as the whole PR comment from the same login first, then rerunning `loopzero merge --wait`, which never requeues by itself.
