@@ -1169,7 +1169,7 @@ def _wait_for_mergify(
             if sha:
                 return sha
             raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
-                           f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
+                           f"post `@mergifyio queue {queue}` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
 
 
 class _AdmissionDeadline(Exception):
@@ -1208,7 +1208,7 @@ def _merge_with_mergify(
         if sha:
             return sha
         raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
-                       f"fix the cause and explicitly requeue with @mergifyio queue {queue}")
+                       f"post `@mergifyio queue {queue}` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
     if not confirmed and not requested:
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
