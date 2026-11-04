@@ -202,23 +202,23 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert report["results"][0]["tail"] == "ok"
 
 
-def test_check_with_open_pr_patches_validation_section(
-    wt: Path, gh: FakeGh, capsys
-) -> None:
+@pytest.mark.parametrize("pushed", [False, True])
+def test_check_with_open_pr_patches_only_pushed_head(wt: Path, gh: FakeGh, capsys, pushed) -> None:
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
-    head = head_of(wt)
-    arm_pr(gh, head)
+    arm_pr(gh, head_of(wt))
+    if not pushed:
+        git(wt, "commit", "-q", "--allow-empty", "-m", "unpushed change")
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-
     code, out, err = run(capsys, "check")
-
     assert code == 0 and out.endswith("PASS\n") and err == ""
-    assert [call["argv"][:2] for call in gh.calls] == [*LOOKUP_CALLS,
-                                                      ["api", f"repos/{REPO}/pulls/7"]]
-    body = json.loads(gh.calls[2]["--input"])["body"]
-    assert body.count("## Validation") == 1
-    assert f"Recorded for `{head[:12]}`" in body
-    assert "- `echo ok`: exit 0" in body
+    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS + (
+        [["api", f"repos/{REPO}/pulls/7"]] if pushed else [])
+    assert json.loads((wt / ".loopzero/checks.json").read_text())["head"] == head_of(wt)
+    if pushed:
+        body = json.loads(gh.calls[2]["--input"])["body"]
+        assert body.count("## Validation") == 1
+        assert f"Recorded for `{head_of(wt)[:12]}`" in body
+        assert "- `echo ok`: exit 0" in body
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])

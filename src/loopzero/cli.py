@@ -439,7 +439,7 @@ def _append_review(body: str, result: ReviewResult) -> str:
 
 
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
-    """Best-effort refresh of an existing PR after the branch has an upstream."""
+    """Best-effort refresh only when local HEAD is the existing PR head."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
     upstream = _proc.run(argv, cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
     if upstream.exit_code != 0:
@@ -447,7 +447,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
     try:
         branch, head = worktree.branch(wt), worktree.head(wt)
         pr = github.pr_for_branch(config.repo, branch)
-        if pr is not None and pr.state == "OPEN":
+        if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
             _update_pr_checks(wt, head, config, pr)
     except (github.GhError, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
