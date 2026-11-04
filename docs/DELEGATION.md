@@ -57,7 +57,9 @@ A schedule firing or a relayed approval grants no new authority.
   incidents and dispatches workers and reviews. May delegate routine dispatch
   and integration to named executors; it keeps main health, merge freezes and
   holds, shared delivery infrastructure and production observation. Reports to
-  the decisions owner.
+  the decisions owner. Its reconstruction from live remote state includes open
+  PRs with no push, comment or review for 6 h or more whose owner session has
+  ended: it adopts each or names a next-action owner.
 - **Decisions owner:** the only role the human owner talks to. Resolves owner
   decisions within delegated authority, records each with its source where it
   binds, and routes asks to the current responsible owner. Settles related cases
@@ -252,6 +254,10 @@ blocker. Peers resolve the current owner when sending, so a rollover sends no
 routing notices; state broadcasts still reach every owner. The successor retires
 the predecessor in the turn it acknowledges or, while the predecessor still
 parents live delegates, when the last one finishes.
+A recurring schedule belongs to its role owner (the coordinator for delivery),
+never to a worker or one-day owner; workers get one-shot wakeups only. The
+successor rebinds role schedules by ID. Each run of a recurring task first
+checks that its previous run's PR merged and adopts that PR if not.
 
 ## Resolve the model before delegation
 
