@@ -306,9 +306,11 @@ def claude_windows(result: dict, fetched_at: float) -> list[dict]:
                       "status": model.get("window_status", {}).get(key),
                       "source": "headers (fallback)", "fetched_at": fetched_at}
             old = found.get(key)
-            if old is None or (percent is not None and
-                               (old["used_pct"] is None or percent * 100 >= old["used_pct"])):
-                found[key] = window
+            if old is not None:
+                window["used_pct"] = max((v for v in (old["used_pct"], window["used_pct"]) if v is not None), default=None)
+                window["resets_at"] = window["resets_at"] or old["resets_at"]
+                window["status"] = "rejected" if "rejected" in (old["status"], window["status"]) else window["status"] or old["status"]
+            found[key] = window
     return list(found.values())
 
 

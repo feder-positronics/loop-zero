@@ -270,25 +270,27 @@ def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
     assert children[0][key] == 'caller-owned'
 
 
-@pytest.mark.parametrize('api,session', [(200, False), (403, False), (403, True)])
-def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session):
+@pytest.mark.parametrize('api,session,reverse', [(200, False, False), (403, False, False), (403, True, False), (403, False, True)])
+def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session, reverse):
     limits = [{'kind': 'weekly_all', 'percent': 96, 'resets_at': 1793912400},
               {'kind': 'weekly_scoped', 'model': 'fable', 'percent': 17, 'resets_at': 1793998800}]
     headers = {'anthropic-ratelimit-unified-representative-claim': 'seven_day',
         'anthropic-ratelimit-unified-status': 'allowed_warning', 'anthropic-ratelimit-unified-reset': '1793912400',
         'anthropic-ratelimit-unified-7d-utilization': '.96', 'anthropic-ratelimit-unified-7d_oi-utilization': '.17',
-        'anthropic-ratelimit-unified-7d_oi-reset': '1793998800'}
+        'anthropic-ratelimit-unified-7d_oi-reset': '1793998800', 'anthropic-ratelimit-unified-7d_oi-status': 'allowed'}
     if session:
         headers.update({'anthropic-ratelimit-unified-5h-utilization': '.5', 'anthropic-ratelimit-unified-5h-reset': '1793912400'})
     calls = []
+    responses = iter([headers, {**{k: v for k, v in headers.items() if k.endswith('-utilization')}, 'anthropic-ratelimit-unified-7d_oi-status': 'rejected'}][::-1 if reverse else 1])
     def http(req):
         calls.append(req.get_method())
-        return (api, {}, json.dumps({'limits': limits}).encode()) if req.get_method() == 'GET' else (200, headers, b'')
+        return (api, {}, json.dumps({'limits': limits}).encode()) if req.get_method() == 'GET' else (200, next(responses), b'')
     monkeypatch.setattr(helper, '_http', http)
     result = helper.check_claude('a')
     helper.print_status({'checked_at': helper.now(), 'providers': {'claude': {'active': 'a', 'accounts': {'a': result}}}})
     output = capsys.readouterr().out
     assert calls == (['GET'] if api == 200 else ['GET', 'POST', 'POST'])
+    assert result['next_reset'] == (1793912400 if api == 200 else 1793998800)
     assert 'Fable week: 17% used, resets Fri 06 Nov 22:00 CET' in output
     assert 'all models week: 96% used, resets Thu 05 Nov 22:00 CET — blocks Fable too when full' in output
     assert output.index('Fable week') < output.index('all models week')
