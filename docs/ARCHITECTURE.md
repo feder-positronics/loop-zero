@@ -287,10 +287,28 @@ direct `gh` polling adds shared account load and cannot replace the wait command
 A rate limit is a waiting dependency, not permission to turn missing evidence green.
 The optional host ai-accounts helper owns managed credential selection and exact-model
 eligibility under its existing lock. Its Claude exec reserve guard (including pinned
-identities) refuses non-owner launches at 85% weekly or five-hour usage, or with
+identities) reads the same per-window usage as status and refuses non-owner launches
+at 85% of any reported limit, including a scoped weekly sub-cap, or with
 missing/unreadable account status or status older than 20 minutes. The owner environment
 override permits required work; direct T3, run and shims are outside this guard.
-Per-window resets include healthy windows; legacy reset fields remain aggregates.
+Claude usage prefers the read-only OAuth usage API; setup tokens without profile
+access fall back to the existing model probes, explicitly labelled with the API
+failure. Claude credentials retain their existing stored-bearer-token format;
+native login/refresh integration is outside this usage-reporting helper.
+No login, account activation or T3 provider configuration is performed by reporting.
+Each status window exposes `instance`, `window`, `used_pct`, `resets_at` (ISO UTC),
+`resets_local`, `snapshot_age_s` and `unknown_reason`, alongside source and fetch
+time. Text and JSON derive from these same windows; user-facing dates use explicit
+Europe/Warsaw zoneinfo with CET/CEST labels, regardless of the host timezone.
+Codex uses its read-only usage API and classifies windows by their duration, since
+the primary window can itself be weekly. Output keeps every reset with its window,
+shows Fable before the overall Claude week, and only shows a Claude session warning
+when that window is reported. Per-window resets include healthy windows; legacy
+reset fields represent when all binding windows can clear, unknown if any binding
+reset is missing. Pace estimates use consecutive observations of the same window,
+source and reset; a refill or reset change invalidates the estimate. They are local
+linear projections, not provider forecasts. The existing status file holds this
+information; no additional usage state or policy gate is introduced.
 Nonsecret launch identities pin credential bindings
 (Codex account principals survive routine OAuth refreshes);
 explicit caller credentials and billing routes remain unchanged. Harnesses own safe live
