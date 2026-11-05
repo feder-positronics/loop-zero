@@ -12,8 +12,10 @@ with a short handoff, transfer recurring tasks and pending wakeups bound to
 this session, post its link and stop. The handoff is enough for the next
 action: live child IDs, pending results or questions, still-binding decisions
 with their sources and the current reply target; link history instead of
-copying it. Reconcile that work with the successor before stopping. Start heavy
-or long-running jobs detached from the agent session (for example with
+copying it. Reconcile that work with the successor before stopping. In every
+session that rolls over or is retired (coordinators, owner lines and helpers
+that start processes), start heavy or long-running jobs detached from the agent
+session (for example with
 `systemd-run --user` or `setsid`), and never settle or retire a session that
 still owns a live job that is not detached: retiring a session ends its process
 tree. A launch
