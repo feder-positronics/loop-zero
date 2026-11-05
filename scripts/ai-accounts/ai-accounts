@@ -33,9 +33,11 @@ Claude accounts authenticate with CLAUDE_CODE_OAUTH_TOKEN; Codex accounts with C
 ("main" is ~/.codex). The monitor keeps the current account while it is in the best
 available tier and switches otherwise, preferring the least-used account.
 
-Claude status includes weekly-used=NUM% and JSON weekly_used_percent (null if unknown),
-from the overall 7d window. Only exec (including --identity) refuses non-owner Claude
-launches at >=85% cached weekly or five-hour usage, or with missing/unreadable
+Status reports each window's usage, reset, source and data age. Claude prefers the
+OAuth usage API, falling back to the existing one-token model probes.
+JSON weekly_used_percent remains the overall 7d window (null if unknown).
+Only exec (including --identity) refuses non-owner Claude launches at >=85% of any
+reported cached limit (including the Fable sub-cap), or with missing/unreadable
 or older than 20 minutes cached status, exiting 3. AI_ACCOUNTS_CLAUDE_OWNER=1 bypasses
 this guard; unknown window values stay unknown. This is not fleet-wide enforcement. Direct T3 launches, run
 and CLI shims are outside this guard.
@@ -58,6 +60,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 STATE = Path(os.environ.get("AI_ACCOUNTS_HOME", Path.home() / ".local/state/ai-accounts"))
 MARGIN = float(os.environ.get("AI_ACCOUNTS_MARGIN", "0.95"))
@@ -85,16 +88,17 @@ def now() -> float:
     return time.time()
 
 
-def iso(ts: float | None) -> str:
-    if not ts:
+def iso(ts: float | str | None) -> str:
+    ts = reset_timestamp(ts)
+    if ts is None:
         return "-"
-    return dt.datetime.fromtimestamp(ts).astimezone().strftime("%a %H:%M")
+    return dt.datetime.fromtimestamp(ts, ZoneInfo("Europe/Warsaw")).strftime("%a %d %b %H:%M %Z")
 
 
 def log(msg: str) -> None:
     STATE.mkdir(parents=True, exist_ok=True)
     with open(STATE / "log", "a", encoding="utf-8") as fh:
-        fh.write(f"{dt.datetime.now().astimezone().isoformat(timespec='seconds')} {msg}\n")
+        fh.write(f"{dt.datetime.now(ZoneInfo('Europe/Warsaw')).strftime('%Y-%m-%d %H:%M:%S %Z')} {msg}\n")
 
 
 def notify(msg: str) -> None:
@@ -268,6 +272,77 @@ def _http(req: urllib.request.Request, timeout: int = 30) -> tuple[int, dict[str
         return exc.code, {k.lower(): v for k, v in exc.headers.items()}, exc.read()
 
 
+def reset_timestamp(value) -> float | None:
+    try:
+        return float(value) if not isinstance(value, bool) else None
+    except (TypeError, ValueError):
+        try:
+            return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except (AttributeError, ValueError):
+            return None
+
+
+def binding_reset(windows: list[dict]) -> float | None:
+    """All binding windows must clear before the account is below the margin."""
+    binding = [reset_timestamp(w.get("resets_at")) for w in windows if
+               w.get("status") == "rejected" or (w.get("used_pct") or 0) >= MARGIN * 100]
+    if not binding or None in binding:
+        return None
+    return max(binding)
+
+
+def claude_windows(result: dict, fetched_at: float) -> list[dict]:
+    """Normalize legacy model headers without conflating their reset times."""
+    found = {}
+    for model in result.get("models", {}).values():
+        if not isinstance(model, dict):
+            continue
+        keys = set(model.get("util", {})) | set(model.get("resets", {}))
+        keys |= set(model.get("window_status", {}))
+        for key in keys - {"", "overage"}:
+            percent = model.get("util", {}).get(key)
+            window = {"window": key, "used_pct": percent * 100 if percent is not None else None,
+                      "resets_at": model.get("resets", {}).get(key),
+                      "status": model.get("window_status", {}).get(key),
+                      "source": "headers (fallback)", "fetched_at": fetched_at}
+            old = found.get(key)
+            if old is None or (percent is not None and
+                               (old["used_pct"] is None or percent * 100 >= old["used_pct"])):
+                found[key] = window
+    return list(found.values())
+
+
+def claude_api_windows(data: dict, fetched_at: float) -> list[dict]:
+    limits = data.get("limits")
+    if not isinstance(limits, list):
+        raise ValueError("usage API has no limits array")
+    windows = []
+    names = {"session": "5h", "weekly_all": "7d"}
+    for limit in limits:
+        if not isinstance(limit, dict):
+            continue
+        kind = limit.get("kind") or limit.get("type")
+        scope = limit.get("scope") or {}
+        model = limit.get("model") or (scope.get("model") or scope.get("id") if isinstance(scope, dict) else scope)
+        key = names.get(kind)
+        if kind == "weekly_scoped" and isinstance(model, str):
+            key = "7d_oi" if "fable" in model.lower() else "7d_" + model
+        if key is None:
+            raise ValueError("usage API has an unrecognized window or scope")
+        percent = limit.get("used_percent", limit.get("percent", limit.get("utilization")))
+        if not isinstance(percent, (int, float)) or isinstance(percent, bool) or not 0 <= percent <= 100:
+            raise ValueError("usage API has invalid window utilization")
+        window = {"window": key, "used_pct": percent,
+                  "resets_at": reset_timestamp(limit.get("resets_at")),
+                  "source": "OAuth usage API", "fetched_at": fetched_at}
+        if isinstance(limit.get("cap_percent"), (int, float)):
+            window["cap_percent"] = limit["cap_percent"]
+        windows.append(window)
+    if not windows or not any(w["window"] == "7d" for w in windows):
+        raise ValueError("usage API has no overall weekly window")
+    return windows
+
+
 def probe_claude_model(token: str, model: str) -> dict:
     """One max_tokens=1 request; the unified rate-limit headers describe the account."""
     body = json.dumps({
@@ -281,26 +356,68 @@ def probe_claude_model(token: str, model: str) -> dict:
     })
     code, headers, _ = _http(req)
     prefix = "anthropic-ratelimit-unified-"
-    util = {k[len(prefix):-len("-utilization")]: float(v) for k, v in headers.items()
-            if k.startswith(prefix) and k.endswith("-utilization")}
-    rejected = [k[len(prefix):-len("-status")] for k, v in headers.items()
-                if k.startswith(prefix) and k.endswith("-status") and v == "rejected"
-                and k != prefix + "overage-status"]
+    # Bare unified-status/reset describe the representative claim, not an empty window.
+    claims = {"five_hour": "5h", "session": "5h", "seven_day": "7d",
+              "seven_day_oi": "7d_oi", "seven_day_fable": "7d_oi"}
+    claim = claims.get(headers.get(prefix + "representative-claim"))
+    fields = {}
+    for key, value in headers.items():
+        if key.startswith(prefix):
+            tail = key[len(prefix):]
+            if tail in ("status", "reset") and claim:
+                fields.setdefault(claim, {}).setdefault(tail, value)
+            elif "-" in tail:
+                window, field = tail.rsplit("-", 1)
+                if window != "overage" and field in ("utilization", "reset", "status"):
+                    fields.setdefault(window, {})[field] = value
+    util = {k: float(v["utilization"]) for k, v in fields.items() if "utilization" in v}
+    statuses = {k: v["status"] for k, v in fields.items() if "status" in v}
+    rejected = [k for k, v in statuses.items() if v == "rejected"]
     ok = code == 200 and not rejected and all(u < MARGIN for u in util.values())
     # The binding claims are the rejected or over-margin ones; usable again after the last resets.
     binding = set(rejected) | {k for k, u in util.items() if u >= MARGIN}
-    windows = set(util) | set(rejected) | {k[len(prefix):-len("-reset")] for k in headers
-                                         if k.startswith(prefix) and k.endswith("-reset")}
-    window_resets = {k: int(headers[f"{prefix}{k}-reset"])
-                     if f"{prefix}{k}-reset" in headers else None for k in windows}
-    # Legacy aggregate: latest known reset among binding windows only.
-    resets = [window_resets[k] for k in binding if window_resets[k] is not None]
-    return {"http": code, "ok": ok, "util": util, "rejected": rejected,
+    window_resets = {k: reset_timestamp(v.get("reset")) for k, v in fields.items()}
+    # Legacy aggregate stays unknown if any binding window's reset is missing.
+    reset = binding_reset([{"used_pct": util[k] * 100 if k in util else None,
+                            "status": statuses.get(k), "resets_at": window_resets[k]}
+                           for k in binding])
+    return {"http": code, "ok": ok, "util": util, "rejected": rejected, "window_status": statuses,
             "org": headers.get("anthropic-organization-id"),
-            "resets": window_resets, "reset": max(resets) if resets and not ok else None}
+            "resets": window_resets, "reset": reset if not ok else None}
 
 
 def check_claude(name: str) -> dict:
+    try:
+        token = claude_token(name)
+        req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+            "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
+        code, _, raw = _http(req)
+        if code != 200:
+            raise ValueError(f"usage API HTTP {code}")
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("usage API response is not an object")
+        windows = claude_api_windows(data, now())
+        overall = [w for w in windows if w["window"] != "7d_oi"]
+        tier = 0 if any(w["used_pct"] >= MARGIN * 100 for w in overall) else (
+            1 if any(w["used_pct"] >= MARGIN * 100 for w in windows) else 2)
+        return {"tier": tier, "util": max(w["used_pct"] for w in windows) / 100,
+                "windows": windows, "next_reset": binding_reset(windows),
+                "source": "OAuth usage API", "fetched_at": now(),
+                "plan": data.get("plan_type") or data.get("plan")}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        api_error = str(exc) if isinstance(exc, ValueError) else type(exc).__name__
+    try:
+        result = check_claude_headers(name)
+    except (ValueError, OSError) as exc:
+        result = {"tier": -1, "error": f"header fallback failed ({type(exc).__name__})"}
+    result.update(source="headers (fallback)", fetched_at=now(), source_reason=api_error)
+    result["windows"] = claude_windows(result, result["fetched_at"])
+    result["next_reset"] = binding_reset(result["windows"])
+    return result
+
+
+def check_claude_headers(name: str) -> dict:
     token = claude_token(name)
     models: dict[str, dict] = {}
     email = claude_email(name, None)
@@ -314,6 +431,11 @@ def check_claude(name: str) -> dict:
     if any(m["http"] in (401, 403) for m in models.values()):
         return {"tier": -1, "email": email, "models": models,
                 "error": "token rejected (401/403): run `claude setup-token` again"}
+    failed = [m["http"] for m in models.values() if m["http"] != 200 and
+              not (m["http"] == 429 and (m.get("util") or m.get("rejected")))]
+    if failed:
+        return {"tier": -1, "email": email, "models": models,
+                "error": f"header probe HTTP {failed[0]} without usable quota evidence"}
     tier = next((t for t, _, needed in CLAUDE_TIERS if all(models[m]["ok"] for m in needed)), 0)
     usable = next((needed for t, _, needed in CLAUDE_TIERS if t == tier), tuple(models))
     util = max((u for m in usable for u in models[m]["util"].values()), default=0.0)
@@ -449,19 +571,34 @@ def check_codex(name: str) -> dict:
         return {"tier": -1, "email": email, "error": "usage response has no usable rate-limit windows"}
     util = max((w.get("used_percent", 0) / 100 for w in windows), default=0.0)
     ok = bool(rl.get("allowed", True)) and not rl.get("limit_reached") and util < MARGIN
+    fetched_at = now()
+    normalized = []
+    for slot in ("primary_window", "secondary_window"):
+        window = rl.get(slot)
+        if not window:
+            continue
+        seconds = window.get("limit_window_seconds")
+        key = {18000: "5h", 604800: "7d"}.get(seconds, slot)
+        reset = reset_timestamp(window.get("reset_at"))
+        if reset is None and isinstance(window.get("reset_after_seconds"), (int, float)):
+            reset = fetched_at + window["reset_after_seconds"]
+        normalized.append({"window": key, "used_pct": window["used_percent"],
+                           "limit_window_seconds": seconds, "resets_at": reset,
+                           "source": "wham/usage API", "fetched_at": fetched_at})
+    result = {"tier": -1, "util": util, "plan": data.get("plan_type"),
+              "email": data.get("email") or email, "windows": normalized,
+              "source": "wham/usage API", "fetched_at": fetched_at,
+              "next_reset": binding_reset(normalized)}
     model_usage = data.get("model_usage")
     if not isinstance(model_usage, dict) or not model_usage:
-        return {"tier": -1, "email": email, "error": "usage response has no model usage"}
+        return {**result, "error": "usage response has no model usage"}
     if any(not isinstance(v, dict) or not isinstance(v.get("available"), bool)
            for v in model_usage.values()):
-        return {"tier": -1, "email": email, "error": "usage response has incomplete model usage"}
+        return {**result, "error": "usage response has incomplete model usage"}
     models = {m: v["available"] for m, v in model_usage.items()}
     usable = [available for available in models.values() if available]
     tier = 0 if not ok or (models and not usable) else (2 if all(models.values()) else 1)
-    resets = [w.get("reset_at") for w in windows if w.get("reset_at")]
-    return {"tier": tier, "util": util, "plan": data.get("plan_type"),
-            "email": data.get("email") or email,
-            "models": models, "next_reset": min(resets) if resets and not ok else None}
+    return {**result, "tier": tier, "models": models}
 
 
 def select(provider: str, results: dict[str, dict], current: str | None) -> str | None:
@@ -479,6 +616,8 @@ def select(provider: str, results: dict[str, dict], current: str | None) -> str 
 
 def claude_weekly_used_percent(result: dict) -> float | None:
     """Overall weekly window; short and model-specific windows are separate limits."""
+    if "windows" in result:
+        return next((w.get("used_pct", w.get("used_percent")) for w in result["windows"] if w["window"] == "7d"), None)
     values = [m["util"]["7d"] for m in result.get("models", {}).values()
               if "7d" in m.get("util", {})]
     return max(values) * 100 if values else None
@@ -494,16 +633,15 @@ def claude_exec_refusal(name: str | None) -> str | None:
         if not isinstance(result, dict) or now() - status["checked_at"] > 1200:
             reason = "cached status missing or older than 20 minutes"
         else:
-            for window in ("7d", "5h"):
-                for model in result.get("models", {}).values():
-                    percent = model.get("util", {}).get(window)
-                    if percent is not None and percent * 100 >= CLAUDE_NON_OWNER_LIMIT:
-                        reset = model.get("resets", {}).get(window)
-                        reason = f"{window} window {percent * 100:g}% used (limit 85%)"
-                        reason += f"; resets {iso(reset)}" if reset is not None else "; reset unknown"
-                        break
-                if reason:
-                    break
+            windows = result.get("windows")
+            if windows is None:
+                windows = claude_windows(result, status["checked_at"])
+            for window in windows:
+                percent = window.get("used_pct", window.get("used_percent"))
+                if percent is not None and percent >= CLAUDE_NON_OWNER_LIMIT:
+                    reset = window.get("resets_at")
+                    return (f"{window['window']} window {percent:g}% used (limit 85%); " +
+                            (f"resets {iso(reset)}" if reset is not None else "reset unknown"))
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         reason = "cached status missing or unreadable"
     return reason
@@ -514,6 +652,22 @@ def claude_exec_allowed(name: str | None) -> bool:
     if reason is not None:
         print(f"ai-accounts: refusing Claude launch for account {name}: {reason}.", file=sys.stderr)
     return reason is None
+
+
+def snapshot_fields(result: dict, instance: str, checked_at: float) -> None:
+    """One status-file schema for the CLI, guard and status page; no extra state."""
+    if "windows" not in result:
+        result["windows"] = claude_windows(result, checked_at)
+    windows = result["windows"]
+    result["instance"] = instance
+    result["unknown_reason"] = None if windows else result.get("error", "no rate-limit snapshot cached")
+    for window in windows:
+        reset = reset_timestamp(window.get("resets_at"))
+        window.update(instance=instance, used_pct=window.pop("used_percent", window.get("used_pct")),
+                      resets_at=dt.datetime.fromtimestamp(reset, dt.timezone.utc).isoformat().replace("+00:00", "Z") if reset is not None else None,
+                      resets_local=iso(reset) if reset is not None else None,
+                      snapshot_age_s=max(0, int(now() - window.get("fetched_at", checked_at))),
+                      unknown_reason=None)
 
 
 def check(quiet: bool = False) -> dict:
@@ -537,6 +691,11 @@ def check(quiet: bool = False) -> dict:
             if provider == "claude":
                 for result in results.values():
                     result["weekly_used_percent"] = claude_weekly_used_percent(result)
+            for name, result in results.items():
+                old = previous.get("providers", {}).get(provider, {}).get("accounts", {}).get(name, {})
+                snapshot_fields(result, name, status["checked_at"])
+                snapshot_fields(old, name, previous.get("checked_at", 0))
+                add_pace(result, old)
             current = active(provider)
             chosen = select(provider, results, current)
             if chosen and chosen != current:
@@ -558,32 +717,64 @@ def check(quiet: bool = False) -> dict:
     return status
 
 
+def add_pace(result: dict, previous: dict) -> None:
+    old = {w["window"]: w for w in previous.get("windows", [])}
+    for window in result.get("windows", []):
+        before = old.get(window["window"], {})
+        used, prior = window.get("used_pct"), before.get("used_pct")
+        reset = reset_timestamp(window.get("resets_at"))
+        elapsed = window["fetched_at"] - before.get("fetched_at", window["fetched_at"])
+        if (used is not None and prior is not None and prior < used < 100 and elapsed > 0
+                and reset is not None and reset == reset_timestamp(before.get("resets_at"))
+                and window.get("source") == before.get("source")):
+            runs_out = window["fetched_at"] + (100 - used) * elapsed / (used - prior)
+            if runs_out < reset:
+                window["runs_out_at"] = runs_out
+
+
+def window_text(window: dict, label: str) -> str:
+    percent = window.get("used_pct")
+    used = f"{percent:g}% used" if percent is not None else "usage not reported"
+    reset = window.get("resets_at")
+    text = f"{label}: {used}, resets {window.get('resets_local') or iso(reset)}"
+    if window.get("cap_percent") is not None:
+        text += f" (cap = {window['cap_percent']:g}% of weekly)"
+    if window.get("runs_out_at") and window["runs_out_at"] > now():
+        text += f"; runs out ~{iso(window['runs_out_at'])}, before reset {iso(reset)}"
+    return text
+
+
 def print_status(status: dict) -> None:
     print(f"checked {iso(status.get('checked_at'))}  (margin {MARGIN:.0%})")
     if now() - status.get("checked_at", 0) > 600:
         print("STALE: no account check in over 10 minutes; check ai-accounts.timer")
     for provider, info in status.get("providers", {}).items():
-        tiers = CLAUDE_TIER_NAMES if provider == "claude" else CODEX_TIER_NAMES
         print(f"{provider}:")
         if not info["accounts"]:
             print("  (no accounts)")
-        for name, r in info["accounts"].items():
+        for name, result in info["accounts"].items():
+            snapshot_fields(result, name, status.get("checked_at", 0))
+            windows = {w["window"]: w for w in result["windows"]}
+            labels = ({"7d_oi": "Fable week", "7d": "all models week", "5h": "WARNING temporary 5-hour limit"}
+                      if provider == "claude" else {"5h": "5-hour", "7d": "week"})
+            items = []
+            for key in dict.fromkeys([*labels, *windows]):
+                if key in windows:
+                    text = window_text(windows[key], labels.get(key, key))
+                    if provider == "claude" and key == "7d" and (windows[key].get("used_pct") or 0) >= MARGIN * 100:
+                        text += " — blocks Fable too when full"
+                    items.append(text)
+                elif not windows:
+                    items.append(f"usage: unknown ({result['unknown_reason']})")
+                    break
+                elif provider == "claude" and key == "7d_oi":
+                    items.append("Fable week: not reported")
+            source = result.get("source", "cached headers (fallback)" if windows else "cached status")
+            age = max((w["snapshot_age_s"] for w in windows.values()), default=max(0, int(now() - status.get("checked_at", 0))))
+            details = "; ".join(filter(None, [f"source: {source}, age {age}s", result.get("source_reason"), result.get("error")]))
             mark = "*" if name == info["active"] else " "
-            line = f" {mark}{name:<10} {r.get('email') or '?':<26} {tiers[r['tier']]:<11}"
-            if "util" in r:
-                line += f" max-used {r['util']:.0%}"
-            if provider == "claude":
-                percent = claude_weekly_used_percent(r)
-                line += f" weekly-used={percent:g}%" if percent is not None else " weekly-used=unknown"
-                for window in ("7d", "5h"):
-                    resets = {m.get("resets", {}).get(window) for m in r.get("models", {}).values()}
-                    known = sorted(t for t in resets if t is not None)
-                    line += f" {window}-reset=" + (",".join(iso(t) for t in known) or "unknown")
-            if r.get("next_reset"):
-                line += f"  aggregate-reset {iso(r['next_reset'])}"
-            if r.get("error"):
-                line += f"  {r['error']}"
-            print(line)
+            plan = f" ({result['plan'].title()})" if isinstance(result.get("plan"), str) else ""
+            print(f" {mark}{name}{plan}  " + " | ".join(items) + f"  [{details}]")
 
 
 # ----------------------------------------------------------------- commands
@@ -890,8 +1081,9 @@ def main(argv: list[str]) -> int:
         status["stale"] = now() - status.get("checked_at", 0) > 600
         for provider, info in status.get("providers", {}).items():
             info["active"] = active(provider)
-            if provider == "claude":
-                for result in info["accounts"].values():
+            for name, result in info["accounts"].items():
+                snapshot_fields(result, name, status.get("checked_at", 0))
+                if provider == "claude":
                     result["weekly_used_percent"] = claude_weekly_used_percent(result)
         if "--json" in argv:
             print(json.dumps(status, indent=1))
