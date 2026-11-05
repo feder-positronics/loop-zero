@@ -38,8 +38,17 @@ children (openai/codex#46702); drop this once a fixed release is verified.
 Treat /tmp as disposable: only running-command logs, build output and browser
 runs belong there. Keep receipts, evidence, review artifacts and handoffs on the
 PR or issue, or in the durable scratch your repository's instructions name. Make
-task checkouts as worktrees of an existing clone, not new clones, and remove
-yours once its PR merges or closes and everything is pushed.
+task checkouts as worktrees of an existing clone, not new clones. At task finish,
+hand leftover worktrees and generated files to the periodic retention job named
+in host or repository instructions (such as `scratch-retention`), without waiting
+or scheduling wakeups. The job must confirm a pushed branch, merged or closed PR,
+verified archive handoff of required review evidence, clean tracked/untracked
+Git state, an empty shared stash, inactivity, no unarchived T3 thread binding
+where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
+floor. Honor host execution approval rules; use dry run until execution is
+authorized. If no job is named or any condition is unproved, preserve the leftovers
+and report cleanup to the owner. Successful `loopzero merge` already performs its
+own cleanup under the delivery contract.
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget). Check the clean committed head
