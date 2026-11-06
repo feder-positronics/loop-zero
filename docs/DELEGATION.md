@@ -56,6 +56,8 @@ the owning issue and the live decision record, not from earlier sessions.
 Resolve every recipient when sending: the coordinator from the active delivery
 schedule, a campaign owner from its tracking issue, the decisions owner from
 its newest live generation. Never use a remembered ID; escalate ambiguity once.
+For important T3 messages to an owner, verify receipt with `t3_thread_read`;
+a successful send alone does not prove delivery.
 A schedule firing or a relayed approval grants no new authority.
 
 - **Coordinator:** owns one repository's delivery, main health and shared
@@ -414,8 +416,17 @@ report the block. When a verified child stops producing output, re-read its
 pending approvals (T3 `pendingRequestCount`) and terminal task state, including
 provider/capacity failures. Recover or report the blocker in that turn using the
 same authorized routes; a launch-time check is insufficient. Inspect what ran
-before resuming interrupted work. For a terminal delegated task, launch a new
-task with the prior brief and result rather than queueing another message to it.
+before resuming interrupted work. After stopping or cancelling a T3 thread, or
+after a failed run, treat its queued messages as undelivered: T3 sets
+`queueHeld=true`, and MCP sends do not release held runs even when new sends run
+([bug](https://github.com/pingdotgg/t3code/issues/22423),
+[MCP recovery](https://github.com/pingdotgg/t3code/pull/23897),
+[UI Resume](https://github.com/pingdotgg/t3code/pull/21164)). To clear a held
+backlog, save each held message's full text before cancelling it with
+`t3_queue cancel`, then resend the still-needed messages as one fresh message
+and verify receipt with `t3_thread_read`. For a terminal delegated task, launch
+a new task with the prior brief and result rather than queueing another message
+to it.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Before arming or rearming a wait,
