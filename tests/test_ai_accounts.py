@@ -163,6 +163,12 @@ def test_launch_keeps_unknown_model_unknown(helper, monkeypatch):
     assert helper.launch('claude', 'm', {})['outcome'] == 'unknown'
 
 
+def test_codex_select_reserves_current_at_85_without_churn(helper):
+    for other, expected in [(.28, 'c2'), (.86, 'c3')]:
+        accounts = {'c3': {'tier': 2, 'util': .87}, 'c2': {'tier': 2, 'util': other}}
+        assert helper.select('codex', accounts, 'c3') == expected
+
+
 def test_codex_refresh_keeps_managed_binding_and_exhaustion_selection(helper, monkeypatch):
     auth = helper.CODEX_MAIN / 'auth.json'
     principal = {'account_id': 'account-a', 'id_token': 'e30.eyJzdWIiOiJ1c2VyLWEiLCJpc3MiOiJpc3N1ZXIifQ.x'}
@@ -270,18 +276,12 @@ def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
     assert children[0][key] == 'caller-owned'
 
 
-@pytest.mark.parametrize('model', [{'display_name': 'Fable', 'id': 'other'}, {'id': 'fable'}, 'fable'])
+@pytest.mark.parametrize('model_field', [{'scope': {'model': {'display_name': 'Fable', 'id': 'other'}}}, {'model': {'id': 'fable'}}, {'model': 'fable'}])
 @pytest.mark.parametrize('api,session,reverse', [(200, False, False), (403, False, False), (403, True, False), (403, False, True)])
-def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session, reverse, model):
-    limits = [{'kind': 'weekly_all', 'percent': 96, 'resets_at': 1793912400}, {'kind': 'weekly_scoped', 'scope': {'model': model}, 'percent': 17, 'resets_at': '2026-11-06T21:00:00Z'}]
-    headers = {'anthropic-ratelimit-unified-representative-claim': 'seven_day',
-        'anthropic-ratelimit-unified-status': 'allowed_warning', 'anthropic-ratelimit-unified-reset': '1793912400',
-        'anthropic-ratelimit-unified-7d-utilization': '.96', 'anthropic-ratelimit-unified-7d_oi-utilization': '.17',
-        'anthropic-ratelimit-unified-7d_oi-reset': '1793998800', 'anthropic-ratelimit-unified-7d_oi-status': 'allowed'}
-    if session:
-        headers.update({'anthropic-ratelimit-unified-5h-utilization': '.5', 'anthropic-ratelimit-unified-5h-reset': '1793912400'})
-    calls = []
-    responses = iter([headers, {**{k: v for k, v in headers.items() if k.endswith('-utilization')}, 'anthropic-ratelimit-unified-7d_oi-status': 'rejected'}][::-1 if reverse else 1])
+def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session, reverse, model_field):
+    limits = [{'kind': 'weekly_all', 'percent': 96, 'resets_at': 1793912400}, {'kind': 'weekly_scoped', **model_field, 'percent': 17, 'resets_at': '2026-11-06T21:00:00Z'}]
+    headers = {f'anthropic-ratelimit-unified-{key}': value for key, value in { 'representative-claim': 'seven_day', 'status': 'allowed_warning', 'reset': '1793912400', '7d-utilization': '.96', '7d_oi-utilization': '.17', '7d_oi-reset': '1793998800', '7d_oi-status': 'allowed', **({'5h-utilization': '.5', '5h-reset': '1793912400'} if session else {})}.items()}
+    calls, responses = [], iter([headers, {**{k: v for k, v in headers.items() if k.endswith('-utilization')}, 'anthropic-ratelimit-unified-7d_oi-status': 'rejected'}][::-1 if reverse else 1])
     def http(req):
         calls.append(req.get_method())
         return (api, {}, json.dumps({'limits': limits}).encode()) if req.get_method() == 'GET' else (200, next(responses), b'')

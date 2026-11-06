@@ -611,6 +611,11 @@ def select(provider: str, results: dict[str, dict], current: str | None) -> str 
         return current
     best = max(r["tier"] for r in known.values())
     if current in known and known[current]["tier"] == best:
+        if provider == "codex" and known[current].get("util", 1.0) >= CLAUDE_NON_OWNER_LIMIT / 100:
+            below_reserve = [n for n, r in known.items()
+                             if r["tier"] == best and r.get("util", 1.0) < CLAUDE_NON_OWNER_LIMIT / 100]
+            if below_reserve:
+                return min(below_reserve, key=lambda n: known[n]["util"])
         return current
     if best == 0 and current in results:
         return current  # nothing usable anywhere; do not churn
