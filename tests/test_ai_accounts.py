@@ -270,10 +270,10 @@ def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
     assert children[0][key] == 'caller-owned'
 
 
+@pytest.mark.parametrize('model', [{'display_name': 'Fable', 'id': 'other'}, {'id': 'fable'}, 'fable'])
 @pytest.mark.parametrize('api,session,reverse', [(200, False, False), (403, False, False), (403, True, False), (403, False, True)])
-def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session, reverse):
-    limits = [{'kind': 'weekly_all', 'percent': 96, 'resets_at': 1793912400},
-              {'kind': 'weekly_scoped', 'model': 'fable', 'percent': 17, 'resets_at': 1793998800}]
+def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session, reverse, model):
+    limits = [{'kind': 'weekly_all', 'percent': 96, 'resets_at': 1793912400}, {'kind': 'weekly_scoped', 'scope': {'model': model}, 'percent': 17, 'resets_at': '2026-11-06T21:00:00Z'}]
     headers = {'anthropic-ratelimit-unified-representative-claim': 'seven_day',
         'anthropic-ratelimit-unified-status': 'allowed_warning', 'anthropic-ratelimit-unified-reset': '1793912400',
         'anthropic-ratelimit-unified-7d-utilization': '.96', 'anthropic-ratelimit-unified-7d_oi-utilization': '.17',
