@@ -326,6 +326,8 @@ def claude_api_windows(data: dict, fetched_at: float) -> list[dict]:
         kind = limit.get("kind") or limit.get("type")
         scope = limit.get("scope") or {}
         model = limit.get("model") or (scope.get("model") or scope.get("id") if isinstance(scope, dict) else scope)
+        if isinstance(model, dict):
+            model = model.get("display_name") or model.get("id")
         key = names.get(kind)
         if kind == "weekly_scoped" and isinstance(model, str):
             key = "7d_oi" if "fable" in model.lower() else "7d_" + model
