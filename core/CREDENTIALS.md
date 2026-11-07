@@ -43,6 +43,9 @@ fixtures, task files, PRs, workflow configuration or logs. Disable debug HTTP
 logging or redact authorization headers. Report only availability and sanitized
 status. A key grants no authority for purchases, unrelated data or external writes
 beyond the task.
+Login tokens count as keys: never run commands that print them (`gh auth token`,
+`gh auth status -t`, reading `hosts.yml`, environment or `/proc/*/environ`
+dumps); canaries assert on secrets without echoing the value.
 
 ## Storage and lifecycle
 
