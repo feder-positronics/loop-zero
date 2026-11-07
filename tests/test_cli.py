@@ -155,6 +155,11 @@ def arm_readiness(
     )
 
 
+def without_accepted_receipt(out: str) -> str:
+    return "".join(line for line in out.splitlines(keepends=True)
+                   if not line.startswith("receipt accepted:"))
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
@@ -197,6 +202,8 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
     assert report["dirty"] is False
+    assert f"receipt produced: head={report['head']} content=" in out
+    assert "config=commands-sha256:" in out and "environment=unknown" in out
     assert [(r["command"], r["exit_code"]) for r in report["results"]] == [
         ("echo ok", 0), ("test -f README.md", 0)]
     assert report["results"][0]["tail"] == "ok"
@@ -1337,8 +1344,11 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_ready_pr(gh, head, wt)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
-    assert (code, err) == (0, "") and out == f"ready: {URL}\n"
+    assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
+
+    assert out.count("receipt accepted:") == 1
+    assert f"head={head}" in out and "environment=unknown" in out
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -1348,7 +1358,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
         "check_suite": {"id": 10}}])
     code, out, _ = run(capsys, "ready")
     assert code == 1
-    assert out.splitlines() == [
+    assert without_accepted_receipt(out).splitlines() == [
         "not ready: no review recorded for the current head",
         "not ready: required check 'checks' is failure",
     ]
@@ -1361,6 +1371,7 @@ def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys, head) ->
 
     code, out, err = run(capsys, "ready")
 
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: PR targets release, configured base is main\n"
 
@@ -1373,6 +1384,7 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
 
     code, out, err = run(capsys, "ready")
 
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: required check 'checks' is failure\n"
 
@@ -1383,6 +1395,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
 
     code, out, err = run(capsys, "ready")
 
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out.splitlines() == [
         "not ready: required check 'checks' is pending",
@@ -1394,7 +1407,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
     arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
     code, out, err = run(capsys, "merge")
 
-    assert (code, out) == (1, "")
+    assert (code, without_accepted_receipt(out)) == (1, "")
     assert "required check 'checks' is pending; next: loopzero merge --wait" in err
 
 
@@ -1405,6 +1418,7 @@ def test_ready_skipped_required_check_waits_only_for_a_draft(
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=draft)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
+    out = without_accepted_receipt(out)
     assert (code, err) == (3 if draft else 1, "")
     if draft:
         assert out.splitlines() == [
@@ -1433,6 +1447,7 @@ def test_ready_waits_for_checks_on_original_head(
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
     code, out, err = run(capsys, "--config", "workflow.toml", "ready", "--wait")
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
+    assert out.count("receipt accepted:") == 1
     assert "required check 'a' is pending" in out
     assert all("f" * 40 not in " ".join(c["argv"]) for c in gh.calls)
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
@@ -1455,6 +1470,7 @@ def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys, head) ->
 
     code, out, err = run(capsys, "ready", "--wait")
 
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: required check 'checks' is failure\n"
 
@@ -1622,6 +1638,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
 
     code, out, err = run(capsys, "ready", *(["--wait"] if wait else []))
 
+    out = without_accepted_receipt(out)
     assert (code, out, err) == (0, f"ready: {URL}\n", "")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == int(draft)
     observations = sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
@@ -1738,6 +1755,7 @@ def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys, head) -
 
     code, out, err = run(capsys, "ready", "--wait")
 
+    out = without_accepted_receipt(out)
     assert code == 1 and out == ""
     assert f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
 
@@ -1825,6 +1843,7 @@ def test_ready_requires_clean_successful_local_report_at_head(
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary", login="stranger"), rev(head, "primary", commit="1" * 40)])
     code, out, _ = run(capsys, "ready")
+    out = without_accepted_receipt(out)
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 2
 
@@ -1834,6 +1853,7 @@ def test_ready_respects_latest_review_state(wt: Path, gh: FakeGh, capsys, state,
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")])
     gh.respond("pr ready", "")
     code, out, _ = run(capsys, "ready")
+    out = without_accepted_receipt(out)
     assert (code, out) == ((0, f"ready: {URL}\n") if state == "COMMENTED" else
                            (1, "not ready: no review recorded for the current head\n"))
 
@@ -1846,6 +1866,7 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
          "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
                                          "\n**critical: Bad**"}]}},))
     code, out, err = run(capsys, "merge")
+    out = without_accepted_receipt(out)
     assert code == 1 and out == ""
     assert "not ready to merge: open critical finding at feature.py:1: Bad" in err
     assert wt.exists()
@@ -1858,6 +1879,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='c' * 40))
     gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
+    out = without_accepted_receipt(out)
     if changed:
         assert code == 1 and "head changed" in err and wt.exists()
         assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
@@ -2067,6 +2089,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
         cli._proc.ProcTimeout("gh api timed out", "")))
     monkeypatch.setattr(cli, "_cleanup", lambda _: None)
     code, out, err = run(capsys, "merge")
+    out = without_accepted_receipt(out)
     assert code == 0 and out.splitlines()[0] == "f" * 40
     assert "remote branch cleanup failed for lz/t1" in err and "timed out" in err
 
@@ -2429,7 +2452,7 @@ def test_reviews_are_paginated(wt: Path, gh: FakeGh, capsys, head) -> None:
     gh.respond(reviews_key(2), [rev(head, "primary")])
     gh.respond("pr ready", "")
     code, out, _ = run(capsys, "ready")
-    assert code == 0 and out == f"ready: {URL}\n"
+    assert code == 0 and out.endswith(f"ready: {URL}\n")
 
 
 @pytest.mark.parametrize("state,verdict,expected", [
@@ -2642,3 +2665,54 @@ def test_review_uses_lineage_author_after_unattributed_repair(
     assert code == 0 and out.splitlines()[-1].startswith(f"primary review by {expected}"), err
     other = "claude" if expected == "codex" else "codex"
     assert not (fake_bin / f"{other}.stdin").exists()
+
+
+@pytest.mark.parametrize("command", ["check", "ready"])
+def test_receipt_print_failure_preserves_verdict(wt, gh, capsys, head, monkeypatch, command):
+    import builtins
+
+    original = builtins.print
+
+    def broken(*args, **kwargs):
+        if args and str(args[0]).startswith("receipt "):
+            raise OSError("capture unavailable")
+        return original(*args, **kwargs)
+
+    if command == "ready":
+        arm_approved_ready_pr(gh, head, wt)
+        gh.respond("pr ready", "")
+    monkeypatch.setattr(builtins, "print", broken)
+    assert run(capsys, command)[0] == 0
+
+
+@pytest.mark.parametrize("invalid", ["stale", "red", "dirty", "commands"])
+def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, invalid):
+    arm_approved_ready_pr(gh, head, wt)
+    path = wt / ".loopzero/checks.json"
+    data = json.loads(path.read_text())
+    if invalid == "stale":
+        data["head"] = "a" * 40
+    elif invalid == "dirty":
+        data["dirty"] = True
+    elif invalid == "red":
+        data["results"][0]["exit_code"] = 1
+    else:
+        data["results"][0]["command"] = "changed"
+    path.write_text(json.dumps(data))
+    code, out, _ = run(capsys, "ready")
+    assert code == 1 and "run loopzero check at this head" in out
+    assert "receipt accepted:" not in out
+
+
+def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
+    arm_approved_ready_pr(gh, head, wt)
+    cli._load_report(wt)
+    cli._validation_section(wt, head)
+    assert "receipt " not in capsys.readouterr().out
+
+
+def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
+    (wt / "README.md").write_text("uncommitted content")
+    code, out, _ = run(capsys, "check")
+    assert code == 0 and out.endswith("PASS\n")
+    assert "receipt produced:" not in out

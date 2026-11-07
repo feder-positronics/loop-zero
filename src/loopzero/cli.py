@@ -261,7 +261,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
 
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
-    *, workflow_wait: bool = False,
+    *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
     review = eligibility.eligible_review(
         reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
@@ -287,6 +287,8 @@ def _readiness(
             ready=False,
             reasons=(*result.reasons, "run loopzero check at this head"),
         )
+    elif announce_receipt:
+        _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
         behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
         reasons = result.reasons
@@ -301,6 +303,18 @@ def _readiness(
 
 
 # --------------------------------------------------------------------------- checks report
+
+
+def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
+    """Best-effort transcript identity; never authority or environment attestation."""
+    try:
+        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}").strip()
+        commands = json.dumps([r.command for r in report.results], separators=(",", ":"))
+        digest = hashlib.sha256(commands.encode()).hexdigest()
+        print(f"receipt {action}: head={report.head} content={content} "
+              f"config=commands-sha256:{digest} environment=unknown")
+    except Exception:  # noqa: BLE001 — output must never affect the verdict
+        return
 
 
 def _save_report(wt: Path, report: CheckReport) -> None:
@@ -512,6 +526,8 @@ def cmd_check(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
     _save_report(wt, report)
+    if report.ok and not report.dirty:
+        _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
@@ -979,7 +995,8 @@ def _pr_readiness(
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
-    return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait)
+    return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait,
+                          announce_receipt=True)
 
 
 def _cleanup(wt: Path) -> None:
