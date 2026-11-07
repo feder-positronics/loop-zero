@@ -69,6 +69,15 @@ exists. Hosted review eligibility uses the exact authored SHA and trusted-base
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
 
+The builder runs each full local gate once, recording command, exact head SHA,
+environment fingerprint (defined by the consumer's AGENTS.md/docs), result, time
+and log path. Builders, reviewers and coordinators reuse its green receipt at
+the same head and fingerprint. Rerun only if head or gate inputs changed
+(including rebase), fingerprint changed or cannot be shown, or receipt is missing,
+red, partial or unverifiable. Reviewers still judge whether tests exercise claimed
+behavior; reuse does not accept those claims. Hosted required CI and loopzero's
+sandboxed check receipt remain unchanged.
+
 ## Findings
 
 - Findings live only in PR review threads, expire at merge, and must not be
