@@ -25,7 +25,7 @@ explain the oracle and its limits. Infrastructure failures do not demonstrate
 regression detection.
 Coverage-only tests may pass existing code.
 
-Run focused and affected neighboring tests, then contract delivery checks.
+Run focused and affected neighboring tests, then [contract delivery checks](../../CONTRACT.md#blockers).
 Record commands, results and limits in task Notes.
 
 After this step, resume the commissioned outcome within the authorized finish,
