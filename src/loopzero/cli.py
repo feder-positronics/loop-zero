@@ -527,7 +527,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
     _save_report(wt, report)
-    if report.ok:
+    if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")

@@ -2716,3 +2716,10 @@ def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
     cli._load_report(wt)
     cli._validation_section(wt, head)
     assert "receipt " not in capsys.readouterr().out
+
+
+def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
+    (wt / "README.md").write_text("uncommitted content")
+    code, out, _ = run(capsys, "check")
+    assert code == 0 and out.endswith("PASS\n")
+    assert "receipt produced:" not in out
