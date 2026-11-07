@@ -22,8 +22,10 @@ security-path downgrades need requester authority. For conflicting findings,
 reconcile their acceptance and impact. New critical evidence requires a separate
 authorized PR review thread rather than silently expanding this batch.
 
-When a second review flags the same file or defect class, audit every producer,
-consumer, caller, reader and transition of that class before the next repair.
+When a second review flags the same file or defect class, stop patching single
+findings: audit every producer, consumer, caller, reader and transition of that
+class, fix the whole class in one batched head, and only then request the next
+review.
 After three `request_changes` primaries on one PR, split it or return to
 [plan](../plan/SKILL.md) and tell the requester why. Follow the contract's
 [review budget and lineage-reset rule](../../CONTRACT.md#review-budget).
