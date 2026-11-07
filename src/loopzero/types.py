@@ -35,6 +35,7 @@ class Config:
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
     review_publishers: tuple[str, ...] = ()  # trusted GitHub logins, independent of CI token
     review_chunk_bytes: int = 200_000
+    check_runner: tuple[str, ...] = ()
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox

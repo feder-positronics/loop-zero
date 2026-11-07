@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import re
 import resource
 import shutil
@@ -41,13 +43,16 @@ class SandboxUnavailable(LoopZeroError):
 
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
-               status: Callable[[str], None] | None = None) -> CheckReport:
+               status: Callable[[str], None] | None = None,
+               _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
     progress receives each command before launch, as before. Optional status receives
     heartbeats from a reporting thread and completion from the calling thread.
     """
     worktree = worktree.resolve()
+    if config.check_runner:
+        return _run_dispatched(config, worktree, timeout, progress, status)
     if shutil.which("bwrap") is None:
         raise SandboxUnavailable(
             "bwrap binary missing: bwrap not found on PATH\n"
@@ -77,7 +82,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             (worktree / entry).mkdir(parents=True, exist_ok=True)
         prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
         probe(config, worktree, prefix)
-        missing, preparations = _preflight(config, worktree)
+        missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         for index, command in enumerate(commands):
@@ -297,3 +302,89 @@ def _git(config: Config, worktree: Path, *args: str) -> str:
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
     raw = Path(_git(config, worktree, "rev-parse", flag).strip())
     return (raw if raw.is_absolute() else worktree / raw).resolve()
+
+
+def _run_dispatched(
+    config: Config, worktree: Path, timeout: float,
+    progress: Callable[[str], None] | None, status: Callable[[str], None] | None,
+) -> CheckReport:
+    from dataclasses import replace
+
+    head = _git(config, worktree, "rev-parse", "HEAD").strip()
+    base = _git(config, worktree, "rev-parse", config.base_branch).strip()
+
+    def unchanged():
+        return (_git(config, worktree, "rev-parse", "HEAD").strip() == head
+                and not _git(config, worktree, "status", "--porcelain").strip())
+
+    if not unchanged():
+        return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
+                                                   "Runner requires a clean worktree"),))
+    missing, preparations = _preflight(config, worktree)
+    results = [missing] if missing else []
+    commands = () if missing else (*preparations, *config.checks)
+    for index, command in enumerate(commands):
+        if not unchanged():
+            results.append(CheckResult("<worktree changed before stage>", 1, 0.0, "Worktree changed before stage"))
+            break
+        if progress:
+            progress(command)
+        with _stage_status(status, index + 1, len(commands)):
+            result = _dispatch_one(config, worktree, head, base, command, timeout)
+            if result is None and not unchanged():
+                result = CheckResult(command, 1, 0.0, "Worktree changed before fallback")
+            if result is None:
+                try:
+                    local = run_checks(replace(config, check_runner=(), checks=(command,)),
+                                       worktree, timeout=timeout, _resolved=True)
+                    result = (local.results[-1] if local.results and not local.dirty
+                              else CheckResult(command, 1, 0.0, "Local fallback failed"))
+                except LoopZeroError as exc:
+                    result = CheckResult(command, 1, 0.0, f"Local fallback failed: {exc}")
+        if status:
+            status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
+                   f"({result.duration_s:.1f}s)")
+        if index >= len(preparations) or result.exit_code:
+            results.append(result)
+        if result.exit_code:
+            break
+    dirty = not unchanged()
+    if dirty:
+        results.append(CheckResult("<worktree changed during run>", 1, 0.0,
+                                   "Runner worktree changed during run"))
+    return CheckReport(head, dirty, tuple(results))
+
+
+def _dispatch_one(
+    config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
+) -> CheckResult | None:
+    binding = {"head": head, "base": base, "command": command}
+    try:
+        done = _proc.run(config.check_runner, cwd=worktree,
+                         env_allowlist=config.env_allowlist, timeout=timeout,
+                         input=json.dumps(binding), encoding="utf-8")
+
+        def unique(pairs):
+            obj = dict(pairs)
+            if len(obj) != len(pairs):
+                raise ValueError("duplicate result field")
+            return obj
+
+        frame = json.loads(done.stdout, object_pairs_hook=unique)
+        if (done.exit_code != 0 or not isinstance(frame, dict)
+                or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
+                or any(frame[key] != value for key, value in binding.items())
+                or type(frame["exit_code"]) is not int
+                or type(frame["duration_s"]) not in (int, float)
+                or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
+                or type(frame["not_started"]) is not bool
+                or not isinstance(frame["tail"], str)):
+            raise ValueError("invalid or mismatched stage result")
+        if frame["not_started"]:
+            if frame["exit_code"] or frame["duration_s"] or frame["tail"]:
+                raise ValueError("inconsistent not-started result")
+            return None
+        return CheckResult(command, frame["exit_code"], frame["duration_s"],
+                           _proc.tail(frame["tail"]))
+    except (LoopZeroError, ValueError, TypeError, OverflowError) as exc:
+        return CheckResult(command, 1, 0.0, f"Stage runner failed: {exc}")

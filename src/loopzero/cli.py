@@ -525,6 +525,7 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "that cache.",
                     file=sys.stderr,
                 )
+    # Runner results use the same coordinator-owned receipt and readiness path.
     _save_report(wt, report)
     if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")

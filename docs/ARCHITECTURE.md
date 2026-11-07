@@ -448,3 +448,10 @@ retain stdout/stderr first, then a separate attempt-bound private final-file sna
 before exit classification and temporary HOME cleanup. Complete snapshots preserve exact
 bytes as base64 with length and SHA-256; absent, unreadable, or partial files are labelled
 honestly and cannot produce an approval. These private receipts are not public evidence.
+Design pass — #420
+
+One optional [checks].runner string array is an operator-trusted argv prefix. Invoke it directly in the worktree with one JSON stdin object: head (exact SHA), base (resolved configured-base SHA), command (one locally resolved stage). Stdout must contain exactly one JSON object echoing those fields plus exit_code (integer), duration_s (finite nonnegative number), not_started (boolean), tail (string). Diagnostics belong on stderr. not_started=true requires exit_code=0, duration_s=0 and empty tail, and permits only sandboxed local fallback; all other errors fail closed, including runner process failure. The runner owns admission and sandbox policy; it must execute the exact clean head under equivalent isolation and must not claim not_started after launch.
+
+Config validates the sole new key; types stores its argv. sandbox keeps trusted preflight/selection and ordered aggregation, verifies clean unchanged head before every stage and after execution, validates each result and stops on failure. cli retains its ordinary report/receipt/readiness path unchanged. No stage retry after success or uncertain launch. No runner means the existing path remains identical.
+
+ARCHITECTURE changes: configured runners are trusted execution authorities outside local bwrap, but cannot select stages or write authoritative receipts. Only the coordinator writes checks.json. With a runner, the outer loopzero check MUST NOT hold a heavy slot: stage admission belongs to the runner. No command, flag, gate or state file is added.

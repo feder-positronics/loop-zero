@@ -24,6 +24,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
     "repo": {"name": str, "base": str},
     "checks": {
         "commands": list,
+        "runner": list,
         "required_ci": list,
         "network": bool,
         "env_allowlist": list,
@@ -176,6 +177,11 @@ def _build(data: dict[str, Any]) -> Config:
         review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
 
     kwargs: dict[str, Any] = {}
+    if "runner" in checks:
+        runner = _strings("checks.runner", checks["runner"])
+        if not runner or any(not arg or "\0" in arg for arg in runner):
+            raise ConfigError("checks.runner must be a nonempty argv prefix")
+        kwargs["check_runner"] = runner
     if "env_allowlist" in checks:
         kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
     if "ro_paths" in checks:
