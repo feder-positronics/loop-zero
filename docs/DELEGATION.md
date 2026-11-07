@@ -8,39 +8,35 @@ or exception record is required.
 ## Coordinator rollover
 
 At a delivery milestone or roughly 300k context tokens, launch a successor
-with a short handoff, transfer recurring tasks and pending wakeups bound to
-this session, post its link and stop. The handoff is enough for the next
-action: live child IDs, pending results or questions, still-binding decisions
-with their sources and the current reply target; link history instead of
-copying it. Reconcile that work with the successor before stopping. In every
-session that rolls over or is retired (coordinators, owner lines and helpers
-that start processes), start heavy or long-running jobs detached from the agent
-session (for example with
-`systemd-run --user` or `setsid`), and never settle or retire a session that
-still owns a live job that is not detached: retiring a session ends its process
-tree. A launch
-notice alone is not a task transfer. A changed decision names the instruction
-it supersedes. After transfer, the retired session forwards late results once,
-with their original task reference, and makes no new decisions; then it retires
-its session so no later send or schedule can revive it. After a finished
-delivery, roll over before monitoring or unrelated follow-ups. Do this
-yourself; do not ask the requester to start it. A bare "continue" means
-continue there. Workers report on the owning PR or issue, directly or through
-the parent; the coordinator reconstructs delivery from live remote state rather
-than inbound messages.
+and post its link. Cap the handoff at 2,000 characters and three numbered first
+acts: only references needed for the next action, pending results or questions,
+binding decision links and the reply target. Link rules and rulings; omit history
+and done items. The launch prompt names only the role, handoff path and reply
+target. Parked work and its dispositions live in one durable table (the owning
+tracking issue or one file) that every handoff links instead of re-listing.
+Transfer recurring tasks and pending wakeups and reconcile live children with
+the successor before stopping; a launch notice alone transfers nothing.
+Every retiring owner or helper starts heavy or long-running jobs detached
+(`systemd-run --user` or `setsid`); never retire with an attached live job,
+because retirement ends its process tree. Changed decisions name the instruction
+superseded. After transfer, forward late results once with their original task
+reference, make no new decisions and retire so sends or schedules cannot revive
+the session. After delivery, roll over before monitoring or unrelated follow-ups;
+do it yourself. A bare "continue" means continue there. Workers report on the
+owning PR or issue, directly or through the parent; coordinators reconstruct
+delivery from live remote state.
 
 **Provider-portable handoff.** If an owner's provider is exhausted or unavailable,
 use a fresh successor on another provider or model only within an explicit
 standing route; preserve commissioned choices and runtime permissions. Otherwise
 report the unavailable route and wait for owner direction. Confirm the old
 writer and its tool tree have stopped or are fenced before the successor acts.
-Keep the existing handoff file current after consequential decisions, so recovery
-never depends on a final summary from the failed session. Include the owning
-issue/PR and evidence links; current authority, holds and decision sources;
-worktree path, branch, head and dirty state; checks and interrupted tool outcomes;
-live child/task IDs, pending results or decisions, schedules and wakeups; current
-reply target and the next authorized action. State lives in Git/GitHub plus this
-handoff, not in provider memory or a provider-specific resume token.
+Keep the handoff current after consequential decisions, within the caps above;
+recovery cannot depend on a failed session's final summary. Link owning issue/PR,
+evidence, authority and holds; worktree/branch/head/dirty state; checks and
+interrupted tool outcomes; live child/task IDs, schedules and wakeups. Include
+the next authorized action. Git/GitHub and the handoff own state, not provider
+memory or resume tokens.
 The successor first reconciles live remote state and uncertain external effects;
 a lost tool response is not proof the write failed. Adopt partial work without
 resetting or cleaning away the diff, and never replay whole commands blindly.
@@ -107,6 +103,25 @@ nudge per new finding. Count productive work by verified activity (completed too
 calls or output on the deliverable), including nested reviewers; report test-slot,
 review, queue and hold waiters separately, excluding them from productive counts.
 Children waiting on a question or approval are waiters, not productive work.
+
+**Owners decide without the decisions owner.** Within existing commissions and
+grants, owners act, record the decision on the issue/PR or their own log, and
+tell the decisions owner in their next routine update:
+
+- Re-own a stalled child under its existing brief and grant.
+- Rebase onto current main and retest within existing proof and review budgets;
+  product conflicts or new migrations go to the decisions owner.
+- Close non-QA work whose full acceptance is proved; preserve separate QA,
+  umbrella and hold conditions.
+- Revert their own failed trial to its previously authorized setting under its
+  recorded rollback terms.
+
+Reserved for the decisions owner (or the human owner): merge/ready/queue GO for
+each PR@head; spending beyond current accounts; auth; public API; destructive
+migrations; CI/required checks; production lease; and anything on the standing
+never list. Ask for merge GOs once per head, only after its check receipts
+exist, batching every head that is ready into one request. Routine decisions
+grant no exception to these reservations or existing holds.
 
 **Holds and freezes.** The live decision record is the only authority: one line
 per merge freeze, production window or hold ("Merge freeze: …") naming the
