@@ -80,6 +80,63 @@ environment, timestamp and evidence link. Disabled jobs remain in the denominato
 authored-head receipts, skipped jobs and zero-test fixtures prove no candidate
 execution. Keep scheduled Canary and Delivery Health signals separate.
 
+### Replayable partial digest
+
+The consumer coordinator owns the existing external audit reducer, invocation,
+paths and retention; link its runbook and current maintainer in each report.
+For IntelFlo, the [Lane P coordinator](https://github.com/feder-positronics/intelflo/issues/10948)
+owns the external session-audit handoff (`audit`, `lz_mine`, `pr_friction`,
+`compare`); its consumer runbook must identify the current reducer maintainer.
+No loop-zero collector, command, state store or delivery gate is implied.
+
+Freeze an input manifest (source/query versions, byte counts and SHA-256 hashes),
+UTC half-open windows, cohort membership/seed, reducer/config version and causal
+classifications. Offline replay must never collect: run twice from those inputs
+and compare JSON and Markdown bytes, with stable ordering/precision and no live
+clock fields. The report records both output hashes and the replay verdict.
+Each of M01–M16 retains source/evidence, window, eligible/observed n, numerator and
+denominator where applicable, value/unit, target, action owner and null reason.
+Unknown targets/owners must be explicit; consumer targets require calibration.
+
+| IDs | Required views |
+| --- | --- |
+| M01–M04 | Stage feedback; inclusive queue residence; dequeue causes; per-job flake/recovery |
+| M05–M08 | Per-test flake; confirmed escapes/detection stage; spend/machine-minutes; equivalent local/CI duplication |
+| M09–M12 | Valid receipt reuse; review rounds; finding yield/disposition; red-time/unattended subset |
+| M13–M16 | Rerun cost; cancelled/never-started cost; completeness/comparability; critical protection/disabled age |
+
+Require external reducer fixtures with these observable results:
+zero denominator → null with reason; duplicate immutable IDs/attempts → one
+observation; recovery after window end → censored, never success; overlapping
+red episodes → interval union within a versioned series, never summed across
+workflows; truncated billing → known summary plus unknown allocation, never zero
+or scaled-up estimates. Skipped/cancelled executions are separate from flake
+eligibility; their costs remain included. Missing acknowledgement makes
+unattended time unknown. Publish a partial/stale diagnostic separately on partial
+collection or quota exhaustion; atomically replace the last complete JSON/Markdown
+pair only after complete validation, preserving its bytes otherwise. Fixture
+proof includes that preservation and two offline byte-identical output pairs.
+
+**Frozen example (IntelFlo, 2026-11-07):** canonical W is
+`[2026-10-08T00:00:00Z, 2026-11-07T00:00:00Z)`. Original seed 20261107's
+50-PR extended cohort has queue p90 **51.7210 min, n=50**; filtering the same
+membership by merge time gives **70.1891 min, n=48**. Excluded short Nov7 rows
+are PR 11374 (2.0084 min) and PR 11435 (1.6925 min). Nearest rank
+`ceil(0.9*n)` changes from 45 to 44: removing two low values moves original
+rank 46 to W rank 44. Residence is first entry→merge including requeues/hold;
+this overlapping-cohort difference is no trend and no loop-zero default.
+Research provenance is recorded in [the owning issue](https://github.com/feder-positronics/loop-zero/issues/413):
+`test-research-20261107/metrics.md` §§1,4 and `p1e-gapfill.md`. The local p4a
+snapshot has 472 inputs; manifest SHA-256 is
+`40cc9ce625f1128ba3d0bf8e765df8fa3bf585ab2728f9291f74f04d40390435`.
+This is a host-local research sample, not a portable replay archive: the consumer
+coordinator must retain reducer, inputs and manifest at a durable evidence URL
+before claiming independently replayable JSON/Markdown fixture proof.
+
+On the ordinary backlog/code-health pass, route at most three aggregate
+off-target repair families to existing consumer work, naming owner and evidence;
+keep missing data visible and avoid automatically filing per-metric issues.
+
 **Frozen protection example (IntelFlo, 2026-11-07):** five workflows disabled,
 ten jobs suspended, P23=1: no hosted integration/browser protection; local
 exact-candidate coverage unknown. The local p1f sample at source `022026af4`
