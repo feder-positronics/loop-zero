@@ -84,8 +84,9 @@ execution. Keep scheduled Canary and Delivery Health signals separate.
 
 The consumer coordinator owns the existing external audit reducer, invocation,
 paths and retention; link its runbook and current maintainer in each report.
-For example, the existing [session-audit tools](file:///home/marcin/.cache/lz-logs/sessions-1014/scripts/)
-(`audit`, `lz_mine`, `pr_friction`, `compare`) remain consumer-owned, outside core.
+For IntelFlo, the [Lane P coordinator](https://github.com/feder-positronics/intelflo/issues/10948)
+owns the external session-audit handoff (`audit`, `lz_mine`, `pr_friction`,
+`compare`); its consumer runbook must identify the current reducer maintainer.
 No loop-zero collector, command, state store or delivery gate is implied.
 
 Freeze an input manifest (source/query versions, byte counts and SHA-256 hashes),
@@ -124,9 +125,13 @@ are PR 11374 (2.0084 min) and PR 11435 (1.6925 min). Nearest rank
 `ceil(0.9*n)` changes from 45 to 44: removing two low values moves original
 rank 46 to W rank 44. Residence is first entry→merge including requeues/hold;
 this overlapping-cohort difference is no trend and no loop-zero default.
-Frozen research evidence: `test-research-20261107/metrics.md` §§1,4,
-`p1e-gapfill.md`, and external `/tmp/tqr/scripts/p4a/{measure,validate}.py`
-with `/tmp/tqr/cache/p4a/input-manifest.json` (472 inputs).
+Research provenance is recorded in [the owning issue](https://github.com/feder-positronics/loop-zero/issues/413):
+`test-research-20261107/metrics.md` §§1,4 and `p1e-gapfill.md`. The local p4a
+snapshot has 472 inputs; manifest SHA-256 is
+`40cc9ce625f1128ba3d0bf8e765df8fa3bf585ab2728f9291f74f04d40390435`.
+This is a host-local research sample, not a portable replay archive: the consumer
+coordinator must retain reducer, inputs and manifest at a durable evidence URL
+before claiming independently replayable JSON/Markdown fixture proof.
 
 On the ordinary backlog/code-health pass, route at most three aggregate
 off-target repair families to existing consumer work, naming owner and evidence;
