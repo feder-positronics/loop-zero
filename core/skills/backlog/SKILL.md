@@ -33,3 +33,5 @@ For count requests, state the consumer repository's counting rule and reconcile
 every open issue into counted work, standing tracking or unclassified; show held
 work and classification gaps explicitly. Use consumer AGENTS.md conventions
 rather than inventing labels or another state store.
+
+For delivery retrospectives, use the [code-health examples](../../../docs/CODE-HEALTH.md#delivery-retrospectives): report actual protection at each tree/stage, budgeted final-QA versus billed work, and wait versus execution. Keep unknowns visible; route missing consumer proof to its existing owner rather than adding a gate.

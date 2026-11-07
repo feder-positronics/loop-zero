@@ -69,3 +69,78 @@ loop-zero ships no collector, schedule or baseline store. IntelFlo is the
 worked example: `make health` is its collector and a nightly read-only audit
 keeps its reports outside the repository. loop-zero's own collector is
 `loopzero check`.
+
+## Delivery retrospectives
+
+Use existing consumer audit outputs; these are reporting conventions, not delivery
+requirements. Freeze the M16 applicable critical-obligation denominator before
+outcomes, by stage/tree/policy. Show executed coverage and complete passing
+coverage separately, with suite, local/final-cloud location, exact tree, scope,
+environment, timestamp and evidence link. Disabled jobs remain in the denominator;
+authored-head receipts, skipped jobs and zero-test fixtures prove no candidate
+execution. Keep scheduled Canary and Delivery Health signals separate.
+
+**Frozen protection example (IntelFlo, 2026-11-07):** five workflows disabled,
+ten jobs suspended, P23=1: no hosted integration/browser protection; local
+exact-candidate coverage unknown. The local p1f sample at source `022026af4`
+(WSL2, 36 logical CPUs, 62 GiB; disposable PostgreSQL/Redis) ran integration-local
+1/2/3: 12,381 cases each, 2/3/1 failures, 13 skipped. Evidence is
+`p1f-local-timing.md` and its CSV, not an attestation of a combined candidate.
+For a local candidate row, record candidate tree=unknown, landed tree=unknown,
+that scope/environment and that evidence: execution exists at the source tree,
+but candidate coverage stays unknown until the actual combined tree is attested.
+Consumer proof/replacement remains with [IntelFlo Lane P](https://github.com/feder-positronics/intelflo/issues/10948)
+and [disabled-heavy coverage work](https://github.com/feder-positronics/intelflo/issues/10842).
+
+**Frozen final-QA budget example:** the proposed complete backend packet is
+`fastapi_backend/tests/integration/etl/test_rss_same_item_reingest.py`,
+`fastapi_backend/tests/integration/research/test_context_file_collection_roles.py`
+and `fastapi_backend/tests/integration/services/test_admission_commit_shield.py`.
+Run four complete files under `nextjs-frontend/__tests__/critical/`:
+`collection-search-continuity.spec.ts`, `team-membership-transitions.spec.ts`,
+`billing-currency.spec.ts`, `inbox-rules-catch-up.spec.ts`. Backend evidence is
+116 cases/run, green in three runs, 140.58/142.20/143.02 summed test-seconds;
+browser weights total 212.7 s, not measured packet wall time. Actual fit is unproved.
+
+Plan at 64 merges/day; observed REST search was 402/7=57.43/day. Estimate setup
+and execution at 10 runner-min each on 8/4 vCPU, $0.016/$0.008 per runner-min:
+$0.24/packet, $0.30 with 25% contingency. Full batches, no invalidation assumed:
+
+| Batch target | Packets/day | Nominal $/day | Contingency $/day | $/30 days |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 64 | 15.36 | 19.20 | 576 |
+| 4 | 16 | 3.84 | 4.80 | 144 |
+| 8 (selected estimate) | 8 | 1.92 | 2.40 | 72 |
+| 16 | 4 | 0.96 | 1.20 | 36 |
+
+Include setup, partial/failed/retried/cancelled packets and paid other work in
+actual spend; flag any paid nonfinal test. Reconcile Blacksmith daily UTC summary
+once against allocated breakdown plus unattributed remainder; truncated allocation
+is unknown, never free. Cached Nov 6 total $4.479 yields **ALERT >$3/day**.
+Batch 8 leaves only $0.60/day for other work; batch_size=1 is the current baseline.
+At evenly spaced 64/day, batch hold estimates are 78.75 min average/157.5 min
+oldest-member wait. Report hold separately and within first-entry-to-merge latency.
+Packing, packet runtime and repository-wide budget compliance need the existing
+Lane P cost/queue owner's experiment; no spending gate or scheduler is implied.
+
+**Frozen timing/outcome example:** W=[2026-10-08, 2026-11-07) UTC, p1e local
+records: non-ok child CPU is 9,117.48/25,819.56 CPU-min=35.31%, not all avoidable
+waste (840 fail, 356 cancelled, 42 starved, 12 timeout, 1,752 ok). Preserve each
+outcome. Record queued/start/end separately: admission wait=start−queued,
+wall=end−start, CPU=user+system (excludes Docker); absent timestamps stay unknown.
+For the p1f source row above, queued/start/end and wait are unknown; integration
+wall is 1,490.52/1,511.85/1,505.56 s, while summed test time is a different measure.
+Keep source SHA, candidate tree and landed tree separate; never infer one from
+another. Scope/environment and evidence belong on every stage row.
+The browser preflight failed after 22.04 s with zero executed tests; collection
+is not execution. Stable Python 3.14.4 `os.memfd_create` platform failures differ
+from the two changing integration IDs in p1f; neither proves intrinsic flakiness.
+Read generic SSH-pool connection, capability and capacity from consumer config;
+use disposable checkouts without production checkout access or secrets. The
+[consumer local-test handoff](https://github.com/feder-positronics/intelflo/issues/11373)
+owns admission proof; Lane P owns candidate/environment adapters outside core.
+
+Frozen examples come from `test-research-20261107/metrics.md` section 4 drafts
+1–3 and its section 1 M14/M16, `scorecard.md`, `p1e-gapfill.md` and
+`p1f-local-timing.md` in the consumer's established research cache. These dated
+figures are examples, not live health claims or new authoritative state.
