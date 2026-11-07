@@ -30,7 +30,7 @@ why. Keep removal recoverable in Git and validate affected runtime, build,
 packaging, deployment and documentation boundaries.
 
 Explain the clarity gain and any apparently behavioral edit. Run focused success
-and relevant failure/cancellation tests and contract checks; record evidence and
+and relevant failure/cancellation tests and [contract checks](../../CONTRACT.md#blockers); record evidence and
 limits in task Notes.
 
 After this step, resume the commissioned outcome within the authorized finish,
