@@ -7,24 +7,30 @@ or exception record is required.
 
 ## Coordinator rollover
 
-At a delivery milestone or roughly 300k context tokens, launch a successor
-and post its link. Cap the handoff at 2,000 characters and three numbered first
-acts: only references needed for the next action, pending results or questions,
-binding decision links and the reply target. Link rules and rulings; omit history
-and done items. The launch prompt names only the role, handoff path and reply
-target. Parked work and its dispositions live in one durable table (the owning
-tracking issue or one file) that every handoff links instead of re-listing.
-Transfer recurring tasks and pending wakeups and reconcile live children with
-the successor before stopping; a launch notice alone transfers nothing.
-Every retiring owner or helper starts heavy or long-running jobs detached
-(`systemd-run --user` or `setsid`); never retire with an attached live job,
-because retirement ends its process tree. Changed decisions name the instruction
-superseded. After transfer, forward late results once with their original task
-reference, make no new decisions and retire so sends or schedules cannot revive
-the session. After delivery, roll over before monitoring or unrelated follow-ups;
-do it yourself. A bare "continue" means continue there. Workers report on the
-owning PR or issue, directly or through the parent; coordinators reconstruct
-delivery from live remote state.
+At a delivery milestone or roughly 150k context tokens (where the host context
+hook nudges), launch a successor and post its link. Cap the handoff at 2,000
+characters and three numbered first acts: only references needed for the next
+action, pending results or questions, binding decision links and the reply
+target. Link rules and rulings; omit history and done items. Spend context on
+work, not on tool output: first acts read the handoff and only the files it
+links, never a chain of older handoffs; bound every read (T3 thread reads at
+most 2 items of 600 characters, helper and shell output at most 2,000
+characters, no full activity, roster or schedule listings); repeat a call that
+echoes large state, such as schedule updates or capability listings, only when
+that state changed. The launch prompt names only the role, handoff path and
+reply target. Parked work and its dispositions live in one durable table (the
+owning tracking issue or one file) that every handoff links instead of
+re-listing. Transfer recurring tasks and pending wakeups and reconcile live
+children with the successor before stopping; a launch notice alone transfers
+nothing. Every retiring owner or helper starts heavy or long-running jobs
+detached (`systemd-run --user` or `setsid`); never retire with an attached live
+job, because retirement ends its process tree. Changed decisions name the
+instruction superseded. After transfer, forward late results once with their
+original task reference, make no new decisions and retire so sends or schedules
+cannot revive the session. After delivery, roll over before monitoring or
+unrelated follow-ups; do it yourself. A bare "continue" means continue there.
+Workers report on the owning PR or issue, directly or through the parent;
+coordinators reconstruct delivery from live remote state.
 
 **Provider-portable handoff.** If an owner's provider is exhausted or unavailable,
 use a fresh successor on another provider or model only within an explicit
