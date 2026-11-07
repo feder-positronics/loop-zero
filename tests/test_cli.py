@@ -155,6 +155,11 @@ def arm_readiness(
     )
 
 
+def without_accepted_receipt(out: str) -> str:
+    return "".join(line for line in out.splitlines(keepends=True)
+                   if not line.startswith("receipt accepted:"))
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
@@ -1353,7 +1358,7 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
         "check_suite": {"id": 10}}])
     code, out, _ = run(capsys, "ready")
     assert code == 1
-    assert [line for line in out.splitlines() if not line.startswith("receipt accepted:")] == [
+    assert without_accepted_receipt(out).splitlines() == [
         "not ready: no review recorded for the current head",
         "not ready: required check 'checks' is failure",
     ]
@@ -1366,8 +1371,7 @@ def test_ready_lists_retargeted_pr_reason(wt: Path, gh: FakeGh, capsys, head) ->
 
     code, out, err = run(capsys, "ready")
 
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: PR targets release, configured base is main\n"
 
@@ -1380,8 +1384,7 @@ def test_ready_uses_base_required_ci_when_worktree_empties_it(
 
     code, out, err = run(capsys, "ready")
 
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: required check 'checks' is failure\n"
 
@@ -1392,8 +1395,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
 
     code, out, err = run(capsys, "ready")
 
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out.splitlines() == [
         "not ready: required check 'checks' is pending",
@@ -1405,7 +1407,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
     arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
     code, out, err = run(capsys, "merge")
 
-    assert (code, out) == (1, "")
+    assert (code, without_accepted_receipt(out)) == (1, "")
     assert "required check 'checks' is pending; next: loopzero merge --wait" in err
 
 
@@ -1416,8 +1418,7 @@ def test_ready_skipped_required_check_waits_only_for_a_draft(
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=draft)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, err) == (3 if draft else 1, "")
     if draft:
         assert out.splitlines() == [
@@ -1469,8 +1470,7 @@ def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys, head) ->
 
     code, out, err = run(capsys, "ready", "--wait")
 
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, err) == (1, "")
     assert out == "not ready: required check 'checks' is failure\n"
 
@@ -1638,8 +1638,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
 
     code, out, err = run(capsys, "ready", *(["--wait"] if wait else []))
 
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, out, err) == (0, f"ready: {URL}\n", "")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == int(draft)
     observations = sum(c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/check-runs"]
@@ -1756,8 +1755,7 @@ def test_ready_wait_stops_if_pr_head_moves(wt: Path, gh: FakeGh, capsys, head) -
 
     code, out, err = run(capsys, "ready", "--wait")
 
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert code == 1 and out == ""
     assert f"PR head changed while waiting: {head[:12]} to {'f' * 12}" in err
 
@@ -1845,8 +1843,7 @@ def test_ready_requires_clean_successful_local_report_at_head(
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary", login="stranger"), rev(head, "primary", commit="1" * 40)])
     code, out, _ = run(capsys, "ready")
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert code == 1 and out == "not ready: no review recorded for the current head\n"
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", "graphql"]) == 2
 
@@ -1856,8 +1853,7 @@ def test_ready_respects_latest_review_state(wt: Path, gh: FakeGh, capsys, state,
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary"), rev(head, "delta", state=state, verdict="request_changes")])
     gh.respond("pr ready", "")
     code, out, _ = run(capsys, "ready")
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert (code, out) == ((0, f"ready: {URL}\n") if state == "COMMENTED" else
                            (1, "not ready: no review recorded for the current head\n"))
 
@@ -1870,8 +1866,7 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
          "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
                                          "\n**critical: Bad**"}]}},))
     code, out, err = run(capsys, "merge")
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert code == 1 and out == ""
     assert "not ready to merge: open critical finding at feature.py:1: Bad" in err
     assert wt.exists()
@@ -1884,8 +1879,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='c' * 40))
     gh.respond("api -X", "")
     code, out, err = run(capsys, "merge")
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     if changed:
         assert code == 1 and "head changed" in err and wt.exists()
         assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
@@ -2095,8 +2089,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
         cli._proc.ProcTimeout("gh api timed out", "")))
     monkeypatch.setattr(cli, "_cleanup", lambda _: None)
     code, out, err = run(capsys, "merge")
-    out = "".join(line for line in out.splitlines(keepends=True)
-                  if not line.startswith("receipt accepted:"))
+    out = without_accepted_receipt(out)
     assert code == 0 and out.splitlines()[0] == "f" * 40
     assert "remote branch cleanup failed for lz/t1" in err and "timed out" in err
 

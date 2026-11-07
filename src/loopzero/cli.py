@@ -314,7 +314,6 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         print(f"receipt {action}: head={report.head} content={content} "
               f"config=commands-sha256:{digest} environment=unknown")
     except Exception:  # noqa: BLE001 — output must never affect the verdict
-        # Observability must not change the check/readiness verdict.
         return
 
 
