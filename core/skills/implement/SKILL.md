@@ -24,6 +24,7 @@ within actual permissions. Required acceptance that remains unobserved stays ope
 with a next-action owner. Record tested revisions, observations, commands,
 results, trade-offs and limits in Notes or human Validation; evidence from an
 earlier head cannot establish a current gate verdict.
+Apply [local gate receipt reuse](../../CONTRACT.md#blockers).
 
 Run a command expected to take more than about two minutes (builds, browser
 runs, full checks) detached, so a harness that ends your turn cannot kill it:

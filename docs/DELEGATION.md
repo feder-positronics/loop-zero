@@ -167,7 +167,7 @@ evidence. Prefer fixing; no suite-wide skip, retry-until-green or hidden xfail.
 a worker and never builds in a turn that answers a message. Measure progress by
 work output on the commissioned deliverable (a commit, push, PR or checks
 started on a new head), never by turns. Acknowledgements, unrelated commits,
-re-runs of unchanged checks and uncommitted changes older than 60 minutes are
+[unnecessary gate reruns](../core/CONTRACT.md#blockers) and uncommitted changes older than 60 minutes are
 not output; workers commit at every green step and push at least hourly. A
 stream holding addressable work is stalled after 60 minutes without output or
 after three acknowledgement-only or empty turns in a row: push it once with an
@@ -511,7 +511,7 @@ The parent owns integration and acceptance, and may name an integration executor
 in the brief: inspect returned diffs and evidence; worker success claims are not
 proof. Route returned heads to that executor. Run decisive tests unavailable to
 the delegate before review, and required broad verification and `loopzero check`
-once per delivery head. If declared checks do not isolate host tools, run a
+under the [receipt reuse rule](../core/CONTRACT.md#blockers). If declared checks do not isolate host tools, run a
 focused restricted-PATH probe and report the limitation. Only sandboxed
 `loopzero check` counts as delivery proof; continue under the
 [contract](../core/CONTRACT.md).
