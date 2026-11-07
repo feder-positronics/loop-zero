@@ -411,9 +411,10 @@ codex exec --model <resolved-model> -c model_reasoning_effort=<resolved-effort> 
 echo $! ><pid-file>
 ```
 
-Record `$!`; use `kill <pid>` to cancel, never `pgrep -f` or `pkill -f`.
-Wait once for completion using the brief's runtime-specific blocking wait above;
-put any status loop inside the shell, then read the completed result once.
+Record `$!`; use `kill <pid>` to cancel, never `pgrep -f` or `pkill -f`:
+patterns also match the waiting shell and can wait forever. Block once with
+`while kill -0 "$(cat <pid-file>)" 2>/dev/null; do sleep 30; done`, using the
+brief's runtime-specific wait above; then read `<final-message-file>` once.
 Never use `t3_thread_read` or `task_status` for liveness.
 
 App-orchestrated delegates (for example T3 `delegate_task`) launched in an
