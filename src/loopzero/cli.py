@@ -998,7 +998,6 @@ def _cleanup(wt: Path) -> None:
         worktree.cleanup(root, wt)
     except (worktree.WorktreeError, OSError) as exc:
         print(f"warning: merged but worktree cleanup failed: {exc}", file=sys.stderr)
-    print(f"cd {root}")
 
 
 def cmd_ready(args: argparse.Namespace) -> int:

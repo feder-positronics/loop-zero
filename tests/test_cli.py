@@ -1862,7 +1862,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
         assert code == 1 and "head changed" in err and wt.exists()
         assert all(c["argv"][:2] != ["api", "-X"] for c in gh.calls)
         return
-    assert (code, out, err) == (0, f"cd {repo}\n{'c' * 40}\n", "")
+    assert (code, out, err) == (0, f"{'c' * 40}\n", "")
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
     assert "--squash" in merge and merge[merge.index("--match-head-commit") + 1] == head
     assert not wt.exists()
@@ -1895,7 +1895,7 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     if state == "wrong_primary":
         assert code == 1 and "does not own this linked worktree" in err
     else:
-        assert code == 0 and out.endswith(f"cd {primary}\n{'c' * 40}\n"), (out, err)
+        assert code == 0 and out.endswith(f"{'c' * 40}\n") and "cd " not in out, (out, err)
         assert ("worktree is dirty" in err) if state == "dirty" else not err
     assert linked.exists() is (state != "clean")
     assert bool(git(primary, "branch", "--list", "lz/bare")) is (state != "clean")
