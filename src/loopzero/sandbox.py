@@ -97,7 +97,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command) if not dirty else None
+            key = _input_key(config, worktree, command, base) if not dirty else None
             old = previous.get(command)
             if key and old and old.get("input_key") == key and old.get("exit_code") == 0:
                 result = CheckResult(command, 0, 0.0, old.get("tail", ""), key, old["head"])
@@ -139,7 +139,7 @@ def _previous(config: Config, worktree: Path) -> dict:
         return {}
 
 
-def _input_key(config: Config, worktree: Path, command: str) -> str | None:
+def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
     if command not in config.inputs:
         return None
     paths = (*config.inputs[command], *config.inputs.get("*", ()))
@@ -149,6 +149,8 @@ def _input_key(config: Config, worktree: Path, command: str) -> str | None:
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    if config.check_runner:
+        settings["base"] = base
     settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
     payload = [command, __version__, settings, blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -407,7 +409,7 @@ def _dispatch_one(
                 raise ValueError("inconsistent not-started result")
             if not _stage_unchanged(config, worktree, head):
                 raise ValueError("Worktree changed before fallback")
-            local = run_checks(replace(config, check_runner=(), checks=(command,)),
+            local = run_checks(replace(config, check_runner=(), checks=(command,), inputs={}),
                                worktree, timeout=timeout, _resolved=True)
             if local.dirty or not local.results:
                 raise ValueError("Local fallback failed")

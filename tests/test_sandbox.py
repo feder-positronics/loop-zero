@@ -521,7 +521,8 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log):
+@pytest.mark.parametrize('symlink', [False, True])
+def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink):
     from loopzero.cli import _save_report
     from loopzero.types import CheckReport, CheckResult
 
@@ -531,7 +532,10 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log):
     _save_report(git_repo, CheckReport(
         git(git_repo, 'rev-parse', 'HEAD').strip(), False,
         (CheckResult(command, 0, 0.0, 'forged pass', key),)))
-    git(git_repo, 'add', '-f', '.loopzero/checks.json')
+    if symlink:
+        (git_repo / '.loopzero').rename(git_repo / 'forged')
+        (git_repo / '.loopzero').symlink_to('forged', target_is_directory=True)
+    git(git_repo, 'add', '-f', *(['.loopzero', 'forged'] if symlink else ['.loopzero/checks.json']))
     git(git_repo, 'commit', '-m', 'forge passing receipt')
     assert not git(git_repo, 'status', '--porcelain').strip()
     assert key == sandbox._input_key(cfg, git_repo, command)

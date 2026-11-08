@@ -148,3 +148,34 @@ def test_runner_timeout(git_repo, monkeypatch):
     result = report.results[0]
     assert result.exit_code == 124 and result.duration_s == 0.25
     assert 'partial' in result.tail and 'timed out after 0.1s' in result.tail
+
+
+@pytest.mark.parametrize('change', ['fallback', 'base'])
+def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, change):  # noqa: F811
+    from dataclasses import replace
+
+    (git_repo / '.git/info/exclude').write_text('.loopzero/\n')
+    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    command = 'echo stage-ran; exit 7' if change == 'fallback' else 'echo one'
+    cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
+    body = ('import json,sys;r=json.load(sys.stdin);r.pop("env");'
+            'r.update(exit_code=0,duration_s=0,not_started=True,tail="");print(json.dumps(r))')
+    runner = (sys.executable, '-c', body)
+    if change == 'fallback':
+        passing = sandbox.run_checks(replace(cfg, checks=('echo seed',)), git_repo)
+        result = replace(passing.results[0], command=command,
+                         input_key=sandbox._input_key(cfg, git_repo, command))
+        _save_report(git_repo, replace(passing, results=(result,)))
+    else:
+        cfg = replace(cfg, check_runner=runner)
+        _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
+        git(git_repo, 'commit', '--allow-empty', '-m', 'advance base')
+        git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    cfg = replace(cfg, check_runner=runner)
+    report = sandbox.run_checks(cfg, git_repo)
+    assert report.results[0].reused_from is None
+    assert report.results[0].exit_code == (7 if change == 'fallback' else 0)
+    _save_report(git_repo, report)
+    again = sandbox.run_checks(cfg, git_repo)
+    assert again.results[0].exit_code == report.results[0].exit_code
+    assert bool(again.results[0].reused_from) is (change == 'base')
