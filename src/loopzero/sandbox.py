@@ -378,9 +378,14 @@ def _dispatch_one(
             raise ValueError("Stage runner executable missing")
         argv = (executable, *config.check_runner[1:])
         with tempfile.TemporaryDirectory(prefix="loopzero-runner-") as cwd:
-            if any(Path(path).resolve().is_relative_to(worktree.resolve())
-                   for arg in (*argv, cwd) for path in (arg, arg.partition("=")[2])
-                   if Path(path).is_absolute()):
+            if any((Path(cwd) / path).resolve().is_relative_to(worktree.resolve())
+                   or (not Path(path).is_absolute() and ".." in Path(path).parts
+                       and not (Path(cwd) / path).resolve().is_relative_to(Path(cwd)))
+                   for arg in (*argv, cwd)
+                   for value in (arg, arg.partition("=")[2],
+                                 arg[2:] if arg.startswith("-") and not arg.startswith("--") else "")
+                   for path in {value, *value.split(":")}
+                   if Path(path).is_absolute() or ".." in Path(path).parts):
                 raise ValueError("Stage runner references task worktree")
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
@@ -395,6 +400,8 @@ def _dispatch_one(
                 or type(frame["not_started"]) is not bool
                 or not isinstance(frame["tail"], str)):
             raise ValueError("invalid or mismatched stage result")
+        if not _stage_unchanged(config, worktree, head):
+            raise ValueError("Worktree changed after stage")
         if frame["not_started"]:
             if frame["exit_code"] or frame["duration_s"] or frame["tail"]:
                 raise ValueError("inconsistent not-started result")
@@ -407,5 +414,9 @@ def _dispatch_one(
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
                            _proc.tail(frame["tail"]))
+    except _proc.ProcTimeout as exc:
+        return CheckResult(command, TIMEOUT_EXIT,
+                           exc.duration_s if exc.duration_s is not None else timeout,
+                           _proc.tail(exc.output + f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
         return CheckResult(command, 1, 0.0, f"Stage runner failed: {exc}")

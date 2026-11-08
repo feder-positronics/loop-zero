@@ -64,7 +64,8 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         assert 'Stage runner failed' in report.results[0].tail
         assert any(word in report.results[0].tail.lower() for word in ('recursion', 'stack overflow'))
     if 'drift' in body:
-        assert report.dirty and 'Worktree changed before stage' in report.results[1].tail
+        assert report.dirty and calls == ['echo one']
+        assert 'Worktree changed after stage' in report.results[0].tail
     elif not verdict:
         assert calls == ['echo one']
     _save_report(git_repo, report)
@@ -95,7 +96,7 @@ def test_runner_config(tmp_path, value):
             load(path)
 
 
-@pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink'])
+@pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink', 'short', 'list', 'parent', 'colon_link', 'colon_tree'])
 def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
     runner = git_repo / 'runner'
     runner.write_text('#!/bin/sh\nexit 0\n')
@@ -103,13 +104,20 @@ def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
     git(git_repo, 'add', 'runner')
     git(git_repo, 'commit', '-m', 'runner')
     git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
-    link = tmp_path / 'runner-link'
+    link = tmp_path / ('runner:link' if kind == 'colon_link' else 'runner-link')
     link.symlink_to(runner)
+    if kind == 'colon_tree':
+        git(git_repo, 'worktree', 'add', '-q', '--detach', str(tmp_path / 'task:tree'))
+        git_repo, runner = tmp_path / 'task:tree', tmp_path / 'task:tree' / 'runner'
     monkeypatch.setenv('PATH', f'{git_repo}:' + os.environ['PATH'])
     prefix = {'executable': (str(runner),), 'argument': (sys.executable, str(runner)),
               'symlink': (sys.executable, str(link)), 'path': ('runner',),
               'executable_symlink': (str(link),), 'option': (sys.executable, f'--script={runner}'),
-              'option_symlink': (sys.executable, f'--script={link}')}[kind]
+              'option_symlink': (sys.executable, f'--script={link}'),
+              'short': (sys.executable, f'-X{runner}'),
+              'list': (sys.executable, f'/operator/safe:{runner}'),
+              'parent': (sys.executable, '../escape'), 'colon_link': (str(link),),
+              'colon_tree': (str(runner),)}[kind]
     report = sandbox.run_checks(make_config(check_runner=prefix), git_repo)
     assert not report.ok and 'references task worktree' in report.results[0].tail
 
@@ -125,3 +133,18 @@ def test_runner_preserves_executable_symlink(git_repo, tmp_path, monkeypatch, ba
             'r.update(exit_code=0,duration_s=0,not_started=False,tail="ok");print(json.dumps(r))')
     report = sandbox.run_checks(make_config(check_runner=(link.name if bare else str(link), '-c', body, 'relative/argument')), git_repo)
     assert report.ok, report.results[0].tail
+
+
+def test_runner_timeout(git_repo, monkeypatch):
+    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    original = sandbox._proc.run
+    def run(argv, **kwargs):
+        if argv[0] == sys.executable:
+            raise sandbox._proc.ProcTimeout('deadline', 'partial', duration_s=0.25)
+        return original(argv, **kwargs)
+    monkeypatch.setattr(sandbox._proc, 'run', run)
+    report = sandbox.run_checks(make_config(check_runner=(sys.executable,)), git_repo, timeout=0.1)
+    assert not report.ok
+    result = report.results[0]
+    assert result.exit_code == 124 and result.duration_s == 0.25
+    assert 'partial' in result.tail and 'timed out after 0.1s' in result.tail
