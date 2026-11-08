@@ -166,3 +166,10 @@ def test_ro_paths_reject_host_secrets(tmp_path, path):
 def test_ro_paths_accept_explicit_subpaths(tmp_path, path):
     text = f'[repo]\nname = "o/n"\n[checks]\nro_paths = ["{path}"]\n'
     assert config.load(write(tmp_path, text)).sandbox_ro == (path,)
+
+
+def test_check_inputs(tmp_path):
+    cfg = config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"echo ok" = ["src/**"]\n"*" = ["lock"]\n'))
+    assert cfg.inputs == {"echo ok": ("src/**",), "*": ("lock",)}
+    with pytest.raises(config.ConfigError):
+        config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"echo ok" = "src"\n'))
