@@ -25,6 +25,7 @@ _SECTIONS: dict[str, dict[str, type]] = {
     "checks": {
         "commands": list,
         "runner": list,
+        "inputs": dict,
         "required_ci": list,
         "network": bool,
         "env_allowlist": list,
@@ -184,6 +185,9 @@ def _build(data: dict[str, Any]) -> Config:
         if "/" in runner[0] and not Path(runner[0]).is_absolute():
             raise ConfigError("checks.runner executable paths must be absolute")
         kwargs["check_runner"] = runner
+    if "inputs" in checks:
+        kwargs["inputs"] = {key: _strings(f"checks.inputs.{key}", value)
+                            for key, value in checks["inputs"].items()}
     if "env_allowlist" in checks:
         kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
     if "ro_paths" in checks:

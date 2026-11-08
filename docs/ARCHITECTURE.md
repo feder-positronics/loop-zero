@@ -482,3 +482,11 @@ the authoritative `checks.json` receipt; runners cannot select stages or mint
 receipts. Stage admission belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
+
+Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
+Keys bind committed paths/blob IDs, command, version and sandbox configuration.
+The `"*"` entry adds shared inputs; consumers own complete input declarations.
+Only this worktree's clean passing keyed receipt is eligible; dirty trees run
+fresh. A tracked receipt is never eligible for reuse.
+New receipts still bind the current head, so readiness is unchanged.
+CI and merge-queue candidates run fresh without a local worktree receipt.

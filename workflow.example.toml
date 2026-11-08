@@ -75,3 +75,9 @@ reviewers = ["claude", "codex"]
 # model = "gpt-6-luna"
 # effort = "medium"
 # allowed_efforts = ["low", "medium", "high", "xhigh", "max"]
+
+# Optional local passing-result reuse. Declare every input, including shared tooling.
+# Undeclared commands always execute. CI/merge-queue candidates execute fresh.
+# [checks.inputs]
+# "uv run pytest -q" = ["src/**", "tests/**"]
+# "*" = ["uv.lock", "pyproject.toml"]

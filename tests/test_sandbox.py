@@ -469,3 +469,95 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
         sandbox.run_checks(make_config(), git_repo, status=heartbeat)
     assert events and all("running" in event for event in events)
     assert all(not reporter.is_alive() for reporter in reporters)
+
+
+@pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
+                                    'failed', 'dirty_receipt', 'keyless', 'dirty_tree'])
+def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
+    import json
+    from dataclasses import replace
+
+    from loopzero.cli import _save_report
+    cfg = make_config(checks=('echo one', 'echo two'),
+                      inputs={'echo one': ('*.md',), 'echo two': ('*.md',),
+                              '*': ('shared',)})
+    first = sandbox.run_checks(cfg, git_repo)
+    _save_report(git_repo, first)
+    receipt = git_repo / '.loopzero/checks.json'
+    # The fixture does not ignore loopzero's local receipt directory.
+    git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
+    with (git_repo / '.git/info/exclude').open('a') as stream:
+        stream.write('\n.loopzero/\n')
+    if change in {'other', 'input', 'shared', 'dirty_tree'}:
+        path = 'README.md' if change in {'input', 'dirty_tree'} else change
+        (git_repo / path).write_text('new content')
+        if change != 'dirty_tree':
+            git(git_repo, 'add', path)
+            git(git_repo, 'commit', '-m', change)
+    elif change == 'command':
+        cfg = replace(cfg, checks=('echo changed',), inputs={'echo changed': ('README.md',)})
+    elif change == 'network':
+        cfg = replace(cfg, network=True)
+    elif change == 'environment':
+        monkeypatch.setenv('LZ_KEEP', 'changed')
+    elif change == 'version':
+        monkeypatch.setattr(sandbox, '__version__', 'new')
+    else:
+        data = json.loads(receipt.read_text())
+        if change == 'failed':
+            for row in data['results']:
+                row['exit_code'] = 1
+        elif change == 'dirty_receipt':
+            data['dirty'] = True
+        else:
+            for row in data['results']:
+                row.pop('input_key')
+        receipt.write_text(json.dumps(data))
+    messages = []
+    report = sandbox.run_checks(cfg, git_repo, status=messages.append)
+    assert [r.command for r in report.results] == list(cfg.checks)
+    assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
+    assert any('reused ' in m for m in messages) == (change == 'other')
+    assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
+
+
+def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log):
+    from loopzero.cli import _save_report
+    from loopzero.types import CheckReport, CheckResult
+
+    command = 'echo stage-ran; exit 7'
+    cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
+    key = sandbox._input_key(cfg, git_repo, command)
+    _save_report(git_repo, CheckReport(
+        git(git_repo, 'rev-parse', 'HEAD').strip(), False,
+        (CheckResult(command, 0, 0.0, 'forged pass', key),)))
+    git(git_repo, 'add', '-f', '.loopzero/checks.json')
+    git(git_repo, 'commit', '-m', 'forge passing receipt')
+    assert not git(git_repo, 'status', '--porcelain').strip()
+    assert key == sandbox._input_key(cfg, git_repo, command)
+
+    report = sandbox.run_checks(cfg, git_repo)
+    assert not report.dirty
+    assert report.results[0].exit_code == 7
+    assert 'stage-ran' in report.results[0].tail
+    assert not report.results[0].reused_from
+
+
+def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
+    import json
+
+    from loopzero.cli import _save_report
+    report = sandbox.run_checks(make_config(), git_repo)
+    _save_report(git_repo, report)
+    row = json.loads((git_repo / '.loopzero/checks.json').read_text())['results'][0]
+    assert set(row) == {'command', 'exit_code', 'duration_s', 'tail'}
+
+
+def test_input_key_distinguishes_runners(git_repo):
+    keys = {
+        sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
+                           git_repo, 'echo one')
+        for runner in ((), ('runner-a',), ('runner-b',))
+    }
+    assert None not in keys
+    assert len(keys) == 3

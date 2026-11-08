@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import resource
 import shutil
@@ -13,11 +14,11 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from os.path import commonpath
 from pathlib import Path
 
-from . import _proc
+from . import __version__, _proc
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError
 
@@ -65,6 +66,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
     base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
+    previous = _previous(config, worktree) if config.inputs and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -95,9 +97,18 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            with _stage_status(status, index + 1, len(commands)):
-                result = (_dispatch_one(config, worktree, head, base, command, timeout)
-                          if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
+            key = _input_key(config, worktree, command) if not dirty else None
+            old = previous.get(command)
+            if key and old and old.get("input_key") == key and old.get("exit_code") == 0:
+                result = CheckResult(command, 0, 0.0, old.get("tail", ""), key, old["head"])
+                if status:
+                    status(f"reused {old['head'][:8]}")
+            else:
+                with _stage_status(status, index + 1, len(commands)):
+                    result = (_dispatch_one(config, worktree, head, base, command, timeout)
+                              if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
+                if key:
+                    result = replace(result, input_key=key)
             if status:
                 status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
@@ -114,6 +125,33 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results))
+
+
+def _previous(config: Config, worktree: Path) -> dict:
+    if _git(config, worktree, "ls-files", "--", ".loopzero"):
+        return {}
+    try:
+        data = json.loads((worktree / ".loopzero/checks.json").read_text())
+        if data["dirty"] is not False or not isinstance(data["head"], str):
+            return {}
+        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def _input_key(config: Config, worktree: Path, command: str) -> str | None:
+    if command not in config.inputs:
+        return None
+    paths = (*config.inputs[command], *config.inputs.get("*", ()))
+    # Empty pathspecs must not accidentally mean the whole tree.
+    empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
+    blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
+                 "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+    settings = {k: v for k, v in asdict(config).items() if k in {
+        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
+    payload = [command, __version__, settings, blobs]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 @contextmanager

@@ -45,6 +45,7 @@ class Config:
     limits: ResourceLimits = ResourceLimits()  # best-effort per-check resource limits
     review: dict[str, ReviewConfig] = field(default_factory=dict)
     mergify_queue: str | None = None
+    inputs: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,8 @@ class CheckResult:
     exit_code: int
     duration_s: float
     tail: str  # last 40 lines of combined output
+    input_key: str | None = None
+    reused_from: str | None = None
 
 
 @dataclass(frozen=True)

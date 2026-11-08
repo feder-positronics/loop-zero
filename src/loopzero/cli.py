@@ -323,7 +323,9 @@ def _save_report(wt: Path, report: CheckReport) -> None:
     payload = {
         "head": report.head,
         "dirty": report.dirty,
-        "results": [dataclasses.asdict(result) for result in report.results],
+        "results": [{k: v for k, v in dataclasses.asdict(result).items()
+                     if k not in {"input_key", "reused_from"} or v is not None}
+                    for result in report.results],
     }
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
