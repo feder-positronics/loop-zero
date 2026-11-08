@@ -14,6 +14,8 @@ Fix valid blocking findings within commissioned scope or hand off bounded repair
 and validation through [response handoff](reference.md#response-handoff).
 Explain repaired, inapplicable or unsupported findings in-thread with verified
 evidence using `loopzero resolve`; never resolve silently. Suggestions are optional.
+Resolving a thread sends GitHub no Actions event: after the last resolve, refresh
+Eligibility through its workflow's manual PR-number input.
 Requester-reserved, irreversible or acceptance/scope/cost changes and external
 commitments require direction.
 
