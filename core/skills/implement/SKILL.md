@@ -35,7 +35,13 @@ Apply [local gate receipt reuse](../../CONTRACT.md#blockers).
 Run a command expected to take more than about two minutes (builds, browser
 runs, full checks) detached, so a harness that ends your turn cannot kill it:
 `setsid nohup bash -c 'echo $$ >LOG.pid; <cmd> >LOG 2>&1; echo $? >LOG.exit' </dev/null >/dev/null 2>&1 &`,
-then wait for `LOG.exit`. Do not end the turn, settle or report done while a job
+then block on `until test -f LOG.exit; do sleep 30; done`.
+For builds, tests, CI, review, ready and merge, Codex exec/write_stdin yields
+>=120 s (>=30 s otherwise); Claude uses a background completion notification
+or `t3_background_wait`. Read the completed result once; never use
+`t3_thread_read` or `task_status` for liveness. Cap returned output at the
+producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
+limit <=2 and maxCharsPerItem <=600. Do not end the turn, settle or report done while a job
 you started has no `LOG.exit`; if the turn must end, first schedule a one-shot
 wakeup that reads `LOG.exit` and resumes the delivery step it feeds. To cancel, check `LOG.exit` first, then run
 `kill -- -$(cat LOG.pid)`; never `pkill -f`, which also matches your own shell

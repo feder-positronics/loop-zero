@@ -360,6 +360,8 @@ Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch policy: Children inherit this rule: never approval-required; use auto only for read-only children and say "read-only, do not edit" in the brief; a child that runs commands or edits inherits the parent's mode, because auto can stall on approval review. After launch, verify pendingRequestCount 0 and a completed tool call.
+Waiting: One blocking wait: Codex exec/write_stdin yield >=30 s (>=120 s for builds, tests, CI, review, ready or merge); shell `until <done>; do sleep 30; done`. Claude: background notification or t3_background_wait. Read the completed result once; never use t3_thread_read/task_status for liveness.
+Output: Cap at the producer: REST `gh api --jq` selected fields, shell `| head -c 2000`; t3_thread_read limit <=2, maxCharsPerItem <=600.
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
 Integration executor: <named executor for returned heads and one owner of any readiness/merge waiter; parent retains acceptance responsibility>
@@ -409,11 +411,11 @@ codex exec --model <resolved-model> -c model_reasoning_effort=<resolved-effort> 
 echo $! ><pid-file>
 ```
 
-Record `$!` and use `kill -0 <pid>` to wait and `kill <pid>` to cancel, never
-`pgrep -f` or `pkill -f`: pattern matching also
-finds the waiting shell and can wait forever. Prefer completion notifications
-to reading output files. Wait on long commands with blocking calls (Codex:
-yield at least 30 seconds), not second-by-second polling.
+Record `$!`; use `kill <pid>` to cancel, never `pgrep -f` or `pkill -f`:
+patterns also match the waiting shell and can wait forever. Block once with
+`while kill -0 "$(cat <pid-file>)" 2>/dev/null; do sleep 30; done`, using the
+brief's runtime-specific wait above; then read `<final-message-file>` once.
+Never use `t3_thread_read` or `task_status` for liveness.
 
 App-orchestrated delegates (for example T3 `delegate_task`) launched in an
 approval-requiring mode stall unattended at their first tool call, while task
