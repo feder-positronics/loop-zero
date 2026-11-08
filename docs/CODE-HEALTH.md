@@ -200,7 +200,8 @@ Dependency setup comes from the checked-out repository (its own preparation
 script, otherwise its lock files), not from another repository's tooling. Pool
 hosts run jobs under the repository-pinned interpreter (for example a user-level
 `uv` with the pinned Python), never the host's system Python, and receive no jobs
-while their reported toolchain differs from the pin. The
+while their reported toolchain differs from the pin. Install that interpreter with
+umask 022: a group- or world-writable install fails consumers' interpreter checks. The
 [consumer local-test handoff](https://github.com/feder-positronics/intelflo/issues/11373)
 owns admission proof; Lane P owns candidate/environment adapters outside core.
 
