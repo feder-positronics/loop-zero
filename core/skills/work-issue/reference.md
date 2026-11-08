@@ -37,6 +37,9 @@ head under the existing rules. A series comparison is not behavior proof.
 
 ## Integration, waiting and re-entry
 
+For CI, review, ready and merge waits, follow the blocking wait and producer
+output limits in [implement](../implement/SKILL.md); read completion once.
+
 - Without a base merge queue, defer a merely-behind branch's rebase during
   implementation/repairs. Rebase once when otherwise finished, then check and
   request exact-head review; an earlier review is wasted. Update the base by
