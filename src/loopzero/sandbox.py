@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import re
 import resource
 import shutil
@@ -10,10 +13,12 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from os.path import commonpath
 from pathlib import Path
 
 from . import _proc
+from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError
 
 GIT_TIMEOUT = 60.0
@@ -41,50 +46,58 @@ class SandboxUnavailable(LoopZeroError):
 
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
-               status: Callable[[str], None] | None = None) -> CheckReport:
+               status: Callable[[str], None] | None = None,
+               _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
     progress receives each command before launch, as before. Optional status receives
     heartbeats from a reporting thread and completion from the calling thread.
     """
     worktree = worktree.resolve()
-    if shutil.which("bwrap") is None:
+    if not config.check_runner and shutil.which("bwrap") is None:
         raise SandboxUnavailable(
             "bwrap binary missing: bwrap not found on PATH\n"
             "sudo apt install bubblewrap"
         )
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    if config.check_runner and dirty:
+        return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
+                                                   "Runner requires a clean worktree"),))
+    base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
     with ExitStack() as stack:
-        home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))
-        scratch_root = Path(
-            stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-scratch-"))
-        )
-        private_parent = Path(commonpath((home, scratch_root)))
-        for exposed in (*config.sandbox_ro, *config.writable):
-            if private_parent.is_relative_to(Path(exposed).resolve()):
-                raise SandboxUnavailable(
-                    f"sandbox path {exposed!r} would expose private check directories"
-                )
-        scratch = {entry: scratch_root / entry for entry in config.scratch}
-        for entry, source in scratch.items():
-            source.mkdir(parents=True)
-            # Mount points must exist before bwrap binds the source read-only.
-            (worktree / entry).mkdir(parents=True, exist_ok=True)
-        prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
-        probe(config, worktree, prefix)
-        missing, preparations = _preflight(config, worktree)
+        prefix = []
+        if not config.check_runner:
+            home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))
+            scratch_root = Path(
+                stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-scratch-"))
+            )
+            private_parent = Path(commonpath((home, scratch_root)))
+            for exposed in (*config.sandbox_ro, *config.writable):
+                if private_parent.is_relative_to(Path(exposed).resolve()):
+                    raise SandboxUnavailable(
+                        f"sandbox path {exposed!r} would expose private check directories"
+                    )
+            scratch = {entry: scratch_root / entry for entry in config.scratch}
+            for entry, source in scratch.items():
+                source.mkdir(parents=True)
+                # Mount points must exist before bwrap binds the source read-only.
+                (worktree / entry).mkdir(parents=True, exist_ok=True)
+            prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
+            probe(config, worktree, prefix)
+        missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
             with _stage_status(status, index + 1, len(commands)):
-                result = _run_one(config, worktree, prefix, command, timeout)
+                result = (_dispatch_one(config, worktree, head, base, command, timeout)
+                          if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
             if status:
                 status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
@@ -297,3 +310,64 @@ def _git(config: Config, worktree: Path, *args: str) -> str:
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
     raw = Path(_git(config, worktree, "rev-parse", flag).strip())
     return (raw if raw.is_absolute() else worktree / raw).resolve()
+
+
+def _stage_unchanged(config: Config, worktree: Path, head: str) -> bool:
+    return (_git(config, worktree, "rev-parse", "HEAD").strip() == head
+            and not _git(config, worktree, "status", "--porcelain").strip())
+
+
+def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    obj = dict(pairs)
+    if len(obj) != len(pairs):
+        raise ValueError("duplicate result field")
+    return obj
+
+
+def _dispatch_one(
+    config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
+) -> CheckResult:
+    env = {**SANDBOX_ENV, **dict(config.env)}
+    binding = {"worktree": str(worktree.resolve()), "head": head, "base": base, "command": command, "network": config.network,
+               "env_sha256": hashlib.sha256(json.dumps(
+                   env, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
+    try:
+        if not _stage_unchanged(config, worktree, head):
+            raise ValueError("Worktree changed before stage")
+        executable = (config.check_runner[0] if Path(config.check_runner[0]).is_absolute()
+                      else shutil.which(config.check_runner[0]))
+        if not executable:
+            raise ValueError("Stage runner executable missing")
+        argv = (executable, *config.check_runner[1:])
+        with tempfile.TemporaryDirectory(prefix="loopzero-runner-") as cwd:
+            if any(Path(path).resolve().is_relative_to(worktree.resolve())
+                   for arg in (*argv, cwd) for path in (arg, arg.partition("=")[2])
+                   if Path(path).is_absolute()):
+                raise ValueError("Stage runner references task worktree")
+            done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
+                             input=json.dumps({**binding, "env": env}), encoding="utf-8")
+        frame = json.loads(done.stdout, object_pairs_hook=_unique_fields)
+        if (done.exit_code != 0 or not isinstance(frame, dict)
+                or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
+                or any(frame[key] != value for key, value in binding.items())
+                or type(frame["network"]) is not bool
+                or type(frame["exit_code"]) is not int
+                or type(frame["duration_s"]) not in (int, float)
+                or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
+                or type(frame["not_started"]) is not bool
+                or not isinstance(frame["tail"], str)):
+            raise ValueError("invalid or mismatched stage result")
+        if frame["not_started"]:
+            if frame["exit_code"] or frame["duration_s"] or frame["tail"]:
+                raise ValueError("inconsistent not-started result")
+            if not _stage_unchanged(config, worktree, head):
+                raise ValueError("Worktree changed before fallback")
+            local = run_checks(replace(config, check_runner=(), checks=(command,)),
+                               worktree, timeout=timeout, _resolved=True)
+            if local.dirty or not local.results:
+                raise ValueError("Local fallback failed")
+            return local.results[-1]
+        return CheckResult(command, frame["exit_code"], frame["duration_s"],
+                           _proc.tail(frame["tail"]))
+    except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
+        return CheckResult(command, 1, 0.0, f"Stage runner failed: {exc}")
