@@ -164,11 +164,11 @@ def merges_since(wt: Path, sha: str) -> list[str]:
 
 def cleanup(repo_root: Path, wt: Path) -> None:
     """Remove the worktree and its branch. Refuses when the worktree is dirty."""
-    repo_root, wt = Path(repo_root), Path(wt)
+    wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
     if is_dirty(wt):
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-    name = branch(wt)
-    _git(repo_root, "worktree", "remove", str(wt))
-    _git(repo_root, "branch", "-D", name)
+    name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
+    _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+    _git(gd, f"--git-dir={gd}", "branch", "-D", name)
