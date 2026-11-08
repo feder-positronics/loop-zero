@@ -1906,13 +1906,13 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     gh.respond("api -X", "")
     if state == "dirty":
         (linked / "README.md").write_text("uncommitted work\n")
-    if state == "wrong_primary":
-        original = cli._git
-        monkeypatch.setattr(cli, "_git", lambda cwd, *args: (
-            f"worktree {repo}\0" if args == ("worktree", "list", "--porcelain", "-z")
-            else original(cwd, *args)))
+    original, cwds = cli._git, []  # #439: no cleanup git in a primary checkout
+    monkeypatch.setattr(cli, "_git", lambda cwd, *args: cwds.append(Path(cwd).resolve()) or (
+        f"worktree {repo}\0" if state == "wrong_primary" and args == ("worktree", "list", "--porcelain", "-z")
+        else original(cwd, *args)))
 
     code, out, err = run(capsys, "merge")
+    assert {primary.resolve(), repo.resolve()}.isdisjoint(cwds)
 
     if state == "wrong_primary":
         assert code == 1 and "does not own this linked worktree" in err
