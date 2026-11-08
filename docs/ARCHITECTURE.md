@@ -448,3 +448,37 @@ retain stdout/stderr first, then a separate attempt-bound private final-file sna
 before exit classification and temporary HOME cleanup. Complete snapshots preserve exact
 bytes as base64 with length and SHA-256; absent, unreadable, or partial files are labelled
 honestly and cannot produce an approval. These private receipts are not public evidence.
+
+## Check stage runners
+
+`[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
+from a fresh temporary directory outside the task worktree. Its executable must
+be an absolute path or a bare PATH command; later arguments may be relative.
+Execute the configured path (or PATH lookup result) without resolving symlinks.
+For containment only, resolve the executable, absolute arguments and absolute
+`--opt=/path` values: none may reference task-tree files, including through
+symlinks. The runner program and its argv must remain operator-controlled
+and must not come from the task tree.
+
+Each stdin JSON object contains `worktree` (resolved absolute checkout path),
+`head` (exact SHA), `base` (resolved base SHA),
+`command` (one locally resolved stage), `env` (`SANDBOX_ENV` overlaid with
+configured checks env, excluding host allowlist values), `network` (boolean),
+and `env_sha256`. The digest is SHA-256 of UTF-8 JSON of `env`, with sorted keys,
+ASCII escaping and compact separators (`,` and `:`). Stdout must contain exactly
+one JSON object echoing worktree, head, base, command, network and env_sha256, plus
+`exit_code` (integer), `duration_s` (finite nonnegative number), `not_started`
+(boolean), and `tail` (string). Env values must not be echoed. Diagnostics belong
+on stderr. Missing, extra, duplicate, malformed or mismatched fields and runner
+process failures fail the stage closed. `not_started=true` requires exit_code=0,
+duration_s=0 and empty tail, and permits only sandboxed local fallback.
+
+The runner may read `worktree` as data to execute the exact clean head, including
+unpushed local commits, with the supplied environment and network policy under
+equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
+every stage and after execution, aggregates in order and stops on failure. No
+stage is retried after success or uncertain launch. Only the coordinator writes
+the authoritative `checks.json` receipt; runners cannot select stages or mint
+receipts. Stage admission belongs to the runner: the outer `loopzero check`
+must not hold a heavy slot when a runner is configured. Without a runner, the
+existing local execution path is unchanged.
