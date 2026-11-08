@@ -31,13 +31,15 @@ set -euo pipefail
 # OD v58 2026-10-30: retire five closed recovery targets and nine receipts; exact own -59 source / -3 tests, zero headroom.
 # OD v59 2026-10-30: retire the final closed recovery target and two receipts; exact own -15 source / -304 tests, zero headroom.
 # OD v162 RULING-lean60-od162-1107: exact measured #414 overage (+17 src/+74 tests).
-SRC_CAP=6558
+# OD v165 RULING-lean64-go-od165-1108: exact measured #426 overage (+66 src/+83 tests).
+# Lean65 #426 review fixes: exact measured overage, pending OD GO ask lean65-batch-1108
+SRC_CAP=6641
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
 # Marcin approval 2026-10-29: ai-accounts reserve guard, per-window resets and fallback and caller-credential proofs (+85).
-TESTS_CAP=10670
+TESTS_CAP=10797
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \
