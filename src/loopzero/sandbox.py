@@ -384,7 +384,7 @@ def _dispatch_one(
                    for arg in (*argv, cwd)
                    for value in (arg, arg.partition("=")[2],
                                  arg[2:] if arg.startswith("-") and not arg.startswith("--") else "")
-                   for path in value.split(":")
+                   for path in {value, *value.split(":")}
                    if Path(path).is_absolute() or ".." in Path(path).parts):
                 raise ValueError("Stage runner references task worktree")
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,

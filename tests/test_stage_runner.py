@@ -96,7 +96,7 @@ def test_runner_config(tmp_path, value):
             load(path)
 
 
-@pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink', 'short', 'list', 'parent'])
+@pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink', 'short', 'list', 'parent', 'colon_link', 'colon_tree'])
 def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
     runner = git_repo / 'runner'
     runner.write_text('#!/bin/sh\nexit 0\n')
@@ -104,8 +104,11 @@ def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
     git(git_repo, 'add', 'runner')
     git(git_repo, 'commit', '-m', 'runner')
     git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
-    link = tmp_path / 'runner-link'
+    link = tmp_path / ('runner:link' if kind == 'colon_link' else 'runner-link')
     link.symlink_to(runner)
+    if kind == 'colon_tree':
+        git(git_repo, 'worktree', 'add', '-q', '--detach', str(tmp_path / 'task:tree'))
+        git_repo, runner = tmp_path / 'task:tree', tmp_path / 'task:tree' / 'runner'
     monkeypatch.setenv('PATH', f'{git_repo}:' + os.environ['PATH'])
     prefix = {'executable': (str(runner),), 'argument': (sys.executable, str(runner)),
               'symlink': (sys.executable, str(link)), 'path': ('runner',),
@@ -113,7 +116,8 @@ def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
               'option_symlink': (sys.executable, f'--script={link}'),
               'short': (sys.executable, f'-X{runner}'),
               'list': (sys.executable, f'/operator/safe:{runner}'),
-              'parent': (sys.executable, '../escape')}[kind]
+              'parent': (sys.executable, '../escape'), 'colon_link': (str(link),),
+              'colon_tree': (str(runner),)}[kind]
     report = sandbox.run_checks(make_config(check_runner=prefix), git_repo)
     assert not report.ok and 'references task worktree' in report.results[0].tail
 
