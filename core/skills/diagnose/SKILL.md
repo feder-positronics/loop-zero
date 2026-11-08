@@ -9,6 +9,8 @@ Follow [the contract](../../CONTRACT.md). Establish expected and observed behavi
 environment, exact command and output; find a small reliable reproduction.
 Distinguish local, staging and production evidence. Check tools, dependencies,
 network and sandbox without treating an infrastructure failure as a product bug.
+Confirm the command ran under the repository's pinned interpreter, not a system
+one; a missing newer-language API is an interpreter fault, not a code fault.
 Use documented setup and frozen-lockfile procedures for demonstrably stale
 dependencies; do not update shared dependencies merely because tools are missing.
 

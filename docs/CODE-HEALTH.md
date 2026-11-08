@@ -193,7 +193,10 @@ The browser preflight failed after 22.04 s with zero executed tests; collection
 is not execution. Stable Python 3.14.4 `os.memfd_create` platform failures differ
 from the two changing integration IDs in p1f; neither proves intrinsic flakiness.
 Read generic SSH-pool connection, capability and capacity from consumer config;
-use disposable checkouts without production checkout access or secrets. The
+use disposable checkouts without production checkout access or secrets. Pool
+hosts run jobs under the repository-pinned interpreter (for example a user-level
+`uv` with the pinned Python), never the host's system Python, and receive no jobs
+while their reported toolchain differs from the pin. The
 [consumer local-test handoff](https://github.com/feder-positronics/intelflo/issues/11373)
 owns admission proof; Lane P owns candidate/environment adapters outside core.
 

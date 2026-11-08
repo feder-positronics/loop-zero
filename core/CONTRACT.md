@@ -78,6 +78,12 @@ red, partial or unverifiable. Reviewers still judge whether tests exercise claim
 behavior; reuse does not accept those claims. Hosted required CI and loopzero's
 sandboxed check receipt remain unchanged.
 
+Every gate, script, workflow step and pool-host job runs under the repository's
+pinned interpreter and toolchain (for example `uv run` with the pinned Python),
+never a host's system interpreter. An error from a missing newer-language API
+means the wrong interpreter ran: fix the interpreter, not the code for an older
+version.
+
 ## Findings
 
 - Findings live only in PR review threads, expire at merge, and must not be
