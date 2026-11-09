@@ -1000,17 +1000,30 @@ def _pr_readiness(
                           announce_receipt=True)
 
 
-def _cleanup(wt: Path) -> None:
+def _cleanup(wt: Path, config: Config | None = None, pr: github.PR | None = None) -> None:
+    native_receipts = False
     for path in (wt / ".loopzero").glob("review-*.json"):
         try:
             saved = json.loads(path.read_text())
             native = json.loads(saved.get("raw", "null"))
             envelopes = native if isinstance(native, list) else [native]
             if saved.get("members") or saved.get("native_pair_transport") or saved.get("native_pair_attempt") or saved.get("family") == "codex" and any(isinstance(item, dict) and "review_context" in item for item in envelopes):
-                print("retaining native review receipt and task clone pending verified archive handoff")
-                return
+                native_receipts = True
         except (ValueError, OSError, AttributeError, TypeError):
-            raise CliError("review audit storage is unreadable; retaining task clone") from None
+            print("review audit storage is unreadable; retaining task clone")
+            return
+    if native_receipts:
+        try:
+            if config is None or pr is None:
+                raise OSError("missing merged PR identity")
+            if worktree.is_dirty(wt):
+                raise OSError("worktree is dirty")
+            from loopzero.receipt_archive import archive
+            archive(list((wt / ".loopzero").glob("review-*.json")),
+                    config.repo, pr.number, pr.head_sha)
+        except (OSError, worktree.WorktreeError) as exc:
+            print(f"retaining native review receipt and task clone pending verified archive handoff: {exc}")
+            return
     root = _repo_root(wt)
     try:
         worktree.cleanup(root, wt)
@@ -1307,7 +1320,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             )
             return 0
     _delete_remote_branch(config, branch)
-    _cleanup(wt)
+    _cleanup(wt, config, pr)
     print(sha)
     return 0
 

@@ -2087,7 +2087,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head=head_of(wt), sha='f' * 40))
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli._proc.ProcTimeout("gh api timed out", "")))
-    monkeypatch.setattr(cli, "_cleanup", lambda _: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: None)
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
     assert code == 0 and out.splitlines()[0] == "f" * 40
@@ -2114,7 +2114,7 @@ def test_second_merge_retries_remote_branch_cleanup(
         {"stdout": "", "stderr": "HTTP 500: delete failed", "exit": 1},
         "",
     )
-    monkeypatch.setattr(cli, "_cleanup", lambda _: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: None)
 
     first = run(capsys, "merge")
     second = run(capsys, "merge")
@@ -2716,3 +2716,65 @@ def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
     code, out, _ = run(capsys, "check")
     assert code == 0 and out.endswith("PASS\n")
     assert "receipt produced:" not in out
+
+
+def test_cleanup_archives_then_removes(wt, gh, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    write = wt / '.loopzero' / 'review-native.json'
+    write.write_text(json.dumps({'native_pair_attempt': True}))
+    config = cli.config_mod.load(wt / 'workflow.toml')
+    from types import SimpleNamespace
+    pr = SimpleNamespace(number=7, head_sha=cli.worktree.head(wt))
+    cli._cleanup(wt, config, pr)
+    assert not wt.exists()
+    archive = tmp_path / '.local/state/loopzero/receipts/acme-widgets' / f'7-{pr.head_sha}'
+    assert json.loads((archive / write.name).read_text()) == {'native_pair_attempt': True}
+
+
+@pytest.mark.parametrize('case', ['identical', 'different', 'dirty', 'digest', 'copy'])
+def test_cleanup_archive_outcomes(wt, monkeypatch, tmp_path, case, capsys):
+    from types import SimpleNamespace
+
+    from loopzero import receipt_archive
+
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    receipt = wt / '.loopzero/review-native.json'
+    receipt.write_text(json.dumps({'native_pair_attempt': True}))
+    config = cli.config_mod.load(wt / 'workflow.toml')
+    pr = SimpleNamespace(number=7, head_sha=cli.worktree.head(wt))
+    dest = tmp_path / '.local/state/loopzero/receipts/acme-widgets' / f'7-{pr.head_sha}'
+    if case in ('identical', 'different'):
+        dest.mkdir(parents=True)
+        (dest / receipt.name).write_bytes(receipt.read_bytes() if case == 'identical' else b'old')
+    if case == 'dirty':
+        (wt / 'untracked').write_text('keep me')
+    if case == 'digest':
+        original = receipt_archive.digest
+        monkeypatch.setattr(receipt_archive, 'digest',
+                            lambda path: original(path) if path == receipt else 'bad')
+    if case == 'copy':
+        monkeypatch.setattr(receipt_archive, 'archive',
+                            lambda *args: (_ for _ in ()).throw(OSError('copy failed')))
+    cli._cleanup(wt, config, pr)
+    assert wt.exists() == (case != 'identical')
+    if case != 'identical':
+        assert 'retaining native review receipt and task clone' in capsys.readouterr().out
+    if case == 'dirty':
+        assert not dest.exists()
+
+
+def test_backfill_dry_run_lists_only(wt, monkeypatch, capsys):
+    import importlib.util
+    from types import SimpleNamespace
+
+    script = Path(__file__).resolve().parents[1] / 'scripts/backfill_receipts.py'
+    spec = importlib.util.spec_from_file_location('backfill', script)
+    backfill = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backfill)
+    (wt / '.loopzero/review-native.json').write_text('{}')
+    monkeypatch.setattr(cli, '_pr_readiness', lambda *a, **kw:
+                        (SimpleNamespace(state='MERGED', number=7, head_sha='a' * 40), None))
+    monkeypatch.setattr(cli, '_cleanup', lambda *a: pytest.fail('dry run must not clean'))
+    assert backfill.main([str(wt)]) == 0
+    assert 'merged PR #7' in capsys.readouterr().out
+    assert wt.exists()
