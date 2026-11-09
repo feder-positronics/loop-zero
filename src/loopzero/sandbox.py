@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -91,6 +92,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 (worktree / entry).mkdir(parents=True, exist_ok=True)
             prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
             probe(config, worktree, prefix)
+            _preflight_alternates(config, worktree, prefix)
         missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
@@ -175,6 +177,27 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
         stopped.set()
         if reporter:
             reporter.join()
+
+
+def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> None:
+    # Git resolves relative/transitive paths; probe actual mounts without broadening visibility.
+    output = _git(config, worktree, "-c", "core.quotepath=true", "count-objects", "-v")
+    for alternate in re.findall(r"^alternate: (.*)$", output, re.MULTILINE):
+        if alternate.startswith('"'):
+            alternate = os.fsdecode(ast.literal_eval("b" + alternate))
+        remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
+                  "Create a standalone clone without --shared/--reference, then run "
+                  "loopzero start there and rerun loopzero check.")
+        try:
+            result = _proc.run(
+                [*prefix, "/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"',
+                 "loopzero-alternate", alternate],
+                cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT,
+            )
+        except _proc.ProcTimeout as exc:
+            raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from exc
+        if result.exit_code != 0:
+            raise SandboxUnavailable(remedy)
 
 
 def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
