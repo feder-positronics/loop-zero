@@ -23,10 +23,14 @@ owning tracking issue or one file) that every handoff links instead of
 re-listing. Transfer recurring tasks and pending wakeups and reconcile live
 children with the successor before stopping; a launch notice alone transfers
 nothing. Every retiring owner or helper starts heavy or long-running jobs
-detached (`systemd-run --user` or `setsid`); never retire with an attached live
-job, because retirement ends its process tree. Changed decisions name the
-instruction superseded. After transfer, forward late results once with their
-original task reference, make no new decisions and retire so sends or schedules
+as a transient user service, e.g. `systemd-run --user --unit=NAME
+--property=RuntimeMaxSec=LIMIT --collect bash -c 'CMD >LOG 2>&1; echo $? >LOG.exit'`,
+and names the unit, log and exit file in the handoff (unit gone without an exit
+file means killed). `setsid` or `nohup` jobs die at settle or retirement;
+never retire with an attached live job, because retirement ends its process
+tree. Changed decisions name the instruction superseded. After transfer,
+forward late results once with their original task reference, make no new
+decisions and retire so sends or schedules
 cannot revive the session. After delivery, roll over before monitoring or
 unrelated follow-ups; do it yourself. A bare "continue" means continue there.
 Workers report on the owning PR or issue, directly or through the parent;
