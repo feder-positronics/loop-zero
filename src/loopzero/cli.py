@@ -258,6 +258,13 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
+def _require_checked_base(wt: Path, config: Config, head: str) -> None:
+    """Fetch the live base and fail closed unless the checked commit contains it."""
+    _git(wt, "fetch", "--no-tags", "origin",
+         f"+refs/heads/{config.base_branch}:refs/remotes/origin/{config.base_branch}")
+    _git(wt, "merge-base", "--is-ancestor", f"origin/{config.base_branch}", head)
+
+
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
@@ -286,8 +293,17 @@ def _readiness(
             ready=False,
             reasons=(*result.reasons, "run loopzero check at this head"),
         )
-    elif announce_receipt:
-        _print_receipt(wt, report, "accepted")
+    else:
+        try:
+            _require_checked_base(wt, config, report.head)
+        except CliError:
+            result = github.Readiness(False, (*result.reasons,
+                (f"integrate current {config.base_branch} and run loopzero check; "
+                "checked head must contain the live base (fetch/ancestry verification failed)")),
+                result.waitable_failures, result.stale_verdicts)
+        else:
+            if announce_receipt:
+                _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
         behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
         reasons = result.reasons

@@ -608,7 +608,9 @@ def test_cli_pair_native_failure_stops_and_retains_actual_error_transport(
 
 
 @pytest.mark.parametrize("case", ["valid", "request_changes", "invalid_latest"])
-def test_local_and_hosted_shared_pair_predicate(wt, gh, case):
+def test_local_and_hosted_shared_pair_predicate(wt, gh, case, monkeypatch):
+    # This review predicate fixture uses a synthetic head, not a Git commit.
+    monkeypatch.setattr(cli, "_require_checked_base", lambda *_: None)
     from loopzero.types import CheckReport
     from tests.test_github import pr_json, rest_pr_json, threads_json
 

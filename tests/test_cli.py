@@ -2787,3 +2787,31 @@ def test_backfill_dry_run_lists_only(wt, monkeypatch, capsys, error):
     assert len(calls) == 2
     assert ('retaining' if error else 'merged PR #7') in capsys.readouterr().out
     assert wt.exists()
+
+
+@pytest.mark.parametrize("strategy", ["squash", "mergify"])
+def test_receipt_requires_checked_head_to_contain_live_base(wt, repo, gh, monkeypatch, strategy):
+    config = cli.config_mod.load(wt / "workflow.toml")
+    config = cli.dataclasses.replace(config, merge_strategy=strategy, mergify_queue="main")
+    monkeypatch.setattr(cli.eligibility, "eligible_review", lambda *a, **k: None)
+    monkeypatch.setattr(cli.github, "readiness", lambda *a, **k: github.Readiness(True, ()))
+    monkeypatch.setattr(cli.mergify, "configured", lambda *a: True)
+    pr = SimpleNamespace(number=7, base_ref="main", state="OPEN")
+
+    def checked_readiness():
+        head = head_of(wt)
+        cli._save_report(wt, CheckReport(head, False, tuple(
+            CheckResult(command, 0, 0.0, "ok") for command in config.checks)))
+        return cli._readiness(wt, config, pr, head, reviews=[])
+
+    assert checked_readiness().ready
+    (repo / "base-change").write_text("shared cap changed\n")
+    git(repo, "add", "base-change")
+    git(repo, "commit", "-qm", "advance base")
+    git(repo, "push", "-q", "origin", "main")
+    # Rechecking the old source tree alone cannot validate the composition.
+    stale = checked_readiness()
+    assert not stale.ready
+    assert any("current main" in reason for reason in stale.reasons)
+    git(wt, "merge", "--no-edit", "origin/main")
+    assert checked_readiness().ready

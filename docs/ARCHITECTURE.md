@@ -72,8 +72,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    Heartbeats stop on completion or cancellation and never supply a verdict; child
    streams remain captured for the existing final report and failing output tail.
    Trusted-base commands remain authoritative;
-   stale task trees need integration only when prerequisites are missing,
-   preserving source-preserving queue eligibility for behind branches.
+   readiness fetches the live base and requires it in the checked head ancestry,
+   including source-preserving queue admission. Base movement requires integration
+   and fresh checks before admission.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. Before pushing or writing, `pr` reads the branch's closed PR history through
    GitHub REST. A confirmed merged PR completes that branch, even when a newer

@@ -66,7 +66,10 @@ Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
 one finding; no bulk or silent resolution. No waiver file or override flag
 exists. Hosted review eligibility uses the exact authored SHA and trusted-base
 `workflow.toml` publishers; pending/dismissed reviews are ineligible. Local
-readiness also requires its sandboxed check receipt and source CI. Writers
+readiness also requires its sandboxed check receipt and source CI. Readiness
+fetches the current remote base and requires it to be an ancestor of the checked
+head, including for Mergify admission. Integrate base movement and rerun checks
+before admission; a fresh receipt on an unintegrated source tree is insufficient. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
 
 The builder runs each full local gate once, recording command, exact head SHA,

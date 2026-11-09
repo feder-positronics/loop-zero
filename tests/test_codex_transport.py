@@ -464,6 +464,8 @@ def test_large_publication_confirmation_and_hosted_agreement(
     gitdir.write_text(gitdir.read_text() + "\n.loopzero/\n")
     cli._save_review(native[2], result)
     cli._save_report(native[2], CheckReport(head, False, ()))
+    # This transport-only repository has no remote; ancestry is covered in test_cli.
+    monkeypatch.setattr(cli, "_require_checked_base", lambda *_: None)
     pr = github.pr_view(repo, 7)
     assert (
         cli._readiness(native[2], cfg, pr, head, [review]).ready
