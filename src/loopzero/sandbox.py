@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -179,12 +180,11 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
 
 
 def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> None:
-    # Let Git resolve relative paths and enumerate transitive alternates. Test the
-    # actual mount view rather than broadening it or approximating bind visibility.
-    for line in _git(config, worktree, "count-objects", "-v").splitlines():
-        if not line.startswith("alternate: "):
-            continue
-        alternate = line.removeprefix("alternate: ")
+    # Git resolves relative/transitive paths; probe actual mounts without broadening visibility.
+    output = _git(config, worktree, "-c", "core.quotepath=true", "count-objects", "-v")
+    for alternate in re.findall(r"^alternate: (.*)$", output, re.MULTILINE):
+        if alternate.startswith('"'):
+            alternate = os.fsdecode(ast.literal_eval("b" + alternate))
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
                   "Create a standalone clone without --shared/--reference, then run "
                   "loopzero start there and rerun loopzero check.")

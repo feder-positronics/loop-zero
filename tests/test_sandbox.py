@@ -277,10 +277,10 @@ def _real_bwrap_works() -> bool:
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-@pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "resolved"))
+@pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode", "resolved"))
 def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_path, layout):
     shared = tmp_path / "shared"
-    git(git_repo, "clone", "-q", "--shared", str(git_repo), str(shared))
+    git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
     objects = git_repo / ".git/objects"
     worktree = shared
     if layout == "relative":
@@ -296,8 +296,8 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
         # Expose the direct alternate; only its transitive dependency is hidden.
     elif layout == "local-head":
         git(shared, "commit", "-q", "--allow-empty", "-m", "local HEAD")
-    elif layout == "spaces":
-        objects = tmp_path / "alternate objects; $(false)"
+    elif layout in ("spaces", "unicode"):
+        objects = tmp_path / ("zażółć" if layout == "unicode" else "alternate objects; $(false)")
         shutil.copytree(git_repo / ".git/objects", objects)
         (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
     config = make_config(checks=("echo first-stage",))
@@ -316,14 +316,14 @@ def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
-@pytest.mark.parametrize("visibility", ("worktree", "configured"))
+@pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
 def test_real_sandbox_allows_visible_git_alternates(git_repo, tmp_path, visibility):
     shared = tmp_path / "shared"
-    git(git_repo, "clone", "-q", "--shared", str(git_repo), str(shared))
+    git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
     config = make_config(checks=("git show HEAD:README.md",))
-    if visibility == "worktree":
-        shutil.copytree(git_repo / ".git/objects", shared / "object-store")
-        (shared / ".git/objects/info/alternates").write_text("../../object-store\n")
+    if visibility != "configured":
+        shutil.copytree(git_repo / ".git/objects", shared / visibility)
+        (shared / ".git/objects/info/alternates").write_text(f"../../{visibility}\n")
     else:
         config = make_config(checks=config.checks, sandbox_ro=(str(git_repo / ".git/objects"),))
 
