@@ -108,8 +108,10 @@ Do not add a claim ledger, service or label system.
 
 Fresh bounded runs send nothing when evidence is unchanged. Workers report deltas
 on the owning PR or issue, directly or through the parent, and message the parent
-mid-task only for a blocker. Monitors and watchdogs keep sending one packet or
-nudge per new finding. Count productive work by verified activity (completed tool
+mid-task only for a blocker. Combine notices to one recipient into one packet;
+request an acknowledgement only when receipt changes the next action. Blockers
+and changed holds still go at once. Monitors and watchdogs keep sending one
+packet or nudge per new finding. Count productive work by verified activity (completed tool
 calls or output on the deliverable), including nested reviewers; report test-slot,
 review, queue and hold waiters separately, excluding them from productive counts.
 Children waiting on a question or approval are waiters, not productive work.
@@ -443,23 +445,24 @@ report the block. When a verified child stops producing output, re-read its
 pending approvals (T3 `pendingRequestCount`) and terminal task state, including
 provider/capacity failures. Recover or report the blocker in that turn using the
 same authorized routes; a launch-time check is insufficient. Inspect what ran
-before resuming interrupted work. After stopping or cancelling a T3 thread, or
-after a failed run, treat its queued messages as undelivered: T3 sets
-`queueHeld=true`, and MCP sends do not release held runs even when new sends run
-([bug](https://github.com/pingdotgg/t3code/issues/22423),
-[MCP recovery](https://github.com/pingdotgg/t3code/pull/23897),
-[UI Resume](https://github.com/pingdotgg/t3code/pull/21164)). To clear a held
-backlog, save each held message's full text before cancelling it with
-`t3_queue cancel`, then resend the still-needed messages as one fresh message
-and verify receipt with `t3_thread_read`. For a terminal delegated task, launch
+before resuming interrupted work. Since T3 0.1.6 a later successful newest run
+releases held automation messages; held human messages and runs after an
+explicit stop stay held (`queueHeld=true`). Only then save each held message's
+full text, cancel it with `t3_queue cancel`, resend the still-needed messages as
+one fresh message and verify receipt. For a terminal delegated task, launch
 a new task with the prior brief and result rather than queueing another message
-to it.
+to it. Since 0.1.7 PR watches survive restarts and are rebuilt from persisted
+links; re-watch only a watch that is missing.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
-fallback timer, or a bounded blocking wait. Before arming or rearming a wait,
-reconcile the awaited task's existing terminal result and current remote
-state; after a superseding message or restart, check again before concluding
-"still waiting".
+fallback timer, or a bounded blocking wait. Rely on T3 delegate completion
+delivery; when this turn needs a thread's result, call `t3_thread_wait`
+(`untilDelegatedWorkSettled:true` when nested work matters), follow its `next`
+and read the final result once. A finite retry uses a one-time schedule
+(`schedule_task` with `schedule:{type:once,runAt:<ISO time>}`), not an interval.
+Before arming or rearming a wait, reconcile the awaited task's existing terminal
+result and current remote state; after a superseding message or restart, check
+again before concluding "still waiting".
 
 Split oversized scope in the plan rather than imposing brief line limits. Resume
 unfinished delegate sessions instead of restarting; reassess repeated repairs as

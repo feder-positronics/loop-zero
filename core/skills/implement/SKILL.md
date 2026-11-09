@@ -41,9 +41,9 @@ For builds, tests, CI, review, ready and merge, Codex exec/write_stdin yields
 or `t3_background_wait`. Read the completed result once; never use
 `t3_thread_read` or `task_status` for liveness. Cap returned output at the
 producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
-limit <=2 and maxCharsPerItem <=600. Do not end the turn, settle or report done while a job
+limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or report done while a job
 you started has no `LOG.exit`; if the turn must end, first schedule a one-shot
-wakeup that reads `LOG.exit` and resumes the delivery step it feeds. To cancel, check `LOG.exit` first, then run
+wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`) that reads `LOG.exit` and resumes the delivery step it feeds. To cancel, check `LOG.exit` first, then run
 `kill -- -$(cat LOG.pid)`; never `pkill -f`, which also matches your own shell
 (`$!` is not the job: `setsid` may fork). Codex 0.165 sends SIGTERM (exit 143) to such
 children (openai/codex#46702); drop this once a fixed release is verified.
