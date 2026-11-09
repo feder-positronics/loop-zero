@@ -277,6 +277,63 @@ def _real_bwrap_works() -> bool:
 
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+@pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "resolved"))
+def test_real_sandbox_rejects_hidden_git_alternates_before_checks(git_repo, tmp_path, layout):
+    shared = tmp_path / "shared"
+    git(git_repo, "clone", "-q", "--shared", str(git_repo), str(shared))
+    objects = git_repo / ".git/objects"
+    worktree = shared
+    if layout == "relative":
+        (shared / ".git/objects/info/alternates").write_text(
+            os.path.relpath(objects, shared / ".git/objects") + "\n"
+        )
+    elif layout == "linked":
+        worktree = tmp_path / "linked"
+        git(shared, "worktree", "add", "-q", "-b", "linked", str(worktree))
+    elif layout == "transitive":
+        worktree = tmp_path / "transitive"
+        git(shared, "clone", "-q", "--shared", str(shared), str(worktree))
+        # Expose the direct alternate; only its transitive dependency is hidden.
+    elif layout == "local-head":
+        git(shared, "commit", "-q", "--allow-empty", "-m", "local HEAD")
+    elif layout == "spaces":
+        objects = tmp_path / "alternate objects; $(false)"
+        shutil.copytree(git_repo / ".git/objects", objects)
+        (shared / ".git/objects/info/alternates").write_text(str(objects) + "\n")
+    config = make_config(checks=("echo first-stage",))
+    if layout == "transitive":
+        config = make_config(checks=config.checks, sandbox_ro=(str(shared / ".git/objects"),))
+    started = []
+
+    with pytest.raises(sandbox.SandboxUnavailable) as failure:
+        sandbox.run_checks(config, worktree, progress=started.append, _resolved=layout == "resolved")
+
+    assert started == []
+    message = str(failure.value)
+    assert str(objects) in message
+    assert "alternate" in message.lower() and "sandbox" in message.lower()
+    assert "standalone clone" in message.lower() and "loopzero start" in message
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
+@pytest.mark.parametrize("visibility", ("worktree", "configured"))
+def test_real_sandbox_allows_visible_git_alternates(git_repo, tmp_path, visibility):
+    shared = tmp_path / "shared"
+    git(git_repo, "clone", "-q", "--shared", str(git_repo), str(shared))
+    config = make_config(checks=("git show HEAD:README.md",))
+    if visibility == "worktree":
+        shutil.copytree(git_repo / ".git/objects", shared / "object-store")
+        (shared / ".git/objects/info/alternates").write_text("../../object-store\n")
+    else:
+        config = make_config(checks=config.checks, sandbox_ro=(str(git_repo / ".git/objects"),))
+
+    report = sandbox.run_checks(config, shared)
+
+    assert report.ok
+    assert report.results[0].tail == "hello"
+
+
+@pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 def test_real_sandbox_denies_writes(git_repo):
     denied = (
         ("touch escaped.txt", git_repo / "escaped.txt"),

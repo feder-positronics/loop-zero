@@ -91,6 +91,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 (worktree / entry).mkdir(parents=True, exist_ok=True)
             prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
             probe(config, worktree, prefix)
+            _preflight_alternates(config, worktree, prefix)
         missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
@@ -175,6 +176,28 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
         stopped.set()
         if reporter:
             reporter.join()
+
+
+def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> None:
+    # Let Git resolve relative paths and enumerate transitive alternates. Test the
+    # actual mount view rather than broadening it or approximating bind visibility.
+    for line in _git(config, worktree, "count-objects", "-v").splitlines():
+        if not line.startswith("alternate: "):
+            continue
+        alternate = line.removeprefix("alternate: ")
+        remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
+                  "Create a standalone clone without --shared/--reference, then run "
+                  "loopzero start there and rerun loopzero check.")
+        try:
+            result = _proc.run(
+                [*prefix, "/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"',
+                 "loopzero-alternate", alternate],
+                cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT,
+            )
+        except _proc.ProcTimeout as exc:
+            raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from exc
+        if result.exit_code != 0:
+            raise SandboxUnavailable(remedy)
 
 
 def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tuple[str, ...]]:
