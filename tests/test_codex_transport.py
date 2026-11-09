@@ -397,7 +397,7 @@ def test_private_audit_task_is_retained(native, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_repo_root", lambda *_: pytest.fail("audit task must not be removed"))
     cli._cleanup(tmp_path)
     assert (tmp_path / ".loopzero" / f"review-{result.head[:12]}-primary.json").exists()
-    assert "verified archive handoff" in capsys.readouterr().out
+    assert "verified archive handoff" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
