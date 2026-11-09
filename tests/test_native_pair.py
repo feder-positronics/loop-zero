@@ -392,7 +392,7 @@ def test_pair_cleanup_retains_private_transport(tmp_path, capsys):
         json.dumps({"native_pair_transport": True, "stdout": "private"})
     )
     cli._cleanup(tmp_path)
-    assert "retaining native review receipt" in capsys.readouterr().out
+    assert "retaining review receipts" in capsys.readouterr().err
     assert directory.exists()
 
 

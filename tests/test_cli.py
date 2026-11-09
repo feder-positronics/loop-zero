@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -2087,7 +2088,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head=head_of(wt), sha='f' * 40))
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli._proc.ProcTimeout("gh api timed out", "")))
-    monkeypatch.setattr(cli, "_cleanup", lambda _: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: None)
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
     assert code == 0 and out.splitlines()[0] == "f" * 40
@@ -2114,7 +2115,7 @@ def test_second_merge_retries_remote_branch_cleanup(
         {"stdout": "", "stderr": "HTTP 500: delete failed", "exit": 1},
         "",
     )
-    monkeypatch.setattr(cli, "_cleanup", lambda _: None)
+    monkeypatch.setattr(cli, "_cleanup", lambda *_: None)
 
     first = run(capsys, "merge")
     second = run(capsys, "merge")
@@ -2716,3 +2717,73 @@ def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
     code, out, _ = run(capsys, "check")
     assert code == 0 and out.endswith("PASS\n")
     assert "receipt produced:" not in out
+
+
+@pytest.mark.parametrize('case', ['native', 'ordinary', 'identical', 'different', 'dirty', 'unpushed', 'unreadable', 'digest', 'copy', 'advance'])
+def test_cleanup_archive_outcomes(wt, monkeypatch, tmp_path, case, capsys):
+    from loopzero import receipt_archive
+
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    receipt = wt / '.loopzero/review-native.json'
+    receipt.write_text(json.dumps({'native_pair_attempt': case != 'ordinary'}))
+    config = cli.config_mod.load(wt / 'workflow.toml')
+    pr = SimpleNamespace(number=7, head_sha=cli.worktree.head(wt))
+    dest = tmp_path / '.local/state/loopzero/receipts/acme-widgets' / f'7-{pr.head_sha}'
+    if case in ('identical', 'different'):
+        dest.mkdir(parents=True)
+        (dest / receipt.name).write_bytes(receipt.read_bytes() if case == 'identical' else b'old')
+    if case == 'dirty':
+        (wt / 'untracked').write_text('keep me')
+    if case == 'unpushed':
+        git(wt, 'commit', '--allow-empty', '-m', 'local after merge')
+    if case == 'unreadable':
+        receipt.write_text('{broken')
+    if case == 'digest':
+        original = receipt_archive.digest
+        monkeypatch.setattr(receipt_archive, 'digest',
+                            lambda path: original(path) if path == receipt else 'bad')
+    if case in ('copy', 'advance'):
+        original = receipt_archive.archive
+        def handoff(*args):
+            if case == 'copy':
+                raise OSError('copy failed')
+            original(*args)
+            git(wt, 'commit', '--allow-empty', '-m', 'local during archive')
+        monkeypatch.setattr(receipt_archive, 'archive', handoff)
+    cli._cleanup(wt, config, pr)
+    kept = case not in ('native', 'ordinary', 'identical')
+    assert wt.exists() == kept
+    out, err = capsys.readouterr()
+    assert not out
+    if kept:
+        assert err.startswith('warning:') and 'retaining' in err
+    else:
+        assert json.loads((dest / receipt.name).read_text()) == {'native_pair_attempt': case != 'ordinary'}
+    if case in ('dirty', 'unpushed', 'unreadable'):
+        assert not dest.exists()
+
+
+@pytest.mark.parametrize('error', [None, 'lookup', 'os', 'config', 'head', 'open', 'cleanup'])
+def test_backfill_dry_run_lists_only(wt, monkeypatch, capsys, error):
+    import importlib.util
+
+    script = Path(__file__).resolve().parents[1] / 'scripts/backfill_receipts.py'
+    spec = importlib.util.spec_from_file_location('backfill', script)
+    backfill = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backfill)
+    (wt / '.loopzero/review-native.json').write_text('{}')
+    pr = SimpleNamespace(state='OPEN' if error == 'open' else 'MERGED', number=7,
+                         head_sha='a' * 40 if error == 'head' else cli.worktree.head(wt))
+    calls = []
+    def lookup(*a, **kw):
+        calls.append(a)
+        if error in ('lookup', 'os', 'config'):
+            raise {'os': OSError, 'config': backfill.config_mod.ConfigError}.get(error, cli.CliError)('load/lookup failed')
+        return pr
+    monkeypatch.setattr(backfill.config_mod if error == 'config' else cli,
+                        'load' if error == 'config' else '_require_pr', lookup)
+    monkeypatch.setattr(cli, '_cleanup', lambda *a: None if error == 'cleanup' else pytest.fail('dry run'))
+    assert backfill.main((['--confirm'] if error == 'cleanup' else []) + [str(wt)] * 2) == bool(error)
+    assert len(calls) == 2
+    assert ('retaining' if error else 'merged PR #7') in capsys.readouterr().out
+    assert wt.exists()

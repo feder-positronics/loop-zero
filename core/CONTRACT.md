@@ -161,7 +161,8 @@ fatal, settings and inspection facts. Header overflow is HOLD, never truncation.
 Public output excludes private native commands, paths and source contents; local
 publication, saved replay and confirmation derive facts from complete raw rather
 than rendered tails or supplied summaries. Retain the restricted receipt/clone
-until completion and a verified archive handoff. Hosted readers trust the existing
+until completion and a verified archive handoff.
+A verified archive handoff copies every review receipt, native sidecar and attempt file to the private receipt archive and verifies each SHA256 against its source before clone removal. Hosted readers trust the existing
 publisher; a digest is neither inspection nor backend attestation, and cannot
 prevent coherent forgery by that trusted publisher/editor.
 

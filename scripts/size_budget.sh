@@ -37,13 +37,14 @@ set -euo pipefail
 # Issue #431: exact measured growth +11 source / +23 tests (incl. colon-path review fix), zero headroom.
 # Issue #432: exact measured receipt-boundary growth (+2 src/+35 tests), re-measured on #431 (6701/10954).
 # Issue #442: alternates preflight (OD v176 2026-11-09)
-SRC_CAP=6724
+# Issue #448: receipt archive + merged clone removal (OD v179 RULING-448 amend 1): exact +54 src/+96 tests (6778/11106).
+SRC_CAP=6778
 # Managed-account and native quota regression coverage (owner approval 2026-10-22).
 # OD approval 2026-10-27: complete recovery repost and raw UTF-8 leading-block boundary proofs.
 # OD ruling 123 Note 1: exact measured test overage (+61); source remains below its cap.
 # OD ruling 125(a), ruling 123 Note 1: measured test overage +35 (9311 -> 9346).
 # Marcin approval 2026-10-29: ai-accounts reserve guard, per-window resets and fallback and caller-credential proofs (+85).
-TESTS_CAP=11010
+TESTS_CAP=11106
 base=${1:-$(git merge-base HEAD origin/main)}
 count_base() {
   git -c core.quotepath=off ls-tree -rz --name-only "$base" -- "$1" | { grep -z '\.py$' || true; } \

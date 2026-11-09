@@ -52,6 +52,8 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
+Merged native review receipts and their sidecars are handed off to `~/.local/state/loopzero/receipts/<owner>-<repo>/<pr>-<head>/`, append-only: existing directories are accepted only when all files are byte-identical, never overwritten.
+
 Private agent transcripts, metrics ledgers and copied findings do not belong in
 this guide or in a new persistent store.
 

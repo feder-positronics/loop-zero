@@ -361,5 +361,5 @@ def test_attempt_receipt_is_retained_by_cleanup(monkeypatch, tmp_path, capsys):
         json.dumps({"native_pair_attempt": True, "state": "started"})
     )
     cli._cleanup(tmp_path)
-    assert "retaining native review receipt" in capsys.readouterr().out
+    assert "retaining review receipts" in capsys.readouterr().err
     assert directory.exists()
