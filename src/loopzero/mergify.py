@@ -150,10 +150,11 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
             return False
         mode = document["merge_queue"]
         parallel = mode["max_parallel_checks"]
-        rules = document["queue_rules"]
-        if (mode.get("mode") != "serial" or type(parallel) is not int or parallel <= 1
-                or not isinstance(rules, list)
-                or sum(isinstance(rule, dict) and rule.get("name") == queue for rule in rules) != 1):
+        rules = document["queue_rules"] if isinstance(document["queue_rules"], list) else []
+        matched = [r for r in rules if isinstance(r, dict) and r.get("name") == queue]
+        if (mode.get("mode") != "serial" or type(parallel) is not int or parallel < 1
+                or len(matched) != 1 or parallel == 1  # one lone check rewrites heads in place
+                and (type(batch := matched[0].get("batch_size")) is not int or batch <= 1)):
             return False
     except (KeyError, TypeError, ValueError, yaml.YAMLError, RecursionError):
         return False

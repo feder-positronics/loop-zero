@@ -308,10 +308,12 @@ membership through `https://api.mergify.com/v1`. A command comment is only a
 request; a behind branch is treated as queued only after that API confirms it.
 
 Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
-than one. In-place updates rewrite the reviewed source
-head and are unsupported. Admission checks the live serial queue's identity and
-reads `.mergify.yml` from GitHub's default branch, requiring explicit integer
-parallelism greater than one and the matching queue name. The configuration blob
+than one, or to one only when the matching queue rule sets an explicit integer
+`batch_size` greater than one. In-place updates (one parallel check and batch size
+one) rewrite the reviewed source head and are unsupported. Admission checks the
+live serial queue's identity and reads `.mergify.yml` from GitHub's default
+branch, requiring that explicit integer parallelism and batch size and the
+matching queue name. The configuration blob
 must stay unchanged across verification. Local/PR files, `extends`, scopes,
 duplicate YAML keys and ambiguous or missing values do not establish this proof.
 
