@@ -36,12 +36,8 @@ def test_membership_uses_bearer_and_validates_queue(monkeypatch):
         })
 
     monkeypatch.setattr(mergify, "_open", open_)
-    assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership(
-        "main", "now", 2
-    )
-    assert seen[0].full_url == (
-        "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
-    )
+    assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership("main", "now", 2)
+    assert seen[0].full_url == "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     assert seen[0].headers["Authorization"] == "Bearer secret"
     assert seen[0].headers["User-agent"] == "loopzero"
 
@@ -105,10 +101,12 @@ def queue_api(monkeypatch):
 
 
 SAFE_CONFIG = "merge_queue: {mode: serial, max_parallel_checks: 3}\nqueue_rules: [{name: main}]\n"
+ONE_CHECK = SAFE_CONFIG.replace("checks: 3", "checks: 1")  # in place unless batches are explicit
 
 
-def test_configured_accepts_documented_speculation_despite_raw_inplace_default(queue_api):
-    queue_api(SAFE_CONFIG)
+@pytest.mark.parametrize("text", [SAFE_CONFIG, ONE_CHECK.replace("main}", "main, batch_size: 8}")])
+def test_configured_accepts_documented_speculation_despite_raw_inplace_default(queue_api, text):
+    queue_api(text)
     assert mergify.configured("acme/widgets", "main", "main")
 
 
@@ -121,7 +119,8 @@ def test_configured_accepts_documented_speculation_despite_raw_inplace_default(q
     SAFE_CONFIG + "extends: [other/repo]\n",
     SAFE_CONFIG + "merge_queue: {max_parallel_checks: 1}\n",
     "[]", "!!python/object:object {}", "merge_queue: [",
-])
+] + [ONE_CHECK.replace("main}", r) for r in ["main, batch_size: 1}", "main, batch_size: true}",
+     'main, batch_size: "8"}', "main, batch_size: null}", "main}, {name: o, batch_size: 8}"]])
 def test_configured_rejects_unsafe_or_ambiguous_canonical_config(queue_api, text):
     queue_api(text)
     assert not mergify.configured("acme/widgets", "main", "main")

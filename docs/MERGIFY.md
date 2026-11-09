@@ -30,8 +30,9 @@ real target including all earlier queued changes and never deploys. Never select
 cumulative risk lane using only Mergify's `checking_base_sha`, which can already
 include earlier queued work. Mergify may directly merge a current PR using
 already-valid integration checks and documents no switch to disable that; do not
-promise every PR a temporary branch. Do not reduce parallel checks to one: that can
-enable source-head updates.
+promise every PR a temporary branch. Do not reduce parallel checks to one unless
+the queue rule sets an explicit batch size above one: one check of one PR can
+update its source head in place.
 
 When a parent batch has vanished from live status, attestation still checks every
 live source it discovers and requires the candidate's complete tree to equal a
