@@ -159,10 +159,9 @@ def _require_clean(wt: Path) -> None:
 
 
 def _require_task_branch(config: Config, branch: str) -> None:
-    if branch == config.base_branch or not branch.startswith("lz/"):
+    if branch == config.base_branch:
         raise CliError(
-            f"branch {branch!r} is not a loopzero task branch (lz/<slug>); run from a worktree "
-            "created by `loopzero start`"
+            f"branch {branch!r} is the configured base; use a task branch"
         )
 
 
