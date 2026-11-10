@@ -239,6 +239,7 @@ the two systemd units to `~/.config/systemd/user/`, then
   `loopzero` commands are never replayed by the shim. Existing processes keep their
   credentials until their harness safely replaces them; changing the active file
   does not change a running session. Never pin a token in `settings.json` `env`.
+  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`; allowlisting a newer release is a periodic task: copy the binary into `codex-reviewer-<v>`, then repoint the symlink after the allowlist PR lands.
 - Harness integrations can call `ai-accounts launch <provider> --model <model>` for
   a nonsecret JSON identity, then `ai-accounts exec <provider> --identity <identity>
   -- /absolute/real/executable ...` to pin that exact managed revision. Pass the
