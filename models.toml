@@ -34,7 +34,7 @@ effort = "medium"
 
 [[profiles.deep.alternatives]]
 provider = "anthropic"
-model = "claude-fable-5-1"
+model = "claude-fable-5-2"
 effort = "low"
 
 # Exhaustive defect/gap search: thorough, potentially noisy; OpenAI only, so do not
