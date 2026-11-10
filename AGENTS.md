@@ -11,3 +11,7 @@
   whether its account still holds. If not, update it in the same change; if so,
   add a commit trailer `Architecture-Review: unchanged;` followed by the specific
   reason. For watched files `loopzero check` fails without one of them.
+- Claude sessions here do not add commit or PR attribution automatically
+  (`.claude/settings.json`). Add `Co-Authored-By` for each model that actually
+  wrote the change, Claude included; committing another writer's patch is not
+  writing.
