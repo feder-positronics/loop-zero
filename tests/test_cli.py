@@ -487,13 +487,18 @@ def test_check_fails_when_base_workflow_is_malformed(
 # --- pr ------------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("branch", [
+    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+])
 def test_pr_pushes_and_creates_draft(
-    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, branch
 ) -> None:
+    git(wt, "branch", "-m", branch)
+    gh.respond(branch_history_key().replace("lz%2Ft1", branch.replace("/", "%2F")), [])
     run(capsys, "check")
     head = head_of(wt)
-    gh.respond_pr_list([])
-    gh.respond_pr_create(pr_json(headRefOid=head))
+    gh.respond_pr_list([], branch=branch)
+    gh.respond_pr_create(pr_json(headRefOid=head), branch=branch)
     pushes = tmp_path / "pushes"
     fake_tool("git", f'''\
 if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
@@ -501,12 +506,12 @@ exec /usr/bin/git "$@"
 ''')
     code, out, err = run(capsys, "pr")
     assert (code, out, err) == (0, URL + "\n", "")
-    assert pushes.read_text().strip() == "push -u origin lz/t1"
+    assert pushes.read_text().strip() == f"push -u origin {branch}"
     origin = repo.parent / "origin.git"
-    assert git(origin, "rev-parse", "lz/t1").strip() == head
+    assert git(origin, "rev-parse", branch).strip() == head
     create = next(c for c in gh.calls if c["argv"][:2] == ["api", f"repos/{REPO}/pulls"])
     payload = json.loads(create["--input"])
-    assert payload["draft"] is True
+    assert payload["draft"] is True and payload["head"] == branch
     heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
     assert payload["title"] == heading
     body = payload["body"]
@@ -741,20 +746,22 @@ def arm_pr(gh: FakeGh, head: str, *, branch: str = "lz/t1", **over) -> None:
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
 
 
-def arm_empty_primary_review_history(gh: FakeGh, head: str) -> None:
-    arm_pr(gh, head)
+def arm_empty_primary_review_history(gh: FakeGh, head: str, *, branch="lz/t1") -> None:
+    arm_pr(gh, head, branch=branch)
     gh.respond(reviews_key(), [])
 
 
-def arm_empty_primary_review_post(gh: FakeGh, head: str, post_id: int = 1) -> None:
-    arm_empty_primary_review_history(gh, head)
+def arm_empty_primary_review_post(
+    gh: FakeGh, head: str, post_id: int = 1, *, branch="lz/t1"
+) -> None:
+    arm_empty_primary_review_history(gh, head, branch=branch)
     gh.respond(post_key(), {"id": post_id})
 
 
 def prepare_review(wt: Path, gh: FakeGh, fake_bin: Path, *, payload=APPROVE,
-                   history=(), post_id: int = 1) -> str:
+                   history=(), post_id: int = 1, branch="lz/t1") -> str:
     head = head_of(wt)
-    arm_empty_primary_review_post(gh, head, post_id)
+    arm_empty_primary_review_post(gh, head, post_id, branch=branch)
     gh.respond(reviews_key(), list(history))
     _fake_claude(fake_bin, _claude_envelope(payload))
     return head
@@ -789,8 +796,12 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None
     git(wt, "commit", "-q", "-m", message)
 
 
-def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
-    head = prepare_review(wt, gh, fake_bin, payload=CHANGES)
+@pytest.mark.parametrize("branch", [
+    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+])
+def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch) -> None:
+    git(wt, "branch", "-m", branch)
+    head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     code, out, err = run(capsys, "review")
@@ -1341,8 +1352,12 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 # --- ready / merge / status ----------------------------------------------------------
 
 
-def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_approved_ready_pr(gh, head, wt)
+@pytest.mark.parametrize("branch", [
+    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+])
+def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch) -> None:
+    git(wt, "branch", "-m", branch)
+    arm_approved_ready_pr(gh, head, wt, branch=branch)
     gh.respond("pr ready", "")
     code, out, err = run(capsys, "ready")
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
@@ -1873,9 +1888,15 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
     assert wt.exists()
 
 
+@pytest.mark.parametrize("branch", [
+    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+])
 @pytest.mark.parametrize("changed", [False, True])
-def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys, changed, head) -> None:
-    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+def test_merge_prints_sha_and_cleans_up(
+    wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch
+) -> None:
+    git(wt, "branch", "-m", branch)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False, branch=branch)
     gh.respond("pr merge", "")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head='f' * 40 if changed else head_of(wt), sha='c' * 40))
     gh.respond("api -X", "")
@@ -1889,7 +1910,7 @@ def test_merge_prints_sha_and_cleans_up(wt: Path, repo: Path, gh: FakeGh, capsys
     merge = next(c["argv"] for c in gh.calls if c["argv"][:2] == ["pr", "merge"])
     assert "--squash" in merge and merge[merge.index("--match-head-commit") + 1] == head
     assert not wt.exists()
-    assert git(repo, "branch", "--list", "lz/t1") == ""
+    assert git(repo, "branch", "--list", branch) == ""
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "wrong_primary"])
@@ -2179,14 +2200,23 @@ def test_help_lists_all_commands(capsys) -> None:
 # --- review findings -------------------------------------------------------------------
 
 
-def test_commands_refuse_non_task_branch(wt: Path, gh: FakeGh, capsys) -> None:
-    git(wt, "checkout", "-q", "-b", "feature")
+@pytest.mark.parametrize("base", ["main", "staging"])
+def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None:
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text().replace('base = "main"', f'base = "{base}"'))
+    if base == "main":
+        git(wt, "checkout", "-q", "--ignore-other-worktrees", base)
+    else:
+        git(wt, "checkout", "-q", "-b", base)
     for command in ("pr", "review", "ready", "merge"):
         code, out, err = run(capsys, command)
-        assert code == 1 and out == "" and "not a loopzero task branch" in err, command
+        assert code == 1 and out == "" and "configured base" in err, command
     assert gh.calls == []
-    git(wt, "symbolic-ref", "HEAD", "refs/heads/main")  # base branch itself
-    assert run(capsys, "pr")[0] == 1 and gh.calls == []
+    git(wt, "checkout", "-q", "--detach")
+    for command in ("pr", "review", "ready", "merge"):
+        code, out, err = run(capsys, command)
+        assert code == 1 and out == "" and "symbolic-ref" in err, command
+    assert gh.calls == []
 
 
 def test_ready_and_merge_refuse_when_pr_head_differs(wt: Path, gh: FakeGh, capsys) -> None:
