@@ -389,10 +389,11 @@ Return: Tested changes and evidence to parent; parent finishes through readiness
 The source request supplies authority; neither this example nor a finish label
 grants it. An unattended child never uses the ask-the-user or request-input
 tool: send one message with a blocker or question to the parent or current
-decisions owner, then end the turn. The owner uses the available harness question
-tool with the PR/task link, exact decision and recommended option. If unavailable
-or unanswered, preserve authorized work and report the blocker and next owner;
-silence is not approval. T3 watches are wakeups, not additional readiness waiters;
+decisions owner, then end the turn. The owner decides and continues anything
+within its authority; only a decision reserved to a person goes to the harness
+question tool with the PR/task link, exact decision and recommended option. If
+unavailable or unanswered, continue the work that decision does not block and
+report the blocker and next owner; silence is not approval. T3 watches are wakeups, not additional readiness waiters;
 the watch owner unwatches before handing control to a person.
 
 Before each preassigned follow-up, re-read live issue/PR state and dispatch
