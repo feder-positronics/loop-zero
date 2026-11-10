@@ -22,7 +22,7 @@ one message with a blocker or question to the parent (or owner named in the
 brief), then end the turn.
 Recheck collisions before publication and again before merge, rereading live
 acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
-Merge only when authorized and the contract's gates pass; otherwise stop at readiness.
+Follow the contract's S1 owner route and S2 merge authority.
 
 Partial delivery uses `Refs #N` and never closes the issue, including work needing
 post-merge observation. Closing keywords belong only to complete acceptance;

@@ -26,8 +26,9 @@ check gives an exit-code verdict. A model reviews the authored head, independent
 by default. The [bounded owner exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
 permits disclosed contributor review with reduced assurance.
 Readiness combines that evidence with live checks and findings. Merge verifies
-what actually landed. Missing evidence blocks progress; there is no waiver file
-or unsandboxed fallback.
+what actually landed. CLI checks stay strict, with no waiver file or unsandboxed
+fallback. The contract's S1 owner route uses GitHub and the queue for local-receipt
+exceptions; S2 authorizes merge by default outside reserved classes.
 
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
 reviews, finding threads, check statuses and merge state. CI and branch protection
@@ -105,7 +106,7 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    the landed SHA and then cleans up the task branch and worktree.
 
 The contract defines exceptions, exact exit codes, budget handling and wait
-procedures. Local check success is necessary but does not prove the integration
+procedures. CLI readiness needs local check success; that does not prove the integration
 tree that a consumer's merge queue will land. Consumer CI must test that tree
 when integration can change behavior. Nightly breadth supplies additional
 feedback and needs an owner who responds to failures.

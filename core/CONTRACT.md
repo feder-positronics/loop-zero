@@ -32,8 +32,8 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    budget; without it, those checks block merge and the command names the
    waiter. Enqueueing without `--wait` returns 0 without cleanup.
 
-Stop at readiness unless merge is authorized. After `ready --wait` exits 0,
-an authorized merge runs in the same turn from the repository root:
+Merge is authorized by default outside [reserved classes](../docs/DELEGATION.md#team-roles).
+No per-PR merge GO. After `ready --wait` exits 0, merge from the repository root:
 `(cd <worktree> && loopzero merge --wait)`. The subshell avoids leaving the
 shell inside a deleted worktree.
 
@@ -48,7 +48,7 @@ requester needed).
 
 ## Blockers
 
-Readiness requires none of these:
+`loopzero ready` stays a strict tool check. It requires none of these:
 
 - A required check exited nonzero on this head.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
@@ -63,11 +63,24 @@ Readiness requires none of these:
 - Any `[checks].required_ci` check missing or not green on the exact head.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
-one finding; no bulk or silent resolution. No waiver file or override flag
-exists. Hosted review eligibility uses the exact authored SHA and trusted-base
+one finding; no bulk or silent resolution. The CLI has no waiver file or override
+flag. Hosted review eligibility uses the exact authored SHA and trusted-base
 `workflow.toml` publishers; pending/dismissed reviews are ineligible. Local
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
+
+**S1: queue is the proof.** A PR approved at its head by the other family and
+green on required hosted checks is marked ready and queued by its owner.
+If the local receipt is not green, the owner states ONE reason in a PR comment
+and marks ready in GitHub and queues directly:
+
+- The red also fails on main or is on the flake list.
+- The red is a guard, not a test, and the guarded stage passed.
+- The head moved only by a clean rebase and the old head was green.
+
+This is the documented owner route; a red receipt still blocks `loopzero ready`
+and `loopzero merge`. Infra-only PRs need owning tests + lint instead of a full
+check. If main breaks, revert first within 1 h.
 
 The builder runs each full local gate once, recording command, exact head SHA,
 environment fingerprint (defined by the consumer's AGENTS.md/docs), result, time

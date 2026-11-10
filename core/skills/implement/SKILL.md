@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Implement a bounded change through behavior proof and readiness; merge only when separately authorized.
+description: Implement a bounded change through behavior proof and the contract's S1/S2 owner rules.
 ---
 
 # Implement
@@ -68,7 +68,7 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 before pushing; publish and review every pushed head within that budget. Batch
 all substantive and mechanical repairs into one delta head. Preserve an approved
 head unless necessary changes require renewed checks and review. Suggestions
-must not expand scope. Merge only with authority; otherwise finish at readiness.
+must not expand scope. Follow the contract's S1 owner route and S2 merge authority.
 Never merge main into a reviewed branch. Rebase your own commits onto
 origin/main BEFORE review. If a conflict appears AFTER review: rebase (drop any
 merge), check, then one fresh whole-PR primary; that is the PR's one fresh lineage.
@@ -85,10 +85,8 @@ services, labels) goes live only after the repository change consuming it is on
 main, or stays compatible with current main; prove it with one green run of the
 affected job on the changed host before enabling it for every runner. Before
 parking a PR behind another, confirm that one does not wait on yours; never hold
-two PRs on each other. A PR red only on a known main-red whose fix is another
-open PR waits for that fix to land alone, then rebases and rechecks; never batch
-the two together. A landing or merge step that stops on a failure hands the
-failure and its last-green comparison to [diagnose](../diagnose/SKILL.md) at
+two PRs on each other. A failure outside the contract's S1 owner route goes with
+its last-green comparison to [diagnose](../diagnose/SKILL.md) at
 once; recording it is not handing it over.
 
-After a merge/queue failure, an authorized requeue means posting `@mergifyio queue <queue>` as the whole PR comment from the same login first, then rerunning `loopzero merge --wait`, which never requeues by itself.
+To requeue, post `@mergifyio queue <queue>` as the whole PR comment from the same login; `loopzero merge --wait` never requeues by itself.
