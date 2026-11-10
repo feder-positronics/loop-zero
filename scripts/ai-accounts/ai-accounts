@@ -66,7 +66,7 @@ STATE = Path(os.environ.get("AI_ACCOUNTS_HOME", Path.home() / ".local/state/ai-a
 MARGIN = float(os.environ.get("AI_ACCOUNTS_MARGIN", "0.95"))
 CLAUDE_NON_OWNER_LIMIT = 85
 CODEX_MAIN = Path.home() / ".codex"
-CLAUDE_TIERS = ((2, "fable+opus", ("claude-fable-5-1", "claude-opus-5-5")),
+CLAUDE_TIERS = ((2, "fable+opus", ("claude-fable-5-2", "claude-opus-5-5")),
                 (1, "opus", ("claude-opus-5-5",)))
 CODEX_TIER_NAMES = {2: "all-models", 1: "restricted", 0: "none", -1: "unknown"}
 CLAUDE_TIER_NAMES = {2: "fable+opus", 1: "opus", 0: "none", -1: "unknown"}
