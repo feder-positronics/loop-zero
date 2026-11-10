@@ -1056,6 +1056,10 @@ def cmd_shim(name: str, args: list[str]) -> int:
         sys.exit(f"ai-accounts: no real {name} on PATH")
     if name == "loopzero":
         # loopzero resolves claude/codex on PATH and runs them in its sandbox: hide the shims.
+        reviewer = Path.home() / ".local/lib/codex-reviewer"
+        pinned = reviewer / "codex"
+        if reviewer.is_dir() and pinned.is_file() and os.access(pinned, os.X_OK):
+            rest.insert(0, str(reviewer))
         base = {**os.environ, "PATH": os.pathsep.join(rest)}
         os.execve(real, [real, *args], with_accounts(SHIMS[name], base))
         return 127
