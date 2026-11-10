@@ -122,7 +122,10 @@ version.
   squash/amend so **neither reviewed commit remains an ancestor of HEAD**.
   The next primary starts at HEAD's merge-base with configured base.
   Repeated same-class findings mean the audit failed; fresh lineage is not
-  permission to keep patching (see `resolve-findings`).
+  permission to keep patching (see `resolve-findings`). Skip the class audit
+  only when every remaining fix is a mechanical repair (test expectations,
+  typing, lint or format) that changes no product behaviour, and the PR body
+  lists each repair as mechanical. Any product logic change keeps the audit.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only
