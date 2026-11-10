@@ -69,8 +69,8 @@ A schedule firing or a relayed approval grants no new authority.
 - **Coordinator:** owns one repository's delivery, main health and shared
   delivery infrastructure; drains ready backlog toward the current goal, routes
   incidents and dispatches workers and reviews. May delegate routine dispatch
-  and integration to named executors; it keeps main health, merge freezes and
-  holds, shared delivery infrastructure and production observation. Reports to
+  and integration to named executors; it keeps main health, S2 holds,
+  shared delivery infrastructure and production observation. Reports to
   the decisions owner. Its reconstruction from live remote state includes open
   PRs with no push, comment or review for 6 h or more whose owner session has
   ended: it adopts each or names a next-action owner.
@@ -133,6 +133,7 @@ public API, destructive migrations, CI/required checks, production lease and
 spending beyond current accounts. A reserved class carries a `hold` label plus
 one issue comment naming the hazard and end condition for the decisions owner
 (or human owner) to resolve. No per-PR merge/ready/queue GO or hold renewal ritual.
+See the contract's [S2 merge authority](../core/CONTRACT.md#s2-merge-authority).
 
 **Release plan review.** Before owner approval for a production window, verify
 every named backup/database provider, recovery point, CLI and identity against
@@ -178,8 +179,8 @@ pending-request list. Answer within authority or route the request to the owner.
 **Event-triggered review.** Review progress when evidence shows something is
 off, not on a clock. Host policy decides which signals wake an owner (for
 example eligible work waiting while slots are free, a Liveness stall, a
-merge-authorised green PR left unqueued, or a hold past its re-decide time) and
-wakes only the owner concerned, with that one finding; an unchanged finding
+merge-authorised green PR left unqueued, or an S2 hold whose end condition is
+met) and wakes only the owner concerned, with that one finding; an unchanged finding
 does not wake again, and an unreadable source is unknown. On a wake, read every
 claim the decision rests on from the remote: reported work shortages, "in the
 queue", the change class from the PR file list. A stale draft is not
@@ -199,8 +200,8 @@ consumers, when any of these occurs:
    Administrative monitors and review-eligibility jobs do not count.
 2. An executed corrective rollback of code, a deployment or configuration.
    Unused contingencies and planned switch-back tests do not count.
-3. A hold that misses its re-decide time or restricts a commissioned outcome
-   for 24 hours; renewals do not reset its age, and a retro never lifts it.
+3. An S2 hold that remains after its end condition is met or restricts a
+   commissioned outcome for 24 hours; a retro never lifts it.
 4. The human owner, or the decisions owner for them, corrects an evidenced
    wrong claim, unauthorised restriction, lost ownership or failed
    continuation. Approvals, priorities and plain questions do not count.

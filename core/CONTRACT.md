@@ -32,7 +32,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    budget; without it, those checks block merge and the command names the
    waiter. Enqueueing without `--wait` returns 0 without cleanup.
 
-Merge is authorized by default outside [reserved classes](../docs/DELEGATION.md#team-roles).
+Merge is authorized by default under [S2](#s2-merge-authority).
 No per-PR merge GO. After `ready --wait` exits 0, merge from the repository root:
 `(cd <worktree> && loopzero merge --wait)`. The subshell avoids leaving the
 shell inside a deleted worktree.
@@ -45,6 +45,15 @@ Before yielding, comment on the PR with head, last exit code, awaited event
 and next command. End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
+
+## S2: merge authority
+
+Merge is authorized by default outside six reserved classes: auth, public API,
+destructive migrations, CI/required checks, production lease and spending beyond
+current accounts. A reserved class carries a `hold` label plus one issue comment
+naming the hazard and end condition for the decisions owner (or human owner) to
+resolve. No per-PR merge/ready/queue GO or hold renewal ritual. S1 does not bypass
+an S2 hold.
 
 ## Blockers
 
@@ -70,9 +79,10 @@ readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
 
 **S1: queue is the proof.** A PR approved at its head by the other family and
-green on required hosted checks is marked ready and queued by its owner.
-If the local receipt is not green, the owner states ONE reason in a PR comment
-and marks ready in GitHub and queues directly:
+green on required hosted checks, with no other readiness blockers above and
+no S2 hold, is marked ready and queued by its owner. If only the local receipt
+is not green, the owner states ONE reason in a PR comment and marks ready in
+GitHub and queues directly:
 
 - The red also fails on main or is on the flake list.
 - The red is a guard, not a test, and the guarded stage passed.
