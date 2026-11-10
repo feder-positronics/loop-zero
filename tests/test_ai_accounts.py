@@ -341,3 +341,48 @@ def test_pace_warns_only_for_increasing_same_reset_samples(helper, monkeypatch, 
     assert after['windows'][0].get('runs_out_at') == forecast
     helper.print_status({'checked_at': 300, 'providers': {'claude': {'active': 'a', 'accounts': {'a': after}}}})
     assert ('runs out ~' in capsys.readouterr().out) is bool(forecast)
+
+
+@pytest.mark.parametrize('name', ['loopzero', 'codex', 'claude'])
+@pytest.mark.parametrize('pin_state', ['absent', 'missing', 'nonexecutable', 'executable', 'symlink'])
+def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeypatch,
+                                                       name, pin_state):
+    shims = tmp_path / 'shims'
+    shims.mkdir()
+    for shim in helper.SHIMS:
+        (shims / shim).symlink_to(Path(helper.__file__))
+    binaries = tmp_path / 'bin'
+    binaries.mkdir()
+    for binary in helper.SHIMS:
+        target = binaries / binary
+        target.write_text('#!/bin/sh\nexit 0\n')
+        target.chmod(0o755)
+    pin = tmp_path / '.local/lib/codex-reviewer'
+    if pin_state != 'absent':
+        version = pin.with_name('codex-reviewer-test')
+        version.mkdir(parents=True)
+        if pin_state == 'symlink':
+            pin.symlink_to(version, target_is_directory=True)
+        else:
+            pin.mkdir()
+        if pin_state != 'missing':
+            codex = pin / 'codex'
+            codex.write_text('#!/bin/sh\nexit 0\n')
+            codex.chmod(0o755 if pin_state != 'nonexecutable' else 0o644)
+    monkeypatch.setenv('PATH', f'{shims}:{binaries}')
+    monkeypatch.setattr(helper.sys, 'argv', [str(shims / name)])
+    calls = []
+    monkeypatch.setattr(helper.os, 'execve', lambda *args: calls.append(args))
+
+    helper.cmd_shim(name, ['--help'])
+
+    real, argv, env = calls.pop()
+    assert real == str(binaries / name)
+    assert argv == [real, '--help']
+    if name == 'loopzero':
+        expected = [str(binaries)]
+        if pin_state in ('executable', 'symlink'):
+            expected.insert(0, str(pin))
+        assert env['PATH'].split(helper.os.pathsep) == expected
+    else:
+        assert env['PATH'] == f'{shims}:{binaries}'
