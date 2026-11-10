@@ -536,8 +536,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
 
     from loopzero.cli import _save_report
     cfg = make_config(checks=('echo one', 'echo two'),
-                      inputs={'echo one': ('*.md',), 'echo two': ('*.md',),
-                              '*': ('shared',)})
+                      inputs={'echo one': ('*.md',), '*': ('*.md', 'shared')})  # two: "*" only
     first = sandbox.run_checks(cfg, git_repo)
     _save_report(git_repo, first)
     receipt = git_repo / '.loopzero/checks.json'

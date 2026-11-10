@@ -489,7 +489,9 @@ existing local execution path is unchanged.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
 Keys bind committed paths/blob IDs, command, version and sandbox configuration.
-The `"*"` entry adds shared inputs; consumers own complete input declarations.
+The `"*"` entry supplies default inputs for unlisted commands and adds shared inputs
+to explicitly listed commands; `"*" = ["."]` opts every command into whole-tree reuse.
+Consumers own complete input declarations.
 Only this worktree's clean passing keyed receipt is eligible; dirty trees run
 fresh. A tracked receipt is never eligible for reuse.
 New receipts still bind the current head, so readiness is unchanged.
