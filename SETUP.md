@@ -307,9 +307,10 @@ cleanup failures print warnings.
 ### Mergify
 
 Set `delivery.merge = "mergify"` and `delivery.mergify_queue` to the exact
-Mergify queue-rule name. `loopzero merge` posts the documented
-`@mergifyio queue <name>` command once for the current source head, then confirms
-membership through `https://api.mergify.com/v1`. A command comment is only a
+Mergify queue-rule name. `loopzero merge` posts the unnamed `@mergifyio queue`
+command (Mergify deprecates naming a queue and picks the first whose conditions
+match) once for the current source head, then confirms membership in the
+configured queue through `https://api.mergify.com/v1`. A command comment is only a
 request; a behind branch is treated as queued only after that API confirms it.
 
 Use draft-PR integration checks: set `merge_queue.max_parallel_checks` greater
@@ -421,7 +422,7 @@ change after the last read and before landing. Do not claim atomic review/merge
 validation or enable unattended landing without accepting this boundary.
 
 After cancellation or ejection, repair the cause and explicitly requeue with
-`@mergifyio queue <name>` (the configured queue) as the whole PR comment, then
+`@mergifyio queue` as the whole PR comment, then
 resume `loopzero merge --wait`.
 The CLI never retries a failed admission automatically. Resume request markers
 are scoped to the publishing GitHub login; use the same account across sessions.

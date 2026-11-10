@@ -2363,7 +2363,7 @@ def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
 
     code, _out, err = run(capsys, "merge", "--wait=1")
 
-    assert code == 1 and "post `@mergifyio queue main` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err
+    assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err
 
 
 @pytest.mark.parametrize("outcome", ["merged", "ejected", "landed-on-ejection",
@@ -2584,7 +2584,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert code == 0 and "e" * 40 in out and not wt.exists()
     else:
         assert wt.exists() and code == (3 if outcome == "timeout" else 1)
-        message = {"ejected": "post `@mergifyio queue main` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
+        message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",
                    "requested_head_changed": "head changed", "merged_head_changed": "head changed", "already_merged_changed": "head changed", "ejection_head_changed": "head changed"}[outcome]

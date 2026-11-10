@@ -89,6 +89,6 @@ two PRs on each other. A failure outside the contract's S1 owner route goes with
 its last-green comparison to [diagnose](../diagnose/SKILL.md) at
 once; recording it is not handing it over.
 
-To requeue, unless an S2 hold applies, post `@mergifyio queue <queue>` as the
+To requeue, unless an S2 hold applies, post `@mergifyio queue` as the
 whole PR comment from the same login; `loopzero merge --wait` never requeues
 by itself.
