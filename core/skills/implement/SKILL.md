@@ -80,4 +80,13 @@ update task and PR first; request scope decisions for expanded proof seams or
 ownership. If interrupted, preserve an adoptable diff and report remaining
 acceptance, checks and findings under the contract's handoff rules.
 
+A host or runner change that alters what jobs see (ports, env vars, paths,
+services, labels) goes live only after the repository change consuming it is on
+main, or stays compatible with current main; prove it with one green run of the
+affected job on the changed host before enabling it for every runner. Before
+parking a PR behind another, confirm that one does not wait on yours; never hold
+two PRs on each other. A landing or merge step that stops on a failure hands the
+failure and its last-green comparison to [diagnose](../diagnose/SKILL.md) at
+once; recording it is not handing it over.
+
 After a merge/queue failure, an authorized requeue means posting `@mergifyio queue <queue>` as the whole PR comment from the same login first, then rerunning `loopzero merge --wait`, which never requeues by itself.
