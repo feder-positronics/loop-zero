@@ -68,4 +68,5 @@ does not change the SDK's credential lookup behavior.
 The requested decisions compose into the expected application behavior, failure
 and uncertainty paths are explicit, and evidence distinguishes deterministic
 checks from model-quality evaluation. Follow the owning task through review and
-`loopzero ready`; merge only when separately requested.
+`loopzero ready`; follow the contract's [S1 owner route](../../core/CONTRACT.md#blockers)
+and [S2 merge authority](../../core/CONTRACT.md#s2-merge-authority).

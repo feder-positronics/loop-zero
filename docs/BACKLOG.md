@@ -36,9 +36,10 @@ limit on the backlog.
   update its latest observation; distinct failures, especially security or
   privacy defects, get their own issue. A confirmed recurrence of a closed one
   reopens it under the same recovery rule.
-- **Work:** ownership, claims, linked PRs and acceptance work as before. A hold
-  is a line in the live decision record ([DELEGATION.md](DELEGATION.md)),
-  linked from the issue, never a label or an inference from age.
+- **Work:** ownership, claims, linked PRs and acceptance work as before. Only
+  [S2 reserved classes](../core/CONTRACT.md#s2-merge-authority) carry a `hold`
+  label plus one issue comment naming the hazard and end condition; age alone
+  never implies a hold.
 - **Close:** closure rules do not change. Incidents, QA issues and goals close
   on their own acceptance and authority ([CONTRACT.md](../core/CONTRACT.md),
   [DELEGATION.md](DELEGATION.md)). A green unrelated job, age or a count target
