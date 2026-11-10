@@ -536,21 +536,24 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
 
     from loopzero.cli import _save_report
     cfg = make_config(checks=('echo one', 'echo two'),
-                      inputs={'echo one': ('*.md',), 'echo two': ('*.md',),
-                              '*': ('shared',)})
-    first = sandbox.run_checks(cfg, git_repo)
-    _save_report(git_repo, first)
+                      inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
+    for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
+        assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted') is None
+    whole = replace(cfg, inputs={'*': ('.',)})
+    key = sandbox._input_key(whole, git_repo, 'unlisted')
+    assert key is not None
+    _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
     receipt = git_repo / '.loopzero/checks.json'
-    # The fixture does not ignore loopzero's local receipt directory.
     git(git_repo, 'config', 'core.excludesFile', str(git_repo / '.git/info/exclude'))
     with (git_repo / '.git/info/exclude').open('a') as stream:
         stream.write('\n.loopzero/\n')
     if change in {'other', 'input', 'shared', 'dirty_tree'}:
-        path = 'README.md' if change in {'input', 'dirty_tree'} else change
+        path = 'README.md' if change in {'input', 'dirty_tree'} else 'src.py' if change == 'other' else change
         (git_repo / path).write_text('new content')
         if change != 'dirty_tree':
             git(git_repo, 'add', path)
             git(git_repo, 'commit', '-m', change)
+            assert key != sandbox._input_key(whole, git_repo, 'unlisted')
     elif change == 'command':
         cfg = replace(cfg, checks=('echo changed',), inputs={'echo changed': ('README.md',)})
     elif change == 'network':
@@ -562,16 +565,13 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     else:
         data = json.loads(receipt.read_text())
         if change == 'failed':
-            for row in data['results']:
-                row['exit_code'] = 1
+            for row in data['results']: row['exit_code'] = 1
         elif change == 'dirty_receipt':
             data['dirty'] = True
         else:
-            for row in data['results']:
-                row.pop('input_key')
+            for row in data['results']: row.pop('input_key')
         receipt.write_text(json.dumps(data))
-    messages = []
-    report = sandbox.run_checks(cfg, git_repo, status=messages.append)
+    report = sandbox.run_checks(cfg, git_repo, status=(messages := []).append)
     assert [r.command for r in report.results] == list(cfg.checks)
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
     assert any('reused ' in m for m in messages) == (change == 'other')
