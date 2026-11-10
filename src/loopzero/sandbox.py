@@ -142,7 +142,7 @@ def _previous(config: Config, worktree: Path) -> dict:
 
 
 def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
-    if command not in config.inputs and "*" not in config.inputs:
+    if command not in config.inputs and "." not in config.inputs.get("*", ()):
         return None
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.
