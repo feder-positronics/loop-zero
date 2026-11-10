@@ -85,7 +85,9 @@ services, labels) goes live only after the repository change consuming it is on
 main, or stays compatible with current main; prove it with one green run of the
 affected job on the changed host before enabling it for every runner. Before
 parking a PR behind another, confirm that one does not wait on yours; never hold
-two PRs on each other. A landing or merge step that stops on a failure hands the
+two PRs on each other. A PR red only on a known main-red whose fix is another
+open PR waits for that fix to land alone, then rebases and rechecks; never batch
+the two together. A landing or merge step that stops on a failure hands the
 failure and its last-green comparison to [diagnose](../diagnose/SKILL.md) at
 once; recording it is not handing it over.
 
