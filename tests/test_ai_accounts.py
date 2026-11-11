@@ -386,3 +386,13 @@ def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeyp
         assert env['PATH'].split(helper.os.pathsep) == expected
     else:
         assert env['PATH'] == f'{shims}:{binaries}'
+
+
+@pytest.mark.parametrize('provider,email,shown', [
+    ('claude', 'a@example.com', ' *a (Max)  a@example.com  '),
+    ('claude', None, ' *a (Max)  email unknown (ai-accounts label claude a <email>)  '),
+    ('codex', None, ' *a (Max)  email unknown  ')])
+def test_status_prints_account_email_after_plan(helper, capsys, provider, email, shown):
+    result = {'tier': 0, 'plan': 'max', 'email': email, 'windows': [], 'unknown_reason': 'no data'}
+    helper.print_status({'checked_at': helper.now(), 'providers': {provider: {'active': 'a', 'accounts': {'a': result}}}})
+    assert shown in capsys.readouterr().out

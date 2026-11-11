@@ -783,7 +783,9 @@ def print_status(status: dict) -> None:
             details = "; ".join(filter(None, [f"source: {source}, age {age}s", result.get("source_reason"), result.get("error")]))
             mark = "*" if name == info["active"] else " "
             plan = f" ({result['plan'].title()})" if isinstance(result.get("plan"), str) else ""
-            print(f" {mark}{name}{plan}  " + " | ".join(items) + f"  [{details}]")
+            email = result.get("email") or ("email unknown (ai-accounts label claude "
+                                             f"{name} <email>)" if provider == "claude" else "email unknown")
+            print(f" {mark}{name}{plan}  {email}  " + " | ".join(items) + f"  [{details}]")
 
 
 # ----------------------------------------------------------------- commands
