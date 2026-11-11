@@ -280,6 +280,9 @@ A recurring schedule belongs to its role owner (the coordinator for delivery),
 never to a worker or one-day owner; workers get one-shot wakeups only. The
 successor rebinds role schedules by ID. Each run of a recurring task first
 checks that its previous run's PR merged and adopts that PR if not.
+An owner with queued work always keeps an enabled wake: nobody pauses its tick
+to save wakes while its queue is non-empty, a rollover rebinds with
+`enabled:true`, and each tick fills workers from the queue, not fixed triggers.
 
 ## Resolve the model before delegation
 
