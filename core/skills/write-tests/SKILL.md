@@ -23,6 +23,8 @@ avoid shared mutable state, timing tolerance and duplicate cases. For bug fixes,
 observe the regression test fail on pre-fix code; only when that is impossible,
 explain the oracle and its limits. Infrastructure failures do not demonstrate
 regression detection.
+A new or changed test blocks other changes only through the consumer's
+admission rule; established critical assertions stay blocking.
 Coverage-only tests may pass existing code.
 
 Run focused and affected neighboring tests, then [contract delivery checks](../../CONTRACT.md#blockers).

@@ -90,7 +90,13 @@ GitHub and queues directly:
 
 This is the documented owner route; a red receipt still blocks `loopzero ready`
 and `loopzero merge`. Infra-only PRs need owning tests + lint instead of a full
-check. If main breaks, revert first within 1 h.
+check. An attributed main regression is repaired or reverted by its owner; for
+a shared critical product, build or deployment hazard, revert the culprit first
+within 1 h under the consumer's rollback rules. Non-critical observer failures
+outside a change get an active repair owner without freezing unrelated merges.
+Missing valid required proof still blocks the affected operation. This changes
+neither exact-SHA review and receipt requirements nor the S1 local-receipt
+route or S2 holds.
 
 The builder runs each full local gate once, recording command, exact head SHA,
 environment fingerprint (defined by the consumer's AGENTS.md/docs), result, time
