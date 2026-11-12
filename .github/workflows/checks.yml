@@ -19,8 +19,11 @@ jobs:
           version: "0.11.28"
       - name: Install bubblewrap for the sandbox test
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q bubblewrap
+          for i in 1 2 3; do
+            command -v bwrap >/dev/null && break
+            sudo apt-get update -q && sudo apt-get install -y -q bubblewrap || sleep 30
+          done
+          command -v bwrap >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Lint
         run: uv run --python 3.14 --group dev ruff check src tests
