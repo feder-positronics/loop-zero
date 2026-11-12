@@ -98,6 +98,16 @@ Missing valid required proof still blocks the affected operation. This changes
 neither exact-SHA review and receipt requirements nor the S1 local-receipt
 route or S2 holds.
 
+**Expensive suites run where the change is.** Browser and slow integration
+suites run on a PR or queue candidate only when the change touches their area.
+Their full run happens on main after merge; a red main from it follows the
+main-regression rule above. Never make a path-filtered job a required check.
+
+**Delivery fixes go first.** Fixes to the delivery system itself (CI, queue and
+runner reliability or speed) go to the front of the merge line, ahead of feature
+work, through the repository's queue priority if it has one. Infra-only fixes
+may use the infra-only route above.
+
 The builder runs each full local gate once, recording command, exact head SHA,
 environment fingerprint (defined by the consumer's AGENTS.md/docs), result, time
 and log path. Builders, reviewers and coordinators reuse its green receipt at
