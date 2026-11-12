@@ -38,8 +38,10 @@ recovery defined beforehand. Reproduction scripts must not commit, tag or push.
 
 Report reproduction, cause, rejected hypotheses, discriminating evidence, blast
 radius, repair, validation and uncertainty. If proof is unavailable, name attempts
-and missing evidence or authority. Keep out-of-scope repairs open; report shared
-gate impact for requester decisions about retry or quarantine.
+and missing evidence or authority. Keep out-of-scope repairs open; report
+shared-gate impact and the consumer's owned retry, repair or exclusion route;
+apply it only when commissioned and authorized, preserving required proof and
+protected checks.
 
 After this step, resume the commissioned outcome within the authorized finish,
 or hand over its remaining acceptance; after two unsuccessful repairs,
