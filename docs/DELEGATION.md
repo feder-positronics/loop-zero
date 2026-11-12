@@ -159,10 +159,15 @@ missing, cancelled or skipped coverage remain unresolved, never green. Green mai
 does not prove a candidate regression. Required hosted checks and the
 `loopzero ready`/`merge` tool checks stay strict; use the documented
 [S1 owner route](../core/CONTRACT.md#blockers) for its three local-receipt reasons.
-Quarantine only after diagnosis; name the exact test/signature, cause evidence,
-issue, owner, fixed calendar expiry and exit criterion. Change and review any
-exclusion in the owning consumer; loop-zero has no advisory stages. Prefer
-fixing; one logged retry in place is allowed, no suite-wide skip or hidden xfail.
+Exclude a known non-critical shared-gate failure the change did not cause,
+after checking no protected check is involved, on its second strike in 7 days
+or when it also fails on main, then diagnose; name the exact test/signature,
+evidence, issue, agent owner, fixed calendar expiry and exit criterion. Expiry
+never blocks or re-admits; protected checks are excluded only under a
+reserved-class hold; a new test blocks only its own PR until the consumer's
+main-run proof. Change and review any exclusion in the owning consumer;
+loop-zero has no advisory stages. Prefer fixing; one logged retry in place is
+allowed, no suite-wide skip or hidden xfail.
 
 **Liveness.** Owners route and workers build: an owner commissions build work to
 a worker and never builds in a turn that answers a message. Measure progress by
