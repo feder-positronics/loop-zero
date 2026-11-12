@@ -20,18 +20,25 @@ echoes large state, such as schedule updates or capability listings, only when
 that state changed. The launch prompt names only the role, handoff path and
 reply target. Parked work and its dispositions live in one durable table (the
 owning tracking issue or one file) that every handoff links instead of
-re-listing. Transfer recurring tasks and pending wakeups and reconcile live
-children with the successor before stopping; a launch notice alone transfers
-nothing. Every retiring owner or helper starts heavy or long-running jobs
-as a transient user service, e.g. `systemd-run --user --unit=NAME
+re-listing. Transfer recurring tasks and pending wakeups to the successor.
+Takeover first acts rebind schedules without restating their prompts; long
+schedule bodies live in files their prompts point to. Running T3 delegate
+completions cannot be retargeted and still go to the predecessor; the handoff
+names them, and the successor waits for each one (`t3_thread_wait` or a one-shot
+wakeup) and then reads that child's thread once. A launch
+notice alone transfers nothing. Every retiring owner or helper starts heavy or
+long-running jobs as a transient user service, e.g. `systemd-run --user --unit=NAME
 --property=RuntimeMaxSec=LIMIT --collect bash -c 'CMD >LOG 2>&1; echo $? >LOG.exit'`,
 and names the unit, log and exit file in the handoff (unit gone without an exit
 file means killed). `setsid` or `nohup` jobs die at settle or retirement;
 never retire with an attached live job, because retirement ends its process
-tree. Changed decisions name the instruction superseded. After transfer,
-forward late results once with their original task reference, make no new
-decisions and retire so sends or schedules
-cannot revive the session. After delivery, roll over before monitoring or
+tree. Changed decisions name the instruction superseded. Right after takeover,
+the successor settles its predecessor; if T3 refuses because a turn is running,
+settle at the next idle. A retired predecessor revived by a send, schedule or
+delegate completion ends its turn without acting or replying. Resolve the current
+owner as in [Team roles](#team-roles); never send through retired predecessors.
+Batch independent notices to one owner into one send. Sends or schedules can
+revive a settled T3 thread. After delivery, roll over before monitoring or
 unrelated follow-ups; do it yourself. A bare "continue" means continue there.
 Workers report on the owning PR or issue, directly or through the parent;
 coordinators reconstruct delivery from live remote state.
@@ -50,8 +57,9 @@ memory or resume tokens.
 The successor first reconciles live remote state and uncertain external effects;
 a lost tool response is not proof the write failed. Adopt partial work without
 resetting or cleaning away the diff, and never replay whole commands blindly.
-Revalidate holds and recipients, then confirm child and wakeup ownership transfer
-before retiring the predecessor. Start with read-only coordination; if the new
+Revalidate holds and recipients, rebind wakeups and list the predecessor's running
+delegates, then retire it as in [Coordinator rollover](#coordinator-rollover).
+Start with read-only coordination; if the new
 family writes, retain every writer's truthful attribution and recheck independent
 review eligibility. A provider change grants no new authority or review exception.
 
@@ -280,9 +288,7 @@ work finishes or checkpoints its current heavy command and releases its slot.
 owner role. Before acting, the successor revalidates recipients, schedules and
 carried decisions against live sources and reports what it cannot confirm as a
 blocker. Peers resolve the current owner when sending, so a rollover sends no
-routing notices; state broadcasts still reach every owner. The successor retires
-the predecessor in the turn it acknowledges or, while the predecessor still
-parents live delegates, when the last one finishes.
+routing notices; state broadcasts still reach every owner.
 A recurring schedule belongs to its role owner (the coordinator for delivery),
 never to a worker or one-day owner; workers get one-shot wakeups only. The
 successor rebinds role schedules by ID. Each run of a recurring task first
@@ -457,7 +463,8 @@ links; re-watch only a watch that is missing.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Rely on T3 delegate completion
-delivery; when this turn needs a thread's result, call `t3_thread_wait`
+delivery (a predecessor's carried children: see
+[Coordinator rollover](#coordinator-rollover)); when this turn needs a thread's result, call `t3_thread_wait`
 (`untilDelegatedWorkSettled:true` when nested work matters), follow its `next`
 and read the final result once. A finite retry uses a one-time schedule
 (`schedule_task` with `schedule:{type:once,runAt:<ISO time>}`), not an interval.
