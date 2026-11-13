@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+from email.utils import parsedate_to_datetime
 import fcntl
 import hashlib
 import json
@@ -391,12 +392,35 @@ def probe_claude_model(token: str, model: str) -> dict:
 
 
 def check_claude(name: str) -> dict:
+    next_file = STATE / "claude/usage-next" / name
     try:
+        next_allowed = float(next_file.read_text())
+    except (OSError, ValueError):
+        next_allowed = 0
+    try:
+        if now() < next_allowed:
+            raise ValueError(f"usage API backoff until {dt.datetime.fromtimestamp(next_allowed, dt.timezone.utc).isoformat()}")
         token = claude_token(name)
         req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
             "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20"})
-        code, _, raw = _http(req)
+        try:
+            code, headers, raw = _http(req)
+        finally:
+            next_allowed = now() + 1800
+            write_private(next_file, str(next_allowed) + "\n")
+        if code == 429:
+            retry_after = headers.get("retry-after", "")
+            try:
+                retry_at = now() + int(retry_after)
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after).timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    retry_at = 0
+            next_allowed = max(next_allowed, retry_at)
+            write_private(next_file, str(next_allowed) + "\n")
         if code != 200:
+            log(f"claude {name}: usage API HTTP {code}; backoff until {dt.datetime.fromtimestamp(next_allowed, dt.timezone.utc).isoformat()}")
             raise ValueError(f"usage API HTTP {code}")
         data = json.loads(raw)
         if not isinstance(data, dict):
