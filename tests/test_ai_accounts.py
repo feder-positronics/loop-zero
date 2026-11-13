@@ -276,6 +276,92 @@ def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
     assert children[0][key] == 'caller-owned'
 
 
+@pytest.mark.parametrize('code,retry_after,delay', [
+    (429, '3600', 3600), (429, 'Thu, 01 Jan 2026 01:00:00 GMT', 3600),
+    (429, '9' * 400, 86400), (429, '1000000000000', 86400),
+    (429, 'Fri, 31 Dec 9999 23:59:59 GMT', 86400),
+    (429, 'Thu, 01 Jan 2026 01:00:00', 3600),
+    (429, None, 1800), (429, 'invalid', 1800), (429, '120', 1800),
+    (200, None, 1800), (503, None, 1800), (None, None, 1800)])
+def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, code, retry_after, delay):
+    start = 1767225600  # 2026-01-01 00:00:00 UTC
+    clock, calls = [start], []
+    limits = [{'kind': 'weekly_all', 'percent': 10, 'resets_at': start + 86400}]
+    headers = {'anthropic-ratelimit-unified-7d-utilization': '.25'}
+
+    def http(req):
+        calls.append((req.get_method(), req.get_header('Authorization')))
+        if req.get_method() == 'POST':
+            return 200, headers, b''
+        if code is None:
+            raise helper.urllib.error.URLError('synthetic network failure')
+        return code, {'retry-after': retry_after} if retry_after else {}, json.dumps({'limits': limits}).encode()
+
+    monkeypatch.setattr(helper, 'now', lambda: clock[0])
+    monkeypatch.setattr(helper, '_http', http)
+    first = helper.check_claude('a')
+    assert first['source'] == ('OAuth usage API' if code == 200 else 'headers (fallback)')
+    deadline = helper.STATE / 'claude/usage-next/a'
+    assert float(deadline.read_text()) == start + delay
+    assert deadline.stat().st_mode & 0o777 == 0o600
+    log_path = helper.STATE / 'log'
+    logged = log_path.read_text() if log_path.exists() else ''
+    if code not in (200, None):
+        assert len(logged.splitlines()) == 1
+        assert f'claude a: usage API HTTP {code}; backoff until ' in logged
+        expected_deadline = {1800: '2026-01-01T00:30:00+00:00',
+                             3600: '2026-01-01T01:00:00+00:00',
+                             86400: '2026-01-02T00:00:00+00:00'}
+        assert expected_deadline[delay] in logged
+    else:
+        assert logged == ''
+    assert 'synthetic-secret' not in logged
+
+    # Reload as the next timer process: only persisted state can suppress its GET.
+    fresh = importlib.util.module_from_spec(helper.__spec__)
+    helper.__loader__.exec_module(fresh)
+    monkeypatch.setattr(fresh, 'now', lambda: clock[0])
+    monkeypatch.setattr(fresh, '_http', http)
+    calls.clear()
+    clock[0] = start + delay - 1
+    skipped = fresh.check_claude('a')
+    assert [method for method, _ in calls] == ['POST', 'POST']
+    assert skipped['source'] == 'headers (fallback)'
+    assert skipped['source_reason'].startswith('usage API backoff until ')
+    assert skipped['util'] == .25
+    assert skipped['windows'][0]['used_pct'] == 25
+    assert (log_path.read_text() if log_path.exists() else '') == logged
+
+    # Another token has its own deadline; the first token resumes at the boundary.
+    calls.clear()
+    fresh.check_claude('b')
+    assert calls[0] == ('GET', 'Bearer synthetic-secret-b')
+    calls.clear()
+    clock[0] = start + delay
+    fresh.check_claude('a')
+    assert calls[0] == ('GET', 'Bearer synthetic-secret-a')
+
+
+@pytest.mark.parametrize('deadline', ['inf', '-inf', 'nan', '1e308', '1767312001'])
+def test_claude_usage_malformed_deadline_allows_fresh_attempt(helper, monkeypatch, deadline):
+    start = 1767225600  # 2026-01-01 00:00:00 UTC
+    next_file = helper.STATE / 'claude/usage-next/a'
+    helper.write_private(next_file, deadline)
+    calls = []
+
+    def http(req):
+        calls.append(req.get_method())
+        limits = [{'kind': 'weekly_all', 'percent': 10, 'resets_at': start + 86400}]
+        return 200, {}, json.dumps({'limits': limits}).encode()
+
+    monkeypatch.setattr(helper, 'now', lambda: start)
+    monkeypatch.setattr(helper, '_http', http)
+    result = helper.check_claude('a')
+    assert result['source'] == 'OAuth usage API'
+    assert calls == ['GET']
+    assert float(next_file.read_text()) == start + 1800
+
+
 @pytest.mark.parametrize('model_field', [{'scope': {'model': {'display_name': 'Fable', 'id': 'other'}}}, {'model': {'id': 'fable'}}, {'model': 'fable'}])
 @pytest.mark.parametrize('api,session,reverse', [(200, False, False), (403, False, False), (403, True, False), (403, False, True)])
 def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatch, capsys, api, session, reverse, model_field):
