@@ -278,6 +278,9 @@ def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
 
 @pytest.mark.parametrize('code,retry_after,delay', [
     (429, '3600', 3600), (429, 'Thu, 01 Jan 2026 01:00:00 GMT', 3600),
+    (429, '9' * 400, 86400), (429, '1000000000000', 86400),
+    (429, 'Fri, 31 Dec 9999 23:59:59 GMT', 86400),
+    (429, 'Thu, 01 Jan 2026 01:00:00', 3600),
     (429, None, 1800), (429, 'invalid', 1800), (429, '120', 1800),
     (200, None, 1800), (503, None, 1800), (None, None, 1800)])
 def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, code, retry_after, delay):
@@ -306,7 +309,10 @@ def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, cod
     if code not in (200, None):
         assert len(logged.splitlines()) == 1
         assert f'claude a: usage API HTTP {code}; backoff until ' in logged
-        assert ('2026-01-01T01:00:00+00:00' if delay == 3600 else '2026-01-01T00:30:00+00:00') in logged
+        expected_deadline = {1800: '2026-01-01T00:30:00+00:00',
+                             3600: '2026-01-01T01:00:00+00:00',
+                             86400: '2026-01-02T00:00:00+00:00'}
+        assert expected_deadline[delay] in logged
     else:
         assert logged == ''
     assert 'synthetic-secret' not in logged
@@ -334,6 +340,26 @@ def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, cod
     clock[0] = start + delay
     fresh.check_claude('a')
     assert calls[0] == ('GET', 'Bearer synthetic-secret-a')
+
+
+@pytest.mark.parametrize('deadline', ['inf', '-inf', 'nan', '1e308', '1767312001'])
+def test_claude_usage_malformed_deadline_allows_fresh_attempt(helper, monkeypatch, deadline):
+    start = 1767225600  # 2026-01-01 00:00:00 UTC
+    next_file = helper.STATE / 'claude/usage-next/a'
+    helper.write_private(next_file, deadline)
+    calls = []
+
+    def http(req):
+        calls.append(req.get_method())
+        limits = [{'kind': 'weekly_all', 'percent': 10, 'resets_at': start + 86400}]
+        return 200, {}, json.dumps({'limits': limits}).encode()
+
+    monkeypatch.setattr(helper, 'now', lambda: start)
+    monkeypatch.setattr(helper, '_http', http)
+    result = helper.check_claude('a')
+    assert result['source'] == 'OAuth usage API'
+    assert calls == ['GET']
+    assert float(next_file.read_text()) == start + 1800
 
 
 @pytest.mark.parametrize('model_field', [{'scope': {'model': {'display_name': 'Fable', 'id': 'other'}}}, {'model': {'id': 'fable'}}, {'model': 'fable'}])
