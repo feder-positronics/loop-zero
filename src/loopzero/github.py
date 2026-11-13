@@ -1007,6 +1007,10 @@ _QUEUE_QUERY = (
 )
 
 
+class ClosedUnmerged(GhError):
+    """A PR read as closed but not merged; right after a queue merge this can be transient."""
+
+
 def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
     """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
@@ -1022,6 +1026,8 @@ def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> s
             return sha
     elif not view["merged"] and view.get("state") == "open":
         return None  # An open PR's merge_commit_sha is only a test merge.
+    if not view["merged"] and view.get("state") == "closed":
+        raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
     raise GhError(argv, "PR closed without a verified merge or invalid merge evidence")
 
 
