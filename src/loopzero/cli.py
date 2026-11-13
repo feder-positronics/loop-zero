@@ -1152,19 +1152,36 @@ def _wait_for_checks(
             )
 
 
+def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
+    """Merge SHA if landed; a closed-unmerged read is held as not final (GitHub lags a
+    queue merge) and re-raised by the caller only if it persists to the deadline."""
+    try:
+        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+    except github.ClosedUnmerged as exc:
+        closed[:] = [exc]
+        return None
+    closed.clear()
+    return sha
+
+
 def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None:
     """Poll until the queue lands the PR and return the merge SHA; None on timeout."""
     started = time.monotonic()
+    closed: list[github.GhError] = []
     print(f"PR #{pr.number} is queued for merge into {config.base_branch}; waiting")
     for _ in _poll_until(started, timeout):
-        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        sha = _landed(config, pr, closed)
         if sha:
             return sha
         if not github.merge_pending(config.repo, pr.number):
-            sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+            sha = _landed(config, pr, closed)
             if sha:
                 return sha
+            if closed:
+                continue
             raise CliError(f"PR #{pr.number} left the merge queue unmerged")
+    if closed:
+        raise closed[0]
 
 
 def _wait_for_mergify(
@@ -1172,17 +1189,18 @@ def _wait_for_mergify(
 ) -> str | None:
     """Follow one exact source head from request through confirmed membership to merge."""
     started = time.monotonic()
+    closed: list[github.GhError] = []
     queue = config.mergify_queue
     assert queue is not None
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
-        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        sha = _landed(config, pr, closed)
         if sha:
             return sha
         if not mergify.configured(config.repo, config.base_branch, queue):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
-        sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+        sha = _landed(config, pr, closed)
         if sha:
             return sha
         if state is not None and not confirmed:
@@ -1190,11 +1208,15 @@ def _wait_for_mergify(
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
+            sha = _landed(config, pr, closed)
             if sha:
                 return sha
+            if closed:
+                continue
             raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
                            f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
+    if closed:
+        raise closed[0]
 
 
 class _AdmissionDeadline(Exception):

@@ -2817,3 +2817,33 @@ def test_backfill_dry_run_lists_only(wt, monkeypatch, capsys, error):
     assert len(calls) == 2
     assert ('retaining' if error else 'merged PR #7') in capsys.readouterr().out
     assert wt.exists()
+
+
+def _closed_unmerged_wait(monkeypatch, reads, steps=0):
+    """Run _wait_for_merge against scripted merged_sha reads; return its result."""
+    argv = ("gh", "api", "repos/o/r/pulls/7")
+    seen = iter(reads)
+
+    def merged_sha(*_a, **_k):
+        read = next(seen)
+        if read == "closed":
+            raise github.ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
+        return read
+
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+    monkeypatch.setattr(cli.github, "merged_sha", merged_sha)
+    monkeypatch.setattr(cli.github, "merge_pending", lambda *_: True)
+    ticks = iter(range(steps + 1))
+    monkeypatch.setattr(cli, "_poll_until", lambda *_: (None for _ in ticks))
+    config = SimpleNamespace(repo="o/r", base_branch="main")
+    pr = github.PR(7, URL, "a" * 40, "main", False, "OPEN", "MERGEABLE")
+    return cli._wait_for_merge(config, pr, 60)
+
+
+def test_wait_treats_closed_unmerged_as_not_final(monkeypatch) -> None:
+    assert _closed_unmerged_wait(monkeypatch, ["closed", "c" * 40], steps=1) == "c" * 40
+
+
+def test_wait_raises_when_closed_unmerged_persists(monkeypatch) -> None:
+    with pytest.raises(github.GhError, match="closed without a verified merge"):
+        _closed_unmerged_wait(monkeypatch, ["closed", "closed"], steps=1)
