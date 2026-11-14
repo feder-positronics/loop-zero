@@ -84,8 +84,8 @@ A schedule firing or a relayed approval grants no new authority.
   and integration to named executors; it keeps main health, S2 holds,
   shared delivery infrastructure and production observation. Reports to
   the decisions owner. Its reconstruction from live remote state includes open
-  PRs with no push, comment or review for 6 h or more whose owner session has
-  ended: it adopts each or names a next-action owner.
+  PRs whose owner session has ended: at each fill it adopts each or names a
+  next-action owner.
 - **Decisions owner:** the only role the human owner talks to. Resolves owner
   decisions within delegated authority, records each with its source where it
   binds, and routes asks to the current responsible owner. Settles related cases
