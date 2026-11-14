@@ -343,11 +343,20 @@ def test_ordinary_author_family_default_and_config_do_not_authorize_pair(monkeyp
     monkeypatch.setattr(cli.worktree, "diff_since", lambda *a: "diff --git a/a b/a\n+test")
     monkeypatch.setattr(cli.worktree, "task_text", lambda *a: "task")
     monkeypatch.setattr(runners, "author_families", lambda *a: {"codex"})
-    monkeypatch.setattr(
-        runners, "review_with", lambda *a, **kw: pytest.fail("must not run a model")
-    )
-    with pytest.raises(cli.IndependentReviewerUnavailable):
-        cli._run_review(tmp_path, config, HEAD, "primary", None, model="gpt-6.1-sol")
+    calls = []
+
+    def ordinary_review(family, **kwargs):
+        calls.append((family, kwargs))
+        return member(kwargs["model"])
+
+    monkeypatch.setattr(runners, "review_with", ordinary_review)
+    for name in ("run", "request"):
+        monkeypatch.setattr(native_pair, name, lambda *a, **kw: pytest.fail("no pair grant"))
+    result = cli._run_review(tmp_path, config, HEAD, "primary", None, model="gpt-6.1-sol")
+    assert len(calls) == 1 and calls[0][0] == "codex"
+    assert calls[0][1]["model"] == "gpt-6.1-sol"
+    assert result.family == "codex" and not result.members
+    assert result.fallback == "every configured family contributed (codex)"
 
 
 def test_pair_private_capture_retention_including_nonzero_and_timeout(monkeypatch, tmp_path):
