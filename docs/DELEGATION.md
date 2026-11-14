@@ -347,8 +347,9 @@ credit the patch's writer, not the applier.
 Without the contract's
 [owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
 retain all writers' attribution through amendments and squashes. If mixed
-authorship leaves no independent configured reviewer, review fails closed:
-wait for the owner. Do not re-author work or drop trailers to regain eligibility.
+authorship leaves no independent configured reviewer, use a fresh same-family
+review with visible fallback disclosure. Wait only when no configured reviewer
+can run. Do not re-author work or drop trailers to regain eligibility.
 Read the exception before mixing writing families. Formal delivery review is
 `loopzero review`.
 

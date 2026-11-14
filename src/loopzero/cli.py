@@ -619,18 +619,18 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
-        if not pair_grant and not any(family not in authors for family in config.reviewers):
+        result = _load_review(wt, head, kind)
+        if not pair_grant and not result.fallback and not any(family not in authors for family in config.reviewers):
             raise IndependentReviewerUnavailable(
                 _independence_message(authors, excluded, [], config.reviewers)
             )
-        result = _load_review(wt, head, kind)
         if bool(result.members) != bool(pair_grant):
             raise CliError("saved pair requires the same explicit operator context")
         if result.members:
             from loopzero import native_pair
             result = native_pair.compose(result.members, pair_grant, pair_note or result.reconciliation,
                                          prompt_sha256=result.pair_prompt_sha256)
-        if result.family in authors and not pair_grant:
+        if result.family in authors and not pair_grant and not result.fallback:
             raise IndependentReviewerUnavailable(
                 f"saved reviewer family {result.family} contributed to this PR lineage; "
                 "run without --repost to obtain an independent review"
@@ -803,12 +803,7 @@ def _run_review(
     candidates = [family for family in config.reviewers if family not in authors]
     failures: list[str] = []
     excluded = [family for family in config.reviewers if family in authors]
-    if not candidates:
-        raise IndependentReviewerUnavailable(
-            _independence_message(authors, excluded, failures, config.reviewers)
-        )
-    selected: dict[str, Callable[..., ReviewResult]] = {}
-    for family in candidates:  # validate every candidate before launching any reviewer
+    def select(family: str) -> Callable[..., ReviewResult]:
         settings = config.review.get(family)
         chosen = effort or (settings.effort if settings else None)
         if settings and chosen and settings.allowed_efforts and chosen not in settings.allowed_efforts:
@@ -816,7 +811,7 @@ def _run_review(
                 f"effort {chosen!r} is not allowed for {family}; "
                 f"expected one of {settings.allowed_efforts}"
             )
-        selected[family] = partial(
+        return partial(
             runners.review_with, family, cwd=wt, head=head, kind=kind, task_text=task,
             reviewer_ro_paths=config.reviewer_ro_paths,
             model=model or (settings.model if settings else None), effort=chosen,
@@ -825,9 +820,17 @@ def _run_review(
                              "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(),
                              "diff_bytes": len(diff.encode())} if publication and family == "codex" else None),
         )
+    selected = {family: select(family) for family in candidates}
     if runtime_source:
         print(runtime_source)
-    for family in candidates:
+    fallback = ""
+    for family in candidates + excluded:
+        if family in excluded and not fallback:
+            fallback = ("independent reviewers failed: " + "; ".join(f.splitlines()[0] for f in failures)
+                        if candidates else "every configured family contributed (" + ", ".join(excluded) + ")")
+            print(f"same-family fallback: {fallback}", file=sys.stderr)
+        if family not in selected:
+            selected[family] = select(family)
         try:
             try:
                 result = selected[family](diff=diff)
@@ -859,7 +862,7 @@ def _run_review(
         raise IndependentReviewerUnavailable(
             _independence_message(authors, excluded, failures, config.reviewers)
         )
-    return result
+    return dataclasses.replace(result, fallback=fallback)
 
 
 def _run_native_pair(wt, config, head, kind, diff, task, publication, grant, note, effort, base):
@@ -909,24 +912,10 @@ def _independence_message(
     identity = ", ".join(sorted(authors)) or "unknown"
     excluded_text = ", ".join(excluded) if excluded else "none"
     detail = ("\n\nFailures:\n" + "\n\n".join(failures)) if failures else ""
-    # Name only remedies that exist: an unconfigured independent family, or fixable failures.
-    addable = [f for f in config_mod.REVIEWER_FAMILIES if f not in authors and f not in configured]
-    remedies = []
-    if addable:
-        remedies.append(f"add {' or '.join(addable)} to delivery.reviewers in workflow.toml")
-    if failures:
-        remedies.append("fix the reviewer failures below and rerun")
-    if remedies:
-        options = "Owner options: " + "; ".join(remedies) + "."
-    else:
-        options = (
-            "Every supported reviewer family contributed to this lineage, so no native "
-            "independent review route exists yet (see loop-zero#264). Do not remove truthful "
-            "Co-authored-by attribution."
-        )
     return (
-        f"no independent reviewer can run (author family: {identity}; excluded families: "
-        f"{excluded_text}). {options} Delivery remains blocked; --repost does not apply.{detail}"
+        f"no configured reviewer can run (author family: {identity}; excluded families: "
+        f"{excluded_text}). Fix the reviewer failures below and rerun; wait for the owner "
+        f"if none can run. Do not remove truthful Co-authored-by attribution.{detail}"
     )
 
 

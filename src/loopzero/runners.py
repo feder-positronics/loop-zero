@@ -1462,6 +1462,7 @@ def validate_runner_result(result: ReviewResult) -> bool:
     if (
         not isinstance(provenance, dict)
         or provenance.get("family") != result.family
+        or not isinstance(result.fallback, str)
         or isinstance(result.chunk_count, bool)
         or not isinstance(result.chunk_count, int)
         or result.chunk_count <= 0

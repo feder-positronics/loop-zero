@@ -23,7 +23,8 @@ this guide and the delivery contract describe current behavior.
 
 The smallest useful unit is one task, one branch and one draft PR. A deterministic
 check gives an exit-code verdict. A model reviews the authored head, independently
-by default. The [bounded owner exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+by default, with a fresh same-family fallback and visible disclosure when
+independent runners are unavailable. The [bounded owner exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
 permits disclosed contributor review with reduced assurance.
 Readiness combines that evidence with live checks and findings. Merge verifies
 what actually landed. CLI checks stay strict, with no waiver file or unsandboxed
@@ -117,7 +118,7 @@ feedback and needs an owner who responds to failures.
 person / agent session / T3 workspace
   → loopzero CLI → Git worktree and authored commits
                 → sandboxed owning checks
-                → native model runner (independent by default)
+                → native model runner (cross-family preferred; disclosed same-family fallback)
                 → GitHub PR, reviews, findings and required checks
                       → trusted hosted eligibility
                       → consumer CI and optional merge queue
