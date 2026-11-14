@@ -598,6 +598,8 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if result.members:
         lines.append("\nOperator-authorized Sol+Astra model-level pair; both full reviews retained. "
                      "Same Codex provider/family; no cross-provider independence claim.")
+    if result.fallback:
+        lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
     if not legacy_settings:

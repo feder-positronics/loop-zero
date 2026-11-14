@@ -1073,49 +1073,37 @@ def test_review_chunks_oversized_diff_with_same_family(
     assert len(saved["provenance"]["session_ids"]) == saved["chunk_count"]
 
 
-def test_review_with_every_supported_family_authoring_names_no_false_remedy(
-    wt: Path, gh: FakeGh, capsys
+def test_review_with_every_supported_family_authoring_uses_disclosed_fallback(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
 ) -> None:
     git(
         wt, "commit", "-q", "--allow-empty", "-m",
         "mixed-family\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
         "Co-authored-by: Codex gpt-6.1-sol <noreply@openai.com>",
     )
-    arm_empty_primary_review_history(gh, head_of(wt))
-
+    head = prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, "review")
+    assert code == 0 and "review by claude" in out
+    reason = "every configured family contributed (claude, codex)"
+    assert f"same-family fallback: {reason}" in err
+    assert f"Same-family fallback: {reason}. Cross-family review is preferred." in posted_review(gh)["body"]
+    assert cli._load_review(wt, head, "primary").fallback == reason
 
-    assert code == 4 and out == ""
-    assert "excluded families: claude, codex" in err
-    assert "no native independent review route exists yet (see loop-zero#264)" in err
-    assert "Do not remove truthful Co-authored-by attribution." in err
-    assert "delivery.reviewers" not in err and "exception" not in err
 
-
-def test_review_without_independent_family_exits_four_and_repost_cannot_bypass(
-    wt: Path, gh: FakeGh, capsys
-) -> None:
-    workflow = (wt / "workflow.toml").read_text().replace(
-        'reviewers = ["claude", "codex"]', 'reviewers = ["claude"]'
-    )
-    (wt / "workflow.toml").write_text(workflow)
-    git(wt, "add", "workflow.toml")
-    git(
-        wt, "commit", "-q", "-m",
-        "claude-authored\n\nCo-Authored-By: Claude <noreply@anthropic.com>",
-    )
-    head = head_of(wt)
-    arm_empty_primary_review_history(gh, head)
-
-    code, out, err = run(capsys, "review")
-
-    assert code == 4 and out == ""
-    assert "author family: claude" in err and "excluded families: claude" in err
-    assert "add codex to delivery.reviewers in workflow.toml" in err
-    assert "exception" not in err and "loop-zero#264" not in err
-
-    code, out, err = run(capsys, "review", "--repost")
-    assert code == 4 and out == "" and "--repost does not apply" in err
+@pytest.mark.parametrize("disclosed", [False, True])
+def test_review_author_family_repost_requires_fallback(wt, gh, fake_bin, capsys, disclosed):
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    head = prepare_review(wt, gh, fake_bin)
+    # Save a genuine author-family receipt, with or without the route disclosure.
+    from dataclasses import replace
+    result = cli.runners.review_with("claude", cwd=wt, head=head, kind="primary",
+                                     task_text="task", diff="diff")
+    cli._save_review(wt, replace(result, fallback="independent reviewers failed: codex" if disclosed else ""))
+    code, _out, err = run(capsys, "review", "--repost")
+    if disclosed:
+        assert code == 0 and "Same-family fallback:" in posted_review(gh)["body"]
+    else:
+        assert code == 4 and "saved reviewer family claude contributed" in err
 
 
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
@@ -1274,8 +1262,9 @@ def test_review_falls_through_when_preferred_family_fails(
     fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
               "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
-    assert code == 4 and out.startswith("reviewer paths pinned")
-    assert "codex: CLI is not authenticated" in err
+    assert code == 0 and "review by claude" in out
+    assert "same-family fallback: independent reviewers failed: codex:" in err
+    assert "Same-family fallback:" in posted_review(gh)["body"]
 
 
 def test_review_unverified_codex_version_falls_back_before_model_input(
@@ -1295,9 +1284,14 @@ def test_review_unverified_codex_version_falls_back_before_model_input(
     assert not (fake_bin / "codex.stdin").exists()
 
 
+@pytest.mark.parametrize("mixed_authors", [False, True])
 def test_review_fails_with_three_line_errors_and_remedies_without_spending_budget(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, head
+    wt: Path, gh: FakeGh, capsys, monkeypatch, head, mixed_authors
 ) -> None:
+    if mixed_authors:
+        git(wt, "commit", "-q", "--allow-empty", "-m",
+            "mixed\n\nCo-Authored-By: Claude <n@a.c>\nCo-Authored-By: Codex <n@o.c>")
+        head = head_of(wt)
     arm_empty_primary_review_history(gh, head)
 
     def fail(family, **kwargs):
@@ -1310,9 +1304,9 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     monkeypatch.setattr(cli.runners, "review_with", fail)
     code, out, err = run(capsys, "review")
     assert code == 4 and out.startswith("reviewer paths pinned")
-    assert "no independent reviewer can run" in err
-    assert "author family: unknown" in err and "excluded families: none" in err
-    assert "fix the reviewer failures below and rerun" in err
+    assert "no configured reviewer can run" in err
+    assert ("author family: claude, codex" if mixed_authors else "author family: unknown") in err
+    assert "Fix the reviewer failures below and rerun" in err
     assert "delivery.reviewers" not in err and "exception" not in err
     assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
     assert "not printed" not in err
@@ -2630,7 +2624,7 @@ def test_mergify_cancel_does_not_require_healthy_queue_or_review(wt, gh, capsys,
 
 
 @pytest.mark.parametrize("lineage", ["two-head-trailers", "earlier-child", "delta"])
-def test_review_excludes_all_contributing_families(
+def test_review_discloses_fallback_for_all_contributing_families(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, lineage: str
 ) -> None:
     git(wt, "commit", "--amend", "-q", "-m",
@@ -2653,11 +2647,11 @@ def test_review_excludes_all_contributing_families(
 
     code, out, err = run(capsys, "review")
 
-    assert code == 4 and out == "", err
-    assert "excluded families: claude, codex" in err
-    assert not (fake_bin / "claude.stdin").exists()
+    assert code == 0 and "review by claude" in out, err
+    assert "same-family fallback: every configured family contributed (claude, codex)" in err
+    assert (fake_bin / "claude.stdin").exists()
     assert not (fake_bin / "codex.stdin").exists()
-    assert not any(call["argv"][1] == post_key()[4:] for call in gh.calls)
+    assert "Same-family fallback:" in posted_review(gh)["body"]
 
 
 def test_repost_rejects_saved_contributor_review(

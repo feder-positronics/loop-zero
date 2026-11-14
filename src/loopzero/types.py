@@ -92,6 +92,7 @@ class ReviewResult:
     provenance: dict[str, object] = field(default_factory=dict)
     chunk_count: int = 1
     effort: str | None = None
+    fallback: str = ""
 
     members: tuple[ReviewResult, ...] = ()  # independent full native reviews, never chunks
     reconciliation: str = ""  # explicit operator reason retaining the complete union

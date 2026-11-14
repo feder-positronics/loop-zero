@@ -147,12 +147,12 @@ version.
   Preserve all actual contributors through squash/amend except under the
   authorized disclosure route below; otherwise retain every writer's
   truthful trailers. Missing attribution stays unknown; never invent it.
-- Primary, delta and repost exclude every recognized trailer family across
+- Primary and delta prefer families absent from recognized trailers across
   all commits/trailers from configured-base merge-base through HEAD,
   including repairs. Narrower diffs, prose and a main-author-only HEAD cannot
   erase earlier trailers. The selector cannot infer prose contributions or
   owner permission. If every configured family has recognized lineage
-  trailers, fail closed and wait for the owner.
+  trailers, use the disclosed same-family fallback.
 - Batch substantive and mechanical repairs into one head for the delta.
   Preserve the approved head; optional suggestions do not justify edits.
   Necessary changes require renewed checks and review: remaining delta, or
@@ -168,8 +168,9 @@ version.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only
-  runner-produced reviews count. If no independent or valid exception
-  reviewer can run, wait for the owner.
+  runner-produced reviews count. If no independent reviewer can run, try the
+  preferred configured family in a fresh session and publish a visible same-family
+  fallback line. Wait for the owner only when no configured reviewer can run.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
@@ -245,8 +246,8 @@ audit the class and remove both reviewed ancestors.
 
 The selector, budget and all exact-head runner review, checks, findings,
 readiness and merge gates remain unchanged. Prose proves no permission;
-mixed-family trailers still fail closed. Outside the confirmed scope, retain
-all-writer trailers and wait for the owner when independence is unavailable.
+retain all-writer trailers. When independence is unavailable, use the disclosed
+same-family fallback; wait for the owner only when no configured reviewer can run.
 
 ## Sandbox rules for checks
 
