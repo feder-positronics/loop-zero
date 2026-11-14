@@ -249,7 +249,7 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
             "resolve-findings): audit the class, then rewrite the reviewed commits "
             "(squash/amend) so they are no longer ancestors of HEAD and run review again"
         )
-    if len(primaries) > 1:
+    if len({m.head for m in primaries}) > 1:  # duplicate posts on one head are one review
         raise CliError("more than one primary review marker found for this lineage; refusing")
     reviewed = primaries[0].head
     if head.startswith(reviewed) or reviewed.startswith(head):
