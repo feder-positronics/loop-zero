@@ -232,3 +232,13 @@ def test_retired_targets_use_ordinary_eligibility_and_budget(tmp_path, monkeypat
     with pytest.raises(cli.CliError, match="budget exhausted"):
         cli._decide_kind(markers([*rows, replacement, delta]), target)
     assert rows == snapshot
+
+
+def test_duplicate_primary_markers_on_one_head_count_as_one():
+    reviewed, head = "a" * 40, "b" * 40
+    duplicate = [cli.Marker(reviewed, "primary", "COMMENTED")] * 2
+    assert cli._decide_kind(duplicate, head) == ("delta", reviewed)
+    with pytest.raises(cli.CliError, match="already has a primary"):
+        cli._decide_kind(duplicate, reviewed)
+    with pytest.raises(cli.CliError, match="more than one primary"):
+        cli._decide_kind([*duplicate, cli.Marker("c" * 40, "primary", "COMMENTED")], head)
