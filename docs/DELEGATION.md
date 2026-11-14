@@ -17,8 +17,10 @@ links, never a chain of older handoffs; bound every read (T3 thread reads at
 most 2 items of 600 characters, helper and shell output at most 2,000
 characters, no full activity, roster or schedule listings); repeat a call that
 echoes large state, such as schedule updates or capability listings, only when
-that state changed. The launch prompt names only the role, handoff path and
-reply target. Parked work and its dispositions live in one durable table (the
+that state changed. A child notice that only reports work still running needs no
+action: end that turn without calls. Do not watch a PR whose readiness or merge
+a child or your own `--wait` already reports. The launch prompt names only the
+role, handoff path and reply target. Parked work and its dispositions live in one durable table (the
 owning tracking issue or one file) that every handoff links instead of
 re-listing. Transfer recurring tasks and pending wakeups to the successor.
 Takeover first acts rebind schedules without restating their prompts; long
@@ -369,7 +371,7 @@ Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch policy: Children inherit this rule: never approval-required; use auto only for read-only children and say "read-only, do not edit" in the brief; a child that runs commands or edits inherits the parent's mode, because auto can stall on approval review. After launch, verify pendingRequestCount 0 and a completed tool call.
-Waiting: One blocking wait: Codex exec/write_stdin yield >=30 s (>=120 s for builds, tests, CI, review, ready or merge); shell `until <done>; do sleep 30; done`. Claude: background notification or t3_background_wait. Read the completed result once; never use t3_thread_read/task_status for liveness.
+Waiting: One blocking wait: Codex exec/write_stdin yield >=30 s (>=120 s for builds, tests, CI, review, ready or merge); shell `until <done>; do sleep 30; done`. Claude: background notification or t3_background_wait. Read the completed result once; never use t3_thread_read/task_status for liveness. Every ended turn wakes the parent: end it only with a final result, a blocker or a question, never with a progress note while your own job runs.
 Output: Cap at the producer: REST `gh api --jq` selected fields, shell `| head -c 2000`; t3_thread_read limit <=2, maxCharsPerItem <=600.
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
