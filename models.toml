@@ -1,4 +1,4 @@
-# Owner-selected task routes (2026-09-19; Sol 6.1 and Sonnet 5.5 routes 2026-09-30);
+# Owner-selected task routes (2026-09-19; Sonnet 5.5 routes 2026-09-30; Sol and Astra 6.2 2026-11-18);
 # provider preferences below are owner rules (2026-09-30). Profile names do not rank cost or speed.
 # Read before delegation; check runtime support and pass model/effort explicitly.
 # Effort: avoid max/ultra; xhigh only where it measurably helps.
@@ -18,7 +18,7 @@ effort = "medium"
 
 [profiles.standard]
 provider = "openai"
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 effort = "medium"
 
 [[profiles.standard.alternatives]]
@@ -29,7 +29,7 @@ effort = "medium"
 
 [profiles.deep]
 provider = "openai"
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 effort = "medium"
 
 [[profiles.deep.alternatives]]
@@ -41,12 +41,12 @@ effort = "low"
 # choose an Anthropic alternative. If no OpenAI route is available, ask the owner.
 [profiles.audit]
 provider = "openai"
-model = "gpt-6.1-sol"
+model = "gpt-6.2-sol"
 effort = "high"
 
 [[profiles.audit.alternatives]]
 provider = "openai"
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 effort = "medium"
 
 # UI/UX design and frontend layout/interaction decisions: Anthropic only.

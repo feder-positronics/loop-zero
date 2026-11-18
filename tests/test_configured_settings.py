@@ -33,7 +33,7 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
     start = text.index("echo '{\"type\":\"thread.started\"")
     script.write_text(text[:start] + "printf '%s\\n' " + shlex.quote(
         '\n'.join(json.dumps(e) for e in raw["events"])) + '\nexit 0\n')
-    pins = {} if mode == "default" else {"model": "gpt-6-astra", "effort": "medium"}
+    pins = {} if mode == "default" else {"model": "gpt-6.2-astra", "effort": "medium"}
     if mode in ("model-only", "effort-only"):
         pins.pop("effort" if mode == "model-only" else "model")
     if mode == "wrong":
@@ -57,8 +57,8 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
     assert f"configured model {pins.get('model', 'unknown')} (effort {pins.get('effort', 'unknown')})" in body
     # A retained receipt from before the fix cannot be upgraded from requested/model fields.
     captured.pop("configured_settings")
-    legacy = dataclasses.replace(native, raw=json.dumps(captured), model="gpt-6-astra", effort="medium",
-        provenance={**native.provenance, "configured_settings": [{"model": "gpt-6-astra", "effort": "medium"}]})
+    legacy = dataclasses.replace(native, raw=json.dumps(captured), model="gpt-6.2-astra", effort="medium",
+        provenance={**native.provenance, "configured_settings": [{"model": "gpt-6.2-astra", "effort": "medium"}]})
     assert not eligibility.recovery_inspection(runners.codex_evidence(legacy), native.head)
 
 

@@ -34,6 +34,6 @@ effort = "medium"
 allowed_efforts = ["low", "medium", "high"]
 
 [delivery.review.codex]
-model = "gpt-6-astra"
+model = "gpt-6.2-astra"
 effort = "medium"
 allowed_efforts = ["low", "medium", "high", "xhigh"]

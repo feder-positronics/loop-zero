@@ -1079,7 +1079,7 @@ def test_review_with_every_supported_family_authoring_uses_disclosed_fallback(
     git(
         wt, "commit", "-q", "--allow-empty", "-m",
         "mixed-family\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
-        "Co-authored-by: Codex gpt-6.1-sol <noreply@openai.com>",
+        "Co-authored-by: Codex gpt-6.2-sol <noreply@openai.com>",
     )
     head = prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, "review")
