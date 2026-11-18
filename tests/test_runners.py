@@ -77,7 +77,7 @@ def _native_codex_result(
         },
         {"type": "turn.completed", "usage": usage},
     ]
-    settings = {"model": "gpt-6-astra", "effort": "medium"}
+    settings = {"model": "gpt-6.2-astra", "effort": "medium"}
     context = {
         "repo": repo,
         "pr": number,

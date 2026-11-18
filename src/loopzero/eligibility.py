@@ -71,7 +71,7 @@ def recovery_inspection(evidence: dict | None, head: str) -> bool:
                 and all(call["fatal"] == "absent" and call["inspection"] == "verified"
                         and all((call["reported"][key] if call["reported"][key] is not None
                                  else call.get("configured", {}).get(key)) == expected
-                                for key, expected in (("model", "gpt-6-astra"), ("effort", "medium")))
+                                for key, expected in (("model", "gpt-6.2-astra"), ("effort", "medium")))
                         for call in evidence["calls"]))
 
 

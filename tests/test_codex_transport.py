@@ -46,7 +46,7 @@ message=json.dumps({'verdict':'approve','findings':[]})
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(message)
 print(json.dumps({'type':'item.completed','item':{'id':'final','type':'agent_message','text':message}}))
 print(json.dumps({'type':'turn.completed','usage':usage}))
-print('model: gpt-6-astra\\nreasoning effort: medium',file=sys.stderr)
+print('model: gpt-6.2-astra\\nreasoning effort: medium',file=sys.stderr)
 """.replace(",BASE,HEAD", "," + repr(base) + "," + repr(head))
     fake_tool("codex", script)
     context = {
@@ -68,7 +68,7 @@ print('model: gpt-6-astra\\nreasoning effort: medium',file=sys.stderr)
             kind="primary",
             diff=patch,
             task_text="Synthetic source inspection",
-            model="gpt-6-astra",
+            model="gpt-6.2-astra",
             effort="medium",
             review_context=context,
             chunk=chunk,
@@ -112,7 +112,7 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path
     assert len(result.raw.encode()) > 30000
     evidence = runners.codex_evidence(result)
     assert evidence["complete"] and evidence["calls"][0]["inspection"] == "verified"
-    assert evidence["calls"][0]["reported"] == {"model": "gpt-6-astra", "effort": "medium"}
+    assert evidence["calls"][0]["reported"] == {"model": "gpt-6.2-astra", "effort": "medium"}
     assert evidence["raw_sha256"] == hashlib.sha256(result.raw.encode()).hexdigest()
     assert (
         evidence["raw_sha256"]

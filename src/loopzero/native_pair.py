@@ -10,7 +10,7 @@ from functools import partial
 from loopzero import runners
 from loopzero.types import ReviewResult
 
-MODELS = ("gpt-6.1-sol", "gpt-6-astra")
+MODELS = ("gpt-6.2-sol", "gpt-6.2-astra")
 HEADER = "<!-- loopzero:codex-evidence v=2 "
 
 
