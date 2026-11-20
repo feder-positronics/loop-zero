@@ -40,8 +40,9 @@ or `t3_background_wait`. Read the completed result once; never use
 `t3_thread_read` or `task_status` for liveness. Cap returned output at the
 producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
 limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or
-report done while a job you started has no `LOG.exit`. If the turn must end,
-first schedule a one-shot wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`)
+report done while a job you started has no `LOG.exit`, unless the unit is gone
+and you report the job as killed and the result as failed. If the turn must
+end, first schedule a one-shot wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`)
 that reads `LOG.exit` and resumes the delivery step it feeds.
 
 Treat /tmp as disposable: only running-command logs, build output and browser

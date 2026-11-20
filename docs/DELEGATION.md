@@ -77,9 +77,15 @@ systemd-run --user --unit=NAME --working-directory="$PWD" \
 The unit starts with the user manager's environment. Pass needed variables with
 `--setenv=NAME=VALUE` or use absolute tool paths.
 
-Block until the exit file exists with `until test -f LOG.exit; do sleep 30; done`.
-Cancel with `systemctl --user stop NAME`. If the unit is gone and `LOG.exit` is
-absent, the job was killed.
+Wait for the exit file or for the unit to stop:
+
+```sh
+until test -f LOG.exit || ! systemctl --user is-active --quiet NAME; do sleep 30; done
+```
+
+After the wait, a missing `LOG.exit` means the job was killed, timed out or
+cancelled. To cancel, check `LOG.exit` first and run `systemctl --user stop NAME`
+if the file is absent.
 
 ## Team roles
 
