@@ -1,6 +1,6 @@
 ---
 name: write-tests
-description: Add or improve behavior-focused coverage when testing is the task; use diagnose for observed failures.
+description: Add or improve behavior-focused coverage when testing is the task or guide test design during implementation; use diagnose for observed failures.
 ---
 
 # Write Tests

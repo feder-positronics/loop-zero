@@ -23,7 +23,7 @@ and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 | `code-review` | Review a frozen code diff against acceptance; emit JSON for `loopzero review`. |
 | `review` | Assess an artifact, system, architecture, workflow, agent configuration or idea read-only. |
 | `security-review` | Review changes to auth, permissions, secrets, external calls, config, file/shell primitives, serialization or dependencies. |
-| `write-tests` | Add or improve behavior-focused tests when testing is the task. |
+| `write-tests` | Add or improve behavior-focused tests when testing is the task or guide test design during implementation. |
 | `refine-code` | Simplify or delete evidenced dead code while preserving supported contracts. |
 
 `loopzero review` builds its own prompt; `code-review` defines its JSON behavior.
