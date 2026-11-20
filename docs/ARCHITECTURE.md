@@ -133,9 +133,10 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-At native review launch the CLI pins checks, publishers and runtime paths to one
-remote PR-base revision, refusing a missing remote ref/workflow unless the operator
-supplies explicit configuration. Reposts and other commands retain their fallback
+At native review launch the CLI pins checks, publishers and
+`delivery.reviewer_ro_paths` to one remote PR-base revision. A missing remote ref
+or workflow blocks launch. Bootstrap requires an explicit `--config`, which
+still undergoes validation. Reposts and other commands retain their fallback
 policy. Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
 explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
@@ -199,10 +200,15 @@ core native provenance, independently of optional reporting. Recovery considers 
 exact historical renderer only when the saved artifact lacks requested_settings;
 present malformed metadata cannot activate it. New publication/repost uses qualified
 wording, while publisher/head/findings/session/publication checks remain unchanged.
-Codex's specific structured fatal Code Mode startup event invalidates a result
-before publication, in every chunk and when validating saved/reposted evidence.
-The shared predicate does not classify quoted text or require a generic tool
-count. Eligibility rejects fatal latest evidence without reviving an older
+
+<a id="codex-review-runner-evidence"></a>
+
+A structured Codex event reporting that Code Mode cannot spawn its host
+invalidates the attempt even if the process exits zero with a parseable verdict.
+The runner excludes the attempt from chunk merge, publication and saved-result
+replay without consuming review budget. Quoted diagnostics and absence of tool
+calls alone do not invalidate a review.
+Eligibility rejects fatal latest evidence without reviving an older
 approval. OD v59 retired the final PR9179 target and its two receipt pins after
 successor IntelFlo #9782 merged and #9179 closed as superseded. The
 [bounded incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
@@ -210,14 +216,16 @@ is now historical: runtime target and receipt registries are empty and the
 incident-only baseline restriction is removed. Recovery helpers remain inert
 with no pinned targets; all PRs use ordinary eligibility and review budgets.
 The dated adjudication account, original records/findings and shared historical
-regression fixtures remain retained evidence. No override flag, local counter
-or separate registry is introduced.
+regression fixtures remain retained evidence. There is no generic override,
+retrospective error scan, local counter or separate registry.
 New Codex publication derives one canonical v1 `codex-evidence` comment from the
 complete validated private native stream, across every ordered chunk/session.
 It immediately follows the byte-zero review marker, before any adjudication or
 human text. The anchored leading block is limited to 8192 bytes; strict schema,
 canonical ASCII base64url JSON, context and bounds checks reject malformed or
-ambiguous projections without legacy fallback. The projection binds publisher,
+ambiguous projections without legacy fallback. Duplicate blocks fail eligibility,
+and the latest invalid evidence cannot revive an older approval. Header overflow
+produces HOLD without truncation. The projection binds publisher,
 repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
 raw digest/byte count, completeness and per-call requested/reported/configured settings,
 fatal classification and attributable inspection event/range facts. It publishes
@@ -226,12 +234,15 @@ is a sanitized retention notice; Claude's existing rendering stays unchanged.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted existing receipt and writer clone remain until completion and a
-verified archive handoff; task cleanup cannot discard that audit evidence.
+verified archive handoff. Before removing the clone, cleanup copies every review
+receipt, native sidecar and attempt file to the private receipt archive and
+verifies each copy's SHA-256 against its source.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the
 backend. Ordinary legacy/truncated/tool-free evidence remains UNKNOWN under its
-existing contract; new named recoveries require complete attributable evidence.
+existing contract. New named recoveries require complete attributable evidence
+and HOLD when required commissioned evidence is missing or unknown.
 Separate successful native head and immutable-range diff commands in one session
 can qualify when explicit repository anchors, event outcomes and exact output
 match the pinned head/diff. Echoes, ambiguous shell, wrong repositories, unresolved
