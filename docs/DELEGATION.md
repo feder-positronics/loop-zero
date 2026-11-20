@@ -29,13 +29,11 @@ completions cannot be retargeted and still go to the predecessor; the handoff
 names them, and the successor waits for each one (`t3_thread_wait` or a one-shot
 wakeup) and then reads that child's thread once. A launch
 notice alone transfers nothing. Every retiring owner or helper starts heavy or
-long-running jobs as a transient user service, e.g. `systemd-run --user --unit=NAME
---property=RuntimeMaxSec=LIMIT --collect bash -c 'CMD >LOG 2>&1; echo $? >LOG.exit'`,
-and names the unit, log and exit file in the handoff (unit gone without an exit
-file means killed). `setsid` or `nohup` jobs die at settle or retirement;
-never retire with an attached live job, because retirement ends its process
-tree. Changed decisions name the instruction superseded. Right after takeover,
-the successor settles its predecessor; if T3 refuses because a turn is running,
+long-running jobs as described in [Long-running jobs](#long-running-jobs) and
+names the unit, log and exit file in the handoff. Never retire with an attached
+live job, because retirement ends its process tree. Changed decisions name the
+instruction superseded. Right after takeover, the successor settles its
+predecessor; if T3 refuses because a turn is running,
 settle at the next idle. A retired predecessor revived by a send, schedule or
 delegate completion ends its turn without acting or replying. Resolve the current
 owner as in [Team roles](#team-roles); never send through retired predecessors.
@@ -64,6 +62,24 @@ delegates, then retire it as in [Coordinator rollover](#coordinator-rollover).
 Start with read-only coordination; if the new
 family writes, retain every writer's truthful attribution and recheck independent
 review eligibility. A provider change grants no new authority or review exception.
+
+### Long-running jobs
+
+Start a transient user service. Use a unique unit name and fresh absolute paths
+for `LOG` and `LOG.exit` each run. Jobs detached with `setsid` or `nohup` die at
+settle or retirement.
+
+```sh
+systemd-run --user --unit=NAME --working-directory="$PWD" \
+  --property=RuntimeMaxSec=LIMIT --collect bash -c 'CMD >LOG 2>&1; echo $? >LOG.exit'
+```
+
+The unit starts with the user manager's environment. Pass needed variables with
+`--setenv=NAME=VALUE` or use absolute tool paths.
+
+Block until the exit file exists with `until test -f LOG.exit; do sleep 30; done`.
+Cancel with `systemctl --user stop NAME`. If the unit is gone and `LOG.exit` is
+absent, the job was killed.
 
 ## Team roles
 

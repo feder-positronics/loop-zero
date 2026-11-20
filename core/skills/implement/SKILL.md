@@ -32,21 +32,17 @@ results, trade-offs and limits in Notes or human Validation; evidence from an
 earlier head cannot establish a current gate verdict.
 Apply [local gate receipt reuse](../../CONTRACT.md#blockers).
 
-Run a command expected to take more than about two minutes (builds, browser
-runs, full checks) detached, so a harness that ends your turn cannot kill it:
-`setsid nohup bash -c 'echo $$ >LOG.pid; <cmd> >LOG 2>&1; echo $? >LOG.exit' </dev/null >/dev/null 2>&1 &`,
-then block on `until test -f LOG.exit; do sleep 30; done`.
+Run commands expected to take more than about two minutes detached as in
+[Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
 For builds, tests, CI, review, ready and merge, Codex exec/write_stdin yields
 >=120 s (>=30 s otherwise); Claude uses a background completion notification
 or `t3_background_wait`. Read the completed result once; never use
 `t3_thread_read` or `task_status` for liveness. Cap returned output at the
 producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
-limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or report done while a job
-you started has no `LOG.exit`; if the turn must end, first schedule a one-shot
-wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`) that reads `LOG.exit` and resumes the delivery step it feeds. To cancel, check `LOG.exit` first, then run
-`kill -- -$(cat LOG.pid)`; never `pkill -f`, which also matches your own shell
-(`$!` is not the job: `setsid` may fork). Codex 0.165 sends SIGTERM (exit 143) to such
-children (openai/codex#46702); drop this once a fixed release is verified.
+limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or
+report done while a job you started has no `LOG.exit`. If the turn must end,
+first schedule a one-shot wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`)
+that reads `LOG.exit` and resumes the delivery step it feeds.
 
 Treat /tmp as disposable: only running-command logs, build output and browser
 runs belong there. Keep receipts, evidence, review artifacts and handoffs on the
