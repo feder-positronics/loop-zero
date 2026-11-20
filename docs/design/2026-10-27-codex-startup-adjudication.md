@@ -1,10 +1,10 @@
 # 2026-10-27 Codex startup-failure adjudication
 
 Status: retired; no runtime targets or receipt pins remain in trusted eligibility code
-(`src/loopzero/eligibility.py`). Moved from the
-[delivery contract](../../core/CONTRACT.md#fatal-codex-startup-failures) on
-2026-10-30 so the contract keeps only the general rule; the original scope and
-recovery conditions below are preserved as historical evidence.
+(`src/loopzero/eligibility.py`). The original scope and recovery conditions moved
+out of the delivery contract on 2026-10-30 and are preserved below as historical
+evidence. The [architecture guide](../ARCHITECTURE.md#codex-review-runner-evidence)
+describes current startup handling.
 
 OD v58 retired runtime targets 9173, 9174, 9175, 9275 and 9284 and their nine
 receipt identities on 2026-10-30 after verifying that all five PRs were closed
