@@ -38,5 +38,4 @@ Leave the target unchanged. Do not create findings files. Live-task findings bel
 other actionable discussion belongs in its issue or PR, never a separate store.
 
 After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+or hand over its remaining acceptance.

@@ -19,5 +19,4 @@ conflicting ownership or material requirements need the exact decision and optio
 Continue independent preparation. Do not implement or plan unrelated cleanup.
 
 After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+or hand over its remaining acceptance.

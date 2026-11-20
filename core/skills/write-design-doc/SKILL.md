@@ -22,7 +22,6 @@ For an existing artifact, preserve settled decisions unless evidence invalidates
 their premises. Correct material gaps and verify the underlying design problem
 is resolved beyond wording. Suggestions never become blockers; unresolved
 material questions retain owners and visibly block the relevant action.
-After two unsuccessful repairs, reconsider the approach.
 
 Validate the artifact. Revise material ambiguity or leave an explicit blocker.
 Finish with a commit-ready document and actionable acceptance and questions.
