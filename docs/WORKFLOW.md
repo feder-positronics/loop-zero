@@ -45,15 +45,17 @@ flowchart TD
     E --> F["One fresh full review<br/><sub>new primary</sub>"]
     F --> Z
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
-    H -->|none can run| I["Wait for the owner"]
+    H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
+    J -->|none can run| I["Wait for the owner"]
 ```
 
 Each line of work gets one full review and at most one follow-up that reads
-only what changed. The reviewer comes from a model family that did not write
-any part of the change. A failed reviewer run that
-produced no verdict does not use up a review; if no eligible reviewer can run
-at all, wait for the owner. Repeated findings of the same kind mean the audit
-missed something, not that patching should continue.
+only what changed. The reviewer preferably comes from a model family that wrote
+no part of the change. A failed reviewer run with no verdict does not use up a
+review. If no independent reviewer can run, try the preferred family in a fresh
+session and add a visible same-family fallback line to the PR. Wait for the
+owner only when no configured reviewer can run. Repeated findings of the same
+kind mean the audit missed something, not that patching should continue.
 
 Summarizes [Review budget](../core/CONTRACT.md#review-budget).
 
