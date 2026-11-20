@@ -8,10 +8,12 @@ description: Bound an unclear change into PR-sized tasks with observable accepta
 Read [the contract](../../CONTRACT.md), repository guidance, the issue/task and
 relevant code. Use [delegation guidance](../../../docs/DELEGATION.md) for executors.
 
-Choose a coherent, reviewable acceptance slice. Split or sequence when coupling,
-uncertainty or ownership makes integration hard. Give each task an objective,
-observable acceptance, affected paths, owners, governing constraints and proving
-`workflow.toml` checks. Add checks only when existing checks cannot cover behavior.
+Before slicing, restate the ask in one precise sentence and check it against the
+issue or request. Choose a coherent, reviewable acceptance slice. Split or
+sequence when coupling, uncertainty or ownership makes integration hard. Give
+each task an objective, observable acceptance, affected paths, owners, governing
+constraints and proving `workflow.toml` checks. Add checks only when existing
+checks cannot cover behavior.
 
 Record the plan in `.loopzero/task.md` using [HANDOFF](../../HANDOFF.md), without
 another tracking file. Resolve routine choices from evidence; missing authority,
