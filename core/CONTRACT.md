@@ -78,11 +78,11 @@ flag. Hosted review eligibility uses the exact authored SHA and trusted-base
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
 
-**S1: queue is the proof.** A PR approved at its head by the other family and
-green on required hosted checks, with no other readiness blockers above and
-no S2 hold, is marked ready and queued by its owner. If only the local receipt
-is not green, the owner states ONE reason in a PR comment and marks ready in
-GitHub and queues directly:
+**S1: queue is the proof.** A PR approved at its head by a reviewer eligible
+under [Review budget](#review-budget) and green on required hosted checks,
+with no other readiness blockers above and no S2 hold, is marked ready and
+queued by its owner. If only the local receipt is not green, the owner states
+ONE reason in a PR comment and marks ready in GitHub and queues directly:
 
 - The red also fails on main or is on the flake list.
 - The red is a guard, not a test, and the guarded stage passed.
