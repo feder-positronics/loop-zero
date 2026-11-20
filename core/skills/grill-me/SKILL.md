@@ -20,5 +20,4 @@ premise, reconsider the plan. On fatigue or “wrap up”, summarize settled cho
 remaining questions and their owners; defer the remainder.
 
 After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+or hand over its remaining acceptance.
