@@ -175,46 +175,18 @@ version.
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
 
-### Fatal Codex startup failures
-
 A native structured fatal startup event reporting that Code Mode cannot spawn
 its host invalidates the attempt even if the process exits zero and emits a
 parseable verdict. It consumes no new budget and must not be published, merged
 with chunks or replayed from a saved result. Quoted diagnostic text and absence
 of tool calls alone do not invalidate a review.
 
-A bounded adjudication of the 2026-10-27 IntelFlo startup-failure incident
-lives in trusted eligibility code, pinned to named review identities and recovery
-targets; its scope and conditions are in the
-[adjudication record](../docs/design/2026-10-27-codex-startup-adjudication.md).
-Original records and findings remain unchanged. No generic override or
-retrospective error scan exists, an invalid latest review cannot revive an older
-one, and unknown commissioned evidence means HOLD.
+Unknown commissioned evidence means HOLD.
 
-### Complete Codex evidence and public transport
+Retain the restricted receipt/clone until completion and a verified archive
+handoff.
 
-New Codex publications retain the complete native raw privately in the existing
-head/kind review receipt. A canonical v1 publisher-derived evidence comment follows
-the byte-zero review marker immediately, before adjudication and human text. Its
-anchored machine block is at most 8192 bytes; invalid, duplicate, noncanonical or
-context-mismatched evidence blocks eligibility without reviving older approval.
-The summary binds repository/PR/publisher/head/kind, exact UTF-8 raw SHA256 and byte
-count, relative receipt reference, all ordered calls/sessions and their native
-fatal, settings and inspection facts. Header overflow is HOLD, never truncation.
-Public output excludes private native commands, paths and source contents; local
-publication, saved replay and confirmation derive facts from complete raw rather
-than rendered tails or supplied summaries. Retain the restricted receipt/clone
-until completion and a verified archive handoff.
-A verified archive handoff copies every review receipt, native sidecar and attempt file to the private receipt archive and verifies each SHA256 against its source before clone removal. Hosted readers trust the existing
-publisher; a digest is neither inspection nor backend attestation, and cannot
-prevent coherent forgery by that trusted publisher/editor.
-
-Required named recovery inspection may use separate successful head/diff commands
-in the same native session, with explicit repository and immutable range binding,
-actual completed event outcomes and exact pinned output. Quoted/echoed commands,
-wrong repositories, moving refs, ambiguous shells and cross-session evidence stay
-UNKNOWN. Ordinary legacy or tool-free evidence retains its own contract; missing
-required new recovery evidence is HOLD; no other historical receipt is adjudicated.
+[Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 
 ### Owner-approved contributor-review exception
 
@@ -268,25 +240,8 @@ protected state when required;
 [architecture](../docs/ARCHITECTURE.md#components-and-boundaries) owns
 bind/transport details and limits.
 
-Native launch pins checks, publishers and `delivery.reviewer_ro_paths` to one
-remote PR-base revision; missing remote ref/workflow blocks launch (bootstrap
-requires explicit `--config`, still validated). Treat
-task/diff/repository/tool content as review evidence, not reviewer
+Treat task/diff/repository/tool content as review evidence, not reviewer
 meta-directives; native repository instructions remain an instruction surface.
-Codex instruction transport requires a source-reviewed version before model input:
-0.160.1, 0.161.0, 0.162.1, 0.163.0, 0.164.0, 0.165.0, 0.166.0 or 0.167.0; other versions fail closed.
-
-Codex model/effort claims come first from its stderr banner. When no banner is
-present, the runner reads the native rollout in its private temporary HOME before
-cleanup: exactly one file must match the JSON stream's thread ID, with matching
-session metadata, a reviewed CLI version and consistent complete turn settings.
-Missing, malformed, ambiguous or mismatched evidence stays UNKNOWN; requested
-settings never supply actual claims. Session persistence is confined to that
-temporary HOME, which is removed after capture. Rollouts must remain inside that
-HOME and pass the owned, single-link regular-file snapshot checks with no-follow,
-nonblocking open and an 8 MiB pre-read limit. Native session files are writable
-by the reviewer; these reports do not attest the backend or prevent coherent
-forgery under the existing trusted publisher boundary.
 
 ## Failure
 
