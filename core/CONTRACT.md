@@ -32,7 +32,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    the repository root; the subshell avoids leaving the shell inside a deleted
    worktree. Merge rechecks readiness, uses the configured strategy, verifies
    the landed SHA, and deletes branch/worktree. A cleanup warning still means
-   the merge landed; follow its next step. A queue initially enqueues;
+   the merge landed; follow the next step it names. A queue initially enqueues;
    `--wait[=SECONDS]` follows landing and cleanup. It first waits out
    pending/missing required checks on the unchanged head within that same
    budget; without it, those checks block merge and the command names the
