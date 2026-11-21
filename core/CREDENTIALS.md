@@ -25,7 +25,8 @@ key for production or another account.
 
 Inside the process making an authorized API request:
 
-1. Use the documented environment variable if nonempty.
+1. Use the documented environment variable if it is nonempty after stripping
+   surrounding whitespace.
 2. Otherwise check the documented file's ownership and permissions before reading;
    use a private directory (`0700`) and owner-only file (`0600`). Reject unsafe
    files without loading them; do not follow credential-file symlinks.
