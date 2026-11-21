@@ -113,14 +113,14 @@ comment, then marks ready and queues directly in GitHub:
 This is the documented owner route; a red receipt still blocks `loopzero ready`
 and `loopzero merge`.
 
-Infra-only PRs need owning tests + lint instead of a full
-check. An attributed main regression is repaired or reverted by its owner; for
-a shared critical product, build or deployment hazard, revert the culprit first
-within 1 h under the consumer's rollback rules. Non-critical observer failures
-outside a change get an active repair owner without freezing unrelated merges.
-Missing valid required proof still blocks the affected operation. These failure
-policies preserve exact-SHA review, receipt requirements, the S1 local-receipt
-route and S2 holds.
+Infra-only PRs need owning tests + lint instead of a full check. An attributed
+main regression is repaired or reverted by its owner; for a shared critical
+product, build or deployment hazard, revert the culprit first within 1 h under
+the consumer's rollback rules. Non-critical observer failures outside a change
+get an active repair owner without freezing unrelated merges. Missing valid
+required proof still blocks the affected operation. These failure policies
+preserve exact-SHA review, receipt requirements, the S1 local-receipt route and
+S2 holds.
 
 ## Gate execution and delivery priority
 
@@ -207,9 +207,9 @@ parseable verdict. It consumes no new budget and must not be published, merged
 with chunks or replayed from a saved result. Quoted diagnostic text and absence
 of tool calls alone do not invalidate a review.
 
-For named Codex review recoveries, HOLD when required evidence is unknown.
-Retain the restricted Codex review receipt and writer clone until completion
-and a verified archive handoff.
+For named Codex review recoveries, HOLD when required evidence is missing or
+unknown. Retain the restricted Codex review receipt and writer clone until
+completion and a verified archive handoff.
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 

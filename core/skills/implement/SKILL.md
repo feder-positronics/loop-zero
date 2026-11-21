@@ -30,7 +30,7 @@ within actual permissions. Required acceptance that remains unobserved stays ope
 with a next-action owner. Record tested revisions, observations, commands,
 results, trade-offs and limits in Notes or human Validation; evidence from an
 earlier head cannot establish a current gate verdict.
-Apply [local gate receipt reuse](../../CONTRACT.md#blockers).
+Apply [local gate receipt reuse](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 Run commands expected to take more than about two minutes detached as in
 [Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
