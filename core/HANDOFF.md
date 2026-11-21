@@ -1,24 +1,14 @@
 # <Title from slug>
 
 ## Context and goal
-- **Context:** <one or two sentences: where this sits, what exists today>
-- **Problem:** <what is wrong or missing, observable>
-- **Goal:** <what will be true when done>
+- **Goal:** <what the owner or users will notice once this lands, in plain words>
+- **Problem:** <what is wrong or missing today, observable, with its cost if known>
+- **Context:** <where this sits; link a parent plan or issue rather than naming it>
 
 Refs #<issue number, or remove this line>
 
 ## Acceptance
 - <verifiable criterion>
-
-## Base
-main @ <sha>
-Base: <sha>
-
-## Validation
-(filled by `loopzero check`)
-
-## Review
-(filled by `loopzero review`)
 
 ## Notes
 - <Authorized unfinished work: one next-action owner and its next action or
@@ -29,3 +19,13 @@ Base: <sha>
   for the returned head (parent retains acceptance responsibility); ordered
   preassigned next item(s), or stop condition. Follow
   loop-zero docs/DELEGATION.md; do not duplicate host capacity rules here.>
+
+## Base
+main @ <sha>
+Base: <sha>
+
+## Validation
+(filled by `loopzero check`)
+
+## Review
+(filled by `loopzero review`)
