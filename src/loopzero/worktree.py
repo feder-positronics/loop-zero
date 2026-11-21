@@ -13,14 +13,16 @@ _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
 ## Context and goal
-- **Context:** <one or two sentences: where this sits, what exists today>
-- **Problem:** <what is wrong or missing, observable>
-- **Goal:** <what will be true when done>
+- **Goal:** <what the owner or users will notice once this lands, in plain words>
+- **Problem:** <what is wrong or missing today, observable, with its cost if known>
+- **Context:** <where this sits; link a parent plan or issue rather than naming it>
 
 Refs #<issue number, or remove this line>
 
 ## Acceptance
 - <verifiable criterion>
+
+## Notes
 
 ## Base
 {base_branch} @ {base}
@@ -31,8 +33,6 @@ Base: {base}
 
 ## Review
 (filled by `loopzero review`)
-
-## Notes
 """
 
 

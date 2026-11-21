@@ -42,11 +42,11 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     text = worktree.task_text(wt)
     assert text.startswith("# My task\n")
     headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
-    assert headings == ["## Context and goal", "## Acceptance", "## Base", "## Validation",
-                        "## Review", "## Notes"], "matches core/HANDOFF.md"
-    assert "- **Context:** <one or two sentences: where this sits, what exists today>" in text
-    assert "- **Problem:** <what is wrong or missing, observable>" in text
-    assert "- **Goal:** <what will be true when done>" in text
+    assert headings == ["## Context and goal", "## Acceptance", "## Notes", "## Base",
+                        "## Validation", "## Review"], "matches core/HANDOFF.md"
+    assert "- **Context:** <where this sits; link a parent plan or issue rather than naming it>" in text
+    assert "- **Problem:** <what is wrong or missing today, observable, with its cost if known>" in text
+    assert "- **Goal:** <what the owner or users will notice once this lands, in plain words>" in text
     assert "Refs #<issue number, or remove this line>" in text
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
