@@ -151,8 +151,7 @@ review, queue and hold waiters separately, excluding them from productive counts
 Children waiting on a question or approval are waiters, not productive work.
 
 **Owners decide without the decisions owner.** Within existing commissions and
-grants, owners act, record the decision on the issue/PR or their own log, and
-tell the decisions owner in their next routine update:
+grants, owners act and record the decision on the issue/PR or their own log:
 
 - Re-own a stalled child under its existing brief and grant.
 - Rebase onto current main and retest within existing proof and review budgets;
