@@ -226,7 +226,8 @@ queue", the change class from the PR file list. A stale draft is not
 ownership. Record one entry: the outcome and its current condition, the
 obstacle, the next step with its predicted effect and check time, and at that
 check the actual result. Judge reviews by changed next actions and shortened
-blockages; a daily check keeps or reverts each adjustment against its numbers.
+blockages; a recurring check keeps or reverts each adjustment against its
+numbers.
 
 **Retrospectives.** The outcome owner records a retro, in loop-zero and in
 consumers, when any of these occurs:
@@ -258,11 +259,11 @@ a deletion or a check inside an existing mechanism) with owner, observable
 result and check date, or why none remains. Workflow health still governs
 any change.
 
-Close the loop on a schedule that host policy sets. A daily check rules on
+Close the loop on a schedule that host policy sets. A recurring check rules on
 every action whose check date has arrived: keep, revert or extend once with a
 reason. It also pushes the owner of any trigger event still missing its retro.
 An action more than a day overdue counts as an occurrence under trigger 6. A
-weekly audit covers every dimension of the fleet against its sources, rechecks
+broader audit covers every dimension of the fleet against its sources, rechecks
 whether earlier actions were shipped, used and effective, and names at least one
 mechanism to delete, or why none qualifies.
 
