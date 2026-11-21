@@ -23,8 +23,8 @@ flowchart TD
     J --> K["Clean up: delete branch and worktree"]
 ```
 
-See the [contract steps](../core/CONTRACT.md#the-six-steps) for exact-head
-review and readiness requirements.
+See the contract's [Blockers](../core/CONTRACT.md#blockers) for exact-head
+review, head movement and readiness.
 
 Work stops at "ready" unless merging has been authorized.
 
