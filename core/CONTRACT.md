@@ -246,9 +246,7 @@ audit the class and remove both reviewed ancestors.
 
 The selector, budget and all exact-head runner review, checks, findings,
 readiness and merge gates remain unchanged. Prose proves no permission.
-Outside the confirmed scope, retain all-writer trailers. When independence is
-unavailable, use the disclosed same-family fallback; wait for the owner only
-when no configured reviewer can run.
+Outside the confirmed scope, retain all-writer trailers.
 
 ## Sandbox rules for checks
 
