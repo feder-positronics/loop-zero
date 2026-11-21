@@ -297,9 +297,8 @@ check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
 GitHub reads retry transient failures up to three times (5/20/60 seconds) and
 stop on rate limits; Mergify reads retry server errors, throttling and failed
-reads up to twice (2/5 seconds). Waits use bounded backoff and one waiter per PR;
-direct `gh` polling adds shared account load and cannot replace the wait command.
-A rate limit is a waiting dependency, not permission to turn missing evidence green.
+reads up to twice (2/5 seconds). Waits use bounded backoff. See the
+[contract's waiter and polling rules](../core/CONTRACT.md#failure).
 The optional host ai-accounts helper owns managed credential selection and exact-model
 eligibility under its existing lock. Its Claude exec reserve guard (including pinned
 identities) reads the same per-window usage as status and refuses non-owner launches
