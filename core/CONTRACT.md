@@ -17,7 +17,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 4. `loopzero review` reviews the exact head, independently by default, and
    posts one GitHub review with inline findings: exit 0 `approve`,
    5 `request_changes`.
-5. `loopzero ready` computes readiness and marks a ready PR ready for review.
+5. `loopzero ready --wait` computes readiness and marks a ready PR ready for review.
    A draft blocked only by missing/skipped required checks is activated to
    trigger CI; without `--wait` it exits 3. `--wait[=SECONDS]` (default 1800)
    observes the unchanged head, including after activation within the same
@@ -25,7 +25,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    asynchronous CI scheduling. After two minutes of missing checks without
    visible pending checks, inspect scheduling, triggers and permissions,
    correct the cause, then retry.
-6. `loopzero merge` rechecks readiness, uses the configured strategy, verifies
+6. After step 5 exits 0, run `(cd <worktree> && loopzero merge --wait)` from
+   the repository root; the subshell avoids leaving the shell inside a deleted
+   worktree. Merge rechecks readiness, uses the configured strategy, verifies
    the landed SHA, and deletes branch/worktree. A queue initially enqueues;
    `--wait[=SECONDS]` follows landing and cleanup. It first waits out
    pending/missing required checks on the unchanged head within that same
@@ -33,9 +35,6 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    waiter. Enqueueing without `--wait` returns 0 without cleanup.
 
 Merge is authorized by default under [S2](#s2-merge-authority).
-No per-PR merge GO. After `ready --wait` exits 0, merge from the repository root:
-`(cd <worktree> && loopzero merge --wait)`. The subshell avoids leaving the
-shell inside a deleted worktree.
 
 On every start/resume, run `loopzero status`, then rerun the last `--wait`
 command if any; both are idempotent. Status derives the branch's stage from
@@ -72,13 +71,14 @@ brief) keep their fields; these rules govern the prose inside them.
 Merge is authorized by default outside six reserved classes: auth, public API,
 destructive migrations, CI/required checks, production lease and spending beyond
 current accounts. A reserved class carries a `hold` label plus one issue comment
-naming the hazard and end condition for the decisions owner (or human owner) to
-resolve. No per-PR merge/ready/queue GO or hold renewal ritual. S1 does not bypass
-an S2 hold.
+naming the hazard and end condition for the
+[decisions owner](../docs/DELEGATION.md#team-roles) (or human owner) to resolve.
+No separate per-PR merge, ready or queue approval; no hold renewal. S2 holds also
+block the S1 owner queue route below.
 
 ## Blockers
 
-`loopzero ready` stays a strict tool check. It requires none of these:
+`loopzero ready` succeeds only if none of these blockers apply:
 
 - A required check exited nonzero on this head.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
@@ -102,22 +102,27 @@ can edit/resolve evidence; branch protection and CI enforce the gates.
 **S1: queue is the proof.** A PR approved at its head by a reviewer eligible
 under [Review budget](#review-budget) and green on required hosted checks,
 with no other readiness blockers above and no S2 hold, is marked ready and
-queued by its owner. If only the local receipt is not green, the owner states
-ONE reason in a PR comment and marks ready in GitHub and queues directly:
+queued by its owner. Because the queue enforces required integration checks,
+when only the local receipt is not green the owner states ONE reason in a PR
+comment, then marks ready and queues directly in GitHub:
 
 - The red also fails on main or is on the flake list.
 - The red is a guard, not a test, and the guarded stage passed.
 - The head moved only by a clean rebase and the old head was green.
 
 This is the documented owner route; a red receipt still blocks `loopzero ready`
-and `loopzero merge`. Infra-only PRs need owning tests + lint instead of a full
+and `loopzero merge`.
+
+Infra-only PRs need owning tests + lint instead of a full
 check. An attributed main regression is repaired or reverted by its owner; for
 a shared critical product, build or deployment hazard, revert the culprit first
 within 1 h under the consumer's rollback rules. Non-critical observer failures
 outside a change get an active repair owner without freezing unrelated merges.
-Missing valid required proof still blocks the affected operation. This changes
-neither exact-SHA review and receipt requirements nor the S1 local-receipt
-route or S2 holds.
+Missing valid required proof still blocks the affected operation. These failure
+policies preserve exact-SHA review, receipt requirements, the S1 local-receipt
+route and S2 holds.
+
+## Gate execution and delivery priority
 
 **Expensive suites run where the change is.** Browser and slow integration
 suites run on a PR or queue candidate only when the change touches their area.
@@ -202,10 +207,9 @@ parseable verdict. It consumes no new budget and must not be published, merged
 with chunks or replayed from a saved result. Quoted diagnostic text and absence
 of tool calls alone do not invalidate a review.
 
-Unknown commissioned evidence means HOLD.
-
-Retain the restricted receipt/clone until completion and a verified archive
-handoff.
+For named Codex review recoveries, HOLD when required evidence is unknown.
+Retain the restricted Codex review receipt and writer clone until completion
+and a verified archive handoff.
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 
@@ -238,9 +242,10 @@ wait for owner direction. Before another primary after delta exhaustion,
 audit the class and remove both reviewed ancestors.
 
 The selector, budget and all exact-head runner review, checks, findings,
-readiness and merge gates remain unchanged. Prose proves no permission;
-retain all-writer trailers. When independence is unavailable, use the disclosed
-same-family fallback; wait for the owner only when no configured reviewer can run.
+readiness and merge gates remain unchanged. Prose proves no permission.
+Outside the confirmed scope, retain all-writer trailers. When independence is
+unavailable, use the disclosed same-family fallback; wait for the owner only
+when no configured reviewer can run.
 
 ## Sandbox rules for checks
 
@@ -270,7 +275,8 @@ Fail closed on missing tools and command errors; preserve the failing command
 and output tail. Stop on terminal failures or quota errors. Exit 3 means
 waiting: rerun the bounded waiter. Exit 5 means changes requested, not a crash.
 
-**Never pipe a `loopzero` command, even with `set -o pipefail`.** Redirect
+**Never pipe a `loopzero` command, even with `set -o pipefail`: the pipeline
+can report the filter's exit code in place of the command's verdict.** Redirect
 stdout/stderr to a file, e.g. `loopzero check >check.log 2>&1`; inspect that
 file separately. Chain dependent commands with `&&`. Report the exit code
 and final output line; earlier progress never proves queue/merge state.
