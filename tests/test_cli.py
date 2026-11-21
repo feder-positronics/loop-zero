@@ -90,11 +90,11 @@ def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
     task.write_text(
         task.read_text()
         .replace(
-            "<one or two sentences: where this sits, what exists today>",
+            "<where this sits; link a parent plan or issue rather than naming it>",
             "The feature module is part of the sample application.",
         )
-        .replace("<what is wrong or missing, observable>", "The feature is missing.")
-        .replace("<what will be true when done>", "The feature prints its greeting.")
+        .replace("<what is wrong or missing today, observable, with its cost if known>", "The feature is missing.")
+        .replace("<what the owner or users will notice once this lands, in plain words>", "The feature prints its greeting.")
     )
     git(path, "add", "feature.py")
     git(path, "commit", "-q", "-m", "add feature")
@@ -518,7 +518,7 @@ exec /usr/bin/git "$@"
     assert "## Context and goal" in body and git(repo, "rev-parse", "origin/main").strip() in body
     assert body.count("## Validation") == 1 and f"Recorded for `{head[:12]}`" in body
     assert "(filled by `loopzero check`)" not in body, "placeholder replaced in place"
-    assert body.index("## Validation") < body.index("## Review") < body.index("## Notes")
+    assert body.index("## Notes") < body.index("## Validation") < body.index("## Review"), "evidence trails the narrative"
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
 
 
@@ -604,8 +604,8 @@ def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
 
 @pytest.mark.parametrize("name,value", [
     ("Context", ""),
-    ("Problem", "<what is wrong or missing, observable>"),
-    ("Goal", "<what will be true when done>"),
+    ("Problem", "<what is wrong or missing today, observable, with its cost if known>"),
+    ("Goal", "<what the owner or users will notice once this lands, in plain words>"),
 ])
 def test_pr_refuses_missing_context_problem_or_goal(
     wt: Path, gh: FakeGh, capsys, name: str, value: str
