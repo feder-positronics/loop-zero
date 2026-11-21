@@ -8,7 +8,7 @@ description: Review a frozen code diff against acceptance criteria and emit JSON
 Review one frozen diff without editing the tree. Read [the contract](../../CONTRACT.md),
 the PR body, and surrounding code. Confirm the exact head and follow the
 contract's [scope and budget](../../CONTRACT.md#review-budget) and
-[missing-evidence rule](../../CONTRACT.md#findings); never approve blind.
+[missing-evidence rule](../../CONTRACT.md#findings).
 Apply [local gate receipt reuse](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 ## Judge
