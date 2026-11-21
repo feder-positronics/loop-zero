@@ -45,7 +45,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     assert headings == ["## Context and goal", "## Acceptance", "## Notes", "## Base",
                         "## Validation", "## Review"], "matches core/HANDOFF.md"
     assert "- **Context:** <only what a reader needs first; link a parent plan or issue rather than naming it>" in text
-    assert "- **Problem:** <the evidence: what is wrong today, as observed, and its cost if known>" in text
+    assert "- **Problem:** <what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>" in text
     assert "- **Goal:** <one plain sentence: what the owner or users now notice, because this CHANGE fixes which PROBLEM>" in text
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
