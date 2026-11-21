@@ -10,9 +10,10 @@ delivery evidence. Read live issue acceptance, comments, artifacts and linked
 work. Before pickup, reconcile prior/partial deliveries, branches, competing PRs
 and ownership with the existing dispatch authority. Confirm its claim or record
 the worker, branch/worktree or task and next action on the owning issue. Comments
-record a claim but cannot stop a second worker, so check for overlapping work
-before you launch any. Verify remote identity before mutation and connected
-environment before relying on production claims. Apply [inherited-work guidance](reference.md#inherited-work) to continuations.
+record a claim but cannot stop a second worker, so do not launch work that
+overlaps; reconcile its ownership first. Verify remote identity before mutation
+and connected environment before relying on production claims. Apply
+[inherited-work guidance](reference.md#inherited-work) to continuations.
 
 Retain an inherited task worktree or use `loopzero start` for a new delivery.
 Record observable acceptance and the issue link. Deliver through

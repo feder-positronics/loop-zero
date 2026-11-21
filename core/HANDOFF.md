@@ -1,8 +1,8 @@
 # <Title from slug>
 
 ## Context and goal
-- **Goal:** <one plain sentence: because PROBLEM, this CHANGE, so the owner or users notice OUTCOME>
-- **Problem:** <the evidence: what is wrong today, as observed, and its cost>
+- **Goal:** <one plain sentence: what the owner or users now notice, because this CHANGE fixes which PROBLEM>
+- **Problem:** <the evidence: what is wrong today, as observed, and its cost if known>
 - **Context:** <only what a reader needs first; link a parent plan or issue rather than naming it>
 
 Refs #<issue number, or remove this line>
