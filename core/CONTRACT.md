@@ -46,6 +46,26 @@ and next command. End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
 
+## Reporting
+
+Write reports, requests and status messages for the reader's next action,
+readable without the thread they came from. Templates (handoff, delegation
+brief) keep their fields; these rules govern the prose inside them.
+
+- Lead with the outcome; when the reader must decide or act, put that request
+  first, before any status.
+- Give the observation a conclusion rests on: command and result, number, file
+  or example. Say which claims behind a decision are inferred or assumed, and
+  what was skipped or failed.
+- To a reader who has seen earlier state, report what changed and what comes
+  next; give a new reader the state they need to act. Include steps taken only
+  when they change what to trust.
+- For a decision, name who decides, ask the exact question, recommend a course
+  and say what happens if no answer comes. Give alternatives when the choice is
+  real.
+- Name things by what they are when an ID alone would be opaque to the reader.
+- Stop when the reader can act; do not close by restating the opening.
+
 ## S2: merge authority
 
 Merge is authorized by default outside six reserved classes: auth, public API,

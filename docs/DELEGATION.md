@@ -388,7 +388,7 @@ inherited project root.
 ```text
 cd <own-task-tree>
 Objective: <one bounded outcome>
-Context: <source text, decisions, files, and requester's wording/link authorizing the finish point; sandboxed delegates usually lack network/gh>
+Context: <source text, decisions, files, why any approach the delegate might retry was ruled out (with the evidence), and requester's wording/link authorizing the finish point; sandboxed delegates usually lack network/gh>
 Allowed paths: <owned scope>
 Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>

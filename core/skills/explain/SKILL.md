@@ -19,7 +19,9 @@ avoid unsupported precision or caveats hidden from decisions.
 
 Orient first, explain the mechanism, then give an actionable or memorable
 takeaway. Choose structure to fit, using components, data flow and
-failure/authority boundaries for technical topics.
+failure/authority boundaries for technical topics. Before sending, check that
+each takeaway follows from the concrete material and says something the opening
+did not.
 
 When the topic has a shape (steps or branches, states, a comparison,
 quantities over time, components and boundaries), show it once in the form that
