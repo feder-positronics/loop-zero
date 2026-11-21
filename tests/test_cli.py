@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -2189,6 +2190,47 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     code, out, err = run(capsys, "merge")
     assert code == 0 and out.splitlines()[-1] == "d" * 40
     assert err.startswith("warning: merged but worktree cleanup failed")
+    assert err.rstrip().endswith(
+        "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup")
+
+
+def test_merge_names_branch_left_after_worktree_removal(
+    wt: Path, gh: FakeGh, capsys, monkeypatch, head
+) -> None:
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    gh.respond("pr merge", "")
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head=head_of(wt), sha='d' * 40))
+    gh.respond("api -X", "")
+
+    def remove_then_fail(_root, path):
+        shutil.rmtree(path)
+        raise cli.worktree.WorktreeError("cannot lock ref")
+
+    monkeypatch.setattr(cli.worktree, "cleanup", remove_then_fail)
+    code, out, err = run(capsys, "merge")
+    assert code == 0 and out.splitlines()[-1] == "d" * 40
+    assert err.startswith("warning: merged but worktree cleanup failed: cannot lock ref")
+    assert err.rstrip().endswith(
+        "; worktree removed; from the repository root run `git branch -D lz/t1`")
+
+
+def test_cleanup_hints_quote_branch_and_target_configured_repo(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    branch = "lz/fix$version"
+    monkeypatch.setattr(cli, "_repo_root", lambda _wt: tmp_path)
+    monkeypatch.setattr(cli.worktree, "branch", lambda _wt: branch)
+    gone = tmp_path / "gone"
+    monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
+        cli.worktree.WorktreeError("cannot lock ref")))
+    cli._cleanup(gone)
+    assert capsys.readouterr().err.rstrip().endswith("run `git branch -D 'lz/fix$version'`")
+
+    monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
+        cli.github.GhError(("gh", "api"), "HTTP 500")))
+    cli._delete_remote_branch(SimpleNamespace(repo="acme/widgets"), branch)
+    assert capsys.readouterr().err.rstrip().endswith(
+        "delete it with `gh api -X DELETE 'repos/acme/widgets/git/refs/heads/lz/fix$version'`")
 
 
 def test_merge_warns_when_remote_cleanup_times_out(
@@ -2204,6 +2246,8 @@ def test_merge_warns_when_remote_cleanup_times_out(
     out = without_accepted_receipt(out)
     assert code == 0 and out.splitlines()[0] == "f" * 40
     assert "remote branch cleanup failed for lz/t1" in err and "timed out" in err
+    assert err.rstrip().endswith(
+        f"; delete it with `gh api -X DELETE repos/{REPO}/git/refs/heads/lz/t1`")
 
 
 def test_second_merge_retries_remote_branch_cleanup(

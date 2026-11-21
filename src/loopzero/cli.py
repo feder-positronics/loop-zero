@@ -11,6 +11,7 @@ import json
 import os
 import random
 import re
+import shlex
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -1026,6 +1027,9 @@ def _pr_readiness(
                           announce_receipt=True)
 
 
+CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"
+
+
 def _cleanup(wt: Path, config: Config | None = None, pr: github.PR | None = None) -> None:
     files = list((wt / ".loopzero").glob("review-*.json"))
     try:
@@ -1043,14 +1047,17 @@ def _cleanup(wt: Path, config: Config | None = None, pr: github.PR | None = None
         if pr is not None and worktree.head(wt) != pr.head_sha:
             raise OSError("local HEAD changed during archive handoff")
     except (ValueError, OSError, worktree.WorktreeError) as exc:
-        print(f"warning: retaining review receipts and task clone pending verified archive handoff: {exc}",
-              file=sys.stderr)
+        print(f"warning: merged; retaining review receipts and task clone pending verified "
+              f"archive handoff: {exc}{CLEANUP_RETRY}", file=sys.stderr)
         return
-    root = _repo_root(wt)
+    root, name = _repo_root(wt), None
     try:
+        name = worktree.branch(wt)
         worktree.cleanup(root, wt)
     except (worktree.WorktreeError, OSError) as exc:
-        print(f"warning: merged but worktree cleanup failed: {exc}", file=sys.stderr)
+        retry = CLEANUP_RETRY if wt.exists() or name is None else (
+            f"; worktree removed; from the repository root run `git branch -D {shlex.quote(name)}`")
+        print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
@@ -1373,7 +1380,9 @@ def _delete_remote_branch(config: Config, branch: str) -> None:
     try:
         github.delete_remote_branch(config.repo, branch)
     except (github.GhError, _proc.ProcTimeout) as exc:
-        print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}", file=sys.stderr)
+        ref = shlex.quote(f"repos/{config.repo}/git/refs/heads/{branch}")
+        print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
+              f"delete it with `gh api -X DELETE {ref}`", file=sys.stderr)
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:

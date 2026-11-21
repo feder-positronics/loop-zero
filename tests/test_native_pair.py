@@ -401,7 +401,10 @@ def test_pair_cleanup_retains_private_transport(tmp_path, capsys):
         json.dumps({"native_pair_transport": True, "stdout": "private"})
     )
     cli._cleanup(tmp_path)
-    assert "retaining review receipts" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert err.startswith("warning: merged; retaining review receipts")
+    assert err.rstrip().endswith(
+        "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup")
     assert directory.exists()
 
 
