@@ -8,7 +8,7 @@ description: Decide the response to each existing PR review finding: post factua
 Read the PR acceptance, exact threads, affected code and current head. Verify
 each finding's premise on that head; use
 [staleness re-verification](reference.md#staleness-re-verification) as needed.
-Findings stay in PR threads, never issues, backlogs or tracking files.
+Follow the contract's [findings rule](../../CONTRACT.md#findings).
 
 Fix valid blocking findings within commissioned scope or hand off bounded repairs
 and validation through [response handoff](reference.md#response-handoff).

@@ -274,11 +274,11 @@ record, work on whatever most limits that outcome now: implementation,
 readiness, CI, review recovery or deployment. Separate constraints (owner
 authority, a demonstrated hazard) from assumptions (an inherited sequence, a
 preferred tool, an estimated start time); repetition does not make an
-assumption binding. Two repair rounds on one mechanism or defect class, or two
-stops caused by tooling rather than the product, mean reassessing the route:
-prefer an existing simpler route to another isolated fix or check. Measure
-progress by what became usable, unblocked or safer. When a subtask closes, its
-owner keeps the remaining outcome or hands it over on the owning issue.
+assumption binding. Two stops caused by tooling rather than the product mean
+reassessing the route: prefer an existing simpler route to another isolated fix
+or check. Measure progress by what became usable, unblocked or safer.
+When a subtask closes, its owner keeps the remaining outcome or hands it over on
+the owning issue.
 
 **Workflow health.** Keeping delivery lean is a standing duty, not a tier. A
 broken workflow that blocks delivery is the bottleneck: repair it at once.
@@ -498,10 +498,9 @@ result and current remote state; after a superseding message or restart, check
 again before concluding "still waiting".
 
 Split oversized scope in the plan rather than imposing brief line limits. Resume
-unfinished delegate sessions instead of restarting; reassess repeated repairs as
-in [Goal first](#team-roles). A repair brief lists every unresolved review
-finding and deterministic test failure on the failed head; an unrelated repair
-does not fix one.
+unfinished delegate sessions instead of restarting. A repair brief lists every
+unresolved review finding and deterministic test failure on the failed head; an
+unrelated repair does not fix one.
 
 Consult and artifact reviews outside a PR use the same budget: one full review, then at
 most one delta per artifact. Reviewers classify each finding as blocking (it can cause an
