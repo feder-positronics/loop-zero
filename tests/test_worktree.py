@@ -47,6 +47,8 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     assert "- **Context:** <where this sits; link a parent plan or issue rather than naming it>" in text
     assert "- **Problem:** <what is wrong or missing today, observable, with its cost if known>" in text
     assert "- **Goal:** <what the owner or users will notice once this lands, in plain words>" in text
+    prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
+    assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     assert "Refs #<issue number, or remove this line>" in text
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
