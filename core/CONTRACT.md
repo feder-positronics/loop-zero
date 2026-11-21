@@ -64,7 +64,8 @@ brief) keep their fields; these rules govern the prose inside them.
   and say what happens if no answer comes. Give alternatives when the choice is
   real.
 - Name things by what they are when an ID alone would be opaque to the reader.
-- Stop when the reader can act; do not close by restating the opening.
+- Stop when the reader can act. Apart from the delivery ending above, do not
+  close by restating the opening.
 
 ## S2: merge authority
 
