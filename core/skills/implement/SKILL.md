@@ -10,9 +10,7 @@ and affected interfaces. Confirm the task worktree and branch. Follow
 [credential conventions](../../CREDENTIALS.md) and
 [delegation guidance](../../../docs/DELEGATION.md).
 
-As an unattended worker, never use an ask-the-user or request-input tool. Send
-one message with a blocker or question to the parent (or owner named in the
-brief), then end the turn.
+As an unattended worker, follow [the worker role's blocker route](../../../docs/DELEGATION.md#team-roles).
 
 Before the first code edit, record observable criteria in task Acceptance and
 freeze them. Change Acceptance only with a recorded reason in Notes, before
@@ -61,11 +59,9 @@ and report cleanup to the owner. Successful `loopzero merge` already performs it
 own cleanup under the delivery contract.
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
-[review budget](../../CONTRACT.md#review-budget). Check the clean committed head
-before pushing; publish and review every pushed head within that budget. Batch
-all substantive and mechanical repairs into one delta head. Preserve an approved
-head unless necessary changes require renewed checks and review. Suggestions
-must not expand scope. Follow the contract's S1 owner route and S2 merge authority.
+[review budget](../../CONTRACT.md#review-budget) for each pushed head. Check the
+clean committed head before pushing. Suggestions must not expand scope. Follow
+the contract's S1 owner route and S2 merge authority.
 Never merge main into a reviewed branch. Rebase your own commits onto
 origin/main BEFORE review. If a conflict appears AFTER review: rebase (drop any
 merge), check, then one fresh whole-PR primary; that is the PR's one fresh lineage.

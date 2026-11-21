@@ -56,8 +56,8 @@ self-review rejection fallback to COMMENT remains a separate transport rule.
 
 Merged native review receipts and their sidecars are handed off to `~/.local/state/loopzero/receipts/<owner>-<repo>/<pr>-<head>/`, append-only: existing directories are accepted only when all files are byte-identical, never overwritten.
 
-Private agent transcripts, metrics ledgers and copied findings do not belong in
-this guide or in a new persistent store.
+Private agent transcripts and metrics ledgers do not belong in this guide or in
+a new persistent store.
 
 ## Delivery and feedback
 

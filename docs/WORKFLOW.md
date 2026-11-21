@@ -23,10 +23,10 @@ flowchart TD
     J --> K["Clean up: delete branch and worktree"]
 ```
 
-The review and the CI results belong to one exact version (head) of the
-branch. If the branch changes after the review, that review no longer counts
-and the change is reviewed again. Work stops at "ready" unless merging has been
-authorized.
+See the contract's [Blockers](../core/CONTRACT.md#blockers) for exact-head
+review, head movement and readiness.
+
+Work stops at "ready" unless merging has been authorized.
 
 Summarizes [The six steps](../core/CONTRACT.md#the-six-steps) and
 [Blockers](../core/CONTRACT.md#blockers); the queue is described in
@@ -49,15 +49,7 @@ flowchart TD
     J -->|none can run| I["Wait for the owner"]
 ```
 
-Each line of work gets one full review and at most one follow-up that reads
-only what changed. The reviewer preferably comes from a model family that wrote
-no part of the change. A failed reviewer run with no verdict does not use up a
-review. If no independent reviewer can run, try the preferred family in a fresh
-session and add a visible same-family fallback line to the PR. Wait for the
-owner only when no configured reviewer can run. Repeated findings of the same
-kind mean the audit missed something, not that patching should continue.
-
-Summarizes [Review budget](../core/CONTRACT.md#review-budget).
+See the contract's [review budget](../core/CONTRACT.md#review-budget).
 
 ## 3. Who does what
 
@@ -74,8 +66,7 @@ flowchart TD
 ```
 
 Each role has one current owner, and state lives in Git and GitHub rather than
-in anyone's memory. A worker that is stuck sends one message with its blocker
-to its parent and stops instead of asking a person directly.
+in anyone's memory.
 
 Summarizes [Team roles](DELEGATION.md#team-roles) and
 [Review budget](../core/CONTRACT.md#review-budget).
