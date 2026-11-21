@@ -31,9 +31,9 @@ review.
 After three `request_changes` primaries on one PR, split it or return to
 [plan](../plan/SKILL.md) and tell the requester why. Follow the contract's
 [review budget and lineage-reset rule](../../CONTRACT.md#review-budget).
-Return accepted repairs to delivery; bounded fixes alone do not complete the
-commissioned outcome.
+Return accepted repairs to delivery: fixing findings does not finish the task
+until the fixed head is delivered.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance. If two repairs have failed, the route is
+probably wrong, so reconsider it before a third.

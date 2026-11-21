@@ -19,5 +19,5 @@ and deciding premise. Do not make questions a ceremony for every reply.
 premise, reconsider the plan. On fatigue or “wrap up”, summarize settled choices,
 remaining questions and their owners; defer the remainder.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance.

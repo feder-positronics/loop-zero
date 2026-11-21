@@ -33,6 +33,6 @@ Explain the clarity gain and any apparently behavioral edit. Run focused success
 and relevant failure/cancellation tests and [contract checks](../../CONTRACT.md#blockers); record evidence and
 limits in task Notes.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance. If two repairs have failed, the route is
+probably wrong, so reconsider it before a third.

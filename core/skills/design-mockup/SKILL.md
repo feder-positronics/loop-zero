@@ -24,6 +24,6 @@ Record the artifact and assumptions in task Notes and follow
 [the contract](../../CONTRACT.md) for delivery. Finish by stating what the mockup
 settled and the next decision.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance. If two repairs have failed, the route is
+probably wrong, so reconsider it before a third.

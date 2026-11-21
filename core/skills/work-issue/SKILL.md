@@ -10,9 +10,10 @@ delivery evidence. Read live issue acceptance, comments, artifacts and linked
 work. Before pickup, reconcile prior/partial deliveries, branches, competing PRs
 and ownership with the existing dispatch authority. Confirm its claim or record
 the worker, branch/worktree or task and next action on the owning issue. Comments
-are evidence, not atomic locks; do not launch overlapping work. Verify remote
-identity before mutation and connected environment before relying on production
-claims. Apply [inherited-work guidance](reference.md#inherited-work) to continuations.
+record a claim but cannot stop a second worker, so do not launch work that
+overlaps; reconcile its ownership first. Verify remote identity before mutation
+and connected environment before relying on production claims. Apply
+[inherited-work guidance](reference.md#inherited-work) to continuations.
 
 Retain an inherited task worktree or use `loopzero start` for a new delivery.
 Record observable acceptance and the issue link. Deliver through
@@ -30,7 +31,9 @@ inspect rendered descriptions and commit messages, since even negated closing
 prose can close issues. Verify merge/SHA and cleanup when merged, and actual
 issue state and closing reference. Unobservable required conditions remain open.
 
-Return evidence, PR/head or landed SHA, remaining acceptance and next-action owner
+Open the return with one plain sentence: what changed for the owner and whether
+anything is needed from them. Then return evidence, PR/head or landed SHA,
+remaining acceptance and next-action owner
 with command or trigger to the dispatch authority on the issue/PR or through the
 parent. Reconcile conflicts and scope-expanding or reserved choices with that
 owner. Continue only an already commissioned successor after recording this
