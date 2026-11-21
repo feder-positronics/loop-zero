@@ -9,17 +9,20 @@ Make one complex topic understandable without losing complexity that changes the
 reader's action. Explain rather than implement or deliver a design verdict.
 
 Clarify audience, decision, depth or format only when ambiguity materially affects
-the result. Default to intuition, mechanism and decision-changing caveats; use
-orientation alone for direction or deeper models, edge cases and sources for
-independent transfer. Define technical terms on first use.
+the result. By default give the intuition, the mechanism and the caveats that would
+change a decision. A reader who only needs direction gets orientation alone; one
+who must apply it unaided also gets edge cases and sources. Define technical
+terms on first use.
 
 Separate facts, interpretation, uncertainty and speculation. Source material
 uncertainty in scientific, medical, regulatory, forecasting and emerging topics;
 avoid unsupported precision or caveats hidden from decisions.
 
-Orient first, explain the mechanism, then give an actionable or memorable
-takeaway. Choose structure to fit, using components, data flow and
-failure/authority boundaries for technical topics. Before sending, check that
+Answer the question the reader actually has, against what they expected. Orient
+first, explain the mechanism and say how each step leads to the next, then give
+an actionable or memorable takeaway. Cut details that are interesting but do not
+help the reader follow, judge or act. Choose structure to fit, using
+components, data flow and failure/authority boundaries for technical topics. Before sending, check that
 each takeaway follows from the concrete material and says something the opening
 did not.
 
