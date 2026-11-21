@@ -9,7 +9,7 @@ Review one frozen diff without editing the tree. Read [the contract](../../CONTR
 the PR body, and surrounding code. Confirm the exact head and follow the
 contract's [scope and budget](../../CONTRACT.md#review-budget) and
 [missing-evidence rule](../../CONTRACT.md#findings); never approve blind.
-Apply [local gate receipt reuse](../../CONTRACT.md#blockers).
+Apply [local gate receipt reuse](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 ## Judge
 
