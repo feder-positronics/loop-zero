@@ -8,9 +8,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 1. `loopzero start <task-slug>` creates a worktree and branch from the base.
    Fill `.loopzero/task.md` from the [handoff template](HANDOFF.md): context,
    problem, goal, acceptance, base SHA. Write the title and goal, like any
-   issue you file, for the project owner: the outcome or consequence in plain
-   words, without session labels, ids or internal terms; link a plan instead
-   of naming it.
+   issue you file, for the project owner: lead with the consequence, then the
+   evidence that connects it to the cause, in plain words without session
+   labels, ids or internal terms; link a plan instead of naming it.
 2. Implement, commit, then `loopzero check`: run `workflow.toml`
    `[checks].commands` in the sandbox. Its exit code is the verdict.
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus

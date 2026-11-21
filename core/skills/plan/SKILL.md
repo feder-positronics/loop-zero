@@ -20,5 +20,5 @@ another tracking file. Resolve routine choices from evidence; missing authority,
 conflicting ownership or material requirements need the exact decision and options.
 Continue independent preparation. Do not implement or plan unrelated cleanup.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance.

@@ -1,14 +1,14 @@
 # <Title from slug>
 
 ## Context and goal
-- **Goal:** <what the owner or users will notice once this lands, in plain words>
-- **Problem:** <what is wrong or missing today, observable, with its cost if known>
-- **Context:** <where this sits; link a parent plan or issue rather than naming it>
+- **Goal:** <one plain sentence: because PROBLEM, this CHANGE, so the owner or users notice OUTCOME>
+- **Problem:** <the evidence: what is wrong today, as observed, and its cost>
+- **Context:** <only what a reader needs first; link a parent plan or issue rather than naming it>
 
 Refs #<issue number, or remove this line>
 
 ## Acceptance
-- <verifiable criterion>
+- <observable behaviour, e.g. "a new plan opens by restating the ask"; not wording, e.g. "plan/SKILL.md line 12 says X">
 
 ## Notes
 - <Authorized unfinished work: one next-action owner and its next action or

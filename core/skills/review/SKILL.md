@@ -37,5 +37,5 @@ State scope, uncertainty, and limits. For findings, use
 Leave the target unchanged. Do not create findings files. Live-task findings belong in PR review threads;
 other actionable discussion belongs in its issue or PR, never a separate store.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance.

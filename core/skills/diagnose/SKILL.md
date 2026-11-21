@@ -43,6 +43,6 @@ shared-gate impact and the consumer's owned retry, repair or exclusion route;
 apply it only when commissioned and authorized, preserving required proof and
 protected checks.
 
-After this step, resume the commissioned outcome within the authorized finish,
-or hand over its remaining acceptance; after two unsuccessful repairs,
-reconsider the route.
+Then continue the task you were given as far as it authorizes, or hand over
+what is left of its acceptance. If two repairs have failed, the route is
+probably wrong, so reconsider it before a third.
