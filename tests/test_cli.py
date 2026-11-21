@@ -2093,6 +2093,7 @@ def test_merge_warns_when_cleanup_fails(wt: Path, gh: FakeGh, capsys, monkeypatc
     code, out, err = run(capsys, "merge")
     assert code == 0 and out.splitlines()[-1] == "d" * 40
     assert err.startswith("warning: merged but worktree cleanup failed")
+    assert "rerun `loopzero merge` in this worktree to finish cleanup" in err
 
 
 def test_merge_warns_when_remote_cleanup_times_out(

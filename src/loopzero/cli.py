@@ -988,6 +988,9 @@ def _pr_readiness(
                           announce_receipt=True)
 
 
+CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"
+
+
 def _cleanup(wt: Path, config: Config | None = None, pr: github.PR | None = None) -> None:
     files = list((wt / ".loopzero").glob("review-*.json"))
     try:
@@ -1005,14 +1008,14 @@ def _cleanup(wt: Path, config: Config | None = None, pr: github.PR | None = None
         if pr is not None and worktree.head(wt) != pr.head_sha:
             raise OSError("local HEAD changed during archive handoff")
     except (ValueError, OSError, worktree.WorktreeError) as exc:
-        print(f"warning: retaining review receipts and task clone pending verified archive handoff: {exc}",
-              file=sys.stderr)
+        print(f"warning: merged; retaining review receipts and task clone pending verified "
+              f"archive handoff: {exc}{CLEANUP_RETRY}", file=sys.stderr)
         return
     root = _repo_root(wt)
     try:
         worktree.cleanup(root, wt)
     except (worktree.WorktreeError, OSError) as exc:
-        print(f"warning: merged but worktree cleanup failed: {exc}", file=sys.stderr)
+        print(f"warning: merged but worktree cleanup failed: {exc}{CLEANUP_RETRY}", file=sys.stderr)
 
 
 def cmd_ready(args: argparse.Namespace) -> int:
