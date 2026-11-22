@@ -2211,10 +2211,10 @@ def test_merge_names_branch_left_after_worktree_removal(
     assert code == 0 and out.splitlines()[-1] == "d" * 40
     assert err.startswith("warning: merged but worktree cleanup failed: cannot lock ref")
     assert err.rstrip().endswith(
-        "; worktree removed; from the repository root run `git branch -D lz/t1`")
+        "; worktree removed; delete local branch 'lz/t1' if it still points at the merged head")
 
 
-def test_cleanup_hints_quote_branch_and_target_configured_repo(
+def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
     branch = "lz/fix$version"
@@ -2224,13 +2224,14 @@ def test_cleanup_hints_quote_branch_and_target_configured_repo(
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("cannot lock ref")))
     cli._cleanup(gone)
-    assert capsys.readouterr().err.rstrip().endswith("run `git branch -D 'lz/fix$version'`")
+    assert capsys.readouterr().err.rstrip().endswith(
+        "delete local branch 'lz/fix$version' if it still points at the merged head")
 
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli.github.GhError(("gh", "api"), "HTTP 500")))
     cli._delete_remote_branch(SimpleNamespace(repo="acme/widgets"), branch)
     assert capsys.readouterr().err.rstrip().endswith(
-        "delete it with `gh api -X DELETE 'repos/acme/widgets/git/refs/heads/lz/fix$version'`")
+        "delete 'lz/fix$version' in acme/widgets if it still points at the merged head")
 
 
 def test_merge_warns_when_remote_cleanup_times_out(
@@ -2247,7 +2248,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
     assert code == 0 and out.splitlines()[0] == "f" * 40
     assert "remote branch cleanup failed for lz/t1" in err and "timed out" in err
     assert err.rstrip().endswith(
-        f"; delete it with `gh api -X DELETE repos/{REPO}/git/refs/heads/lz/t1`")
+        f"; delete 'lz/t1' in {REPO} if it still points at the merged head")
 
 
 def test_second_merge_retries_remote_branch_cleanup(

@@ -11,7 +11,6 @@ import json
 import os
 import random
 import re
-import shlex
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -1056,7 +1055,7 @@ def _cleanup(wt: Path, config: Config | None = None, pr: github.PR | None = None
         worktree.cleanup(root, wt)
     except (worktree.WorktreeError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() or name is None else (
-            f"; worktree removed; from the repository root run `git branch -D {shlex.quote(name)}`")
+            f"; worktree removed; delete local branch {name!r} if it still points at the merged head")
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
@@ -1380,9 +1379,8 @@ def _delete_remote_branch(config: Config, branch: str) -> None:
     try:
         github.delete_remote_branch(config.repo, branch)
     except (github.GhError, _proc.ProcTimeout) as exc:
-        ref = shlex.quote(f"repos/{config.repo}/git/refs/heads/{branch}")
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
-              f"delete it with `gh api -X DELETE {ref}`", file=sys.stderr)
+              f"delete {branch!r} in {config.repo} if it still points at the merged head", file=sys.stderr)
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
