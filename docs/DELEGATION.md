@@ -22,7 +22,8 @@ action: end that turn without calls. Do not watch a PR whose readiness or merge
 a child or your own `--wait` already reports. The launch prompt names only the
 role, handoff path and reply target. Parked work and its dispositions live in one durable table (the
 owning tracking issue or one file) that every handoff links instead of
-re-listing. Transfer recurring tasks and pending wakeups to the successor.
+re-listing. Handoffs do not carry owner orders: the successor reads open `p0`
+issues. Transfer recurring tasks and pending wakeups to the successor.
 Takeover first acts rebind schedules without restating their prompts; long
 schedule bodies live in files their prompts point to. Running T3 delegate
 completions cannot be retargeted and still go to the predecessor; the handoff
@@ -53,7 +54,9 @@ recovery cannot depend on a failed session's final summary. Link owning issue/PR
 evidence, authority and holds; worktree/branch/head/dirty state; checks and
 interrupted tool outcomes; live child/task IDs, schedules and wakeups. Include
 the next authorized action. Git/GitHub and the handoff own state, not provider
-memory or resume tokens.
+memory or resume tokens. Push the head and open the draft PR before a long
+`loopzero check`: the check then posts its verdict to the PR even if the session
+ends first.
 The successor first reconciles live remote state and uncertain external effects;
 a lost tool response is not proof the write failed. Adopt partial work without
 resetting or cleaning away the diff, and never replay whole commands blindly.
@@ -112,7 +115,20 @@ A schedule firing or a relayed approval grants no new authority.
   decisions within delegated authority, records each with its source where it
   binds, and routes asks to the current responsible owner. Settles related cases
   in one decision and ends each ruling with the next executable action and what
-  needs no further consult.
+  needs no further consult. Its whole job: take the human owner's orders, ask
+  the owner real decisions, and rule on escalations. When the owner is away and
+  the answer is easy to predict, it decides on the owner's behalf. It keeps no
+  watch and sends no status.
+- **Owner orders:** an order from the human owner is an open issue labelled
+  `p0`. Whoever receives it labels or opens that issue, comments which owner
+  carries it, and replies with its link in the same turn. PRs reference it with
+  `Refs`, not `Closes`: the issue closes only with a comment holding the result
+  or blocker.
+- **Status thread:** a standing two-hourly schedule, not any owner's watch, runs
+  one status thread as a fresh session each run. It rebuilds from GitHub and T3
+  records, tells the human owner what is done, not done and wrong, and sends the
+  decisions owner any `p0` with no commit, PR update or result for 3 h to
+  re-home.
 - **Campaign owner:** delivers one commissioned campaign while its tracking
   issue is open, and ends when it closes. Self-dispatches within approved scope
   and allocated host capacity without per-launch coordinator permission. Reports
