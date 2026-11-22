@@ -1098,12 +1098,69 @@ def test_review_author_family_repost_requires_fallback(wt, gh, fake_bin, capsys,
     from dataclasses import replace
     result = cli.runners.review_with("claude", cwd=wt, head=head, kind="primary",
                                      task_text="task", diff="diff")
-    cli._save_review(wt, replace(result, fallback="independent reviewers failed: codex" if disclosed else ""))
+    cli._save_review(wt, replace(result, fallback="independent reviewers failed: codex: unavailable" if disclosed else ""))
     code, _out, err = run(capsys, "review", "--repost")
     if disclosed:
         assert code == 0 and "Same-family fallback:" in posted_review(gh)["body"]
     else:
         assert code == 4 and "saved reviewer family claude contributed" in err
+
+
+def test_review_repost_refuses_fallback_on_independent_family(wt, gh, fake_bin, capsys):
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    head = prepare_review(wt, gh, fake_bin)
+    from dataclasses import replace
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+    result = cli.runners.review_with("codex", cwd=wt, head=head, kind="primary",
+                                     task_text="task", diff="diff")
+    cli._save_review(wt, replace(result, fallback="independent reviewers failed: claude: unavailable"))
+    code, _out, err = run(capsys, "review", "--repost")
+    assert code == 1 and "codex is not a configured reviewer family" in err
+
+
+def test_review_repost_refuses_raw_fallback_note(wt, gh, fake_bin, capsys):
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    head = prepare_review(wt, gh, fake_bin)
+    from dataclasses import replace
+    result = cli.runners.review_with("claude", cwd=wt, head=head, kind="primary",
+                                     task_text="task", diff="diff")
+    # A note saved by an older version kept the runner's first error line.
+    cli._save_review(wt, replace(result, fallback="independent reviewers failed: /home/u/secret: boom"))
+    code, _out, err = run(capsys, "review", "--repost")
+    assert code == 1 and "not in the published form" in err
+    assert not any(call["argv"][1] == post_key().split(" ")[1] for call in gh.calls)
+
+
+def test_review_repost_refuses_fallback_by_unconfigured_author(wt, gh, fake_bin, capsys):
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text().replace('reviewers = ["claude", "codex"]', 'reviewers = ["codex"]'))
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    head = prepare_review(wt, gh, fake_bin)
+    from dataclasses import replace
+    result = cli.runners.review_with("claude", cwd=wt, head=head, kind="primary",
+                                     task_text="task", diff="diff")
+    cli._save_review(wt, replace(result, fallback="independent reviewers failed: codex: unavailable"))
+    code, _out, err = run(capsys, "review", "--repost")
+    # A fresh run with only codex configured stops at exit 4; a repost must not publish more.
+    assert code == 1 and "claude is not a configured reviewer family" in err
+    assert not any(call["argv"][1] == post_key().split(" ")[1] for call in gh.calls)
+
+
+@pytest.mark.parametrize("note", [
+    "every configured family contributed (claude)",
+    "independent reviewers failed: claude: unavailable",
+])
+def test_review_repost_refuses_fallback_note_naming_wrong_families(wt, gh, fake_bin, capsys, note):
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    head = prepare_review(wt, gh, fake_bin)
+    from dataclasses import replace
+    result = cli.runners.review_with("claude", cwd=wt, head=head, kind="primary",
+                                     task_text="task", diff="diff")
+    cli._save_review(wt, replace(result, fallback=note))
+    code, _out, err = run(capsys, "review", "--repost")
+    assert code == 1 and "not in the published form" in err
+    assert not any(call["argv"][1] == post_key().split(" ")[1] for call in gh.calls)
 
 
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
@@ -1265,6 +1322,45 @@ def test_review_falls_through_when_preferred_family_fails(
     assert code == 0 and "review by claude" in out
     assert "same-family fallback: independent reviewers failed: codex:" in err
     assert "Same-family fallback:" in posted_review(gh)["body"]
+
+
+@pytest.mark.parametrize("codex_ok", [False, True])
+def test_review_unusable_fallback_effort_waits_for_independent_result(
+    wt: Path, gh: FakeGh, fake_bin: Path, fake_tool, capsys, codex_ok
+) -> None:
+    workflow = wt / "workflow.toml"
+    workflow.write_text(workflow.read_text() + """
+[delivery.review.claude]
+allowed_efforts = ["medium"]
+""")
+    git(wt, "add", "workflow.toml")
+    git(wt, "commit", "-q", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    prepare_review(wt, gh, fake_bin, post_id=4)
+    if codex_ok:
+        _fake_codex(fake_bin, json.dumps(APPROVE))
+    else:
+        fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
+                  "echo 'Please run codex login' >&2\nexit 1\n")
+    code, out, err = run(capsys, "review", "--effort", "high")
+    if codex_ok:
+        assert code == 0 and "review by codex" in out
+        return
+    assert code == 4 and "same-family fallback:" not in err
+    assert "Please run codex login" in err and "effort 'high' is not allowed for claude" in err
+    assert not (fake_bin / "claude.argv").exists()
+
+
+def test_review_fallback_publishes_normalized_reason(
+    wt: Path, gh: FakeGh, fake_bin: Path, fake_tool, capsys
+) -> None:
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    prepare_review(wt, gh, fake_bin, post_id=4)
+    fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
+              "echo 'Please run codex login /home/private/secret-path' >&2\nexit 1\n")
+    code, _out, _err = run(capsys, "review")
+    body = posted_review(gh)["body"]
+    assert code == 0 and "independent reviewers failed: codex: not authenticated." in body
+    assert "secret-path" not in body
 
 
 def test_review_unverified_codex_version_falls_back_before_model_input(

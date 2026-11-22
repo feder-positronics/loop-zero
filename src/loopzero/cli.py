@@ -575,6 +575,21 @@ def cmd_pr(args: argparse.Namespace) -> int:
     return 0
 
 
+# Published fallback reasons; --repost posts a saved note only in the form a fresh run would publish.
+_FALLBACK_REASONS = ("not authenticated", "usage limit", "not installed", "unavailable")
+
+
+def _published_fallback(note: str, candidates: list[str], excluded: list[str]) -> bool:
+    if not candidates:
+        return note == "every configured family contributed (" + ", ".join(excluded) + ")"
+    prefix = "independent reviewers failed: "
+    if not note.startswith(prefix):
+        return False
+    parts = [part.partition(": ") for part in note[len(prefix):].split("; ")]
+    return ([family for family, _sep, _reason in parts] == candidates
+            and all(reason in _FALLBACK_REASONS for _family, _sep, reason in parts))
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
@@ -620,6 +635,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
         result = _load_review(wt, head, kind)
+        if result.fallback and result.family not in excluded:
+            raise CliError(
+                f"saved review claims a same-family fallback, but {result.family} is not a configured "
+                "reviewer family that contributed to this PR lineage; run without --repost"
+            )
         if not pair_grant and not result.fallback and not any(family not in authors for family in config.reviewers):
             raise IndependentReviewerUnavailable(
                 _independence_message(authors, excluded, [], config.reviewers)
@@ -648,6 +668,10 @@ def cmd_review(args: argparse.Namespace) -> int:
                 return _review_verdict(result)
         else:
             reviews = _pr_reviews(config.repo, pr.number)
+        # Exact read-back above may confirm an older published note; a new post needs the current form.
+        candidates = [family for family in config.reviewers if family not in authors]
+        if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
+            raise CliError("saved fallback note is not in the published form; run without --repost")
         allowed, _ = _decide_kind(
             _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
@@ -821,16 +845,25 @@ def _run_review(
                              "diff_bytes": len(diff.encode())} if publication and family == "codex" else None),
         )
     selected = {family: select(family) for family in candidates}
+    # Settle fallback settings before any launch; an unusable one only matters if reached.
+    unusable: dict[str, str] = {}
+    for family in excluded:
+        try:
+            selected[family] = select(family)
+        except CliError as exc:
+            unusable[family] = f"same-family fallback {family} not possible: {exc}"
     if runtime_source:
         print(runtime_source)
     fallback = ""
+    reasons: list[str] = []  # published; runner detail stays in local stderr and failures
     for family in candidates + excluded:
+        if family in unusable:
+            failures.append(unusable[family])
+            continue
         if family in excluded and not fallback:
-            fallback = ("independent reviewers failed: " + "; ".join(f.splitlines()[0] for f in failures)
+            fallback = ("independent reviewers failed: " + "; ".join(reasons)
                         if candidates else "every configured family contributed (" + ", ".join(excluded) + ")")
             print(f"same-family fallback: {fallback}", file=sys.stderr)
-        if family not in selected:
-            selected[family] = select(family)
         try:
             try:
                 result = selected[family](diff=diff)
@@ -857,6 +890,11 @@ def _run_review(
                 package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
                 detail += f"\nFix: install it with `npm install -g {package}`."
             failures.append(detail)
+            reasons.append(f"{family}: " + (
+                _FALLBACK_REASONS[0] if isinstance(exc, runners.RunnerAuthFailed)
+                else _FALLBACK_REASONS[1] if isinstance(exc, runners.RunnerUsageLimit)
+                else _FALLBACK_REASONS[2] if isinstance(exc, runners.RunnerMissing)
+                else _FALLBACK_REASONS[3]))
             print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
