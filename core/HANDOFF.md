@@ -1,9 +1,9 @@
 # <Title from slug>
 
 ## Context and goal
-- **Goal:** <one plain sentence: what the owner or users now notice, because this CHANGE fixes which PROBLEM>
+- **Goal:** <one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>
 - **Problem:** <what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>
-- **Context:** <only what a reader needs first; link a parent plan or issue rather than naming it>
+- **Context:** <the situation a newcomer needs, in plain words; explain each domain term from something you read (code, docs, issue or glossary), or if nothing explains it say what it does here instead of naming it; rulings, batch names and authority go in Notes>
 
 Refs #<issue number, or remove this line>
 
