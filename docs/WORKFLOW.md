@@ -55,7 +55,7 @@ See the contract's [review budget](../core/CONTRACT.md#review-budget).
 
 ```mermaid
 flowchart TD
-    O["Owner<br/><sub>the human; talks only to the decisions owner</sub>"] --> D["Decisions owner<br/><sub>resolves owner decisions within delegated authority</sub>"]
+    O["Owner<br/><sub>the human; gives orders to the decisions owner</sub>"] --> D["Decisions owner<br/><sub>resolves owner decisions within delegated authority</sub>"]
     D --> C["Coordinator<br/><sub>owns delivery of one repository, dispatches workers and reviews</sub>"]
     C --> W["Worker<br/><sub>one bounded delivery from a brief</sub>"]
     W --> P["Pull request with checks"]
