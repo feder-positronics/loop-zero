@@ -90,11 +90,11 @@ def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
     task.write_text(
         task.read_text()
         .replace(
-            "<only what a reader needs first; link a parent plan or issue rather than naming it>",
+            "<the situation a newcomer needs, in plain words, with domain terms explained; rulings, batch names and authority go in Notes>",
             "The feature module is part of the sample application.",
         )
         .replace("<what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>", "The feature is missing.")
-        .replace("<one plain sentence: what the owner or users now notice, because this CHANGE fixes which PROBLEM>", "The feature prints its greeting.")
+        .replace("<one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>", "The feature prints its greeting.")
     )
     git(path, "add", "feature.py")
     git(path, "commit", "-q", "-m", "add feature")
@@ -605,7 +605,7 @@ def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
 @pytest.mark.parametrize("name,value", [
     ("Context", ""),
     ("Problem", "<what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>"),
-    ("Goal", "<one plain sentence: what the owner or users now notice, because this CHANGE fixes which PROBLEM>"),
+    ("Goal", "<one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>"),
 ])
 def test_pr_refuses_missing_context_problem_or_goal(
     wt: Path, gh: FakeGh, capsys, name: str, value: str
