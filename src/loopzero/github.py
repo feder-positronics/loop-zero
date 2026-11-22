@@ -1080,7 +1080,7 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
 def delete_remote_branch(repo: str, branch: str) -> None:
     """Delete `branch` from GitHub, accepting a ref that is already absent."""
     try:
-        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{branch}")
+        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{quote(branch, safe='/')}")
     except GhError as exc:
         absent = re.search(r"\b(?:404|422)\b", exc.tail) and re.search(
             r"reference does not exist", exc.tail, re.IGNORECASE

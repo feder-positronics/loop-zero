@@ -1202,6 +1202,13 @@ def test_delete_remote_branch_accepts_already_deleted_ref(gh: FakeGh, status: in
     github.delete_remote_branch(REPO, "lz/x")
 
 
+def test_delete_remote_branch_encodes_url_characters(gh: FakeGh) -> None:
+    # `#` would start a URL fragment and delete `lz/fix` instead.
+    gh.respond("api -X", "")
+    github.delete_remote_branch(REPO, "lz/fix#516?x%")
+    assert gh.argv(0)[-1] == f"repos/{REPO}/git/refs/heads/lz/fix%23516%3Fx%25"
+
+
 def _queue_json(queued: bool) -> dict:
     return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
 
