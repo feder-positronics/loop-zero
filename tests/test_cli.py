@@ -90,7 +90,7 @@ def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
     task.write_text(
         task.read_text()
         .replace(
-            "<the situation a newcomer needs, in plain words, with domain terms explained; rulings, batch names and authority go in Notes>",
+            "<the situation a newcomer needs, in plain words; explain each domain term from something you read (code, docs, issue or glossary), or if nothing explains it say what it does here instead of naming it; rulings, batch names and authority go in Notes>",
             "The feature module is part of the sample application.",
         )
         .replace("<what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>", "The feature is missing.")
