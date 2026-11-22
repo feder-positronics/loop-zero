@@ -1147,26 +1147,6 @@ def test_review_repost_refuses_fallback_by_unconfigured_author(wt, gh, fake_bin,
     assert not any(call["argv"][1] == post_key().split(" ")[1] for call in gh.calls)
 
 
-def test_review_repost_refuses_fallback_effort_the_config_disallows(wt, gh, fake_bin, capsys):
-    workflow = wt / "workflow.toml"
-    workflow.write_text(workflow.read_text() + """
-[delivery.review.claude]
-allowed_efforts = ["medium"]
-""")
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-q", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
-    head = prepare_review(wt, gh, fake_bin)
-    from dataclasses import replace
-    result = cli.runners.review_with("claude", cwd=wt, head=head, kind="primary",
-                                     task_text="task", diff="diff")
-    cli._save_review(wt, replace(result, effort="high",
-                                 fallback="independent reviewers failed: codex: unavailable"))
-    code, _out, err = run(capsys, "review", "--repost")
-    # A fresh run would skip this fallback as unusable; a repost must not publish it.
-    assert code == 1 and "effort 'high' is not allowed for claude" in err
-    assert not any(call["argv"][1] == post_key().split(" ")[1] for call in gh.calls)
-
-
 @pytest.mark.parametrize("note", [
     "every configured family contributed (claude)",
     "independent reviewers failed: claude: unavailable",

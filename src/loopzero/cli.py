@@ -640,14 +640,6 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"saved review claims a same-family fallback, but {result.family} is not a configured "
                 "reviewer family that contributed to this PR lineage; run without --repost"
             )
-        candidates = [family for family in config.reviewers if family not in authors]
-        if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
-            raise CliError("saved fallback note is not in the published form; run without --repost")
-        settings = config.review.get(result.family)
-        if (result.fallback and settings and result.effort and settings.allowed_efforts
-                and result.effort not in settings.allowed_efforts):
-            raise CliError(f"saved fallback effort {result.effort!r} is not allowed for {result.family}; "
-                           "run without --repost")
         if not pair_grant and not result.fallback and not any(family not in authors for family in config.reviewers):
             raise IndependentReviewerUnavailable(
                 _independence_message(authors, excluded, [], config.reviewers)
@@ -676,6 +668,10 @@ def cmd_review(args: argparse.Namespace) -> int:
                 return _review_verdict(result)
         else:
             reviews = _pr_reviews(config.repo, pr.number)
+        # Exact read-back above may confirm an older published note; a new post needs the current form.
+        candidates = [family for family in config.reviewers if family not in authors]
+        if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
+            raise CliError("saved fallback note is not in the published form; run without --repost")
         allowed, _ = _decide_kind(
             _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )

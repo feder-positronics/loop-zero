@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from loopzero import _proc, github
+from loopzero import _proc, cli, github
 from tests import test_cli as support
 from tests.conftest import git
 from tests.test_cli import (
@@ -292,3 +292,34 @@ def test_optional_settings_cannot_block_explicit_repost(wt, gh, fake_bin, monkey
     body = support.posted_review(gh)["body"]
     assert "CLI-reported model unknown (effort unknown)" in body and "forged" not in body
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+
+
+@pytest.mark.parametrize("published", [True, False])
+def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
+    wt, gh, fake_bin, fake_tool, monkeypatch, capsys, published,
+):
+    legacy = "independent reviewers failed: codex: /home/u/secret: boom"
+    git(wt, "commit", "-q", "--allow-empty", "-m", "by claude\n\nCo-Authored-By: Claude <n@a.c>")
+    fake_tool("codex", "if [ \"$1\" = --version ]; then echo 'codex-cli 0.161.0'; exit 0; fi\n"
+              "echo 'Please run codex login' >&2\nexit 1\n")
+
+    def mutate(rows, comments):  # an older version published the raw runner line
+        if published:
+            rows[-1]["body"] = rows[-1]["body"].replace(
+                "independent reviewers failed: codex: not authenticated", legacy)
+        else:
+            rows.pop()
+
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0,
+                      interrupted=True, mutate=mutate)
+    assert run(capsys, "review")[0] == 130
+    receipt = cli._review_file(wt, head, "primary")
+    data = json.loads(receipt.read_text())
+    assert data["fallback"] == "independent reviewers failed: codex: not authenticated"
+    receipt.write_text(json.dumps({**data, "fallback": legacy}))
+    code, _out, err = run(capsys, "review", "--repost")
+    if published:
+        assert code == 0, err
+    else:
+        assert code == 1 and "not in the published form" in err
+    assert len([c for c in gh.calls if "--input" in c]) == 1
