@@ -1,9 +1,9 @@
 # <Title from slug>
 
 ## Context and goal
-- **Goal:** <one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>
-- **Problem:** <what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>
-- **Context:** <the situation a newcomer needs, in plain words; explain each domain term from something you read (code, docs, issue or glossary), or if nothing explains it say what it does here instead of naming it; rulings, batch names and authority go in Notes>
+- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>
+- **Problem:** <one or two plain sentences before code names: what goes wrong, who notices, and evidence/cost; refs in brackets at the end>
+- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>
 
 Refs #<issue number, or remove this line>
 
@@ -11,6 +11,9 @@ Refs #<issue number, or remove this line>
 - <observable behaviour, e.g. "a new plan opens by restating the ask"; not wording, e.g. "plan/SKILL.md line 12 says X">
 
 ## Notes
+- <Visuals when helpful (see [Reporting](CONTRACT.md#reporting)): before/after
+  screenshots for UI changes, or a Mermaid diagram / mockup preview for
+  non-trivial flows or layouts.>
 - <Authorized unfinished work: one next-action owner and its next action or
   actual external trigger. A consumer waiting for a brief names the producer,
   which owns sending it or reporting its blocker. An owner decision names the

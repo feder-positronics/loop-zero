@@ -119,7 +119,9 @@ A schedule firing or a relayed approval grants no new authority.
   Settles related cases in one decision and ends each ruling with the next
   executable action and what needs no further consult. Its whole job: take
   orders, ask real decisions, and rule on escalations. When the owner is away
-  and the answer is easy to predict, it decides on the owner's behalf. It keeps
+  and the answer is easy to predict, it decides on the owner's behalf. Format
+  owner-facing asks and rulings under [Reporting](../core/CONTRACT.md#reporting),
+  including visuals or mockups when comparing options, flows or UI. It keeps
   no watch and sends no status.
 - **Owner orders:** an order from the human owner is an open issue labelled
   `p0`. Whoever receives it labels or opens that issue, comments which owner
@@ -128,7 +130,9 @@ A schedule firing or a relayed approval grants no new authority.
   or blocker.
 - **Status thread:** a two-hourly schedule runs it as a fresh session. Each run
   rebuilds from GitHub and T3 records, tells the human owner what is done, not
-  done and wrong, and sends the decisions owner any `p0` with no commit, PR
+  done and wrong under [Reporting](../core/CONTRACT.md#reporting) (using
+  compact tables, charts or infographics when trends, counts or comparisons
+  clarify state), and sends the decisions owner any `p0` with no commit, PR
   update or result for 3 h to re-home. The decisions owner owns the schedule
   and rebinds it at rollover but reads no runs.
 - **Campaign owner:** delivers one commissioned campaign while its tracking

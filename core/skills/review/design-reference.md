@@ -8,7 +8,10 @@ at the depth needed for the artifact's next action.
 
 Challenge evidenced need, product fit, reuse, and the strongest alternative.
 Do not invent options. Check decision authority, reversibility, assumptions,
-and owned open questions.
+and owned open questions. Verify the opening is clear to the owner under
+[Reporting](../../CONTRACT.md#reporting), and flag missing diagrams, comparison
+tables or mockups where prose alone leaves flows, boundaries, trade-offs or UI
+shape ambiguous.
 
 ## Boundaries And Operation
 

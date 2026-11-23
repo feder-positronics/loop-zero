@@ -91,11 +91,11 @@ def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
     task.write_text(
         task.read_text()
         .replace(
-            "<the situation a newcomer needs, in plain words; explain each domain term from something you read (code, docs, issue or glossary), or if nothing explains it say what it does here instead of naming it; rulings, batch names and authority go in Notes>",
+            "<plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>",
             "The feature module is part of the sample application.",
         )
-        .replace("<what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>", "The feature is missing.")
-        .replace("<one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>", "The feature prints its greeting.")
+        .replace("<one or two plain sentences before code names: what goes wrong, who notices, and evidence/cost; refs in brackets at the end>", "The feature is missing.")
+        .replace("<one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>", "The feature prints its greeting.")
     )
     git(path, "add", "feature.py")
     git(path, "commit", "-q", "-m", "add feature")
@@ -605,8 +605,8 @@ def test_pr_title_prefers_human_heading(wt: Path, gh: FakeGh, capsys) -> None:
 
 @pytest.mark.parametrize("name,value", [
     ("Context", ""),
-    ("Problem", "<what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>"),
-    ("Goal", "<one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>"),
+    ("Problem", "<one or two plain sentences before code names: what goes wrong, who notices, and evidence/cost; refs in brackets at the end>"),
+    ("Goal", "<one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>"),
 ])
 def test_pr_refuses_missing_context_problem_or_goal(
     wt: Path, gh: FakeGh, capsys, name: str, value: str

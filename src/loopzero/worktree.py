@@ -13,9 +13,9 @@ _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
 ## Context and goal
-- **Goal:** <one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>
-- **Problem:** <what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>
-- **Context:** <the situation a newcomer needs, in plain words; explain each domain term from something you read (code, docs, issue or glossary), or if nothing explains it say what it does here instead of naming it; rulings, batch names and authority go in Notes>
+- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>
+- **Problem:** <one or two plain sentences before code names: what goes wrong, who notices, and evidence/cost; refs in brackets at the end>
+- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>
 
 Refs #<issue number, or remove this line>
 

@@ -44,9 +44,9 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
     assert headings == ["## Context and goal", "## Acceptance", "## Notes", "## Base",
                         "## Validation", "## Review"], "matches core/HANDOFF.md"
-    assert "- **Context:** <the situation a newcomer needs, in plain words; explain each domain term from something you read (code, docs, issue or glossary), or if nothing explains it say what it does here instead of naming it; rulings, batch names and authority go in Notes>" in text
-    assert "- **Problem:** <what goes wrong and who notices, in one or two plain sentences before any code names; one problem only; cost if known; refs in brackets at the end>" in text
-    assert "- **Goal:** <one plain sentence: what the owner or users now notice, and what it costs, saves or shows, because this CHANGE fixes which PROBLEM>" in text
+    assert "- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>" in text
+    assert "- **Problem:** <one or two plain sentences before code names: what goes wrong, who notices, and evidence/cost; refs in brackets at the end>" in text
+    assert "- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>" in text
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     assert "Refs #<issue number, or remove this line>" in text
