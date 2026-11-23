@@ -93,8 +93,10 @@ inside them.
   - **UI layout, navigation, visual hierarchy or interactive flow** (design
     docs, UI issues, owner product choices) → standalone mockup
     ([design-mockup](skills/design-mockup/SKILL.md)) or annotated wireframe
-    before coding; **UI bugs and UI-changing PRs** attach before/after (or
-    expected vs. actual) screenshots.
+    before coding. **Every issue that refers to a UI function** (bug, feature,
+    change or help text) shows that UI when filed: an annotated screenshot of
+    the current screen, plus a mockup of any intended change. **UI-changing
+    PRs** attach before/after (or expected vs. actual) screenshots.
   - **Match the channel:** in interactive owner chat (such as T3), render
     charts, infographics and HTML mockups inline or embed Mermaid/images; on
     GitHub (PRs, issues, checked-in design docs), use Mermaid and Markdown
