@@ -6,11 +6,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 ## The six steps
 
 1. `loopzero start <task-slug>` creates a worktree and branch from the base.
-   Fill `.loopzero/task.md` from the [handoff template](HANDOFF.md): context,
-   problem, goal, acceptance, base SHA. Write the title and goal, like any
-   issue you file, for the project owner: lead with the consequence, then the
-   evidence that connects it to the cause, in plain words without session
-   labels, ids or internal terms; link a plan instead of naming it.
+   Fill `.loopzero/task.md` from the [handoff template](HANDOFF.md): goal,
+   problem, context, acceptance, base SHA. Write the PR, like any issue or
+   design doc you write, for the project owner under [Reporting](#reporting).
 2. Implement, commit, then `loopzero check`: run `workflow.toml`
    `[checks].commands` in the sandbox. Its exit code is the verdict.
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
@@ -51,12 +49,27 @@ requester needed).
 
 ## Reporting
 
-Write reports, requests and status messages for the reader's next action,
-readable without the thread they came from. Templates (handoff, delegation
-brief) keep their fields; these rules govern the prose inside them.
+Write PRs, issues, design docs, reports, requests and status messages for the
+reader's next action, readable without the thread they came from. Templates
+(handoff, delegation brief) keep their fields; these rules govern the prose
+inside them.
 
 - Lead with the outcome; when the reader must decide or act, put that request
   first, before any status.
+  - **PRs** open with what changes for the owner or users (`Goal`), then what
+    is wrong (`Problem`) and the newcomer context (`Context`); keep internal
+    dispatch, rulings and batch names in `Notes`, not the opening.
+  - **Issues** open with what is broken or wanted and who notices
+    (consequence), then the evidence connecting it to the cause, then the
+    observable evidence that closes it.
+  - **Design docs** open with a plain summary of what changes, what decision
+    is needed and the recommendation before architecture details or decision
+    IDs.
+- Write owner-facing text in plain words without session labels, batch names,
+  opaque IDs or unexpanded internal terms. Name things by what they are; link
+  a plan or issue instead of naming it. Explain each domain term from
+  something you read (code, docs, issue or glossary), or if nothing explains
+  it say what it does here instead of naming it.
 - Give the observation a conclusion rests on: command and result, number, file
   or example. Say which claims behind a decision are inferred or assumed, and
   what was skipped or failed.
@@ -66,7 +79,30 @@ brief) keep their fields; these rules govern the prose inside them.
 - For a decision, name who decides, ask the exact question, recommend a course
   and say what happens if no answer comes. Give alternatives when the choice is
   real.
-- Name things by what they are when an ID alone would be opaque to the reader.
+- **Visuals, infographics and mockups:** include a visual whenever a topic,
+  change, design or owner update has a structural, quantitative or UI shape
+  that prose alone makes slower to scan:
+  - **Steps, branches or states** (pipelines, lifecycles, before/after flow)
+    → flowchart or state diagram.
+  - **3+ components, ownership or trust/data boundaries** → component or
+    boundary diagram.
+  - **2+ options, trade-offs or before/after behaviors** → comparison table
+    or decision matrix.
+  - **Trends, proportions, latency/cost or counts over time** (status updates,
+    briefings, retros, proposals) → chart or compact infographic.
+  - **UI layout, navigation, visual hierarchy or interactive flow** (design
+    docs, UI issues, owner product choices) → standalone mockup
+    ([design-mockup](skills/design-mockup/SKILL.md)) or annotated wireframe
+    before coding; **UI bugs and UI-changing PRs** attach before/after (or
+    expected vs. actual) screenshots.
+  - **Match the channel:** in interactive owner chat (such as T3), render
+    charts, infographics and HTML mockups inline or embed Mermaid/images; on
+    GitHub (PRs, issues, checked-in design docs), use Mermaid and Markdown
+    tables, and embed a static PNG preview whenever linking a checked-in HTML
+    mockup (GitHub does not render `.html` inline).
+  - Every visual must carry structure, comparison or appearance the prose does
+    not, and the prose must stand without it. Omit visuals for small,
+    straightforward text- or code-only changes.
 - Stop when the reader can act. Apart from the delivery ending above, do not
   close by restating the opening.
 

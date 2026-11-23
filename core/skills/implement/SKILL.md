@@ -23,8 +23,9 @@ Implement that bounded acceptance with behavior proof; use
 regression test fail on pre-fix code and record where in Notes; a test that passes
 without the fix proves nothing. For migrations,
 authorization, locking/concurrency or policy logic, list edge cases in Acceptance
-and map each to a test or recorded evidence. Observe required UI/runtime behavior
-within actual permissions. Required acceptance that remains unobserved stays open
+and map each to a test or recorded evidence. Observe required UI/runtime behavior within actual permissions; include visual
+proof for UI changes per [Reporting](../../CONTRACT.md#reporting). Required
+acceptance that remains unobserved stays open
 with a next-action owner. Record tested revisions, observations, commands,
 results, trade-offs and limits in Notes or human Validation; evidence from an
 earlier head cannot establish a current gate verdict.

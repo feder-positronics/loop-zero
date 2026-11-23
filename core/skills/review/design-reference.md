@@ -8,7 +8,8 @@ at the depth needed for the artifact's next action.
 
 Challenge evidenced need, product fit, reuse, and the strongest alternative.
 Do not invent options. Check decision authority, reversibility, assumptions,
-and owned open questions.
+and owned open questions. Verify the opening and visuals follow
+[Reporting](../../CONTRACT.md#reporting).
 
 ## Boundaries And Operation
 

@@ -32,6 +32,9 @@ Link sources of truth instead of copying them.
 
 Cover the material:
 
+- Plain-language owner opening and shape-matched visuals per
+  [Reporting](../../CONTRACT.md#reporting) (using
+  [design-mockup](../design-mockup/SKILL.md) for material UI shape).
 - Trigger, actors/jobs, outcome, non-goals, success evidence.
 - Verified current state, state/data boundaries, consumers, integration,
   failures, and blast radius.
@@ -64,8 +67,9 @@ or explicit blockers.
 
 ## Validate
 
-Remove placeholders; verify links, frontmatter, current-state premises,
-decision status, question owners, acceptance, and repository conventions.
+Remove placeholders; verify [Reporting](../../CONTRACT.md#reporting) compliance,
+links, frontmatter, current-state premises, decision status, question owners,
+acceptance, and repository conventions.
 Execute guides and report observed behavior; omit architecture analysis unless
 the guide introduces a design decision.
 

@@ -26,12 +26,9 @@ components, data flow and failure/authority boundaries for technical topics. Bef
 each takeaway follows from the concrete material and says something the opening
 did not.
 
-When the topic has a shape (steps or branches, states, a comparison,
-quantities over time, components and boundaries), show it once in the form that
-fits: flowchart, state table, comparison table, chart or box diagram. In Markdown
-prefer tables and lists that stay legible as plain text; use Mermaid only where
-the destination is known to render it, such as T3 chat and GitHub. Every visual
-must carry something the prose does not, and the prose must stand without it.
+Follow [Reporting](../../CONTRACT.md#reporting) for visuals: show shaped
+topics once in the form that fits the destination channel, preferring tables
+and lists that stay legible as plain text when Markdown rendering is limited.
 
 - **Markdown:** answer inline with the smallest useful structure.
 - **HTML:** follow [HTML validation](reference.md#html-validation); report final

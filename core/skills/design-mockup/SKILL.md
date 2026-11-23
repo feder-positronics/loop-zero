@@ -18,9 +18,10 @@ when they inform the decision; state production gaps and component mappings.
 
 Inspect states, viewports and accessibility material to the decision, including
 keyboard/focus, names, contrast, overflow and supported themes as relevant.
-Report inspected conditions and unavailable checks honestly. Seek stakeholder
-validation when required; otherwise label material direction assumed and vetoable.
-Record the artifact and assumptions in task Notes and follow
+Report inspected conditions and unavailable checks honestly. Present the mockup
+for its channel per [Reporting](../../CONTRACT.md#reporting). Seek stakeholder
+validation when required; otherwise label material direction assumed and
+vetoable. Record the artifact and assumptions in task Notes and follow
 [the contract](../../CONTRACT.md) for delivery. Finish by stating what the mockup
 settled and the next decision.
 
