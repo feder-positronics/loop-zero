@@ -30,11 +30,9 @@ limit on the backlog.
 ## For agents
 
 - **Create:** give each issue exactly one kind. Write it for the owner under
-  [Reporting](../core/CONTRACT.md#reporting): plain title, consequence first,
-  evidence connecting it to the cause, observable closing evidence, and
-  screenshots, diagrams or mockups whenever UI, flow or data shape helps. Before
-  opening one, look for an open issue in the same failure family and add to it
-  instead.
+  [Reporting](../core/CONTRACT.md#reporting) with a plain title and observable
+  closing evidence. Before opening one, look for an open issue in the same
+  failure family and add to it instead.
 - **Automated reporters** reuse one open issue per failure family. Repeated runs
   update its latest observation; distinct failures, especially security or
   privacy defects, get their own issue. A confirmed recurrence of a closed one

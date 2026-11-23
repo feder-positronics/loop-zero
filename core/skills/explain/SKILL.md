@@ -26,14 +26,9 @@ components, data flow and failure/authority boundaries for technical topics. Bef
 each takeaway follows from the concrete material and says something the opening
 did not.
 
-Follow [contract visuals](../../CONTRACT.md#reporting): when the topic has a
-shape (steps or branches, states, a comparison, quantities over time,
-components and boundaries, or a UI surface), show it once in the form that
-fits—flowchart, state table, comparison table, chart/infographic, box diagram
-or mockup—matched to the destination channel. In Markdown prefer tables and
-lists that stay legible as plain text; use Mermaid only where the destination
-renders it, such as T3 chat and GitHub. Every visual must carry something the
-prose does not, and the prose must stand without it.
+Follow [Reporting](../../CONTRACT.md#reporting) for visuals: show shaped
+topics once in the form that fits the destination channel, preferring tables
+and lists that stay legible as plain text when Markdown rendering is limited.
 
 - **Markdown:** answer inline with the smallest useful structure.
 - **HTML:** follow [HTML validation](reference.md#html-validation); report final

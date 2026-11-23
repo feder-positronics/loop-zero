@@ -14,13 +14,11 @@ decision records, conventions, and validation. Align material ambiguity before
 drafting; preserve requester decisions and keep unresolved questions owned and
 visibly blocking the relevant action.
 
-Follow [contract reporting](../../CONTRACT.md#reporting) so the owner can scan
-the opening, decision and visuals without decoding internal jargon. Write user
-scenarios before UI proposals, then validate material UI shape with
-[design-mockup](../design-mockup/SKILL.md) or an established pattern. Include
-diagrams, comparison tables or infographics whenever flows, boundaries, options
-or quantities make them clearer than prose. Blueprints name concrete paths and
-sequenced acceptance without prescribing inferable coding steps.
+Follow [Reporting](../../CONTRACT.md#reporting) for the owner-facing opening
+and visuals. Write user scenarios before UI proposals, then validate material
+UI shape with [design-mockup](../design-mockup/SKILL.md) or an established
+pattern. Blueprints name concrete paths and sequenced acceptance without
+prescribing inferable coding steps.
 
 For an existing artifact, preserve settled decisions unless evidence invalidates
 their premises. Correct material gaps and verify the underlying design problem

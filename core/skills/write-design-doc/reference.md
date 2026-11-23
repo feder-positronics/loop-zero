@@ -32,19 +32,14 @@ Link sources of truth instead of copying them.
 
 Cover the material:
 
-- Plain-language owner opening per [Reporting](../../CONTRACT.md#reporting):
-  what changes, what decision is needed and the recommendation before
-  architecture details or decision IDs.
+- Plain-language owner opening and shape-matched visuals per
+  [Reporting](../../CONTRACT.md#reporting) (using
+  [design-mockup](../design-mockup/SKILL.md) for material UI shape).
 - Trigger, actors/jobs, outcome, non-goals, success evidence.
 - Verified current state, state/data boundaries, consumers, integration,
   failures, and blast radius.
 - Material alternatives and chosen shape; prefer the simplest shape and reuse
   existing surfaces.
-- Visuals matching the topic's shape per
-  [Reporting](../../CONTRACT.md#reporting): Mermaid flow/state/boundary
-  diagrams, option comparison tables, charts/infographics, and
-  [design-mockup](../design-mockup/SKILL.md) previews (with a static PNG
-  screenshot embedded in the doc when linking an HTML mockup on GitHub).
 - Domain terms and user-facing labels; explain intentional divergence.
 - Implementation boundary, observable acceptance, validation, rollback,
   and observability where relevant.
@@ -72,10 +67,9 @@ or explicit blockers.
 
 ## Validate
 
-Remove placeholders; verify owner-readable opening, links, frontmatter,
-current-state premises, decision status, question owners, acceptance, visuals
-(including static previews alongside HTML mockups for GitHub) and repository
-conventions.
+Remove placeholders; verify [Reporting](../../CONTRACT.md#reporting) compliance,
+links, frontmatter, current-state premises, decision status, question owners,
+acceptance, and repository conventions.
 Execute guides and report observed behavior; omit architecture analysis unless
 the guide introduces a design decision.
 
