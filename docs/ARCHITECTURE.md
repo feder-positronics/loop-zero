@@ -28,8 +28,9 @@ independent runners are unavailable. The [bounded owner exception](../core/CONTR
 permits disclosed contributor review with reduced assurance.
 Readiness combines that evidence with live checks and findings. Merge verifies
 what actually landed. CLI checks stay strict, with no waiver file or unsandboxed
-fallback. The contract's S1 owner route uses GitHub and the queue for local-receipt
-exceptions; S2 authorizes merge by default outside reserved classes.
+fallback. The contract's owner queue route uses GitHub and the queue for
+local-receipt exceptions. Merge authority permits merging by default outside
+reserved classes.
 
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
 reviews, finding threads, check statuses and merge state. CI and branch protection

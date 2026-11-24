@@ -36,7 +36,7 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    budget; without it, those checks block merge and the command names the
    waiter. Enqueueing without `--wait` returns 0 without cleanup.
 
-Merge is authorized by default under [S2](#s2-merge-authority).
+Merge is authorized by default under [merge authority](#merge-authority).
 
 On every start/resume, run `loopzero status`, then rerun the last `--wait`
 command if any; both are idempotent. Status derives the branch's stage from
@@ -111,15 +111,15 @@ inside them.
 - Stop when the reader can act. Apart from the delivery ending above, do not
   close by restating the opening.
 
-## S2: merge authority
+## Merge authority
 
 Merge is authorized by default outside six reserved classes: auth, public API,
 destructive migrations, CI/required checks, production lease and spending beyond
 current accounts. A reserved class carries a `hold` label plus one issue comment
 naming the hazard and end condition for the
 [decisions owner](../docs/DELEGATION.md#team-roles) (or human owner) to resolve.
-No separate per-PR merge, ready or queue approval; no hold renewal. S2 holds also
-block the S1 owner queue route below.
+No separate per-PR merge, ready or queue approval; no hold renewal. Merge-authority
+holds also block the owner queue route below.
 
 ## Blockers
 
@@ -144,10 +144,10 @@ flag. Hosted review eligibility uses the exact authored SHA and trusted-base
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
 
-**S1: queue is the proof.** A PR covered by a review eligible
-under [Review budget](#review-budget) and green on required hosted checks,
-with no other readiness blockers above and no S2 hold, is marked ready and
-queued by its owner. Because the queue enforces required integration checks,
+**Owner queue route.** The queue is the proof. A PR covered by a review eligible
+under [Review budget](#review-budget) and green on required hosted checks, with
+no other readiness blockers above and no merge-authority hold, is marked ready
+and queued by its owner. Because the queue enforces required integration checks,
 when only the local receipt is not green the owner states ONE reason in a PR
 comment, then marks ready and queues directly in GitHub:
 
@@ -164,8 +164,8 @@ product, build or deployment hazard, revert the culprit first within 1 h under
 the consumer's rollback rules. Non-critical observer failures outside a change
 get an active repair owner without freezing unrelated merges. Missing valid
 required proof still blocks the affected operation. These failure policies
-preserve exact-SHA review, receipt requirements, the S1 local-receipt route and
-S2 holds.
+preserve exact-SHA review, receipt requirements, the owner queue route and
+merge-authority holds.
 
 ## Gate execution and delivery priority
 
