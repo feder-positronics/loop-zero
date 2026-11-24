@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Implement a bounded change through behavior proof and the contract's S1/S2 owner rules.
+description: Implement a bounded change through behavior proof and the contract's owner queue route and merge authority.
 ---
 
 # Implement
@@ -62,7 +62,7 @@ own cleanup under the delivery contract.
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head. Check the
 clean committed head before pushing. Suggestions must not expand scope. Follow
-the contract's S1 owner route and S2 merge authority.
+the contract's owner queue route and merge authority.
 Never merge main into a reviewed branch. Rebase your own commits onto
 origin/main BEFORE review. Preserve the primary for the delta and the delta for
 post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
@@ -82,10 +82,10 @@ services, labels) goes live only after the repository change consuming it is on
 main, or stays compatible with current main; prove it with one green run of the
 affected job on the changed host before enabling it for every runner. Before
 parking a PR behind another, confirm that one does not wait on yours; never hold
-two PRs on each other. A failure outside the contract's S1 owner route goes with
-its last-green comparison to [diagnose](../diagnose/SKILL.md) at
+two PRs on each other. A failure outside the contract's owner queue route goes
+with its last-green comparison to [diagnose](../diagnose/SKILL.md) at
 once; recording it is not handing it over.
 
-To requeue, unless an S2 hold applies, post `@mergifyio queue` as the
+To requeue, unless a merge-authority hold applies, post `@mergifyio queue` as the
 whole PR comment from the same login; `loopzero merge --wait` never requeues
 by itself.

@@ -11,7 +11,7 @@ and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 | Name | Use when |
 | --- | --- |
 | `plan` | Bound an unclear change before implementation: one objective, observable acceptance. |
-| `implement` | Deliver a bounded task under the contract's S1/S2 owner rules. |
+| `implement` | Deliver a bounded task under the contract's owner queue route and merge authority. |
 | `work-issue` | Run the act skills (`plan`, `implement` and others as needed) for one live GitHub issue through verified merge, then closure or explicit partial delivery. |
 | `write-design-doc` | Create or refine a durable design contract: exploration, ADR, initiative, blueprint or guide. |
 | `grill-me` | Stress-test requested decisions or settle structurally coupled material choices. |
