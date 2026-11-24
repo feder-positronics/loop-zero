@@ -127,14 +127,14 @@ block the S1 owner queue route below.
 
 - A required check exited nonzero on this head.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
-  outdated and its marker names another head.
-- Missing review of the current head, including head movement after review.
+  outdated and its marker names another head. When relying on an ancestor delta,
+  every unresolved blocking thread counts, including outdated threads.
+- Missing eligible review of the current head or a delta-reviewed ancestor.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
   source-preserving. It validates a separate integration candidate,
   preserving authored-head review across base movement. Conflicts still
-  block; source edits, including conflict fixes, require checks and review
-  again.
+  block; source edits require fresh checks and eligible review.
 - Any `[checks].required_ci` check missing or not green on the exact head.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
@@ -144,7 +144,7 @@ flag. Hosted review eligibility uses the exact authored SHA and trusted-base
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
 
-**S1: queue is the proof.** A PR approved at its head by a reviewer eligible
+**S1: queue is the proof.** A PR covered by a review eligible
 under [Review budget](#review-budget) and green on required hosted checks,
 with no other readiness blockers above and no S2 hold, is marked ready and
 queued by its owner. Because the queue enforces required integration checks,
@@ -208,7 +208,10 @@ version.
 
 ## Review budget
 
-- One primary and at most one delta per head lineage. The delta reads only
+Loop-zero serves internal projects only and does not target tamper resistance for outside users.
+Freeze new work on evidence projections, receipt archives, attempt reservations and reviewer version pins, simplifying or deleting them when they break or obstruct delivery.
+
+- One primary and at most one delta per PR. The delta reads only
   changes since the primary; unresolved primary findings still count under
   Blockers.
 - Default: one writing model family per PR, including delegates and repairs;
@@ -226,16 +229,8 @@ version.
   trailers, use the disclosed same-family fallback.
 - Batch substantive and mechanical repairs into one head for the delta.
   Preserve the approved head; optional suggestions do not justify edits.
-  Necessary changes require renewed checks and review: remaining delta, or
-  class audit and fresh lineage.
-- If fixes remain after the delta, audit the entire defect class, then
-  squash/amend so **neither reviewed commit remains an ancestor of HEAD**.
-  The next primary starts at HEAD's merge-base with configured base.
-  Repeated same-class findings mean the audit failed; fresh lineage is not
-  permission to keep patching (see `resolve-findings`). Skip the class audit
-  only when every remaining fix is a mechanical repair (test expectations,
-  typing, lint or format) that changes no product behaviour, and the PR body
-  lists each repair as mechanical. Any product logic change keeps the audit.
+- After round two, the owner merges once every finding is fixed or rejected
+  with reasons and readiness passes, or splits the PR. No escalation is required.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only
@@ -260,8 +255,7 @@ completion and a verified archive handoff.
 
 ### Owner-approved contributor-review exception
 
-Only the mixed-authoring route following Marcin's IntelFlo #6234 direction
-(delivered in IntelFlo #6327), confirmed by the owner's
+Only the mixed-authoring route confirmed by the owner's
 [#264 ruling](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6025584110)
 and [scope confirmation](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6031084292)
 permits genuine native review by the less-writing family, with reduced
@@ -281,10 +275,7 @@ main attribution and full minority disclosure, then push for review.
 Merge-time squash cannot establish it. After primary review, the delta
 requires that exact primary as an ancestor: only unreviewed repairs may be
 rewritten where this disclosure route and truthful authorship permit; never
-credit someone else's repair to the main contributor. If selecting the
-exception requires rewriting the primary or its ancestors for a fresh budget,
-wait for owner direction. Before another primary after delta exhaustion,
-audit the class and remove both reviewed ancestors.
+credit someone else's repair to the main contributor.
 
 The selector, budget and all exact-head runner review, checks, findings,
 readiness and merge gates remain unchanged. Prose proves no permission.

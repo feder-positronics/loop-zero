@@ -23,8 +23,8 @@ flowchart TD
     J --> K["Clean up: delete branch and worktree"]
 ```
 
-See the contract's [Blockers](../core/CONTRACT.md#blockers) for exact-head
-review, head movement and readiness.
+See the contract's [Blockers](../core/CONTRACT.md#blockers) for review coverage,
+head movement and readiness.
 
 Work stops at "ready" unless merging has been authorized.
 
@@ -40,10 +40,9 @@ flowchart TD
     A -->|fixes needed| B["Make all fixes in one batch"]
     B --> C["One review of only the new changes<br/><sub>delta, at most one</sub>"]
     C -->|approved| Z
-    C -->|more fixes still needed| D["Audit the whole class of defect,<br/>not just the reported cases"]
-    D --> E["Squash so no reviewed commit remains"]
-    E --> F["One fresh full review<br/><sub>new primary</sub>"]
-    F --> Z
+    C -->|findings remain| D["Owner fixes or rejects findings with reasons"]
+    D -->|ready| Z
+    C -->|split needed| E["Owner splits the PR"]
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
     H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
     J -->|none can run| I["Wait for the owner"]
