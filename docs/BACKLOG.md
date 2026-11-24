@@ -38,9 +38,9 @@ limit on the backlog.
   privacy defects, get their own issue. A confirmed recurrence of a closed one
   reopens it under the same recovery rule.
 - **Work:** ownership, claims, linked PRs and acceptance work as before. Only
-  [S2 reserved classes](../core/CONTRACT.md#s2-merge-authority) carry a `hold`
-  label plus one issue comment naming the hazard and end condition; age alone
-  never implies a hold.
+  [classes reserved under merge authority](../core/CONTRACT.md#merge-authority) carry a
+  `hold` label plus one issue comment naming the hazard and end condition; age
+  alone never implies a hold.
 - **Close:** closure rules do not change. Incidents, QA issues and goals close
   on their own acceptance and authority ([CONTRACT.md](../core/CONTRACT.md),
   [DELEGATION.md](DELEGATION.md)). A green unrelated job, age or a count target

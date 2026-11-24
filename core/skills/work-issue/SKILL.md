@@ -21,7 +21,7 @@ Record observable acceptance and the issue link. Deliver through
 As an unattended worker, follow [the worker role's blocker route](../../../docs/DELEGATION.md#team-roles).
 Recheck collisions before publication and again before merge, rereading live
 acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
-Follow the contract's S1 owner route and S2 merge authority.
+Follow the contract's owner queue route and merge authority.
 
 Partial delivery uses `Refs #N` and never closes the issue, including work needing
 post-merge observation. Closing keywords belong only to complete acceptance;
