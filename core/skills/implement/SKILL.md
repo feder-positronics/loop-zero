@@ -51,7 +51,7 @@ task checkouts as worktrees of an existing clone, not new clones. At task finish
 hand leftover worktrees and generated files to the periodic retention job named
 in host or repository instructions (such as `scratch-retention`), without waiting
 or scheduling wakeups. The job must confirm a pushed branch, merged or closed PR,
-verified archive handoff of required review evidence, clean tracked/untracked
+retention of any evidence required by the delivery contract, clean tracked/untracked
 Git state, an empty shared stash, inactivity, no unarchived T3 thread binding
 where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
 floor. Honor host execution approval rules; use dry run until execution is

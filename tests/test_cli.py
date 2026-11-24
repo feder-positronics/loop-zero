@@ -971,6 +971,9 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert "model claude-sonnet-4-6" in first_body
     assert len(first_body.encode("utf-8")) < 65_536
     assert ("Transcript truncated" in first_body) == bool(padding)
+    # Repost can still read ordinary receipts containing the old pair defaults.
+    data.update(members=[], reconciliation="", pair_authority=None, pair_prompt_sha256=None)
+    saved.write_text(json.dumps(data))
     (fake_bin / "claude.stdin").unlink()
     gh.respond(post_key(), {"id": 5})
     code, out, err = run(capsys, "review", "--repost")
@@ -2266,7 +2269,8 @@ def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
     gone = tmp_path / "gone"
     monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
         cli.worktree.WorktreeError("cannot lock ref")))
-    cli._cleanup(gone)
+    monkeypatch.setattr(cli.worktree, "head", lambda _wt: "a" * 40)
+    cli._cleanup(gone, SimpleNamespace(head_sha="a" * 40))
     assert capsys.readouterr().err.rstrip().endswith(
         "delete local branch 'lz/fix$version' if it still points at the merged head")
 
@@ -2928,48 +2932,17 @@ def test_dirty_check_does_not_claim_committed_receipt(wt, capsys):
     assert "receipt produced:" not in out
 
 
-@pytest.mark.parametrize('case', ['native', 'ordinary', 'identical', 'different', 'dirty', 'unpushed', 'unreadable', 'digest', 'copy', 'advance'])
-def test_cleanup_archive_outcomes(wt, monkeypatch, tmp_path, case, capsys):
-    from loopzero import receipt_archive
-
-    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
-    receipt = wt / '.loopzero/review-native.json'
-    receipt.write_text(json.dumps({'native_pair_attempt': case != 'ordinary'}))
-    config = cli.config_mod.load(wt / 'workflow.toml')
-    pr = SimpleNamespace(number=7, head_sha=cli.worktree.head(wt))
-    dest = tmp_path / '.local/state/loopzero/receipts/acme-widgets' / f'7-{pr.head_sha}'
-    if case in ('identical', 'different'):
-        dest.mkdir(parents=True)
-        (dest / receipt.name).write_bytes(receipt.read_bytes() if case == 'identical' else b'old')
-    if case == 'dirty':
-        (wt / 'untracked').write_text('keep me')
-    if case == 'unpushed':
-        git(wt, 'commit', '--allow-empty', '-m', 'local after merge')
-    if case == 'unreadable':
-        receipt.write_text('{broken')
-    if case == 'digest':
-        original = receipt_archive.digest
-        monkeypatch.setattr(receipt_archive, 'digest',
-                            lambda path: original(path) if path == receipt else 'bad')
-    if case in ('copy', 'advance'):
-        original = receipt_archive.archive
-        def handoff(*args):
-            if case == 'copy':
-                raise OSError('copy failed')
-            original(*args)
-            git(wt, 'commit', '--allow-empty', '-m', 'local during archive')
-        monkeypatch.setattr(receipt_archive, 'archive', handoff)
-    cli._cleanup(wt, config, pr)
-    kept = case not in ('native', 'ordinary', 'identical')
-    assert wt.exists() == kept
-    out, err = capsys.readouterr()
-    assert not out
-    if kept:
-        assert err.startswith('warning:') and 'retaining' in err
+@pytest.mark.parametrize("case", ["dirty", "unpushed"])
+def test_cleanup_preserves_local_work(wt, case, capsys):
+    pr = SimpleNamespace(head_sha=cli.worktree.head(wt))
+    if case == "dirty":
+        (wt / "untracked").write_text("keep me")
     else:
-        assert json.loads((dest / receipt.name).read_text()) == {'native_pair_attempt': case != 'ordinary'}
-    if case in ('dirty', 'unpushed', 'unreadable'):
-        assert not dest.exists()
+        git(wt, "commit", "--allow-empty", "-m", "local after merge")
+    cli._cleanup(wt, pr)
+    assert wt.exists()
+    err = capsys.readouterr().err
+    assert ("worktree is dirty" if case == "dirty" else "local HEAD differs") in err
 
 
 @pytest.mark.parametrize('error', [None, 'lookup', 'os', 'config', 'head', 'open', 'cleanup'])
@@ -3045,13 +3018,8 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
     assert list(path.parent.iterdir()) == [path]
 
 
-def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head, tmp_path):
-    from loopzero.receipt_archive import archive
-
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    receipt = wt / ".loopzero" / "review-existing.json"
-    receipt.write_text("{}")
-    dest = archive([receipt], REPO, 7, head)
+def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head):
+    (wt / ".loopzero" / "review-existing.json").write_text("{broken")
     arm_pr(gh, head, isDraft=False, state="MERGED")
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))
     ref = f"api repos/{REPO}/git/ref/heads/lz/t1"
@@ -3070,5 +3038,4 @@ def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypat
     assert code == 0 and "was already merged" in out and err == ""
     assert not wt.exists()
     assert not git(repo, "branch", "--list", "lz/t1")
-    assert (dest / receipt.name).read_text() == "{}"
     assert not any(call["argv"][:2] == ["api", "-X"] for call in gh.calls)

@@ -1,6 +1,6 @@
 """Run by hand: uv run python scripts/backfill_receipts.py [--confirm] CLONE ...
 
-Defaults to listing merged clones; --confirm archives receipts and removes them.
+Defaults to listing merged clones; --confirm removes the listed merged clones.
 """
 
 import argparse
@@ -27,9 +27,9 @@ def main(argv=None):
                 continue
             print(f'{clone}: merged PR #{pr.number}, head {pr.head_sha}')
             if args.confirm:
-                cli._cleanup(clone, config, pr)
+                cli._cleanup(clone, pr)
                 if clone.exists():
-                    raise cli.CliError('archive or cleanup incomplete')
+                    raise cli.CliError('cleanup incomplete')
         except Exception as exc:  # noqa: BLE001 - manual batch must continue after any clone failure.
             print(f'retaining {clone}: {exc}')
             failed = True

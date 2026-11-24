@@ -256,7 +256,7 @@ of tool calls alone do not invalidate a review.
 
 For named Codex review recoveries, HOLD when required evidence is missing or
 unknown. Retain the restricted Codex review receipt and writer clone until
-completion and a verified archive handoff.
+completion.
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 

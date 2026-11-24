@@ -391,13 +391,18 @@ def test_overflow_is_hold_without_silent_chunk_truncation(native):
         runners.encode_codex_evidence(value)
 
 
-def test_private_audit_task_is_retained(native, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("source", ["pair", "pair-repost"])
+@pytest.mark.parametrize("include_evidence", [False, True])
+def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evidence):
     result = native[0]()
-    cli._save_review(tmp_path, result)
-    monkeypatch.setattr(cli, "_repo_root", lambda *_: pytest.fail("audit task must not be removed"))
-    cli._cleanup(tmp_path)
-    assert (tmp_path / ".loopzero" / f"review-{result.head[:12]}-primary.json").exists()
-    assert "verified archive handoff" in capsys.readouterr().err
+    lines = body(result).splitlines()
+    lines[0] = cli.review_marker(result.head, "primary", source)
+    if not include_evidence:
+        del lines[1]
+    review = row(result, "\n".join(lines))
+    assert eligibility.eligible_review(
+        [review], result.head, ("bot",), repo="acme/widgets", number=7
+    ) is None
 
 
 @pytest.mark.parametrize(
