@@ -111,7 +111,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
     if mode == "projected_quote":
         assert eligibility.eligible_review([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
-    markers = cli._lineage_markers(tmp_path, [review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
+    markers = cli._pr_markers(tmp_path, [review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
     assert bool(markers) == (mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"))
     script = _fake_codex(fake_bin, json.dumps(APPROVE))
     if mode == "after_tool":
@@ -221,7 +221,7 @@ def test_retired_targets_use_ordinary_eligibility_and_budget(tmp_path, monkeypat
     }
     monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
     def markers(history):
-        return cli._lineage_markers(tmp_path, history, target, PUBLISHER, repo=repository, number=number)
+        return cli._pr_markers(tmp_path, history, target, PUBLISHER, repo=repository, number=number)
     assert cli._decide_kind(markers(rows), target) == ("primary", None)
     assert eligibility.eligible_review(
         [*rows, replacement], target, PUBLISHER, repo=repository, number=number
@@ -229,7 +229,7 @@ def test_retired_targets_use_ordinary_eligibility_and_budget(tmp_path, monkeypat
     with pytest.raises(cli.CliError, match="already has a primary"):
         cli._decide_kind(markers([*rows, replacement]), target)
     delta = {**replacement, "id": 1000, "body": cli.review_marker(target, "delta") + "\n**approve**"}
-    with pytest.raises(cli.CliError, match="budget exhausted"):
+    with pytest.raises(cli.CliError, match="review cap reached"):
         cli._decide_kind(markers([*rows, replacement, delta]), target)
     assert rows == snapshot
 

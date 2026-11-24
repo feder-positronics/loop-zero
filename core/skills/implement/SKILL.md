@@ -64,8 +64,8 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 clean committed head before pushing. Suggestions must not expand scope. Follow
 the contract's S1 owner route and S2 merge authority.
 Never merge main into a reviewed branch. Rebase your own commits onto
-origin/main BEFORE review. If a conflict appears AFTER review: rebase (drop any
-merge), check, then one fresh whole-PR primary; that is the PR's one fresh lineage.
+origin/main BEFORE review. Preserve the primary for the delta and the delta for
+post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
 
 Do not bypass the sandbox, change the check list or enable `[checks].network`
 to pass checks. Report base failures rather than work around them. Only you

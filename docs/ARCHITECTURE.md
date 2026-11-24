@@ -85,10 +85,11 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    unfinished branch creates or refreshes a draft PR.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
-   primary/delta limits and the
+   the PR-wide cap of one primary and one delta across head rewrites, and the
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
-5. `ready` derives readiness from the unchanged head, review, blocking findings,
+5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
+   head or a delta-reviewed ancestor, blocking findings,
    target branch and required CI. After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede

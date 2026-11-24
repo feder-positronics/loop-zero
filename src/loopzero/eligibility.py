@@ -155,9 +155,28 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     return latest if verdict else None
 
 
+def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
+                     repo: str, number: int) -> dict | None:
+    """An exact-head review or the PR's eligible delta on an ancestor."""
+    trusted = {login.casefold() for login in publishers}
+    marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
+              and "loopzero:review" in (r.get("body") or "")]
+    if not marked or any(r.get("commit_id") == head for r in marked):
+        return eligible_review(marked, head, publishers, repo=repo, number=number)
+    latest = marked[-1]
+    marker = REVIEW_MARKER_RE.search(latest["body"])
+    if not marker or marker[2] != "delta":
+        return None
+    reviewed = marker[1]
+    if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
+        return None
+    comparison = github.api_get(f"repos/{repo}/compare/{reviewed}...{head}")
+    return latest if isinstance(comparison, dict) and comparison.get("status") == "ahead" else None
+
+
 def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                   repo: str = "", number: int = 0) -> str | None:
-    return head if eligible_review(reviews, head, publishers, repo=repo, number=number) else None
+    return head if readiness_review(reviews, head, publishers, repo=repo, number=number) else None
 
 
 def evaluate(repo: str, number: int, head: str, base: str,

@@ -208,9 +208,9 @@ class Marker:
     state: str
 
 
-def _lineage_markers(wt: Path, reviews: list[dict], head: str,
+def _pr_markers(wt: Path, reviews: list[dict], head: str,
                      publishers: tuple[str, ...] = (), *, repo: str = "", number: int = 0) -> list[Marker]:
-    """Trusted publisher markers on their named commits within this head's ancestry."""
+    """Trusted publisher markers on their named commits across the PR."""
     found: list[Marker] = []
     target = eligibility.recovery_target(repo, number)
     adjudicated = eligibility.recovery_reviews(repo, number, target, reviews)
@@ -230,27 +230,23 @@ def _lineage_markers(wt: Path, reviews: list[dict], head: str,
             trusted = {github.login().casefold()}
         if (review.get("user") or {}).get("login", "").casefold() not in trusted:
             continue
-        if not _is_ancestor(wt, match.group(1), head):
-            continue
         found.append(Marker(match.group(1), match.group(2), review.get("state") or ""))
     return found
 
 
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
-    """Return (kind, reviewed_head) or raise when the lineage's review budget is spent."""
+    """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
     primaries = [m for m in markers if m.kind == "primary"]
     deltas = [m for m in markers if m.kind == "delta"]
     if not primaries:
         return "primary", None
     if deltas:
         raise CliError(
-            "review budget exhausted for this lineage (primary and delta already posted); "
-            "a fresh lineage is for one class-wide repair, not the next finding (see "
-            "resolve-findings): audit the class, then rewrite the reviewed commits "
-            "(squash/amend) so they are no longer ancestors of HEAD and run review again"
+            "review cap reached (2 rounds per PR): fix or reject the findings "
+            "(resolve-findings) and run `loopzero ready`, or split the PR"
         )
     if len({m.head for m in primaries}) > 1:  # duplicate posts on one head are one review
-        raise CliError("more than one primary review marker found for this lineage; refusing")
+        raise CliError("more than one primary review marker found on this PR; refusing")
     reviewed = primaries[0].head
     if head.startswith(reviewed) or reviewed.startswith(head):
         raise CliError(f"head {head[:12]} already has a primary review; run `loopzero ready`, or push fixes for the delta")
@@ -261,7 +257,7 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
-    review = eligibility.eligible_review(
+    review = eligibility.readiness_review(
         reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
         head, config.review_publishers or (github.login(),), repo=config.repo, number=pr.number,
     )
@@ -625,11 +621,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         if not saved:
             reviews = _pr_reviews(config.repo, pr.number)
         kind = saved[0] if saved else _decide_kind(
-            _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
+            _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )[0]
     else:
         kind, reviewed = _decide_kind(
-            _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
+            _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
@@ -673,7 +669,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
         allowed, _ = _decide_kind(
-            _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
+            _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
@@ -812,12 +808,13 @@ def _run_review(
 ) -> ReviewResult:
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
+    if kind == "delta" and not _is_ancestor(wt, since, head):
+        raise CliError("delta review requires the primary as an ancestor; restore its history or split the PR")
     if kind == "delta" and (merges := worktree.merges_since(wt, since)):
         raise CliError(
             f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
-            "merged-in changes in the delta material; rebase onto the base instead; delta review "
-            "needs the reviewed head as an ancestor without base merges (the rebase starts a new "
-            "lineage, so the next review is a primary)"
+            "merged-in changes in the delta material; delta review needs the reviewed head as an "
+            "ancestor without base merges"
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
@@ -1416,12 +1413,12 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
-    markers = _lineage_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
+    markers = _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
-        print("review:   none for this lineage")
+        print("review:   none on this PR")
     readiness = _readiness(wt, config, pr, head, reviews)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
