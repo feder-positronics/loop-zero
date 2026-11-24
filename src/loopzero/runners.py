@@ -427,25 +427,17 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     return tuple(binds)
 
 
-# These releases have a source-reviewed configuration-to-developer-role path.
-_CODEX_INSTRUCTION_VERSIONS = frozenset({
-    "0.160.1", "0.161.0", "0.162.1", "0.163.0", "0.164.0", "0.165.0", "0.166.0", "0.167.0",
-})
-
-
-def _verify_codex_instruction_channel(
-    binary: Path, cwd: Path, env_allowlist: tuple[str, ...]
-) -> None:
-    diagnostic = "codex: instruction channel requires re-verification for this executable/version"
+def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str:
+    diagnostic = "codex: version probe failed"
     try:
         done = _proc.run(
             [str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30,
         )
-    except (_proc.ToolMissing, _proc.ProcTimeout, FileNotFoundError) as exc:
+    except (_proc.ToolMissing, _proc.ProcTimeout, OSError) as exc:
         raise RunnerBadOutput(diagnostic) from exc
-    match = re.fullmatch(r"codex-cli ([0-9]+\.[0-9]+\.[0-9]+)\n?", done.stdout)
-    if done.exit_code or not match or match.group(1) not in _CODEX_INSTRUCTION_VERSIONS:
+    if done.exit_code:
         raise RunnerBadOutput(diagnostic, _tail(done.stdout + done.stderr))
+    return done.stdout.rstrip("\n")
 
 
 def _codex_supports_ignore_user_config(
@@ -1030,8 +1022,10 @@ def _codex_rollout_settings(home: Path, session_id: str) -> dict:
             return unknown
         metadata = [record.get("payload") for record in records if record.get("type") == "session_meta"]
         if (len(metadata) != 1 or not isinstance(metadata[0], dict)
-                or metadata[0].get("id") != session_id
-                or metadata[0].get("cli_version") not in _CODEX_INSTRUCTION_VERSIONS):
+                or metadata[0].get("id") != session_id):
+            return unknown
+        version = metadata[0].get("cli_version")
+        if not isinstance(version, str) or not version.strip():
             return unknown
         contexts = [record.get("payload") for record in records if record.get("type") == "turn_context"]
         if not contexts or any(not isinstance(context, dict) for context in contexts):
@@ -1225,7 +1219,7 @@ def _review_codex(
         schema_file.write_text(json.dumps(REVIEW_SCHEMA), encoding="utf-8")
         auth_binds = _auth_binds("codex", home)
         prefix, config, binary = _sandbox_prefix("codex", cwd, home, ro_paths, auth_binds)
-        _verify_codex_instruction_channel(binary, cwd, config.env_allowlist)
+        cli_version = _observe_codex_version(binary, cwd, config.env_allowlist)
         ignore_user_config = _codex_supports_ignore_user_config(binary, cwd, config.env_allowlist)
         argv = [
             str(binary),
@@ -1285,6 +1279,8 @@ def _review_codex(
         raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
+    envelope["cli_version"] = cli_version
+    provenance["cli_version"] = cli_version
     if review_context is not None:
         envelope["review_context"] = review_context
     raw = json.dumps(envelope, separators=(",", ":"))
@@ -1372,6 +1368,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
         )
     else:
         provenance["token_usage"] = [result.provenance["token_usage"] for result in results]
+        provenance["cli_versions"] = [result.provenance.get("cli_version") for result in results]
     return ReviewResult(
         family=first.family,
         head=first.head,

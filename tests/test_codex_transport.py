@@ -401,7 +401,7 @@ def test_private_audit_task_is_retained(native, tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize(
-    "kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_wrong_range"]
+    "kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta"]
 )
 def test_large_publication_confirmation_and_hosted_agreement(
     native, gh, tmp_path, fake_bin, monkeypatch, kind
@@ -422,8 +422,7 @@ def test_large_publication_confirmation_and_hosted_agreement(
         task.parent.mkdir()
         task.write_text("Inspect the delta")
         tool = fake_bin / "codex"
-        selected = merge_base if kind == "delta_wrong_range" else reviewed
-        old_range, new_range = f"{merge_base!r},{reviewed!r}", f"{selected!r},{head!r}"
+        old_range, new_range = f"{merge_base!r},{reviewed!r}", f"{reviewed!r},{head!r}"
         tool.write_text(tool.read_text().replace(old_range, new_range))
         result = cli._run_review(native[2], cfg, head, "delta", reviewed,
                                  publication=(repo, 7, "bot"))
@@ -431,15 +430,10 @@ def test_large_publication_confirmation_and_hosted_agreement(
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
         delta_diff = git(native[2], "diff", "--no-color", reviewed, head).strip().encode()
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
-        assert eligibility.recovery_inspection(proof, head) is (kind == "delta")
-        monkeypatch.setattr(eligibility, "recovery_target", lambda *_: head)
-        monkeypatch.setitem(eligibility._RECOVERY_TARGETS, 7, head)
-        monkeypatch.setattr(eligibility, "recovery_reviews", lambda *_: (999,))
     head = result.head
     prefix = (
         cli._repost_prefix(result) if kind == "repost" else cli.review_marker(head, result.kind)
     )
-    prefix += eligibility.recovery_suffix(repo, 7, head, [])
     gh.respond(f"api repos/{repo}/pulls/7/files", [])
     rendered = github.review_payload(repo, 7, head, result, prefix)["body"]
     review = row(result, rendered)
@@ -468,13 +462,8 @@ def test_large_publication_confirmation_and_hosted_agreement(
     assert (
         cli._readiness(native[2], cfg, pr, head, [review]).ready
         is eligibility.evaluate(repo, 7, head, "main", ("bot",)).ready
-        is (kind != "delta_wrong_range")
     )
-    if kind == "delta_wrong_range":
-        assert not eligibility.recovery_inspection(eligibility.review_projection(review, head, repo, 7)[1], head)
-        with pytest.raises(cli.CliError, match="revoked"):
-            cli._confirm_review(native[2], cfg, pr, result, "bot", [review])
-    elif kind in ("tampered_digest", "changed_raw"):
+    if kind in ("tampered_digest", "changed_raw"):
         with pytest.raises(cli.CliError, match="conflicting or ambiguous"):
             cli._confirm_review(native[2], cfg, github.pr_view(repo, 7), result, "bot", [review])
     else:
@@ -663,12 +652,12 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
         tool.write_text(source.replace(" command=", f" if index != {index}: continue\n command="))
         partial.append(native[0]((index + 1, 2)))
     merged = runners.merge_reviews(partial)
+    assert merged.provenance["cli_versions"] == [result.provenance["cli_version"] for result in partial]
     proof = runners.codex_evidence(merged)
     assert proof["complete"] and len({call["session"] for call in proof["calls"]}) == 2
     assert all(call["inspection"] == "unknown" for call in proof["calls"])
-    assert not eligibility.recovery_inspection(proof, merged.head)
     public = eligibility.review_projection(row(merged), merged.head, "acme/widgets", 7)[1]
-    assert public == proof and not eligibility.recovery_inspection(public, merged.head)
+    assert public == proof
 
 
 def test_entire_leading_block_budget_includes_adjudication(native, monkeypatch):

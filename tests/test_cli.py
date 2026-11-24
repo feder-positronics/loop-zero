@@ -1364,7 +1364,7 @@ def test_review_fallback_publishes_normalized_reason(
     assert "secret-path" not in body
 
 
-def test_review_unverified_codex_version_falls_back_before_model_input(
+def test_review_observes_new_codex_version_in_saved_receipt(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys,
 ) -> None:
     workflow = wt / "workflow.toml"
@@ -1374,11 +1374,13 @@ def test_review_unverified_codex_version_falls_back_before_model_input(
     git(wt, "add", "workflow.toml")
     git(wt, "commit", "-q", "-m", "prefer codex")
     prepare_review(wt, gh, fake_bin)
-    _fake_codex(fake_bin, json.dumps(APPROVE), version="codex-cli 0.162.0")
+    version = "codex-cli 0.168.0"
+    _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
     code, out, err = run(capsys, "review")
-    assert code == 0 and "review by claude" in out
-    assert "reviewer codex unavailable:" in err and "re-verification" in err
-    assert not (fake_bin / "codex.stdin").exists()
+    assert code == 0 and "review by codex" in out
+    assert "reviewer codex unavailable:" not in err
+    result = cli._load_review(wt, git(wt, "rev-parse", "HEAD").strip(), "primary")
+    assert result.provenance["cli_version"] == version
 
 
 @pytest.mark.parametrize("mixed_authors", [False, True])

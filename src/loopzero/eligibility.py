@@ -6,7 +6,6 @@ Hosted callers must serialize refreshes per PR and invalidate before review edit
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from pathlib import Path
@@ -16,12 +15,6 @@ from loopzero.types import LoopZeroError
 
 REVIEW_MARKER_RE = runners.REVIEW_MARKER_RE
 CONTEXT = "Loop-zero Eligibility"
-
-
-# OD v59 2026-10-30: all incident targets and receipts retired after closure.
-# Retain empty registries to bound retirement without changing ordinary review logic.
-_RECOVERY_TARGETS = {}
-_RECOVERY_RECEIPTS = {}
 
 
 def review_envelopes(body: str) -> tuple[str, list[dict]]:
@@ -38,41 +31,6 @@ def review_envelopes(body: str) -> tuple[str, list[dict]]:
         return raw, []
     envelopes = value if isinstance(value, list) else [value]
     return raw, envelopes if all(isinstance(item, dict) for item in envelopes) else []
-
-
-def recovery_reviews(repo: str, number: int, target: str | None, reviews: list[dict]) -> tuple[int, ...]:
-    """The complete named incident must match before any spent marker is adjudicated."""
-    if repo != "feder-positronics/intelflo" or _RECOVERY_TARGETS.get(number) != target:
-        return ()
-    expected = {key: row for key, row in _RECOVERY_RECEIPTS.items() if row[0] == number}
-    matched = []
-    for review in reviews:
-        row = expected.get(review.get("id"))
-        if not row:
-            continue
-        body = review.get("body") or ""
-        raw, envelopes = review_envelopes(body)
-        if (review.get("commit_id") == row[1]
-                and (review.get("user") or {}).get("login") == "loopzero-feder-positronics[bot]"
-                and hashlib.sha256(body.encode()).hexdigest() == row[2]
-                and hashlib.sha256(raw.encode()).hexdigest() == row[3]
-                and len(envelopes) == 1 and runners.codex_fatal_startup(envelopes[0])):
-            matched.append(review["id"])
-    return tuple(matched) if len(matched) == len(expected) and len(set(matched)) == len(expected) else ()
-
-
-def recovery_target(repo: str, number: int) -> str | None:
-    return _RECOVERY_TARGETS.get(number) if repo == "feder-positronics/intelflo" else None
-
-
-def recovery_inspection(evidence: dict | None, head: str) -> bool:
-    return bool(isinstance(evidence, dict) and evidence.get("version") == 1
-                and evidence["head"] == head and evidence["complete"]
-                and all(call["fatal"] == "absent" and call["inspection"] == "verified"
-                        and all((call["reported"][key] if call["reported"][key] is not None
-                                 else call.get("configured", {}).get(key)) == expected
-                                for key, expected in (("model", "gpt-6.2-astra"), ("effort", "medium")))
-                        for call in evidence["calls"]))
 
 
 def review_projection(review: dict, head: str, repo: str, number: int):
@@ -103,16 +61,6 @@ def review_projection(review: dict, head: str, repo: str, number: int):
         return True, None
 
 
-def recovery_baseline(number: int, reviews: list[dict]) -> bool:
-    return True
-
-
-def recovery_suffix(repo: str, number: int, head: str, reviews: list[dict]) -> str:
-    ids = recovery_reviews(repo, number, recovery_target(repo, number), reviews)
-    return ("\n<!-- loopzero:adjudication v=1 replaces=" + ",".join(map(str, ids))
-            + " target=" + head + " -->") if ids else ""
-
-
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                     repo: str = "", number: int = 0, publication_only: bool = False) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
@@ -136,22 +84,6 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     _, envelopes = review_envelopes(body)
     if not present and any(runners.codex_fatal_startup(item) for item in envelopes):
         return None
-    if target := recovery_target(repo, number):
-        if not recovery_inspection(evidence, head):
-            return None
-        ids = recovery_reviews(repo, number, target, reviews)
-        suffix = recovery_suffix(repo, number, head, reviews)
-        leading = body.splitlines()
-        if (not ids or len(leading) < 3 or leading[2] != suffix.lstrip("\n")
-                or not recovery_baseline(number, reviews)):
-            return None
-        if head != target:
-            comparison = github.api_get(f"repos/{repo}/compare/{target}...{head}")
-            if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
-                return None
-            merge_base = comparison.get("merge_base_commit")
-            if not isinstance(merge_base, dict) or merge_base.get("sha") != target:
-                return None
     return latest if verdict else None
 
 

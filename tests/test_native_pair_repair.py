@@ -208,13 +208,6 @@ def test_actual_timeout_conversion_preserves_both_streams_and_elapsed(
     ]
 
 
-def test_historical_recovery_explicitly_rejects_v2_shape():
-    assert (
-        eligibility.recovery_inspection({"version": 2, "head": HEAD, "complete": True}, HEAD)
-        is False
-    )
-
-
 def test_two_concurrent_callers_acquire_only_one_native_attempt(monkeypatch, tmp_path):
     review_inputs(monkeypatch)
     start = Barrier(2)

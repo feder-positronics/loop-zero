@@ -90,7 +90,7 @@ def adapter(monkeypatch, tmp_path):
     monkeypatch.setattr(tempfile, "TemporaryDirectory", temporary)
     monkeypatch.setattr(runners, "_auth_binds", lambda *a: ())
     monkeypatch.setattr(runners, "_sandbox_prefix", sandbox_prefix)
-    monkeypatch.setattr(runners, "_verify_codex_instruction_channel", lambda *a: None)
+    monkeypatch.setattr(runners, "_observe_codex_version", lambda *a: "codex-cli 0.168.0")
     monkeypatch.setattr(runners, "_codex_supports_ignore_user_config", lambda *a: False)
     return install, calls, homes, expected
 
