@@ -189,13 +189,20 @@ def test_candidate_publication_and_event_controls(tmp_path, monkeypatch, case, e
 def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
     workflow = (Path(__file__).parents[1] / ".github/workflows/eligibility.yml").read_text()
     assert "pull_request_target:" in workflow
-    assert "ref: ${{ github.event.repository.default_branch }}" in workflow
-    assert "persist-credentials: false" in workflow
-    assert "environment:\n      name: mergify-metadata\n      deployment: false" in workflow
-    assert "permissions:\n      contents: read\n      pull-requests: read\n      statuses: write" in workflow
-    assert "PYTHONPATH: src" in workflow
-    assert "python -m loopzero.hosted" in workflow
-    assert "github.event.pull_request.head" not in workflow
+    source, candidate = workflow.split("\n  source-eligibility:\n", 1)[1].split(
+        "\n  candidate-eligibility:\n", 1
+    )
+    assert "    environment:" not in source
+    assert "${{ secrets.MERGIFY_API_KEY }}" not in source
+    assert "environment:\n      name: mergify-metadata\n      deployment: false" in candidate
+    assert "MERGIFY_API_KEY: ${{ secrets.MERGIFY_API_KEY }}" in candidate
+    for job in (source, candidate):
+        assert "ref: ${{ github.event.repository.default_branch }}" in job
+        assert "ref: ${{ github.event.pull_request.head" not in job
+        assert "persist-credentials: false" in job
+        assert "permissions:\n      contents: read\n      pull-requests: read\n      statuses: write" in job
+        assert "PYTHONPATH: src" in job
+        assert "python -m loopzero.hosted" in job
     ruleset = json.loads(
         (Path(__file__).parents[1] / ".github/rulesets/main.json").read_text()
     )

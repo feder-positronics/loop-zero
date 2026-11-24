@@ -3,8 +3,10 @@ name: review event
 on:
   pull_request_review:
     types: [submitted, edited, dismissed]
+  # Comments created inside a review also fire its submitted event; only edits and
+  # deletions of existing finding comments need their own refresh.
   pull_request_review_comment:
-    types: [created, edited, deleted]
+    types: [edited, deleted]
 permissions: {}
 jobs:
   notify:

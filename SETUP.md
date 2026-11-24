@@ -396,8 +396,9 @@ For the supplied Actions publisher, create an environment named
 `mergify-metadata`, restrict its deployment branches to the protected default
 branch, and store `MERGIFY_API_KEY` as an environment secret rather than a
 repository secret. Use the narrowest Mergify credential that can read queue status.
-The environment prevents a workflow dispatched from another ref from receiving the
-organization credential; it does not make a GitHub commit-status context unforgeable.
+Only the candidate job uses this environment and credential. The source job runs
+without either. Restricting the environment to the protected default branch limits
+credential access, while commit-status publishers still share a context namespace.
 
 GitHub and Mergify match `Loop-zero Eligibility` by context name. A repository
 writer who can add an Actions workflow can publish the same context with its
@@ -412,7 +413,7 @@ block, but unresolved current critical/important findings do. Suggestions do not
 block. Dismissing the latest review cannot restore an earlier approval.
 
 Before queue adoption, wire source pushes, review submissions/edits/dismissal,
-review-comment creation/edits/deletion and an explicit refresh to this publisher.
+review-comment edits/deletions and an explicit refresh to this publisher.
 Actions has no review-thread resolution/reopening trigger. Until an App webhook
 receiver exists, queue users must withdraw an item before altering findings or
 resolving/reopening threads, refresh eligibility, then explicitly request delivery
