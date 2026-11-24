@@ -127,7 +127,8 @@ block the S1 owner queue route below.
 
 - A required check exited nonzero on this head.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
-  outdated and its marker names another head.
+  outdated and its marker names another head. When relying on an ancestor delta,
+  every unresolved blocking thread counts, including outdated threads.
 - Missing eligible review of the current head or a delta-reviewed ancestor.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified

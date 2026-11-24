@@ -174,11 +174,6 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     return latest if isinstance(comparison, dict) and comparison.get("status") == "ahead" else None
 
 
-def reviewed_head(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
-                  repo: str = "", number: int = 0) -> str | None:
-    return head if readiness_review(reviews, head, publishers, repo=repo, number=number) else None
-
-
 def evaluate(repo: str, number: int, head: str, base: str,
              publishers: tuple[str, ...]) -> github.Readiness:
     """Re-fetch reviews and threads; no local receipts, CI identity or source execution."""
@@ -196,8 +191,9 @@ def evaluate(repo: str, number: int, head: str, base: str,
         if len(batch) < 100:
             break
         page += 1
-    result = github.readiness(repo, pr, base, (), reviewed_head(reviews, head, publishers, repo=repo, number=number),
-                              allow_behind=True)
+    review = readiness_review(reviews, head, publishers, repo=repo, number=number)
+    result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
+                              ancestor_review=review is not None and review["commit_id"] != head)
     if github.pr_view(repo, number).head_sha != head:
         return github.Readiness(False, ("source head changed during eligibility refresh",))
     return result

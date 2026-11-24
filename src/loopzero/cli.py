@@ -209,7 +209,7 @@ class Marker:
 
 
 def _pr_markers(wt: Path, reviews: list[dict], head: str,
-                     publishers: tuple[str, ...] = (), *, repo: str = "", number: int = 0) -> list[Marker]:
+                publishers: tuple[str, ...] = (), *, repo: str = "", number: int = 0) -> list[Marker]:
     """Trusted publisher markers on their named commits across the PR."""
     found: list[Marker] = []
     target = eligibility.recovery_target(repo, number)
@@ -237,16 +237,13 @@ def _pr_markers(wt: Path, reviews: list[dict], head: str,
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
     primaries = [m for m in markers if m.kind == "primary"]
-    deltas = [m for m in markers if m.kind == "delta"]
-    if not primaries:
-        return "primary", None
-    if deltas:
+    if len({m.head for m in markers}) >= 2 or (primaries and any(m.kind == "delta" for m in markers)):
         raise CliError(
             "review cap reached (2 rounds per PR): fix or reject the findings "
             "(resolve-findings) and run `loopzero ready`, or split the PR"
         )
-    if len({m.head for m in primaries}) > 1:  # duplicate posts on one head are one review
-        raise CliError("more than one primary review marker found on this PR; refusing")
+    if not primaries:
+        return "primary", None
     reviewed = primaries[0].head
     if head.startswith(reviewed) or reviewed.startswith(head):
         raise CliError(f"head {head[:12]} already has a primary review; run `loopzero ready`, or push fixes for the delta")
@@ -268,6 +265,7 @@ def _readiness(
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
         head if review else None, review_at=review_at,
+        ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
         stale_verdict_grace=(

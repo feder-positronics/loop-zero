@@ -90,7 +90,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or a delta-reviewed ancestor, blocking findings,
-   target branch and required CI. After its own draft-to-ready write,
+   target branch and required CI. Ancestor coverage includes outdated unresolved threads
+   when checking for blocking findings. After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge

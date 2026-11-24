@@ -240,5 +240,5 @@ def test_duplicate_primary_markers_on_one_head_count_as_one():
     assert cli._decide_kind(duplicate, head) == ("delta", reviewed)
     with pytest.raises(cli.CliError, match="already has a primary"):
         cli._decide_kind(duplicate, reviewed)
-    with pytest.raises(cli.CliError, match="more than one primary"):
+    with pytest.raises(cli.CliError, match=r"review cap reached \(2 rounds per PR\)"):
         cli._decide_kind([*duplicate, cli.Marker("c" * 40, "primary", "COMMENTED")], head)
