@@ -1077,16 +1077,32 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
-def delete_remote_branch(repo: str, branch: str) -> None:
-    """Delete `branch` from GitHub, accepting a ref that is already absent."""
+def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
+    """Return False if the remote ref moved, or True if deleted or absent."""
+    ref = f"heads/{quote(branch, safe='/')}"
+    endpoint = f"repos/{repo}/git/ref/{ref}"
     try:
-        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/heads/{quote(branch, safe='/')}")
+        current = api_get(endpoint)
     except GhError as exc:
-        absent = re.search(r"\b(?:404|422)\b", exc.tail) and re.search(
-            r"reference does not exist", exc.tail, re.IGNORECASE
+        if re.search(r"\bHTTP 404\b", exc.tail):
+            return True
+        raise
+    obj = current.get("object") if isinstance(current, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise GhError(("gh", "api", endpoint), "missing remote ref SHA")
+    if sha != expected_head:
+        return False
+    try:
+        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/{ref}")
+    except GhError as exc:
+        absent = re.search(r"\bHTTP 404\b", exc.tail) or (
+            re.search(r"\bHTTP 422\b", exc.tail)
+            and re.search(r"reference does not exist", exc.tail, re.IGNORECASE)
         )
         if not absent:
             raise
+    return True
 
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:

@@ -239,7 +239,16 @@ facts from complete raw, never the public transcript tail or a saved summary.
 The restricted existing receipt and writer clone remain until completion and a
 verified archive handoff. Before removing the clone, cleanup copies every review
 receipt, native sidecar and attempt file to the private receipt archive and
-verifies each copy's SHA-256 against its source.
+verifies each copy's SHA-256 against its source in a private sibling staging
+directory. A same-filesystem rename publishes the complete set. If another
+cleanup already published the archive, the file set and digests must match.
+
+After confirming a merge, cleanup reads the remote branch ref and deletes it
+only when its SHA matches the merged PR head. An absent ref completes that
+step, and a moved ref is left in place with a warning. GitHub REST uses separate
+read and delete requests, so the ref can still change between those requests.
+An already-merged PR can resume cleanup from its task worktree and reuse a
+verified archive.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the
@@ -497,8 +506,9 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt; runners cannot select stages or mint
-receipts. Stage admission belongs to the runner: the outer `loopzero check`
+the authoritative `checks.json` receipt. It flushes and syncs a sibling temporary
+file before replacing the receipt atomically. Runners cannot select stages or
+mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 

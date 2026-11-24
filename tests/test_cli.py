@@ -744,6 +744,7 @@ def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
 def arm_pr(gh: FakeGh, head: str, *, branch: str = "lz/t1", **over) -> None:
     body = "# T1\n\n## Review\n(filled by `loopzero review`)\n\n## Notes\n"
     gh.respond_pr_list([pr_json(headRefOid=head, body=body, **over)], branch=branch)
+    gh.respond(f"api repos/{REPO}/git/ref/heads/{branch}", {"object": {"sha": head}})
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
 
 
@@ -2269,7 +2270,7 @@ def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
 
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli.github.GhError(("gh", "api"), "HTTP 500")))
-    cli._delete_remote_branch(SimpleNamespace(repo="acme/widgets"), branch)
+    cli._delete_remote_branch(SimpleNamespace(repo="acme/widgets"), branch, "a" * 40)
     assert capsys.readouterr().err.rstrip().endswith(
         "delete 'lz/fix$version' in acme/widgets if it still points at the merged head")
 
@@ -2294,6 +2295,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
 def test_second_merge_retries_remote_branch_cleanup(
     wt: Path, gh: FakeGh, capsys, monkeypatch, head
 ) -> None:
+    gh.respond(f"api repos/{REPO}/git/ref/heads/lz/t1", {"object": {"sha": head}})
     gh.respond_pr_list(
         [pr_json(headRefOid=head, isDraft=False)],
         [pr_json(headRefOid=head, isDraft=False, state="MERGED")],
@@ -3022,3 +3024,49 @@ def test_wait_treats_closed_unmerged_as_not_final(monkeypatch) -> None:
 def test_wait_raises_when_closed_unmerged_persists(monkeypatch) -> None:
     with pytest.raises(github.GhError, match="closed without a verified merge"):
         _closed_unmerged_wait(monkeypatch, ["closed", "closed"], steps=1)
+
+
+def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
+    path = tmp_path / cli.CHECKS_FILE
+    cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
+
+    def interrupt(staged, dest):
+        assert Path(staged).parent == dest.parent
+        assert json.loads(Path(staged).read_text())["head"] == "b" * 40
+        assert json.loads(dest.read_text())["head"] == "a" * 40
+        raise OSError("publication interrupted")
+
+    monkeypatch.setattr(cli.os, "replace", interrupt)
+    with pytest.raises(OSError, match="publication interrupted"):
+        cli._save_report(tmp_path, CheckReport("b" * 40, False, ()))
+    assert json.loads(path.read_text())["head"] == "a" * 40
+    assert list(path.parent.iterdir()) == [path]
+
+
+def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head, tmp_path):
+    from loopzero.receipt_archive import archive
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    receipt = wt / ".loopzero" / "review-existing.json"
+    receipt.write_text("{}")
+    dest = archive([receipt], REPO, 7, head)
+    arm_pr(gh, head, isDraft=False, state="MERGED")
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))
+    ref = f"api repos/{REPO}/git/ref/heads/lz/t1"
+    gh.fail(ref, "gh: Not Found (HTTP 404)")
+
+    original = cli.worktree._git
+
+    def cleanup_git(cwd, *args, **kwargs):
+        result = original(cwd, *args, **kwargs)
+        if args[1:3] == ("worktree", "remove"):
+            git(repo, "branch", "-D", "lz/t1")
+        return result
+
+    monkeypatch.setattr(cli.worktree, "_git", cleanup_git)
+    code, out, err = run(capsys, "merge")
+    assert code == 0 and "was already merged" in out and err == ""
+    assert not wt.exists()
+    assert not git(repo, "branch", "--list", "lz/t1")
+    assert (dest / receipt.name).read_text() == "{}"
+    assert not any(call["argv"][:2] == ["api", "-X"] for call in gh.calls)
