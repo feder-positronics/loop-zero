@@ -12,19 +12,57 @@ on:
         required: true
         type: string
 permissions: {}
-concurrency:
-  group: eligibility-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr }}
-  cancel-in-progress: false
 jobs:
-  eligibility:
-    # Skip events that cannot change the verdict before a runner is allocated: title/body
-    # edits (the status tracks head, base and reviews) and candidate metadata events that
-    # loopzero.hosted ignores. The head's existing status stays authoritative.
+  # Only candidate attestation reads the Mergify queue, so only that job carries the
+  # Mergify credential and its main-only environment. Source PRs never wait on that
+  # environment, whose deployment gate intermittently hangs on GitHub's side.
+  # loopzero.hosted classifies the PR itself; a candidate event that reached the keyless
+  # job would fail closed (no MERGIFY_API_KEY) and publish a failure, never a pass.
+  source-eligibility:
+    # Skip closed PRs and title/body edits before a runner is allocated. Draft churn
+    # waits for readiness; conversion to draft still invalidates prior eligibility.
     if: >-
       github.event_name != 'pull_request_target' || (
+        github.event.action != 'closed' &&
+        (!github.event.pull_request.draft || github.event.action == 'converted_to_draft') &&
         (github.event.action != 'edited' || github.event.changes.base != null) &&
-        (github.event.pull_request.user.login != 'mergify[bot]' ||
-          github.event.action == 'opened' || github.event.action == 'synchronize'))
+        github.event.pull_request.user.login != 'mergify[bot]' &&
+        !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))
+    # Skipped events stay out of the group and cannot replace a pending refresh.
+    concurrency:
+      group: eligibility-source-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || format('run-{0}', github.run_id) }}
+      cancel-in-progress: false
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Never run candidate code or consume artifacts from the notifying workflow.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.28"
+      - name: Evaluate live source metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PYTHONPATH: src
+        run: uv run --python 3.14 --frozen --no-dev python -m loopzero.hosted
+
+  candidate-eligibility:
+    # Only candidate creation and head-update events need attestation.
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      (github.event.pull_request.user.login == 'mergify[bot]' ||
+        startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')) &&
+      (github.event.action == 'opened' || github.event.action == 'synchronize')
+    # Separate actions so a synchronize event cannot replace a pending opened run.
+    concurrency:
+      group: eligibility-candidate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || format('run-{0}', github.run_id) }}-${{ github.event.action }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     environment:
       name: mergify-metadata
@@ -42,7 +80,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.28"
-      - name: Evaluate live source or candidate metadata
+      - name: Attest live candidate metadata
         env:
           GH_TOKEN: ${{ github.token }}
           MERGIFY_API_KEY: ${{ secrets.MERGIFY_API_KEY }}
