@@ -1200,7 +1200,7 @@ def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, c
     code, out, err = run(capsys, "review")
     assert code != 0 and out == "" and not (fake_bin / "claude.stdin").exists()
     assert f"merge commit {merge[:12]} since the reviewed head {reviewed[:12]}" in err
-    assert "rebase onto the base instead; delta review needs the reviewed head as an " in err
+    assert "delta review needs the reviewed head as an " in err
 
 
 def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
@@ -1220,24 +1220,23 @@ def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bi
     assert updated.index(prior) < updated.index(head[:12]) < updated.index("## Notes")
 
 
-@pytest.mark.parametrize("invalid_history", ["outside-lineage", "forged"])
-def test_review_ignores_invalid_history(wt: Path, gh: FakeGh, fake_bin, capsys,
-                                       head, invalid_history) -> None:
-    history = ([rev("f" * 40, "primary"), rev("e" * 40, "delta")]
-               if invalid_history == "outside-lineage" else
-               [rev(head, "primary", login="stranger"), rev(head, "delta", commit="2" * 40)])
+def test_review_ignores_forged_history(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
+    history = [rev(head, "primary", login="stranger"), rev(head, "delta", commit="2" * 40)]
     prepare_review(wt, gh, fake_bin, history=history)
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith("primary review by claude")
 
 
 def test_review_refuses_when_budget_exhausted(wt: Path, gh: FakeGh, fake_bin, capsys) -> None:
-    base = git(wt, "rev-parse", "HEAD~1").strip()
-    head = head_of(wt)
-    prepare_review(wt, gh, fake_bin, history=[rev(base, "primary"), rev(head, "delta")])
+    primary = head_of(wt)
+    git(wt, "commit", "--allow-empty", "-qm", "repair after primary")
+    delta = head_of(wt)
+    git(wt, "reset", "--soft", primary + "^")
+    git(wt, "commit", "-qm", "squashed work")
+    prepare_review(wt, gh, fake_bin, history=[rev(primary, "primary"), rev(delta, "delta")])
     code, out, err = run(capsys, "review")
-    assert code == 1 and out == "" and "review budget exhausted" in err
-    assert "class-wide repair" in err and "(squash/amend)" in err
+    assert code == 1 and out == "" and "review cap reached (2 rounds per PR)" in err
+    assert "resolve-findings" in err and "split the PR" in err
     assert not (fake_bin / "claude.stdin").exists()
 
 
@@ -1441,6 +1440,47 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 
 
 # --- ready / merge / status ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind,resolved,ancestor,ready", [
+    ("primary", True, True, False), ("delta", True, True, True),
+    ("delta", False, True, False), ("delta", True, False, False),
+])
+def test_ready_after_reviewed_head(wt, gh, capsys, head, kind, resolved, ancestor, ready):
+    reviewed = git(wt, "rev-parse", "HEAD^").strip()
+    history = [rev(reviewed, kind, state="CHANGES_REQUESTED")]
+    if kind == "delta":
+        history.insert(0, rev("f" * 40, "primary"))
+    thread = {"isResolved": resolved, "path": "feature.py", "line": 1,
+              "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=important head={reviewed} -->"}]}}
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=history,
+                                      readiness={"threads": (thread,)}, isDraft=False)
+    gh.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead" if ancestor else "diverged"})
+    code, out, _ = run(capsys, "ready")
+    assert code == (0 if ready else 1)
+    if not resolved:
+        assert "open important finding" in out and "no review recorded" not in out
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
+
+
+@pytest.mark.parametrize("exact_head", [True, False])
+def test_outdated_blocker_requires_resolution_after_delta(wt, gh, capsys, head, exact_head):
+    previous = git(wt, "rev-parse", "HEAD^").strip()
+    reviewed = head if exact_head else previous
+    history = [rev("f" * 40, "primary"), rev(reviewed, "delta")]
+    thread = {"isResolved": False, "isOutdated": True, "path": "feature.py", "line": 1,
+              "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={previous} -->"}]}}
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=history,
+                                      readiness={"threads": (thread,)}, isDraft=False)
+    gh.respond(f"api repos/{REPO}/compare/{previous}...{head}", {"status": "ahead"})
+    code, out, _ = run(capsys, "ready")
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    hosted = cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,))
+    assert (code == 0, hosted.ready) == (exact_head, exact_head)
+    if not exact_head:
+        assert "open critical finding" in out
+        assert any("open critical finding" in reason for reason in hosted.reasons)
 
 
 @pytest.mark.parametrize("branch", [

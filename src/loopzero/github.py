@@ -949,7 +949,7 @@ def readiness(
     base_branch: str,
     required_ci: tuple[str, ...],
     reviewed_head: str | None,
-    *, allow_behind: bool = False,
+    *, allow_behind: bool = False, ancestor_review: bool = False,
     review_at: str | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
@@ -969,7 +969,7 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, pr.head_sha):
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks, stale, stale_verdicts = (_check_signals(
