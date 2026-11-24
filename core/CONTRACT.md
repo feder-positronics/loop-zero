@@ -231,6 +231,9 @@ Freeze new work on evidence projections, receipt archives, attempt reservations 
   Preserve the approved head; optional suggestions do not justify edits.
 - After round two, the owner merges once every finding is fixed or rejected
   with reasons and readiness passes, or splits the PR. No escalation is required.
+- After round two, take base changes by merging the base into the branch, not
+  by rebasing. Readiness accepts only heads that descend from the last reviewed
+  head; a rebase, even patch-identical, breaks that and a third review is refused.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only
