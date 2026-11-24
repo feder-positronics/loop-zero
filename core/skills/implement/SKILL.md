@@ -63,8 +63,10 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head. Check the
 clean committed head before pushing. Suggestions must not expand scope. Follow
 the contract's S1 owner route and S2 merge authority.
-Never merge main into a reviewed branch. Rebase your own commits onto
-origin/main BEFORE review. Preserve the primary for the delta and the delta for
+Rebase your own commits onto origin/main BEFORE review; do not merge main into
+a branch awaiting its delta. After round two, merge main rather than rebase
+([contract](../../CONTRACT.md#review-budget)).
+Preserve the primary for the delta and the delta for
 post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
 
 Do not bypass the sandbox, change the check list or enable `[checks].network`
