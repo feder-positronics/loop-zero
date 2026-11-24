@@ -93,6 +93,7 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    head or an ancestor with an approved primary or eligible delta review, blocking findings,
    target branch and required CI. Ancestor coverage includes outdated unresolved threads
    when checking for blocking findings and requires GitHub to report the current head as ahead.
+   This comparison establishes ancestry for both merge commits and ordinary commits.
    Primary inheritance requires an approval verdict in an approved or commented review.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.

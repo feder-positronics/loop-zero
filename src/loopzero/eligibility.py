@@ -108,8 +108,11 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         _, machine_block = runners.leading_review_block(latest["body"])
         # App reviews use COMMENTED for either verdict. Read the publisher's
         # summary before model prose, which can quote either verdict.
-        summary = latest["body"][len(machine_block):].lstrip().partition("\n")[0]
-        if not summary.partition(": **")[2].startswith("approve**"):
+        summary, _, rest = latest["body"][len(machine_block):].lstrip().partition("\n")
+        if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
+            summary = rest.partition("\n")[0]
+        if (not summary.startswith("loopzero primary review by ")
+                or not summary.partition(": **")[2].startswith("approve** (")):
             return None
     comparison = github.api_get(f"repos/{repo}/compare/{reviewed}...{head}")
     return latest if isinstance(comparison, dict) and comparison.get("status") == "ahead" else None

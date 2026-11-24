@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero import cli, github, mergify
-from loopzero.types import CheckReport, CheckResult
+from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
 from tests.test_github import (
     FakeGh,
@@ -1445,6 +1445,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 # --- ready / merge / status ----------------------------------------------------------
 
 
+@pytest.mark.parametrize("reposted", [False, True], ids=["published", "reposted"])
 @pytest.mark.parametrize("state,verdict,comparison,resolved,ready", [
     ("APPROVED", "approve", "ahead", True, True),
     ("COMMENTED", "approve", "ahead", True, True),
@@ -1456,7 +1457,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
     ("APPROVED", "approve", "diverged", True, False),
     ("APPROVED", "approve", "ahead", False, False),
 ])
-def test_ready_after_primary_reviewed_head(wt, gh, capsys, state, verdict, comparison, resolved, ready):
+def test_ready_after_primary_reviewed_head(wt, gh, capsys, state, verdict, comparison, resolved, ready, reposted):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
     git(wt, "commit", "--allow-empty", "-m", "update base")
@@ -1467,7 +1468,10 @@ def test_ready_after_primary_reviewed_head(wt, gh, capsys, state, verdict, compa
         git(wt, "rebase", "updated-base")
     head = head_of(wt)
     review = rev(reviewed, "primary", state=state, verdict=verdict)
-    review["body"] += "\n\nQuoted verdict: **approve**"
+    result = ReviewResult("claude", reviewed, "primary", verdict, (), "Quoted verdict: **approve**",
+                          provenance={"session_ids": ["test-session"]})
+    prefix = cli._repost_prefix(result) if reposted else marker(reviewed, "primary")
+    review["body"] = github.review_payload(REPO, 7, reviewed, result, prefix)["body"]
     thread = {"isResolved": resolved, "isOutdated": True, "path": "feature.py", "line": 1,
               "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=important head={reviewed} -->"}]}}
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[review],
