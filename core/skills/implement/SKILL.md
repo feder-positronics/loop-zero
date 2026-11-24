@@ -68,7 +68,10 @@ origin/main BEFORE review. Preserve the primary for the delta and the delta for
 post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
 
 Do not bypass the sandbox, change the check list or enable `[checks].network`
-to pass checks. Report base failures rather than work around them. Only you
+to pass checks. Report base failures rather than work around them. If you must
+work around a deterministic defect outside your scope, fix it in a follow-up PR
+when small and test-only; otherwise file it labelled `urgent`, naming the PR it
+blocks. Only you
 commit, never checks, hooks or scripts. If acceptance requires unlisted paths,
 update task and PR first; request scope decisions for expanded proof seams or
 ownership. If interrupted, preserve an adoptable diff and report remaining
