@@ -7,65 +7,59 @@ or exception record is required.
 
 ## Coordinator rollover
 
-At a delivery milestone or roughly 150k context tokens (where the host context
-hook nudges), launch a successor and post its link. Cap the handoff at 2,000
-characters and three numbered first acts: only references needed for the next
-action, pending results or questions, binding decision links and the reply
-target. Link rules and rulings; omit history and done items. Spend context on
-work, not on tool output: first acts read the handoff and only the files it
-links, never a chain of older handoffs; bound every read (T3 thread reads at
-most 2 items of 600 characters, helper and shell output at most 2,000
-characters, no full activity, roster or schedule listings); repeat a call that
-echoes large state, such as schedule updates or capability listings, only when
-that state changed. A child notice that only reports work still running needs no
-action: end that turn without calls. Do not watch a PR whose readiness or merge
-a child or your own `--wait` already reports. The launch prompt names only the
-role, handoff path and reply target. Parked work and its dispositions live in one durable table (the
-owning tracking issue or one file) that every handoff links instead of
-re-listing. Handoffs do not carry owner orders: the successor reads open `p0`
-issues. Transfer recurring tasks and pending wakeups to the successor.
-Takeover first acts rebind schedules without restating their prompts; long
-schedule bodies live in files their prompts point to. Running T3 delegate
-completions cannot be retargeted and still go to the predecessor; the handoff
-names them, and the successor waits for each one (`t3_thread_wait` or a one-shot
-wakeup) and then reads that child's thread once. A launch
-notice alone transfers nothing. Every retiring owner or helper starts heavy or
-long-running jobs as described in [Long-running jobs](#long-running-jobs) and
-names the unit, log and exit file in the handoff. Never retire with an attached
-live job, because retirement ends its process tree. Changed decisions name the
-instruction superseded. Right after takeover, the successor settles its
-predecessor; if T3 refuses because a turn is running,
-settle at the next idle. A retired predecessor revived by a send, schedule or
-delegate completion ends its turn without acting or replying. Resolve the current
-owner as in [Team roles](#team-roles); never send through retired predecessors.
-Batch independent notices to one owner into one send. Sends or schedules can
-revive a settled T3 thread. After delivery, roll over before monitoring or
-unrelated follow-ups; do it yourself. A bare "continue" means continue there.
-Workers report on the owning PR or issue, directly or through the parent;
-coordinators reconstruct delivery from live remote state.
+Each owner role runs in one permanent T3 thread that resets its session in
+place. At a delivery milestone or the host context hook's nudge (roughly 150k
+tokens), overwrite the role's fixed handoff file, then send the same thread
+`freshContext: true` with only "Read <handoff path>". The thread keeps its
+schedules, PR watches and delegate completions, so a reset rebinds, retargets
+and settles nothing. Before resetting, start heavy or long-running jobs as
+described in [Long-running jobs](#long-running-jobs) and name the unit, log and
+exit file in the handoff.
+
+Cap the handoff at 2,000 characters of active links and three numbered first
+acts: only references needed for the next action, pending results or questions,
+binding decision links and the reply target. Link rules and rulings; omit
+history and done items. Parked work and its dispositions live in one durable
+table (the owning tracking issue or one file) that the handoff links instead
+of re-listing. Handoffs do not carry owner orders: after a reset the owner reads
+open `p0` issues. Long schedule bodies live in files their prompts point to.
+Changed decisions name the instruction superseded.
+
+Spend context on work, not on tool output: first acts read the handoff and only
+the files it links; bound every read (T3 thread reads at most 2 items of 600
+characters, helper and shell output at most 2,000 characters, no full
+activity, roster or schedule listings); repeat a call that echoes large state,
+such as schedule updates or capability listings, only when that state changed.
+A child notice that only reports work still running needs no action: end that
+turn without calls. Do not watch a PR whose readiness or merge a child or your
+own `--wait` already reports. Batch independent notices to one owner into one
+send. After delivery, reset before monitoring or unrelated follow-ups. A bare
+"continue" means continue there. Workers report on the owning PR or issue,
+directly or through the parent; owners reconstruct delivery from live remote
+state, revalidate recipients and carried decisions, and report what they cannot
+confirm as a blocker.
 
 **Provider-portable handoff.** If an owner's provider is exhausted or unavailable,
-use a fresh successor on another provider or model only within an explicit
-standing route; preserve commissioned choices and runtime permissions. Otherwise
-report the unavailable route and wait for owner direction. Confirm the old
-writer and its tool tree have stopped or are fenced before the successor acts.
-Keep the handoff current after consequential decisions, within the caps above;
-recovery cannot depend on a failed session's final summary. Link owning issue/PR,
-evidence, authority and holds; worktree/branch/head/dirty state; checks and
-interrupted tool outcomes; live child/task IDs, schedules and wakeups. Include
-the next authorized action. Git/GitHub and the handoff own state, not provider
-memory or resume tokens. Before a long `loopzero check`, push the head, open the
-draft PR and start the check as a transient unit (see
-[Long-running jobs](#long-running-jobs)): it then posts its verdict to the PR
-even if the session ends first.
-The successor first reconciles live remote state and uncertain external effects;
-a lost tool response is not proof the write failed. Adopt partial work without
-resetting or cleaning away the diff, and never replay whole commands blindly.
-Revalidate holds and recipients, rebind wakeups and list the predecessor's running
-delegates, then retire it as in [Coordinator rollover](#coordinator-rollover).
-Start with read-only coordination; if the new
-family writes, retain every writer's truthful attribution and recheck independent
-review eligibility. A provider change grants no new authority or review exception.
+move the role to a new thread on another provider or model only within an
+explicit standing route; preserve commissioned choices and runtime permissions.
+Otherwise report the unavailable route and wait for owner direction. Confirm the
+old writer and its tool tree have stopped or are fenced before the new thread
+acts. Keep the handoff current after consequential decisions, within the caps
+above; recovery cannot depend on a failed session's final summary. Link owning
+issue/PR, evidence, authority and holds; worktree/branch/head/dirty state;
+checks and interrupted tool outcomes; live child/task IDs, schedules and
+wakeups. Include the next authorized action. Git/GitHub and the handoff own
+state, not provider memory or resume tokens. Before a long `loopzero check`,
+push the head, open the draft PR and start the check as a transient unit: it
+then posts its verdict to the PR even if the session ends first.
+The new thread first reconciles live remote state and uncertain external
+effects; a lost tool response is not proof the write failed. Adopt partial work
+without resetting or cleaning away the diff, and never replay whole commands
+blindly. Rebind the old thread's schedules and wakeups, wait once for each of
+its running delegates (their completions still go to it), then archive it.
+Start with read-only coordination; if the new family writes, retain every
+writer's truthful attribution and recheck independent review eligibility. A
+provider change grants no new authority or review exception.
 
 ### Long-running jobs
 
@@ -97,7 +91,7 @@ A long-running team gives each role one current owner. Owners read state from
 the owning issue and the live decision record, not from earlier sessions.
 Resolve every recipient when sending: the coordinator from the active delivery
 schedule, a campaign owner from its tracking issue, the decisions owner from
-its newest live generation. Never use a remembered ID; escalate ambiguity once.
+its permanent thread. Never use a remembered ID; escalate ambiguity once.
 For agent-to-agent sends to a running Claude thread, use queue mode unless
 urgent; steer can cancel the receiver's in-flight tool call.
 For important T3 messages to an owner, verify receipt with `t3_thread_read`;
@@ -132,7 +126,7 @@ A schedule firing or a relayed approval grants no new authority.
   done and wrong under [Reporting](../core/CONTRACT.md#reporting), and sends the
   decisions owner any `p0` with no commit, PR update or result for 3 h to
   re-home. The decisions owner owns the schedule
-  and rebinds it at rollover but reads no runs.
+  but reads no runs.
 - **Campaign owner:** delivers one commissioned campaign while its tracking
   issue is open, and ends when it closes. Self-dispatches within approved scope
   and allocated host capacity without per-launch coordinator permission. Reports
@@ -147,6 +141,10 @@ A schedule firing or a relayed approval grants no new authority.
   occurrence. A retest checks every recorded occurrence at the exact merged
   revision; the issue closes only on PASS, so repairs use `Refs`. A missing
   fixture or credential is a blocker, never a PASS.
+- **Lean warden:** keeps the delivery system lean: loop-zero improvement,
+  host delivery tooling (test slots, remote hosts, CLI upgrades) and workflow
+  health. Reports to the decisions owner. Host role card:
+  `host-config/roles/lean-warden.md`.
 - **Monitor and watchdog:** detect regressions and idle work; send one packet
   or nudge per new finding, and never decide for an owner. A periodic review
   first asks why an existing mechanism failed and repairs it before adding one.
@@ -330,17 +328,14 @@ the current bottleneck gets dispatch and shared test slots first; other running
 work finishes or checkpoints its current heavy command and releases its slot.
 
 **Rollover.** [Coordinator rollover](#coordinator-rollover) applies to every
-owner role. Before acting, the successor revalidates recipients, schedules and
-carried decisions against live sources and reports what it cannot confirm as a
-blocker. Peers resolve the current owner when sending, so a rollover sends no
-routing notices; state broadcasts still reach every owner.
+owner role. A reset changes no address, so it sends no routing notices;
+state broadcasts still reach every owner.
 A recurring schedule belongs to its role owner (the coordinator for delivery),
-never to a worker or one-day owner; workers get one-shot wakeups only. The
-successor rebinds role schedules by ID. Each run of a recurring task first
-checks that its previous run's PR merged and adopts that PR if not.
-An owner with queued work always keeps an enabled wake: nobody pauses its tick
-to save wakes while its queue is non-empty, a rollover rebinds with
-`enabled:true`, and each tick fills workers from the queue, not fixed triggers.
+never to a worker or one-day owner; workers get one-shot wakeups only. Each run
+of a recurring task first checks that its previous run's PR merged and adopts
+that PR if not. An owner with queued work always keeps an enabled wake: nobody
+pauses its tick to save wakes while its queue is non-empty, and each tick fills
+workers from the queue, not fixed triggers.
 
 ## Resolve the model before delegation
 
@@ -504,8 +499,7 @@ links; re-watch only a watch that is missing.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Rely on T3 delegate completion
-delivery (a predecessor's carried children: see
-[Coordinator rollover](#coordinator-rollover)); when this turn needs a thread's result, call `t3_thread_wait`
+delivery; when this turn needs a thread's result, call `t3_thread_wait`
 (`untilDelegatedWorkSettled:true` when nested work matters), follow its `next`
 and read the final result once. A finite retry uses a one-time schedule
 (`schedule_task` with `schedule:{type:once,runAt:<ISO time>}`), not an interval.
