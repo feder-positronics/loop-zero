@@ -163,9 +163,11 @@ inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
 that header, a newline and the exact raw diff without trimming task or diff text.
-The selected Codex binary's version probe accepts only source-reviewed 0.160.1,
-0.161.0, 0.162.1, 0.163.0, 0.164.0, 0.165.0, 0.166.0 and 0.167.0; refusal uses RunnerBadOutput and existing family fallback
-before model input. Unsupported Claude options follow existing native failure handling.
+The runner probes the selected Codex binary with `--version` and records its
+stdout in runner provenance and the saved review receipt. A failed probe uses
+RunnerBadOutput and existing family fallback before model input. Successful
+probe output is accepted across CLI releases. Unsupported Claude options follow
+existing native failure handling.
 Native defaults, repository AGENTS.md/CLAUDE.md processing and read-only tools
 remain enabled. Repository instructions remain a native authority surface, so
 structural transport tests do not prove injection immunity, reviewer quality or
@@ -183,7 +185,7 @@ provenance while its raw output stays unchanged; normalized Codex evidence retai
 bounded recognized model/effort claims. Stderr banners take precedence; without a
 banner, the adapter reads the exact JSON thread's native session rollout before
 private HOME cleanup. It requires one matching rollout, matching session metadata,
-a reviewed CLI version and consistent complete turn-context settings; missing,
+a nonempty CLI version claim and consistent complete turn-context settings. Missing,
 malformed, ambiguous or mismatched evidence remains unknown. Codex session
 persistence is enabled only in the existing temporary private HOME, which is
 removed after capture. Rollout reads stay inside that HOME and reuse the owned,
@@ -212,19 +214,13 @@ The runner excludes the attempt from chunk merge, publication and saved-result
 replay without consuming review budget. Quoted diagnostics and absence of tool
 calls alone do not invalidate a review.
 Eligibility rejects fatal latest evidence without reviving an older
-approval. OD v59 retired the final PR9179 target and its two receipt pins after
-successor IntelFlo #9782 merged and #9179 closed as superseded. The
-[bounded incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
-is now historical: runtime target and receipt registries are empty and the
-incident-only baseline restriction is removed. Recovery helpers remain inert
-with no pinned targets; all PRs use ordinary eligibility and review budgets.
-The dated adjudication account, original records/findings and shared historical
-regression fixtures remain retained evidence. There is no generic override,
-retrospective error scan, local counter or separate registry.
+approval. The retired [incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
+remains historical evidence. All PRs use ordinary eligibility and review
+budgets. The leading-block reader still validates archived adjudication markers
+alongside their original evidence.
 New Codex publication derives one canonical v1 `codex-evidence` comment from the
 complete validated private native stream, across every ordered chunk/session.
-It immediately follows the byte-zero review marker, before any adjudication or
-human text. The anchored leading block is limited to 8192 bytes; strict schema,
+It immediately follows the byte-zero review marker, before human text. The anchored leading block is limited to 8192 bytes; strict schema,
 canonical ASCII base64url JSON, context and bounds checks reject malformed or
 ambiguous projections without legacy fallback. Duplicate blocks fail eligibility,
 and the latest invalid evidence cannot revive an older approval. Header overflow
