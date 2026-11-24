@@ -38,8 +38,11 @@ def review_projection(review: dict, head: str, repo: str, number: int):
     body = review.get("body") or ""
     block, span = runners.leading_review_block(body)
     positions = [i for i, line in enumerate(block) if line.lstrip().startswith("<!-- loopzero:codex-evidence")]
+    # Retired pair markers must never fall back to ordinary review evidence.
+    if any("source=pair" in marker[0] for marker in REVIEW_MARKER_RE.finditer(body)):
+        return True, None
     if not positions:
-        return (True, None) if any("source=pair" in m[0] for m in REVIEW_MARKER_RE.finditer(body)) else (False, None)
+        return False, None
     try:
         if positions != [1] or len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
             return True, None
@@ -48,9 +51,6 @@ def review_projection(review: dict, head: str, repo: str, number: int):
             return True, None
         marker = REVIEW_MARKER_RE.fullmatch(block[0])
         evidence = runners.decode_codex_evidence(block[1])
-        pair_marker = "source=pair" in block[0]
-        if pair_marker != (evidence.get("version") == 2):
-            return True, None
         if (not marker or marker[1] != head or marker[2] != evidence["kind"]
                 or evidence["repo"] != repo or evidence["pr"] != number
                 or evidence["head"] != head or evidence["publisher"] != (review.get("user") or {}).get("login")
@@ -62,7 +62,7 @@ def review_projection(review: dict, head: str, repo: str, number: int):
 
 
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
-                    repo: str = "", number: int = 0, publication_only: bool = False) -> dict | None:
+                    repo: str = "", number: int = 0) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
     trusted = {login.casefold() for login in publishers}
     latest = next((r for r in reversed(reviews)
@@ -78,8 +78,7 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
         f"**{value}**" in body for value in ("approve", "request_changes")
     )
     present, evidence = review_projection(latest, head, repo, number)
-    if present and (evidence is None or (evidence.get("version") == 2 and not publication_only and evidence["verdict"] != "approve")
-                    or (evidence.get("version") != 2 and any(call["fatal"] != "absent" for call in evidence["calls"]))):
+    if present and (evidence is None or any(call["fatal"] != "absent" for call in evidence["calls"])):
         return None
     _, envelopes = review_envelopes(body)
     if not present and any(runners.codex_fatal_startup(item) for item in envelopes):
