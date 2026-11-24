@@ -1198,15 +1198,26 @@ def test_merge_command_failure(gh: FakeGh) -> None:
 
 @pytest.mark.parametrize("status", [404, 422])
 def test_delete_remote_branch_accepts_already_deleted_ref(gh: FakeGh, status: int) -> None:
+    gh.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
     gh.fail("api -X", f"HTTP {status}: Reference does not exist")
-    github.delete_remote_branch(REPO, "lz/x")
+    assert github.delete_remote_branch(REPO, "lz/x", HEAD)
 
 
-def test_delete_remote_branch_encodes_url_characters(gh: FakeGh) -> None:
-    # `#` would start a URL fragment and delete `lz/fix` instead.
+@pytest.mark.parametrize("remote_head", [HEAD, "f" * 40, None])
+def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | None) -> None:
+    ref = "heads/lz/fix%23516%3Fx%25"
+    get = f"api repos/{REPO}/git/ref/{ref}"
+    if remote_head is None:
+        gh.fail(get, "gh: Not Found (HTTP 404)")
+    else:
+        gh.respond(get, {"object": {"sha": remote_head}})
     gh.respond("api -X", "")
-    github.delete_remote_branch(REPO, "lz/fix#516?x%")
-    assert gh.argv(0)[-1] == f"repos/{REPO}/git/refs/heads/lz/fix%23516%3Fx%25"
+    result = github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD)
+    assert result is (remote_head in (HEAD, None))
+    assert gh.argv(0) == get.split()
+    assert len(gh.calls) == (2 if remote_head == HEAD else 1)
+    if remote_head == HEAD:
+        assert gh.argv(1) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/{ref}"]
 
 
 def _queue_json(queued: bool) -> dict:

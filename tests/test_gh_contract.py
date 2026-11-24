@@ -45,6 +45,7 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     fake.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     fake.respond("pr ready", "")
     fake.respond("pr merge", "")
+    fake.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
     fake.respond("api -X", "")
 
     github.pr_for_branch(REPO, "lz/x")
@@ -64,7 +65,7 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     github.check_runs(REPO, HEAD)
     github.mark_ready(REPO, 7)
     github.merge(REPO, 7, "squash", HEAD)
-    github.delete_remote_branch(REPO, "lz/x")
+    github.delete_remote_branch(REPO, "lz/x", HEAD)
     return fake.calls
 
 

@@ -12,6 +12,7 @@ import os
 import random
 import re
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
@@ -319,7 +320,18 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
+    ) as stream:
+        temp = Path(stream.name)
+        try:
+            stream.write(json.dumps(payload, indent=2) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.close()
+            os.replace(temp, path)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def _load_report(wt: Path) -> CheckReport | None:
@@ -1364,15 +1376,17 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "next: loopzero merge --wait follows the queue, verifies and cleans up"
             )
             return 0
-    _delete_remote_branch(config, branch)
+    _delete_remote_branch(config, branch, pr.head_sha)
     _cleanup(wt, config, pr)
     print(sha)
     return 0
 
 
-def _delete_remote_branch(config: Config, branch: str) -> None:
+def _delete_remote_branch(config: Config, branch: str, expected_head: str) -> None:
     try:
-        github.delete_remote_branch(config.repo, branch)
+        if not github.delete_remote_branch(config.repo, branch, expected_head):
+            print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
+                  "skipping deletion", file=sys.stderr)
     except (github.GhError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
               f"delete {branch!r} in {config.repo} if it still points at the merged head", file=sys.stderr)

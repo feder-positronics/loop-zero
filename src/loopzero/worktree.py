@@ -171,4 +171,8 @@ def cleanup(repo_root: Path, wt: Path) -> None:
         raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
     name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
     _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
-    _git(gd, f"--git-dir={gd}", "branch", "-D", name)
+    try:
+        _git(gd, f"--git-dir={gd}", "branch", "-D", name)
+    except GitError:
+        if _git(gd, f"--git-dir={gd}", "branch", "--list", "--", name):
+            raise
