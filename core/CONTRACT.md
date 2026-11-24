@@ -127,9 +127,10 @@ holds also block the owner queue route below.
 
 - A required check exited nonzero on this head.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
-  outdated and its marker names another head. When relying on an ancestor delta,
+  outdated and its marker names another head. When relying on an ancestor review,
   every unresolved blocking thread counts, including outdated threads.
-- Missing eligible review of the current head or a delta-reviewed ancestor.
+- Missing eligible review of the current head or an ancestor covered by an
+  approved primary or eligible delta review.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
   source-preserving. It validates a separate integration candidate,
@@ -139,7 +140,7 @@ holds also block the owner queue route below.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
 one finding; no bulk or silent resolution. The CLI has no waiver file or override
-flag. Hosted review eligibility uses the exact authored SHA and trusted-base
+flag. Hosted review eligibility uses the current authored SHA, review ancestry and trusted-base
 `workflow.toml` publishers; pending/dismissed reviews are ineligible. Local
 readiness also requires its sandboxed check receipt and source CI. Writers
 can edit/resolve evidence; branch protection and CI enforce the gates.
@@ -235,9 +236,10 @@ incident adjudication is retained as historical evidence.
   Preserve the approved head; optional suggestions do not justify edits.
 - After round two, the owner merges once every finding is fixed or rejected
   with reasons and readiness passes, or splits the PR. No escalation is required.
-- After round two, take base changes by merging the base into the branch, not
-  by rebasing. Readiness accepts only heads that descend from the last reviewed
-  head; a rebase, even patch-identical, breaks that and a third review is refused.
+- After an approved primary or a delta review, take base changes by merging the
+  base into the existing branch. Readiness can inherit that review when GitHub
+  reports the new head is ahead of the reviewed commit. A rebase that rewrites
+  the reviewed commit breaks ancestry even if it preserves the patch.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only

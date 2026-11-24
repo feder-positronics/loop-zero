@@ -1445,6 +1445,42 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 # --- ready / merge / status ----------------------------------------------------------
 
 
+@pytest.mark.parametrize("state,verdict,comparison,resolved,ready", [
+    ("APPROVED", "approve", "ahead", True, True),
+    ("COMMENTED", "approve", "ahead", True, True),
+    ("CHANGES_REQUESTED", "request_changes", "ahead", True, False),
+    ("CHANGES_REQUESTED", "approve", "ahead", True, False),
+    ("COMMENTED", "request_changes", "ahead", True, False),
+    ("APPROVED", "request_changes", "ahead", True, False),
+    ("COMMENTED", "unknown", "ahead", True, False),
+    ("APPROVED", "approve", "diverged", True, False),
+    ("APPROVED", "approve", "ahead", False, False),
+])
+def test_ready_after_primary_reviewed_head(wt, gh, capsys, state, verdict, comparison, resolved, ready):
+    reviewed = head_of(wt)
+    git(wt, "switch", "-c", "updated-base", "HEAD^")
+    git(wt, "commit", "--allow-empty", "-m", "update base")
+    git(wt, "switch", "-")
+    if comparison == "ahead":
+        git(wt, "merge", "--no-edit", "updated-base")
+    else:
+        git(wt, "rebase", "updated-base")
+    head = head_of(wt)
+    review = rev(reviewed, "primary", state=state, verdict=verdict)
+    review["body"] += "\n\nQuoted verdict: **approve**"
+    thread = {"isResolved": resolved, "isOutdated": True, "path": "feature.py", "line": 1,
+              "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=important head={reviewed} -->"}]}}
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[review],
+                                      readiness={"threads": (thread,)}, isDraft=False)
+    gh.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": comparison})
+    code, out, _ = run(capsys, "ready")
+    assert code == (0 if ready else 1)
+    if not resolved:
+        assert "open important finding" in out and "no review recorded" not in out
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
+
+
 @pytest.mark.parametrize("kind,resolved,ancestor,ready", [
     ("primary", True, True, False), ("delta", True, True, True),
     ("delta", False, True, False), ("delta", True, False, False),

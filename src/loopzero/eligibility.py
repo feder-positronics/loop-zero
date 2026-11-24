@@ -89,7 +89,7 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
 
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                      repo: str, number: int) -> dict | None:
-    """An exact-head review or the PR's eligible delta on an ancestor."""
+    """An exact-head review or an eligible ancestor delta or approved primary."""
     trusted = {login.casefold() for login in publishers}
     marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
               and "loopzero:review" in (r.get("body") or "")]
@@ -97,11 +97,20 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         return eligible_review(marked, head, publishers, repo=repo, number=number)
     latest = marked[-1]
     marker = REVIEW_MARKER_RE.search(latest["body"])
-    if not marker or marker[2] != "delta":
+    if not marker or marker[2] not in {"primary", "delta"}:
         return None
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
+    if marker[2] == "primary":
+        if latest.get("state") not in {"APPROVED", "COMMENTED"}:
+            return None
+        _, machine_block = runners.leading_review_block(latest["body"])
+        # App reviews use COMMENTED for either verdict. Read the publisher's
+        # summary before model prose, which can quote either verdict.
+        summary = latest["body"][len(machine_block):].lstrip().partition("\n")[0]
+        if not summary.partition(": **")[2].startswith("approve**"):
+            return None
     comparison = github.api_get(f"repos/{repo}/compare/{reviewed}...{head}")
     return latest if isinstance(comparison, dict) and comparison.get("status") == "ahead" else None
 
