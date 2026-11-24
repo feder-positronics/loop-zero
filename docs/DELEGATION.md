@@ -16,8 +16,8 @@ and settles nothing. Before resetting, start heavy or long-running jobs as
 described in [Long-running jobs](#long-running-jobs) and name the unit, log and
 exit file in the handoff.
 
-Cap the whole handoff at 2,000 characters, holding active links and three
-numbered first acts: only references needed for the next action, pending results or questions,
+Cap the whole handoff at 2,000 characters, holding active links and up to
+three numbered first acts: only references needed for the next action, pending results or questions,
 binding decision links and the reply target. Link rules and rulings; omit
 history and done items. Parked work and its dispositions live in one durable
 table (the owning tracking issue or one file) that the handoff links instead
@@ -58,8 +58,8 @@ without resetting or cleaning away the diff, and never replay whole commands
 blindly. Revalidate holds and recipients, rebind the old thread's schedules and
 wakeups, and wait for each of its running delegates to finish (their
 completions still go to it: `t3_thread_wait` or a one-shot wakeup), reading each
-result once; then archive the old thread. If a send, schedule or delegate
-completion revives it first, it ends that turn without acting or replying;
+result once; then archive the old thread. Whenever a send, schedule or delegate
+completion revives it, it ends that turn without acting or replying;
 never send through it.
 Start with read-only coordination; if the new family writes, retain every
 writer's truthful attribution and recheck independent review eligibility. A
