@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import cli, eligibility, github, runners
+from loopzero import cli, github, runners
 from tests.conftest import git
 from tests.test_runners import (
     APPROVE,
@@ -52,14 +52,14 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
         [f"model_reasoning_effort={pins['effort']}"] if "effort" in pins else [])
     projection = runners.codex_evidence(native)
     assert runners.decode_codex_evidence(runners.encode_codex_evidence(projection)) == projection
-    assert eligibility.recovery_inspection(projection, native.head) == (mode == "pinned")
+    assert projection["calls"][0]["configured"] == call["configured"]
     body = github._review_body(native, [], cli.review_marker(native.head, native.kind))
     assert f"configured model {pins.get('model', 'unknown')} (effort {pins.get('effort', 'unknown')})" in body
     # A retained receipt from before the fix cannot be upgraded from requested/model fields.
     captured.pop("configured_settings")
     legacy = dataclasses.replace(native, raw=json.dumps(captured), model="gpt-6.2-astra", effort="medium",
         provenance={**native.provenance, "configured_settings": [{"model": "gpt-6.2-astra", "effort": "medium"}]})
-    assert not eligibility.recovery_inspection(runners.codex_evidence(legacy), native.head)
+    assert "configured" not in runners.codex_evidence(legacy)["calls"][0]
 
 
 @pytest.mark.parametrize("pins", [{}, {"model": "pinned-model", "effort": "medium"}])

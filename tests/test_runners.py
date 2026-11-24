@@ -336,27 +336,21 @@ def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
     assert tomllib.loads(override)["developer_instructions"].encode() == policy.encode()
 
 
-@pytest.mark.parametrize("version", [
-    "codex-cli 0.160.1", "codex-cli 0.161.0", "codex-cli 0.162.1", "codex-cli 0.163.0", "codex-cli 0.164.0",
-    "codex-cli 0.165.0", "codex-cli 0.166.0", "codex-cli 0.167.0",
-])
-def test_codex_reviewed_versions_run(fake_bin, tmp_path, version):
+@pytest.mark.parametrize("version", ["codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", ""])
+def test_codex_observes_version_without_pinning(fake_bin, tmp_path, version):
     _fake_codex(fake_bin, json.dumps(APPROVE), version=version)
-    assert _review("codex", tmp_path).verdict == "approve"
+    result = _review("codex", tmp_path)
+    assert result.verdict == "approve"
+    assert result.provenance["cli_version"] == version
+    assert json.loads(result.raw)["cli_version"] == version
     assert (fake_bin / "codex.stdin").exists()
 
 
-@pytest.mark.parametrize("version,exit_code", [
-    ("codex-cli 0.159.0", 0), ("codex-cli 0.162.0", 0),
-    ("codex-cli 0.161.0 unexpected", 0), ("0.161.0", 0), ("", 0),
-    ("codex-cli 0.161.0", 1),
-])
-def test_codex_unverified_version_refuses_before_model_input(fake_bin, tmp_path, version, exit_code):
-    _fake_codex(fake_bin, json.dumps(APPROVE), version=version, version_exit=exit_code)
-    with pytest.raises(RunnerBadOutput, match="re-verif"):
+def test_codex_nonzero_version_probe_refuses_before_model_input(fake_bin, tmp_path):
+    _fake_codex(fake_bin, json.dumps(APPROVE), version_exit=1)
+    with pytest.raises(RunnerBadOutput, match="version probe failed"):
         _review("codex", tmp_path)
     assert not (fake_bin / "codex.stdin").exists()
-    assert not (fake_bin / "codex.argv").exists()
 
 
 @pytest.mark.parametrize("failure", ["missing", "timeout"])
@@ -369,7 +363,7 @@ def test_codex_version_probe_errors_use_known_failure_path(fake_bin, tmp_path, m
             raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
         return original(argv, **kwargs)
     monkeypatch.setattr(_proc, "run", probe)
-    with pytest.raises(RunnerBadOutput, match="re-verif"):
+    with pytest.raises(RunnerBadOutput, match="version probe failed"):
         _review("codex", tmp_path)
     assert not (fake_bin / "codex.stdin").exists()
 
@@ -1216,7 +1210,7 @@ def test_codex_rollout_settings_are_exact_native_claims(fake_bin, tmp_path, case
 
     sid = "codex-session-123"
     records = [
-        {"type": "session_meta", "payload": {"id": sid, "cli_version": "0.165.0"}},
+        {"type": "session_meta", "payload": {"id": sid, "cli_version": "0.168.0"}},
         {"type": "turn_context", "payload": {"model": "native-model", "effort": "high"}},
     ]
     if case == "mismatch":

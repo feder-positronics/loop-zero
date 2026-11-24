@@ -85,7 +85,7 @@ def test_real_startup_exit_zero_never_publishes(wt, gh, fake_bin, capsys, row):
 @pytest.mark.parametrize(
     "mode", ["clean", "quoted", "path", "version", "after_tool", "unrelated_error", "quoted_error", "projected_quote"]
 )
-def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkeypatch, mode):
+def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
     row = copy.deepcopy(RECEIPTS[0])
     raw = envelope(row)
     fatal = raw["events"][1]
@@ -110,8 +110,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
     review = {**row, "body": body, "state": "APPROVED"}
     if mode == "projected_quote":
         assert eligibility.eligible_review([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
-    monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
-    markers = cli._pr_markers(tmp_path, [review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
+    markers = cli._pr_markers([review], row["commit_id"], PUBLISHER, repo="a/b", number=1)
     assert bool(markers) == (mode in ("clean", "quoted", "unrelated_error", "quoted_error", "projected_quote"))
     script = _fake_codex(fake_bin, json.dumps(APPROVE))
     if mode == "after_tool":
@@ -139,57 +138,6 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, monkey
             _review("codex", tmp_path)
 
 
-@pytest.mark.parametrize("number", [9179, 9173, 9174, 9175, 9275, 9284])
-@pytest.mark.parametrize(
-    "change",
-    [
-        "none",
-        "repo",
-        "number",
-        "publisher",
-        "body",
-        "raw",
-        "head",
-        "target",
-        "id",
-        "missing",
-        "duplicate",
-    ],
-)
-def test_retired_incidents_never_grant_recovery(number, change):
-    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == number])
-    repo = "feder-positronics/intelflo"
-    target = next((r["commit_id"] for r in reversed(rows)), "e" * 40)
-    selected = number
-    if change == "repo":
-        repo = "elsewhere/intelflo"
-    if change == "number":
-        selected = 1
-    if change == "publisher":
-        rows[0]["user"]["login"] = "stranger"
-    if change == "body":
-        rows[0]["body"] += " "
-    if change == "raw":
-        rows[0]["body"] = rows[0]["body"].replace("codex_exec_result", "codex_exec_resulT")
-    if change == "head":
-        rows[0]["commit_id"] = "f" * 40
-    if change == "target":
-        target = "e" * 40
-    if change == "id":
-        rows[0]["id"] += 1
-    if change == "missing":
-        rows = []
-    if change == "duplicate":
-        rows.append(copy.deepcopy(rows[0]))
-    found = eligibility.recovery_reviews(repo, selected, target, rows)
-    assert found == ()
-    assert eligibility.recovery_target(repo, selected) is None
-    assert eligibility.recovery_suffix(repo, selected, target, rows) == ""
-    assert eligibility.recovery_baseline(selected, rows)
-    assert eligibility._RECOVERY_TARGETS == {}
-    assert eligibility._RECOVERY_RECEIPTS == {}
-
-
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
 def test_invalid_latest_cannot_revive_older_approval(row):
     older = copy.deepcopy(row)
@@ -211,7 +159,7 @@ def test_real_startup_repost_refuses_before_any_publication(wt, gh, fake_bin, ca
 
 @pytest.mark.parametrize("number", [9179, 9173, 9174, 9175, 9275, 9284, 9220])
 @pytest.mark.parametrize("repository", ["feder-positronics/intelflo", "elsewhere/intelflo"])
-def test_retired_targets_use_ordinary_eligibility_and_budget(tmp_path, monkeypatch, number, repository):
+def test_retired_targets_use_ordinary_eligibility_and_budget(number, repository):
     target = "a" * 40
     rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == number])
     snapshot = copy.deepcopy(rows)
@@ -219,9 +167,8 @@ def test_retired_targets_use_ordinary_eligibility_and_budget(tmp_path, monkeypat
         "id": 999, "commit_id": target, "user": {"login": PUBLISHER[0]},
         "state": "COMMENTED", "body": cli.review_marker(target, "primary") + "\n**approve**",
     }
-    monkeypatch.setattr(cli, "_is_ancestor", lambda *a: True)
     def markers(history):
-        return cli._pr_markers(tmp_path, history, target, PUBLISHER, repo=repository, number=number)
+        return cli._pr_markers(history, target, PUBLISHER, repo=repository, number=number)
     assert cli._decide_kind(markers(rows), target) == ("primary", None)
     assert eligibility.eligible_review(
         [*rows, replacement], target, PUBLISHER, repo=repository, number=number

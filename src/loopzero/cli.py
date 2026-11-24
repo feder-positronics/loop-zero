@@ -209,20 +209,15 @@ class Marker:
     state: str
 
 
-def _pr_markers(wt: Path, reviews: list[dict], head: str,
+def _pr_markers(reviews: list[dict], head: str,
                 publishers: tuple[str, ...] = (), *, repo: str = "", number: int = 0) -> list[Marker]:
     """Trusted publisher markers on their named commits across the PR."""
     found: list[Marker] = []
-    target = eligibility.recovery_target(repo, number)
-    adjudicated = eligibility.recovery_reviews(repo, number, target, reviews)
-    if target and (not adjudicated or not eligibility.recovery_baseline(number, reviews)
-                   or (target != head and not _is_ancestor(wt, target, head))):
-        raise CliError("historical recovery target/receipt/baseline is unverified; HOLD for owner")
     trusted = {login.casefold() for login in publishers}
     for review in reviews:
         body = review.get("body") or ""
-        if review.get("id") in adjudicated or (not eligibility.review_projection(review, head, repo, number)[0] and any(
-                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1])):
+        if not eligibility.review_projection(review, head, repo, number)[0] and any(
+                runners.codex_fatal_startup(item) for item in eligibility.review_envelopes(body)[1]):
             continue
         match = REVIEW_MARKER_RE.search(body)
         if not match or review.get("commit_id") != match.group(1):
@@ -631,11 +626,11 @@ def cmd_review(args: argparse.Namespace) -> int:
         if not saved:
             reviews = _pr_reviews(config.repo, pr.number)
         kind = saved[0] if saved else _decide_kind(
-            _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
+            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )[0]
     else:
         kind, reviewed = _decide_kind(
-            _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
+            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
@@ -679,7 +674,7 @@ def cmd_review(args: argparse.Namespace) -> int:
         if result.fallback and not _published_fallback(result.fallback, candidates, excluded):
             raise CliError("saved fallback note is not in the published form; run without --repost")
         allowed, _ = _decide_kind(
-            _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
+            _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number), head
         )
         if allowed != kind:
             raise CliError("saved review kind differs from the remaining review budget")
@@ -698,7 +693,6 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"dirty before False, dirty after {final_dirty}"
             )
         prefix = review_marker(head, kind, "pair" if result.members else "model")
-    suffix = eligibility.recovery_suffix(config.repo, pr.number, head, reviews)
     try:
         evidence = runners.codex_evidence(result)
     except runners.RunnerBadOutput:
@@ -706,10 +700,8 @@ def cmd_review(args: argparse.Namespace) -> int:
         raise
     if evidence is not None and (evidence["repo"], evidence["pr"], evidence["publisher"]) != (config.repo, pr.number, publisher):
         raise CliError("native publication context changed; HOLD")
-    if suffix and not eligibility.recovery_inspection(evidence, head):
-        _save_review(wt, result)  # retain unknown commissioned evidence without publishing it
-        raise CliError("recovery inspection/model/effort evidence is unknown; HOLD for owner")
-    prefix = _repost_prefix(result, suffix) if args.repost else prefix + suffix
+    if args.repost:
+        prefix = _repost_prefix(result)
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     try:
         github.post_review(
@@ -742,9 +734,9 @@ def _review_verdict(result: ReviewResult) -> int:
     return 0 if result.verdict == "approve" else 5  # the exit code is the verdict, as for check
 
 
-def _repost_prefix(result: ReviewResult, suffix: str = "") -> str:
+def _repost_prefix(result: ReviewResult) -> str:
     sessions = result.provenance["session_ids"]
-    return review_marker(result.head, result.kind, "pair-repost" if result.members else "repost") + suffix + "\n" + (
+    return review_marker(result.head, result.kind, "pair-repost" if result.members else "repost") + "\n" + (
         "Reposted from runner session" + ("s" if len(sessions) != 1 else "")
         + ": " + ", ".join(f"`{session}`" for session in sessions)
     )
@@ -761,10 +753,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
     trusted = config.review_publishers or (publisher,)
-    adjudicated = eligibility.recovery_reviews(
-        config.repo, pr.number, eligibility.recovery_target(config.repo, pr.number), reviews)
-    evidence = [r for r in reviews if r.get("id") not in adjudicated
-                and "loopzero:review" in (r.get("body") or "") and (r.get("commit_id") == result.head or any(
+    evidence = [r for r in reviews if "loopzero:review" in (r.get("body") or "") and (r.get("commit_id") == result.head or any(
                     m.group(1) == result.head for m in REVIEW_MARKER_RE.finditer(r["body"])))]
     fresh = github.pr_view(config.repo, pr.number)
     if fresh.head_sha != result.head or fresh.state != "OPEN" or fresh.base_ref != pr.base_ref:
@@ -775,12 +764,11 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
             or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number,
                                            publication_only=bool(result.members)) is None):
         raise CliError("publication is revoked, pending or untrusted")
-    suffix = eligibility.recovery_suffix(config.repo, pr.number, result.head, reviews)
     payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
                                       legacy_settings=legacy, legacy_display=display)
                 for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
                 for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
-                for prefix in (review_marker(result.head, result.kind, "pair" if result.members else "model") + suffix, _repost_prefix(result, suffix))]
+                for prefix in (review_marker(result.head, result.kind, "pair" if result.members else "model"), _repost_prefix(result))]
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
@@ -1425,7 +1413,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
     print(f"pr:       #{pr.number} {pr.url} ({'draft' if pr.is_draft else 'ready'}, {pr.state})")
     reviews = _pr_reviews(config.repo, pr.number)
-    markers = _pr_markers(wt, reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
+    markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if markers:
         latest = markers[-1]
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
