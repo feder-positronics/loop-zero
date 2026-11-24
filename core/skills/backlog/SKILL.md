@@ -21,7 +21,9 @@ missing issue links alone do not prove absent task context. Use
 For pickup, identify unmet acceptance, ownership, collisions and the smallest
 next action. Reconcile stale claims with dispatch authority; do not duplicate
 accepted work. If no pickup is justified, name missing evidence or the actual
-hold, owner and next action. Route authorized pickup to
+hold, owner and next action. Among ready items prefer open PRs, then items
+whose issue names open items it unblocks (`Unblocks: #a #b`) or a measured
+shared cost it removes (`Eases: <number> (source)`). Route authorized pickup to
 [work-issue](../work-issue/SKILL.md), design to
 [write-design-doc](../write-design-doc/SKILL.md), briefs to [explain](../explain/SKILL.md).
 
