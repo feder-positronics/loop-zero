@@ -768,6 +768,20 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
 
+def _review_formats(result: ReviewResult) -> list[tuple[str, bool, bool]]:
+    old_settings = "requested_settings" not in result.provenance
+    formats = [(False, False)]
+    if runners.codex_evidence(result) is None:
+        formats.append((False, True))
+        if old_settings:
+            formats.append((True, True))
+    if result.family == "codex" and old_settings:
+        formats.append((True, False))
+    return [(prefix, settings, display)
+            for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
+            for settings, display in formats]
+
+
 def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
@@ -782,11 +796,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     if (publisher.casefold() not in {name.casefold() for name in trusted}
             or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number) is None):
         raise CliError("publication is revoked, pending or untrusted")
-    payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
-                                      legacy_settings=legacy, legacy_display=display)
-                for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
-                for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
-                for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))]
+    payloads = github.review_payloads(config.repo, pr.number, result.head, result, _review_formats(result))
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
