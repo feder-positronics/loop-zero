@@ -33,6 +33,7 @@ MARKER_RE = re.compile(
 )
 PAGE = 100
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
+CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -918,10 +919,11 @@ def _check_signals(
     review_grace: bool = False,
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
-) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
-    for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
+    runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
+    for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
@@ -973,7 +975,22 @@ def _check_signals(
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(cr, workflows, head_sha):
             superseded.append(name)
-    return states, (*stale, *superseded), stale_verdicts
+    return states, (*stale, *superseded), stale_verdicts, _check_suites_at_limit(runs)
+
+
+def _check_suites_at_limit(runs: list[dict]) -> bool:
+    suites = {
+        suite["id"] for run in runs
+        if isinstance(suite := run.get("check_suite"), dict) and type(suite.get("id")) is int
+    }
+    return len(suites) >= CHECK_SUITE_LIMIT
+
+
+def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
+    if capped:
+        return (f"cannot determine required check '{name}' on {head_sha[:12]}: "
+                f"GitHub's {CHECK_SUITE_LIMIT:,}-suite limit")
+    return f"required check '{name}' missing on {head_sha[:12]}"
 
 
 def _has_active_replacement(check: dict, workflows: list[dict], head_sha: str) -> bool:
@@ -1045,14 +1062,14 @@ def readiness(
     for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
-    checks, stale, stale_verdicts = (_check_signals(
+    checks, stale, stale_verdicts, capped = (_check_signals(
         repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
         workflow_wait and stale_verdict_grace,
-    ) if required_ci else ({}, (), ()))
+    ) if required_ci else ({}, (), (), False))
     for name in required_ci:
         conclusion = checks.get(name)
         if conclusion is None:
-            reasons.append(f"required check '{name}' missing on {pr.head_sha[:12]}")
+            reasons.append(_missing_check_reason(name, pr.head_sha, capped))
         elif conclusion != "success":
             reasons.append(f"required check '{name}' is {conclusion}")
     return Readiness(
