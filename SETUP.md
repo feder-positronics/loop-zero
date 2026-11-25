@@ -117,9 +117,11 @@ Point it at the GitHub repository you set in `[repo] name`. Use
 if you already configured it under a different name.
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root and set `[repo] name`. `loopzero check` uses the base branch's
-`[checks]` when present: edited commands take effect after merging; `--config`
-unpins them. Then:
+repository root, set `[repo] name`, and commit your initial `[checks]` commands
+to the base branch before starting your first task. If the base has a
+`workflow.toml`, `loopzero check` uses its checks configuration even when
+`[checks]` is absent. To try task-side changes explicitly, run
+`loopzero --config workflow.toml check` from the task worktree. Then:
 
 - Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
   For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
