@@ -839,7 +839,7 @@ def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    github.check_runs(REPO, HEAD)
+    github._check_signals(REPO, HEAD)
     reads = [c["argv"] for c in gh.calls if c["argv"][0] == "api" and "-F" in c["argv"]]
     assert len(reads) == 3, "files, check-runs and status all pass -F"
     for argv in reads:
@@ -857,7 +857,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
         {"context": "ci/legacy", "state": "failure"},
         {"context": "checks", "state": "pending"},
     ])
-    runs = github.check_runs(REPO, HEAD)
+    runs = github._check_signals(REPO, HEAD)[0]
     assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
         "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
     pages = [c["argv"][-2] for c in gh.calls if "check-runs" in c["argv"][1]]
@@ -887,7 +887,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
 def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD) == expected
+    assert github._check_signals(REPO, HEAD)[0] == expected
 
 
 @pytest.mark.parametrize("page", [{"total_count": 1}, {"check_runs": 1}, {"check_runs": []}])
@@ -897,10 +897,10 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
     if page.get("check_runs") == []:
-        assert github.check_runs(REPO, HEAD) == {}
+        assert github._check_signals(REPO, HEAD)[0] == {}
     else:
         with pytest.raises(github.GhError, match=endpoint):
-            github.check_runs(REPO, HEAD)
+            github._check_signals(REPO, HEAD)
 
 
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
@@ -913,7 +913,7 @@ def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> N
         [{"context": "required-page-two", "state": "success"},
          {"context": "duplicate", "state": "success"}],
     )
-    runs = github.check_runs(REPO, HEAD)
+    runs = github._check_signals(REPO, HEAD)[0]
     assert runs["required-page-two"] == "success"
     assert runs["duplicate"] == "failure", "the first (latest) status wins"
 

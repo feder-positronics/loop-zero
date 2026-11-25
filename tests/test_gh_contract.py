@@ -61,7 +61,7 @@ def captured_argv(tmp_path_factory: pytest.TempPathFactory) -> list[dict]:
                               (Finding("important", "src/a.py", 10, "Problem", "Details"),), "raw")
         github.post_review(REPO, 7, HEAD, result)
         github.open_blocking_findings(REPO, 7, HEAD)
-        github.check_runs(REPO, HEAD)
+        github._check_signals(REPO, HEAD)
         github.mark_ready(REPO, 7)
         github.merge(REPO, 7, "squash", HEAD)
         github.delete_remote_branch(REPO, "lz/x", HEAD)

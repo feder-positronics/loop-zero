@@ -968,11 +968,6 @@ def _unresolved_threads(repo: str, number: int) -> list[dict]:
             raise _not_found(number, exc) from exc
 
 
-def check_runs(repo: str, head_sha: str) -> dict[str, str]:
-    """Map signal name to state, using only the latest check run of each name."""
-    return _check_signals(repo, head_sha)[0]
-
-
 def _check_signals(
     repo: str,
     head_sha: str,
