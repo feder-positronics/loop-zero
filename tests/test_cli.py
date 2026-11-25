@@ -2340,6 +2340,10 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
 @pytest.mark.parametrize("pending,age,new_failure,wait,expected,waited", [
     (True, 180, False, True, 0, True),
     (False, 30, False, True, 0, True),
+    (False, -30, False, True, 0, True),
+    (False, -3600, False, True, 1, False),
+    (False, -30, True, True, 1, False),
+    (False, -30, "tie", True, 1, False),
     (True, 30, True, True, 1, True),
     (False, 30, True, True, 0, True),
     (False, 120, False, True, 0, True),
@@ -2378,13 +2382,15 @@ def test_ready_wait_review_failure_freshness(
         isDraft=False,
     )
     clock = [1790164800 + age]  # 2026-09-23T12:00:00Z plus review age
+    start = clock[0]
     monkeypatch.setattr(cli.time, "time", lambda: clock[0])
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0] - start)
     failed_at = {
         "tie": "2026-09-23T12:00:00Z",
         "missing": None,
     }.get(
         new_failure,
-        "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:00:00Z",
+        "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:59:00Z",
     )
     runs = (
         [{"name": name, "status": "completed", "conclusion": "failure", "completed_at": failed_at}]
@@ -2424,14 +2430,14 @@ def test_ready_wait_review_failure_freshness(
         "--config",
         "workflow.toml",
         "ready",
-        *(["--wait"] if wait else []),
+        *(["--wait=60" if age < 0 else "--wait"] if wait else []),
     )
     assert (code, err, bool(sleeps)) == (expected, "", waited)
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check '{name}' is failure\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
     assert out.count("predates the review; awaiting refresh") == int(
-        waited and age >= 120 and not pending
+        waited and (age < 0 or age >= 120) and not pending
     )
 
 
