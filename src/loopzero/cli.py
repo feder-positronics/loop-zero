@@ -651,12 +651,8 @@ def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.P
                 f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
                 f"then rerun `{retry}`. {exc}"
             ) from exc
-        if endpoint.startswith(f"{pulls}?") and github.app_token():
-            raise CliError(
-                f"GitHub App could not access pull requests for {config.repo} (HTTP 404). "
-                "Check that the GitHub App installation includes this repository, "
-                f"then rerun `{retry}`."
-            ) from exc
+        if exc.tail.endswith(github.PR_APP_INSTALLATION_HINT):
+            raise CliError(f"{exc}\nThen rerun `{retry}`.") from exc
         raise
 
 
