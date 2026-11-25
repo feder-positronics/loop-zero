@@ -563,6 +563,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    if not config.checks:
+        raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),

@@ -112,6 +112,10 @@ def load_base(worktree: Path, base_branch: str, *,
         data = tomllib.loads(shown.stdout)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"origin/{base_branch}:workflow.toml: invalid TOML: {exc}") from exc
+    try:
+        _reject_unknown("top level", data, _SECTIONS)
+    except ConfigError as exc:
+        raise ConfigError(f"origin/{base_branch}:workflow.toml: {exc}") from None
     return data, revision
 
 
@@ -146,14 +150,7 @@ def _build(data: dict[str, Any]) -> Config:
     base = repo.get("base", "main")
     if not base:
         raise ConfigError("repo.base must not be empty")
-    merge = delivery.get("merge", "squash")
-    if merge not in MERGE_STRATEGIES:
-        raise ConfigError(f"delivery.merge must be one of {MERGE_STRATEGIES}, got {merge!r}")
-    mergify_queue = delivery.get("mergify_queue")
-    if merge == "mergify" and not mergify_queue:
-        raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
-    if mergify_queue is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", mergify_queue):
-        raise ConfigError("delivery.mergify_queue must be a non-empty command-safe name")
+    merge, mergify_queue = _merge_settings(delivery)
     reviewers = _strings("delivery.reviewers", delivery.get("reviewers", list(REVIEWER_FAMILIES)))
     if not reviewers:
         raise ConfigError("delivery.reviewers must list at least one reviewer")
@@ -184,6 +181,7 @@ def _build(data: dict[str, Any]) -> Config:
         )
         review[family] = ReviewConfig(table.get("model"), table.get("effort"), allowed)
 
+    commands = _strings("checks.commands", checks.get("commands", []))
     kwargs: dict[str, Any] = {}
     if "runner" in checks:
         runner = _strings("checks.runner", checks["runner"])
@@ -193,8 +191,13 @@ def _build(data: dict[str, Any]) -> Config:
             raise ConfigError("checks.runner executable paths must be absolute")
         kwargs["check_runner"] = runner
     if "inputs" in checks:
-        kwargs["inputs"] = {key: _strings(f"checks.inputs.{key}", value)
-                            for key, value in checks["inputs"].items()}
+        inputs = {}
+        for key, value in checks["inputs"].items():
+            label = f'checks.inputs."{key}"'
+            if key != "*" and key not in commands:
+                raise ConfigError(f"{label} must exactly match a checks.commands entry")
+            inputs[key] = _strings(label, value)
+        kwargs["inputs"] = inputs
     if "env_allowlist" in checks:
         kwargs["env_allowlist"] = _strings("checks.env_allowlist", checks["env_allowlist"])
     if "ro_paths" in checks:
@@ -211,13 +214,16 @@ def _build(data: dict[str, Any]) -> Config:
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     if "limits" in checks:
         kwargs["limits"] = _limits(checks["limits"])
+        if "runner" in checks and checks["limits"]:
+            keys = ", ".join(f"checks.limits.{key}" for key in sorted(checks["limits"]))
+            raise ConfigError(f"{keys} apply only to local checks and cannot be set with checks.runner")
     reviewer_ro_paths = _host_paths(
         "delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])
     )
     return Config(
         repo=name,
         base_branch=base,
-        checks=_strings("checks.commands", checks.get("commands", [])),
+        checks=commands,
         required_ci=_strings("checks.required_ci", checks.get("required_ci", [])),
         merge_strategy=merge,
         mergify_queue=mergify_queue,
@@ -230,6 +236,22 @@ def _build(data: dict[str, Any]) -> Config:
         network=checks.get("network", False),
         **kwargs,
     )
+
+
+def _merge_settings(delivery: dict[str, Any]) -> tuple[str, str | None]:
+    merge = delivery.get("merge", "squash")
+    if merge not in MERGE_STRATEGIES:
+        raise ConfigError(f"delivery.merge must be one of {MERGE_STRATEGIES}, got {merge!r}")
+    mergify_queue = delivery.get("mergify_queue")
+    if merge == "mergify" and not mergify_queue:
+        raise ConfigError("delivery.mergify_queue is required when delivery.merge = 'mergify'")
+    if mergify_queue is not None and merge != "mergify":
+        raise ConfigError(
+            f"delivery.mergify_queue requires delivery.merge = 'mergify', got {merge!r}"
+        )
+    if mergify_queue is not None and not re.fullmatch(r"[A-Za-z0-9_-]+", mergify_queue):
+        raise ConfigError("delivery.mergify_queue must be a non-empty command-safe name")
+    return merge, mergify_queue
 
 
 def _reject_unknown(where: str, table: dict[str, Any], allowed: Any) -> None:
