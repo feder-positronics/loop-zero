@@ -1494,7 +1494,7 @@ def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, c
     assert f"merge commit {merge[:12]} since the reviewed head {reviewed[:12]}" in err
     assert f"`git reset --hard {reviewed}`" in err
     assert "cherry-pick any later fixes" in err
-    assert "run `loopzero review` before merging main again" in err
+    assert "run `loopzero pr`, then `loopzero review` before merging main again" in err
 
 
 def test_review_delta_replays_fixes_when_reviewed_head_is_second_parent(
@@ -1524,6 +1524,7 @@ def test_review_delta_refuses_rewritten_primary(wt, gh, fake_bin, capsys):
     assert code == 1 and not out and not (fake_bin / "claude.stdin").exists()
     assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
     assert "git reflog" in err and "open a new PR" in err
+    assert "run `loopzero pr`, then `loopzero review` before merging main" in err
 
 
 def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
