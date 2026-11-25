@@ -243,6 +243,8 @@ After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
 step, and a moved ref is left in place with a warning. GitHub REST uses separate
 read and delete requests, so the ref can still change between those requests.
+After confirmed remote deletion or absence, cleanup deletes the matching
+`origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
 requires a clean worktree at the merged PR head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
