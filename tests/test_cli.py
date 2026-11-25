@@ -193,6 +193,25 @@ def without_accepted_receipt(out: str) -> str:
                    if not line.startswith("receipt accepted:"))
 
 
+@pytest.fixture
+def git_calls(monkeypatch):
+    calls = []
+    original = subprocess.run
+
+    def record(argv, *args, **kwargs):
+        if argv[0] == "git":
+            calls.append(argv[1:])
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record)
+    return calls
+
+
+def assert_git_cost(calls, total, workflow_reads):
+    assert len(calls) == total, calls
+    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == workflow_reads
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
@@ -502,10 +521,15 @@ def test_primary_review_diffs_from_merge_base_not_base_tip(
     assert code == 0 and "upstream = 1" not in prompt
 
 
+@pytest.mark.parametrize("workflow, error", [
+    ("[checks\n", "invalid TOML"),
+    ("checks = []\n", "[checks] must be a table"),
+    ("delivery = []\n", "[delivery] must be a table"),
+])
 def test_check_fails_when_base_workflow_is_malformed(
-    wt: Path, repo: Path, capsys
+    wt: Path, repo: Path, capsys, workflow, error,
 ) -> None:
-    (repo / "workflow.toml").write_text("[checks\n")
+    (repo / "workflow.toml").write_text(workflow)
     git(repo, "add", "workflow.toml")
     git(repo, "commit", "-q", "-m", "break workflow")
     git(repo, "push", "-q", "origin", "main")
@@ -513,7 +537,7 @@ def test_check_fails_when_base_workflow_is_malformed(
     code, out, err = run(capsys, "check")
 
     assert code == 1 and out == ""
-    assert "origin/main:workflow.toml: invalid TOML" in err
+    assert f"origin/main:workflow.toml: {error}" in err
 
 
 # --- pr ------------------------------------------------------------------------------------
@@ -881,12 +905,14 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
-def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch) -> None:
+def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
+    git_calls.clear()
     code, out, err = run(capsys, "review")
+    assert_git_cost(git_calls, 16, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1656,11 +1682,13 @@ def test_outdated_blocker_requires_resolution_after_delta(wt, gh, capsys, head, 
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
-def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch) -> None:
+def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     arm_approved_ready_pr(gh, head, wt, branch=branch)
     gh.respond("pr ready", "")
+    git_calls.clear()
     code, out, err = run(capsys, "ready")
+    assert_git_cost(git_calls, 6, 1)
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -2496,7 +2524,7 @@ def test_second_merge_retries_remote_branch_cleanup(
     assert len(deletes) == 2
 
 
-def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
+def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
     code, out, _ = run(capsys, "status")
@@ -2505,13 +2533,14 @@ def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
     assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
+    git_calls.clear()
     code, out, _ = run(capsys, "status")
+    assert_git_cost(git_calls, 6, 1)
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
-
 
 def test_status_silently_ignores_legacy_report_without_dirty(
     wt: Path, gh: FakeGh, capsys, head

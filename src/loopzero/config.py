@@ -93,9 +93,9 @@ def base_revision(worktree: Path, base_branch: str) -> str:
     return _base_source(worktree, base_branch)[1]
 
 
-def load_base(worktree: Path, base_branch: str, section: str = "checks", *,
-              revision: str | None = None) -> dict[str, Any] | None:
-    """Read a base revision section, or None when it has no workflow file."""
+def load_base(worktree: Path, base_branch: str, *,
+              revision: str | None = None) -> tuple[dict[str, Any] | None, str]:
+    """Return the base workflow and revision, with no document if the file is absent."""
     base, revision = (revision, revision) if revision else _base_source(worktree, base_branch)
     shown = _proc.run(
         ["git", "show", f"{base}:workflow.toml"],
@@ -107,17 +107,21 @@ def load_base(worktree: Path, base_branch: str, section: str = "checks", *,
             cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
         )
         if listed.exit_code == 0 and not listed.stdout.strip():
-            return None
+            return None, revision
         message = _proc.tail(shown.stderr or shown.stdout, 1)
         raise ConfigError(f"git show origin/{base_branch}:workflow.toml failed: {message}")
     try:
         data = tomllib.loads(shown.stdout)
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"origin/{base_branch}:workflow.toml: invalid TOML: {exc}") from exc
-    checks = data.get(section, {})
-    if not isinstance(checks, dict):
+    return data, revision
+
+
+def base_section(data: dict[str, Any], base_branch: str, section: str) -> dict[str, Any]:
+    table = data.get(section, {})
+    if not isinstance(table, dict):
         raise ConfigError(f"origin/{base_branch}:workflow.toml: [{section}] must be a table")
-    return checks
+    return table
 
 
 def _build(data: dict[str, Any]) -> Config:
