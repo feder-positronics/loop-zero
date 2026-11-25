@@ -750,6 +750,28 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
+def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    path = git_repo / "README.md"
+    command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
+    config = make_config(checks=(command,), inputs={command: ("README.md",)})
+    assert path.read_bytes() == b"hello\n"
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok and not report.dirty
+    _save_report(git_repo, report)
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == fetched_base
+
+    git(git_repo, "config", "core.autocrlf", "true")
+    path.unlink()
+    git(git_repo, "checkout-index", "-u", "--", path.name)
+    assert path.read_bytes() == b"hello\r\n"
+    assert not git(git_repo, "status", "--porcelain")
+    report = sandbox.run_checks(config, git_repo)
+    assert not report.dirty and report.head == fetched_base
+    assert report.results[0].exit_code == 1
+    assert report.results[0].reused_from is None
+
+
 @pytest.mark.parametrize("recorded_base", [False, True])
 def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, recorded_base):
     (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
