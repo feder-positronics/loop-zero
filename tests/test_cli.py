@@ -436,6 +436,20 @@ def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None
     assert gh.calls == []
 
 
+@pytest.mark.parametrize("history", [None, "CLOSED", "MERGED"])
+def test_check_with_upstream_only_looks_for_open_prs(wt, gh, capsys, head, history):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    gh.respond_pr_list([])
+    gh.respond(pr_list_key(state="closed"), [{"number": 7}] if history else [])
+    if history:
+        gh.respond_pr_view(pr_json(headRefOid=head, state=history))
+
+    code, out, err = run(capsys, "check")
+
+    assert (code, err) == (0, "") and out.endswith("PASS\n")
+    assert [c["argv"][:2] for c in gh.calls] == LOOKUP_CALLS[:1]
+
+
 @pytest.mark.parametrize("command,exit_code,tail", [
     ("echo no; exit 3", 3, "no\n"),
     ("seq 1 50; exit 1", 1, "".join(f"{i}\n" for i in range(11, 51)))])
