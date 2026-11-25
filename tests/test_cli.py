@@ -1034,7 +1034,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
                                                     capsys, padding: str, head) -> None:
     arm_empty_primary_review_history(gh, head)
     gh.fail(post_key(), "HTTP 500 server error")
-    envelope = {"padding": padding,
+    envelope = {"padding": padding, "synthetic_metadata": "private-runner-metadata",
                 **_claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}})}
     _fake_claude(fake_bin, envelope)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
@@ -1044,13 +1044,14 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     saved_bytes = saved.read_bytes()
     data = json.loads(saved_bytes)
     assert json.loads(data["raw"]) == envelope
+    assert saved.stat().st_mode & 0o777 == 0o600
     assert data["head"] == head and data["kind"] == "primary" and data["family"] == "claude"
     assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
     assert data["model"] == "claude-sonnet-4-6" and data["duration_s"] >= 0
     first_body = posted_review(gh)["body"]
     assert "model claude-sonnet-4-6" in first_body
     assert len(first_body.encode("utf-8")) < 65_536
-    assert ("Transcript truncated" in first_body) == bool(padding)
+    assert "private-runner-metadata" not in first_body and "Raw reviewer output" not in first_body
     # Repost can still read ordinary receipts containing the old pair defaults.
     data.update(members=[], reconciliation="", pair_authority=None, pair_prompt_sha256=None)
     saved.write_text(json.dumps(data))
@@ -1063,7 +1064,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert marker(head, "primary", "repost") in payload["body"] and "Nit" in payload["body"]
     assert "claude-session-123" in payload["body"]
     assert len(payload["body"].encode("utf-8")) < 65_536
-    assert ("Transcript truncated" in payload["body"]) == bool(padding)
+    assert "private-runner-metadata" not in payload["body"] and "Raw reviewer output" not in payload["body"]
     assert saved.read_bytes() == saved_bytes
     assert "model claude-sonnet-4-6" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]

@@ -626,6 +626,12 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
+    return "\n".join(lines) + _review_transcript(result, legacy_display)
+
+
+def _review_transcript(result: ReviewResult, legacy_display: bool) -> str:
+    if result.family == "claude" and not legacy_display:
+        return "\n\nNative Claude output is retained in the restricted local review receipt."
     raw = result.raw
     if result.family == "codex" and not legacy_display:
         raw = ("Native Codex transcript retained in the restricted local review receipt; "
@@ -638,9 +644,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
             "[Transcript truncated; showing the last at most 30,000 UTF-8 bytes. "
             "Full output remains in the saved local review artifact.]\n" + raw
         )
-    return "\n".join(lines) + (
-        f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
-    )
+    return f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{raw}\n```\n</details>"
 
 
 def _right_lines(patch: str) -> tuple[set[int], int | None]:

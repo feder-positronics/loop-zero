@@ -436,15 +436,13 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     assert "**request_changes** (1 critical, 2 important, 2 suggestion)" in body
     assert loose.title in body and loose.body in body
     assert len(body.encode("utf-8")) < 65_536 and result.raw == raw
-    if family == "claude":
-        assert ("Transcript truncated" in body) == (len(raw.encode("utf-8")) > 30_000)
-        tail = raw.encode("utf-8")[-30_000:].decode("utf-8", errors="ignore")
-        assert tail + "\n```\n</details>" in body
-    else:
-        assert "Transcript truncated" not in body and "restricted local review receipt" in body
+    assert "Transcript truncated" not in body and "restricted local review receipt" in body
+    if raw:
+        assert raw not in body
+    if family == "codex":
         assert hashlib.sha256(raw.encode()).hexdigest() in body
-        if raw:
-            assert raw not in body
+    else:
+        assert "Raw reviewer output" not in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
 

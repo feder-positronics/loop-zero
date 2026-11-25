@@ -778,7 +778,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         raise CliError("publication is revoked, pending or untrusted")
     payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
                                       legacy_settings=legacy, legacy_display=display)
-                for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
+                for display in ([False, True] if runners.codex_evidence(result) is None else [False])
                 for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
                 for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))]
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}

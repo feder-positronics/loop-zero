@@ -233,8 +233,9 @@ produces HOLD without truncation. The projection binds publisher,
 repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
 raw digest/byte count, completeness and per-call requested/reported/configured settings,
 fatal classification and attributable inspection event/range facts. It publishes
-no commands, source contents or private paths. Codex's human transcript display
-is a sanitized retention notice; Claude's existing rendering stays unchanged.
+no commands, source contents or private paths. New reviews show structured
+review fields and a local retention notice for both Codex and Claude.
+Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
