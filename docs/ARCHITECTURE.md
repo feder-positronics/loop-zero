@@ -233,8 +233,9 @@ produces HOLD without truncation. The projection binds publisher,
 repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
 raw digest/byte count, completeness and per-call requested/reported/configured settings,
 fatal classification and attributable inspection event/range facts. It publishes
-no commands, source contents or private paths. Codex's human transcript display
-is a sanitized retention notice; Claude's existing rendering stays unchanged.
+no commands, source contents or private paths. New reviews show structured
+review fields and a local retention notice for both Codex and Claude.
+Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
@@ -243,6 +244,8 @@ After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
 step, and a moved ref is left in place with a warning. GitHub REST uses separate
 read and delete requests, so the ref can still change between those requests.
+After confirmed remote deletion or absence, cleanup deletes the matching
+`origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
 requires a clean worktree at the merged PR head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
@@ -421,7 +424,8 @@ leaving this guide evergreen.
 ## Check stage runners
 
 `[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
-from a fresh temporary directory outside the task worktree. Its executable must
+from a fresh temporary directory outside the task worktree. Delegation does not
+require local bwrap. Its executable must
 be an absolute path or a bare PATH command; later arguments may be relative.
 Execute the configured path (or PATH lookup result) without resolving symlinks.
 For containment only, resolve the executable, absolute arguments, joined short
@@ -442,7 +446,7 @@ one JSON object echoing worktree, head, base, command, network and env_sha256, p
 on stderr. Missing, extra, duplicate, malformed or mismatched fields and runner
 process failures fail the stage closed. Runner timeouts report exit code 124
 and the measured elapsed duration. `not_started=true` requires exit_code=0,
-duration_s=0 and empty tail, and permits only sandboxed local fallback.
+duration_s=0 and empty tail, and permits only local fallback through bwrap.
 
 The runner may read `worktree` as data to execute the exact clean head, including
 unpushed local commits, with the supplied environment and network policy under

@@ -6,9 +6,11 @@ description: Implement a bounded change through behavior proof and the contract'
 # Implement
 
 Read [the contract](../../CONTRACT.md), `.loopzero/task.md`, repository guidance
-and affected interfaces. Confirm the task worktree and branch. Follow
-[credential conventions](../../CREDENTIALS.md) and
-[delegation guidance](../../../docs/DELEGATION.md).
+and affected interfaces. Confirm the task worktree and branch. Keep
+[keys and login tokens out of output](../../CREDENTIALS.md#keep-credentials-out-of-output).
+Follow the full [credential conventions](../../CREDENTIALS.md) before API-key
+integration and [delegation guidance](../../../docs/DELEGATION.md) before
+launching subagents or commissioning delegates.
 
 As an unattended worker, follow [the worker role's blocker route](../../../docs/DELEGATION.md#team-roles).
 
@@ -55,13 +57,16 @@ where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
 floor. Honor host execution approval rules; use dry run until execution is
 authorized. If no job is named or any condition is unproved, preserve the leftovers
 and report cleanup to the owner. Successful `loopzero merge` already performs its
-own cleanup under the delivery contract.
+own cleanup under the delivery contract. For a confirmed-abandoned task outside
+the job's scope, give the owner the
+[manual worktree procedure](../../../SETUP.md#removing-an-abandoned-task-worktree).
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
-[review budget](../../CONTRACT.md#review-budget) for each pushed head. Check the
-clean committed head before pushing. Suggestions must not expand scope. Follow
-the contract's owner queue route and merge authority.
-Rebase your own commits onto origin/main before the primary review.
+[review budget](../../CONTRACT.md#review-budget) for each pushed head.
+Suggestions must not expand scope. Follow the contract's owner queue route and
+merge authority.
+Rebase your own commits onto the configured base on origin before the primary
+review. For a stack, follow [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 Leave base merges out of a branch awaiting its delta.
 After an approved primary or a delta, merge main into the existing branch when the base or its check scripts change.
 Preserve the primary for the delta and the delta for

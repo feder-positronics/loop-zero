@@ -51,8 +51,11 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str, *, checks: dict[str, Any] | None = None) -> Config:
-    """Parse `path` as workflow.toml and return a validated `Config`."""
+def load(
+    path: Path | str, *, checks: dict[str, Any] | None = None,
+    validation_source: str | None = None,
+) -> Config:
+    """Load a workflow, optionally naming the source of checks on a second validation pass."""
     path = Path(path)
     try:
         with path.open("rb") as handle:
@@ -71,7 +74,7 @@ def load(path: Path | str, *, checks: dict[str, Any] | None = None) -> Config:
     try:
         return _build(data)
     except ConfigError as exc:
-        raise ConfigError(f"{path}: {exc}") from None
+        raise ConfigError(f"{validation_source or path}: {exc}") from None
 
 
 def base_revision(worktree: Path, base_branch: str) -> str:
@@ -200,7 +203,7 @@ def _build(data: dict[str, Any]) -> Config:
         kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
         for entry in kwargs["scratch"]:
             parts = Path(entry).parts
-            if entry in ("", ".") or entry.startswith("/") or ".." in parts or parts[0] == ".git":
+            if not parts or entry.startswith("/") or ".." in parts or parts[0] == ".git":
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     if "limits" in checks:
         kwargs["limits"] = _limits(checks["limits"])

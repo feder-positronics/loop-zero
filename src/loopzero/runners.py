@@ -341,8 +341,8 @@ def _sandbox_prefix(
     binary = _review_binary(family)
     state_dirs = tuple(dict.fromkeys(Path(path).resolve() for path in (
         Path.home() / ".claude", Path.home() / ".codex",
-        os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"),
-        os.environ.get("CODEX_HOME", Path.home() / ".codex"),
+        os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude",
+        os.environ.get("CODEX_HOME") or Path.home() / ".codex",
         os.environ.get("CLAUDE_SECURESTORAGE_CONFIG_DIR") or Path.home() / ".claude",
     )))
     state_file = (Path.home() / ".claude.json").resolve()
@@ -405,7 +405,7 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
         # Native environment auth needs no disk credentials or host refresh state.
         if any(os.environ.get(name) for name in CLAUDE_AUTH_ENV):
             return ()
-        source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude")).resolve()
+        source_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").resolve()
         if source_dir.is_dir():
             (home / ".claude").mkdir()
             binds.append((source_dir, Path(sandbox.SANDBOX_HOME) / ".claude"))
@@ -416,7 +416,7 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     else:
         # Only auth.json: codex rewrites it in place on refresh, and the reviewer's
         # shell runs unsandboxed inside bwrap, so the rest of CODEX_HOME stays private.
-        auth_file = (Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json").resolve()
+        auth_file = (Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "auth.json").resolve()
         if auth_file.is_file():
             (home / ".codex").mkdir()
             (home / ".codex" / "auth.json").touch()
@@ -1298,10 +1298,6 @@ def review_with(
         context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
                    "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
                    "fragment_sha256": hashlib.sha256(diff.encode()).hexdigest()}
-        policy += (" If commissioned inspection is required, retain actual completed head and pinned-diff reads. "
-                   "Use git -C " + json.dumps(context["cwd"]) + " rev-parse HEAD and git -C "
-                   + json.dumps(context["cwd"]) + " diff --no-color " + context["base"] + " " + head
-                   + "; separate native calls in the same session qualify. Do not echo evidence or use moving refs.")
         context.update(prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
                        policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
                        source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())

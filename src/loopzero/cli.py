@@ -21,7 +21,7 @@ from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
-from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
+from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult, is_check_exit_code
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
@@ -101,7 +101,9 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     base_checks = config_mod.load_base(root, config.base_branch, revision=revision)
     if base_checks is None:
         return config_mod.load(path)
-    config = config_mod.load(path, checks=base_checks)
+    config = config_mod.load(
+        path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
+    )
     delivery = config_mod.load_base(root, config.base_branch, "delivery", revision=revision) or {}
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
@@ -128,7 +130,10 @@ def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) ->
         raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
     delivery = config_mod.load_base(wt, config.base_branch, "delivery", revision=revision) or {}
     pinned = dataclasses.replace(
-        config_mod.load(wt / "workflow.toml", checks=checks),
+        config_mod.load(
+            wt / "workflow.toml", checks=checks,
+            validation_source=f"origin/{config.base_branch}:workflow.toml",
+        ),
         review_publishers=config_mod._strings(
             "delivery.review_publishers", delivery.get("review_publishers", [])),
         reviewer_ro_paths=config_mod._host_paths(
@@ -326,6 +331,10 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
+    _write_json_atomically(path, payload)
+
+
+def _write_json_atomically(path: Path, payload: dict) -> None:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
     ) as stream:
@@ -347,6 +356,8 @@ def _load_report(wt: Path) -> CheckReport | None:
     try:
         data = json.loads(path.read_text())
         results = tuple(CheckResult(**item) for item in data["results"])
+        if any(not is_check_exit_code(result.exit_code) for result in results):
+            raise TypeError("exit_code must be an integer")
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
@@ -521,8 +532,6 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
     for result in report.results:
-        print(f"exit {result.exit_code:<3} {result.duration_s:7.1f}s  {result.command}")
-    for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
@@ -543,10 +552,11 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "that cache.",
                     file=sys.stderr,
                 )
-    _save_report(wt, report)
-    if report.ok and not report.dirty:
-        _print_receipt(wt, report, "produced")
-    _refresh_pr_checks(wt, config)
+    if report.head == worktree.head(wt):
+        _save_report(wt, report)
+        if report.ok and not report.dirty:
+            _print_receipt(wt, report, "produced")
+        _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
 
@@ -735,8 +745,9 @@ def cmd_review(args: argparse.Namespace) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        github.update_body(config.repo, pr.number, _append_review(pr.body or _pr_body(wt, head), result))
-    except (github.GhError, OSError, ValueError) as exc:
+        live = github.pr_view(config.repo, pr.number)
+        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+    except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
@@ -763,6 +774,20 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
 
+def _review_formats(result: ReviewResult) -> list[tuple[str, bool, bool]]:
+    old_settings = "requested_settings" not in result.provenance
+    formats = [(False, False)]
+    if runners.codex_evidence(result) is None:
+        formats.append((False, True))
+        if old_settings:
+            formats.append((True, True))
+    if result.family == "codex" and old_settings:
+        formats.append((True, False))
+    return [(prefix, settings, display)
+            for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
+            for settings, display in formats]
+
+
 def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
@@ -777,11 +802,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     if (publisher.casefold() not in {name.casefold() for name in trusted}
             or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number) is None):
         raise CliError("publication is revoked, pending or untrusted")
-    payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
-                                      legacy_settings=legacy, legacy_display=display)
-                for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
-                for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
-                for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))]
+    payloads = github.review_payloads(config.repo, pr.number, result.head, result, _review_formats(result))
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
@@ -947,10 +968,9 @@ def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None
     data = dataclasses.asdict(result)
     if publication is not None:
         data["publication"] = publication
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    with os.fdopen(os.open(path, flags, 0o600), "w") as output:
-        os.fchmod(output.fileno(), 0o600)
-        output.write(json.dumps(data, indent=2) + "\n")
+    if path.is_symlink():
+        raise OSError(f"refusing to replace symbolic link: {path}")
+    _write_json_atomically(path, data)
 
 
 def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
@@ -1352,20 +1372,35 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "next: loopzero merge --wait follows the queue, verifies and cleans up"
             )
             return 0
-    _delete_remote_branch(config, branch, pr.head_sha)
+    _cleanup_remote_refs(wt, config, branch, pr.head_sha)
     _cleanup(wt, pr)
     print(sha)
     return 0
 
 
-def _delete_remote_branch(config: Config, branch: str, expected_head: str) -> None:
+def _cleanup_remote_refs(wt: Path, config: Config, branch: str, expected_head: str) -> None:
     try:
-        if not github.delete_remote_branch(config.repo, branch, expected_head):
-            print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
-                  "skipping deletion", file=sys.stderr)
+        if github.delete_remote_branch(config.repo, branch, expected_head):
+            _delete_tracking_ref(wt, branch, expected_head)
+            return
+        print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
+              "skipping deletion", file=sys.stderr)
     except (github.GhError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
               f"delete {branch!r} in {config.repo} if it still points at the merged head", file=sys.stderr)
+
+
+def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
+    if not branch.startswith("lz/") or branch.count("/") != 1:
+        return
+    ref = f"refs/remotes/origin/{branch}"
+    try:
+        _repo_root(wt)
+        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref)
+        if current == f"{expected_head} {ref}":
+            _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
+    except (CliError, OSError, _proc.ProcTimeout) as exc:
+        print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:

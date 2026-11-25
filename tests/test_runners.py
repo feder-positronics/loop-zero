@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -19,6 +20,8 @@ from loopzero.runners import (
     RunnerUsageLimit,
     author_families,
     build_prompt,
+    codex_evidence,
+    merge_reviews,
     review_with,
     split_diff,
 )
@@ -335,6 +338,39 @@ def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
     policy = claude[claude.index("--append-system-prompt") + 1]
     override = next(arg for arg in _argv(fake_bin, "codex") if arg.startswith("developer_instructions="))
     assert tomllib.loads(override)["developer_instructions"].encode() == policy.encode()
+
+
+
+@pytest.mark.parametrize(("kind", "split"), [("primary", False), ("delta", False), ("primary", True)])
+def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path, kind, split):
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+    git(tmp_path, "init", "-q")
+    head, base = "a" * 40, "b" * 40
+    task = "## Acceptance\nPreserve Ω."
+    diffs = ["+first Ω\n", "+second\n"] if split else ["+first Ω\n"]
+    full_diff = "".join(diffs).encode()
+    context = {
+        "repo": "acme/widgets", "pr": 7, "publisher": "bot", "head": head, "kind": kind,
+        "base": base, "diff_sha256": hashlib.sha256(full_diff).hexdigest(),
+        "diff_bytes": len(full_diff),
+    }
+    results = []
+    for index, diff in enumerate(diffs, 1):
+        results.append(review_with(
+            "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
+            review_context=context, chunk=(index, len(diffs)) if split else None,
+        ))
+        override = next(arg for arg in _argv(fake_bin, "codex")
+                        if arg.startswith("developer_instructions="))
+        policy = tomllib.loads(override)["developer_instructions"]
+        assert "rev-parse HEAD" not in policy and "diff --no-color" not in policy
+        header, raw_diff = (fake_bin / "codex.stdin").read_bytes().split(b"\n", 1)
+        assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
+        assert raw_diff == diff.encode()
+
+    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    assert proof["complete"]
+    assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
 
 @pytest.mark.parametrize("version", ["codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", ""])
@@ -842,6 +878,37 @@ def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path
     assert str(fake_bin) not in [path for pair in _pairs(argv, "--ro-bind-try") for path in pair]
 
 
+@pytest.mark.parametrize("family,override", [("codex", "CODEX_HOME"), ("claude", "CLAUDE_CONFIG_DIR")])
+def test_blank_reviewer_home_matches_unset(family, override, tmp_path, fake_bwrap, monkeypatch):
+    from loopzero import runners
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    host = tmp_path / "host"
+    state = host / f".{family}"
+    state.mkdir(parents=True)
+    (state / "auth.json").touch()
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.chdir(repo)
+    for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                 *runners.CLAUDE_AUTH_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(runners, "_review_binary", lambda _: Path("/usr/bin/true"))
+    monkeypatch.setattr(runners.sandbox, "probe", lambda *_: None)
+
+    home = tmp_path / "sandbox"
+    home.mkdir()
+    unset_prefix = runners._sandbox_prefix(family, repo, home, (), ())
+    unset_binds = runners._auth_binds(family, home)
+    assert unset_binds
+    monkeypatch.setenv(override, "")
+    assert runners._sandbox_prefix(family, repo, home, (), ()) == unset_prefix
+    blank_home = tmp_path / "blank-sandbox"
+    blank_home.mkdir()
+    assert runners._auth_binds(family, blank_home) == unset_binds
+
+
 def test_empty_secure_storage_override_preserves_native_default(
     fake_bin, tmp_path, fake_bwrap, monkeypatch,
 ) -> None:
@@ -1038,7 +1105,7 @@ def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch:
 def test_bwrap_probe_failure_fails_closed(fake_bin: Path, tmp_path: Path, fake_tool) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     fake_tool("bwrap", "echo 'namespace denied' >&2\nexit 1\n")
-    with pytest.raises(SandboxUnavailable, match="namespace denied"):
+    with pytest.raises(SandboxUnavailable, match="namespace creation failed: exit 1"):
         _review("claude", tmp_path)
     assert not (fake_bin / "claude.stdin").exists()
 
