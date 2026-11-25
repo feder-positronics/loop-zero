@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import tempfile
 from pathlib import Path
 
 from loopzero._proc import run
@@ -104,24 +105,61 @@ def _ensure_excludes(repo_root: Path) -> None:
 
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
-    """Create branch `lz/<slug>` from `origin/<base_branch>` in a new worktree."""
+    """Create a task worktree or finish initializing an interrupted start."""
     repo_root = Path(repo_root)
     branch = branch_name(repo_root, slug)
     wt = worktree_dir(repo_root, slug)
-    if wt.exists():
-        raise WorktreeError(f"worktree directory already exists: {wt}")
-    if _branch_exists(repo_root, branch):
+    task = task_file(wt)
+    existing = wt.exists()
+    refusal = f"worktree directory already exists: {wt}"
+    if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
+        raise WorktreeError(refusal)
+    if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
     _git(repo_root, "fetch", "--quiet", "origin", base_branch)
     base = _git(repo_root, "rev-parse", f"origin/{base_branch}")
+    if existing and not _can_resume_start(repo_root, wt, branch, base):
+        raise WorktreeError(refusal)
     _ensure_excludes(repo_root)
-    wt.parent.mkdir(parents=True, exist_ok=True)
-    _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
-    task = task_file(wt)
-    task.parent.mkdir(parents=True, exist_ok=True)
-    task.write_text(_TASK_TEMPLATE.format(
+    if not existing:
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
+    _initialize_task(task, _TASK_TEMPLATE.format(
         title=title_from_slug(slug), base_branch=base_branch, base=base))
     return wt
+
+
+def _can_resume_start(repo_root: Path, wt: Path, expected_branch: str, base: str) -> bool:
+    registered = _git(repo_root, "worktree", "list", "--porcelain", "-z").split("\0\0")
+    expected = f"worktree {wt.resolve()}\0HEAD {base}\0branch refs/heads/{expected_branch}"
+    if expected not in registered or not (wt / ".git").is_file():
+        return False
+    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    return (
+        _git(wt, *common_dir) == _git(repo_root, *common_dir)
+        and branch(wt) == expected_branch
+        and head(wt) == base
+        and not is_dirty(wt)
+    )
+
+
+def _initialize_task(task: Path, text: str) -> None:
+    if task.parent.is_symlink():
+        raise WorktreeError(f"task directory is a symbolic link: {task.parent}")
+    task.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=task.parent, prefix=".task.md-", delete=False
+    ) as stream:
+        temp = Path(stream.name)
+        try:
+            stream.write(text)
+            stream.close()
+            # Publish the complete file without replacing an existing handoff.
+            task.hardlink_to(temp)
+        except FileExistsError as exc:
+            raise WorktreeError(f"task file already exists: {task}") from exc
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def head(wt: Path) -> str:
