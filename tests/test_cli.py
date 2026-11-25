@@ -3766,6 +3766,7 @@ DO NOT EDIT
         assert code == 3 and "waiting for admission" in out
     else:
         assert code == 1 and f"{URL}#issuecomment-43" in err and "'checks'" in err
+        assert "as the whole PR comment (same login)" in err and "`loopzero merge --wait`" in err
         if attribution == "stacked":
             assert "stack" in err and "earlier" in err
         elif attribution == "isolated":

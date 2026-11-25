@@ -1306,24 +1306,26 @@ def _mergify_timeout_detail(
     return detail
 
 
-MERGIFY_DEQUEUE_HINT = (
-    'Read Mergify\'s "Left the queue" comment on the PR for the reason. '
-    "Address it before requeueing. To requeue, post `@mergifyio queue` as the whole PR comment "
+MERGIFY_REQUEUE = (
+    "To requeue, post `@mergifyio queue` as the whole PR comment "
     "(same login), then rerun `loopzero merge --wait`."
+)
+MERGIFY_DEQUEUE_HINT = (
+    'Read Mergify\'s "Left the queue" comment on the PR for the reason. Address it before requeueing.'
 )
 
 
 def _mergify_departure_hint(report: mergify.Departure | None) -> str:
     if report is None:
-        return MERGIFY_DEQUEUE_HINT
+        return f"{MERGIFY_DEQUEUE_HINT} {MERGIFY_REQUEUE}"
     detail = f"Mergify report: {report.url}."
     if report.checks:
         detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
     guidance = {
-        "stacked": "Mergify tested a stack and could not attribute the failure. Inspect the candidate or requeue after the earlier PRs clear.",
+        "stacked": "Mergify tested a stack and could not attribute the failure. Inspect the candidate in the report or requeue after the earlier PRs clear.",
         "isolated": "Mergify tested this PR alone. Inspect or fix the failed check before requeueing unless it is a known flake.",
     }
-    return f"{detail} {guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)}"
+    return f"{detail} {guidance.get(report.attribution, MERGIFY_DEQUEUE_HINT)} {MERGIFY_REQUEUE}"
 
 
 def _mergify_departure(
