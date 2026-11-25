@@ -200,16 +200,16 @@ def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
 
 
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
-    run = subprocess.run
+    communicate = subprocess.Popen.communicate
 
-    def run_with_timeout(argv, **kwargs):
-        if argv[-3:-1] == ["/bin/sh", "-c"]:
+    def communicate_with_timeout(process, input=None, timeout=None):
+        if process.args[-3:-1] == ["/bin/sh", "-c"]:
             if before_timeout is not None:
                 before_timeout()
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=output)
-        return run(argv, **kwargs)
+            raise subprocess.TimeoutExpired(process.args, timeout, output=output)
+        return communicate(process, input, timeout)
 
-    monkeypatch.setattr(subprocess, "run", run_with_timeout)
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
 
 
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):

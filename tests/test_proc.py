@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
+import signal
+import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -58,6 +62,37 @@ def test_run_raises_on_timeout(tmp_path):
             env_allowlist=("PATH",),
             timeout=0.2,
         )
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="checks Linux process state")
+def test_timeout_stops_descendant_and_preserves_output(tmp_path):
+    wait = "import signal; signal.pause()"
+    child = f"import os; print(os.getpid(), flush=True); {wait}"
+    parent = (
+        f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child!r}]); "
+        f"print('parent stderr', file=sys.stderr, flush=True); {wait}"
+    )
+    with subprocess.Popen([sys.executable, "-c", wait]) as unrelated:
+        try:
+            with pytest.raises(_proc.ProcTimeout) as raised:
+                _proc.run(
+                    [sys.executable, "-c", parent], cwd=tmp_path, env_allowlist=(), timeout=0.75,
+                )
+            pid = int(raised.value.stdout)
+            stat = Path(f"/proc/{pid}/stat")
+            try:
+                try:
+                    state = stat.read_text().rsplit(")", 1)[1].split()[0]
+                except FileNotFoundError:
+                    state = "gone"
+                assert state in {"gone", "Z", "X"}
+                assert raised.value.stderr == "parent stderr\n"
+                assert unrelated.poll() is None
+            finally:
+                with suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+        finally:
+            unrelated.kill()
 
 
 def test_merge_output_interleaves_streams(tmp_path):
