@@ -226,7 +226,7 @@ def _read_only(args: tuple[str, ...]) -> bool:
         if methods:
             return all(method.upper() == "GET" for method in methods)
         return not {"-f", "-F", "--field", "--raw-field", "--input"} & set(args)
-    return args[:2] in {("pr", "view"), ("pr", "list"), ("pr", "checks")}
+    return False
 
 
 def app_token() -> str:
