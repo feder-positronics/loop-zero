@@ -461,8 +461,9 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. It flushes and syncs a sibling temporary
-file before replacing the receipt atomically. Runners cannot select stages or
+the authoritative `checks.json` receipt. Writers lock the task state directory
+while rechecking HEAD and atomically replacing the receipt from a synced sibling
+temporary file. Runners cannot select stages or
 mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.

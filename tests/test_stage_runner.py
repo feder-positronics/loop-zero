@@ -75,8 +75,12 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         assert 'Worktree changed after stage' in report.results[0].tail
     elif not verdict:
         assert calls == ['echo one']
-    _save_report(git_repo, report)
-    assert _load_report(git_repo) == report
+    current_head = _save_report(git_repo, report)
+    if 'drift' in body:
+        assert current_head == git(git_repo, 'rev-parse', 'HEAD').strip() and current_head != report.head
+        assert _load_report(git_repo) != report
+        return
+    assert current_head is None and _load_report(git_repo) == report
     receipt = json.loads((git_repo / '.loopzero/checks.json').read_text())
     assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
 
