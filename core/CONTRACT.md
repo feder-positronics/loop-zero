@@ -44,10 +44,11 @@ On every start/resume, run `loopzero status`, then rerun the last `--wait`
 command if any; both are idempotent. Status derives the branch's stage from
 Git, GitHub and the check receipt. Never end a turn waiting for notice of an
 event that may already have happened; notifications never replace the waiter.
-Before yielding, record the head, last exit code, awaited event and next
-command in one PR comment per owner. Post it on the first yield and edit it in
-place on later yields (`gh api -X PATCH repos/O/R/issues/comments/ID`). Post a
-separate comment only for a request to a human, a blocker or stall, or the final
+Before yielding, record head, last exit code, awaited event and next command
+in one PR comment per owner. Post on first yield; update the existing comment ID
+with the full replacement Markdown from `body_file` on later yields:
+`gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
+Post separately only for a human request, blocker, stall or final
 result. End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
