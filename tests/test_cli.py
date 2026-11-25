@@ -879,14 +879,18 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
+@pytest.mark.parametrize("hook_fails", [False, True])
 def test_pr_uses_lease_for_rewritten_open_pr(
-    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, hook_fails: bool
 ) -> None:
     old = head_of(wt)
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     git(wt, "reset", "-q", "--soft", "HEAD~1")
     git(wt, "commit", "-q", "-m", "rebased feature")
     head = head_of(wt)
+    if hook_fails:
+        hook = fake_tool("pre-push", "echo 'lint failed in widget.py' >&2\nexit 1\n")
+        git(wt, "config", "core.hooksPath", str(hook.parent))
     pushes = tmp_path / "pushes"
     fake_tool("git", f'''\
 if [ "$1" = "push" ]; then printf '%s\\n' "$*" >> "{pushes}"; fi
@@ -897,11 +901,15 @@ exec /usr/bin/git "$@"
 
     code, out, err = run(capsys, "pr")
 
-    assert (code, out, err) == (0, URL + "\n", "")
+    if hook_fails:
+        assert (code, out) == (1, "") and "lint failed in widget.py" in err
+        assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
+    else:
+        assert (code, out, err) == (0, URL + "\n", "")
     assert pushes.read_text().strip() == (
-        f"push -u origin --force-with-lease=lz/t1:{old} lz/t1"
+        f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
     )
-    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == head
+    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == (old if hook_fails else head)
 
 
 def test_pr_reports_rejected_lease_without_overwriting_remote(
