@@ -1630,6 +1630,7 @@ def test_review_falls_through_when_preferred_family_fails(
               "echo 'Please run codex login' >&2\nexit 1\n")  # RunnerAuthFailed
     code, out, err = run(capsys, "review")
     assert code == 0 and "review by claude" in out
+    assert "reviewer codex unavailable:" in err
     assert "same-family fallback: independent reviewers failed: codex:" in err
     assert "Same-family fallback:" in posted_review(gh)["body"]
 
@@ -1657,6 +1658,7 @@ allowed_efforts = ["medium"]
         return
     assert code == 4 and "same-family fallback:" not in err
     assert "Please run codex login" in err and "effort 'high' is not allowed for claude" in err
+    assert "reviewer codex unavailable:" not in err
     assert not (fake_bin / "claude.argv").exists()
 
 
@@ -1719,7 +1721,7 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert "claude: CLI is not authenticated\nfirst detail\nsecond detail" in err
     assert "not printed" not in err
     assert "Fix: run `claude auth login`." in err
-    assert "codex: 'codex' not found on PATH" in err
+    assert err.count("codex: 'codex' not found on PATH") == 1
     assert "npm install -g @openai/codex" in err
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
 
