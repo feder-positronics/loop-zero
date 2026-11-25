@@ -181,10 +181,17 @@ Verify file presence and permissions without displaying the key (replace
 ```bash
 test -r "$HOME/.config/typesafe/api-key" &&
   test -s "$HOME/.config/typesafe/api-key" &&
-  stat -c '%a %n' "$HOME/.config/typesafe" "$HOME/.config/typesafe/api-key"
+  python3 - "$HOME/.config/typesafe" "$HOME/.config/typesafe/api-key" <<'PYTHON'
+import os
+import stat
+import sys
+
+for path in sys.argv[1:]:
+    print(f"{stat.S_IMODE(os.stat(path).st_mode):o} {path}")
+PYTHON
 ```
 
-On Linux, this should show `700` for the directory and `600` for the file.
+This should show `700` for the directory and `600` for the file.
 It confirms the local setup, not whether the provider accepts the key. To test
 authentication, ask the agent to use the integration skill for one live call
 with synthetic input and report the result without credentials. For TypeSafe:
