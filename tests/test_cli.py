@@ -2748,20 +2748,26 @@ def test_resolve_retries_only_thread_resolution(wt: Path, gh: FakeGh, capsys, mo
     resolved = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
     outcomes = [failure, resolved] if recovers else [failure] * 4
     gh.respond("api graphql", threads_json(_finding_thread("0b9b59e7", head)), posted, *outcomes)
+    if recovers:
+        gh.append("api graphql", threads_json())
+        gh.respond("api -X", "")
     monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed.")
 
     if recovers:
-        assert (code, out, err) == (0, "resolved 0b9b59e7: Off by one\n", "")
+        assert (code, err) == (0, "")
+        assert out.splitlines() == [
+            "resolved 0b9b59e7: Off by one", "refreshed Loop-zero Eligibility for PR #7",
+        ]
     else:
         assert code == 1
         assert "reply posted to finding 0b9b59e7" in err
-        assert "do not rerun loopzero resolve" in err
+        assert "Do not rerun loopzero resolve" in err
     queries = [c["argv"][3] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]]
-    assert len(queries) == 2 + len(outcomes)
+    assert len(queries) == 2 + len(outcomes) + recovers
     assert "addPullRequestReviewThreadReply" in queries[1]
-    assert all("resolveReviewThread" in query for query in queries[2:])
+    assert all("resolveReviewThread" in query for query in queries[2:2 + len(outcomes)])
 
 
 def test_resolve_leaves_the_thread_open_when_the_reply_was_not_posted(
