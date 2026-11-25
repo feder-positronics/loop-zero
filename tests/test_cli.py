@@ -1771,7 +1771,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
     ("APPROVED", "approve", "ahead", False, False, "clean"),
 ])
 def test_ready_after_primary_reviewed_head(
-    wt, gh, capsys, monkeypatch, state, verdict, comparison, resolved, ready, history, reposted,
+    wt, gh, capsys, monkeypatch, fake_tool, state, verdict, comparison, resolved, ready, history, reposted,
 ):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
@@ -1803,10 +1803,11 @@ def test_ready_after_primary_reviewed_head(
     detail = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
     detail["base"]["sha"] = base
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
+    fake_tool("prlimit", "exit 127\n")
     popen = subprocess.Popen
 
     def isolated_fetch(argv, **kwargs):
-        if argv[0] == "prlimit" and "fetch" in argv:
+        if "fetch" in argv:
             argv = [wt.as_uri() if arg == f"https://github.com/{REPO}.git" else arg for arg in argv]
         return popen(argv, **kwargs)
 
