@@ -53,11 +53,8 @@ class GitError(WorktreeError):
 
 def _git(cwd: Path, *args: str, timeout: float = 120, preserve_newlines: bool = False) -> str:
     argv = ("git", *args)
-    try:
-        done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-                   preserve_newlines=preserve_newlines)
-    except UnicodeDecodeError as exc:
-        raise GitError(argv, "output is not valid UTF-8") from exc
+    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+               preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
     return done.stdout if preserve_newlines else done.stdout.strip()

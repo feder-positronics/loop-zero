@@ -72,7 +72,7 @@ def run(
     `merge_output=True` sends stderr into stdout so interleaving is preserved.
     `input` is written to the child's stdin; without it stdin is /dev/null.
     `encoding` overrides the parent locale for text I/O; None retains subprocess defaults.
-    With `preserve_newlines`, decode stdout strictly without newline translation
+    With `preserve_newlines`, decode output without newline translation
     (UTF-8 by default).
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
@@ -118,7 +118,7 @@ def run(
             duration_s=elapsed,
         ) from exc
     if isinstance(stdout, bytes):
-        stdout = stdout.decode(raw_encoding)
+        stdout = stdout.decode(raw_encoding, errors="replace")
     if isinstance(stderr, bytes):
         stderr = stderr.decode(raw_encoding, errors="replace")
     return Completed(

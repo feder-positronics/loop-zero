@@ -200,6 +200,14 @@ def test_dirty_head_and_diff(repo: Path) -> None:
     assert worktree.is_dirty(wt)
 
 
+def test_diff_retains_reviewable_text_for_non_utf8_patch(repo):
+    base = worktree.head(repo)
+    (repo / "latin1.txt").write_bytes(b"caf\xe9\r\n")
+    git(repo, "add", "latin1.txt")
+    git(repo, "commit", "-m", "add Latin-1 text")
+    assert worktree.diff_since(repo, base).endswith("+caf\ufffd\r\n")
+
+
 def test_task_helpers_errors(repo: Path) -> None:
     wt = worktree.start(repo, "tk", "main")
     worktree.task_file(wt).write_text("# no base line\n")
