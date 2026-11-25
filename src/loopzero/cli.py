@@ -549,7 +549,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     argv = ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
     current = _proc.run(argv, cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
-    if current.stdout.strip().startswith("lz/"):
+    if current.stdout.strip().startswith("lz/") or (
+        current.exit_code == 1 and worktree.is_linked_checkout(root)
+    ):
         raise CliError(f"already inside task worktree {root}; run start from the main checkout")
     config = _load_config(args, root)
     print(worktree.start(root, args.slug, config.base_branch))
@@ -1120,6 +1122,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
         if waited is None:
             return 3
         pr, readiness, kicked = waited
+    assert readiness is not None
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
@@ -1128,6 +1131,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
+    assert readiness is not None
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
@@ -1201,7 +1205,7 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
-) -> tuple[github.PR, github.Readiness, bool] | None:
+) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
@@ -1230,9 +1234,11 @@ def _print_check_wait_timeout(pr: github.PR) -> None:
         print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
 
 
-def _verify_wait_config(
-    args: argparse.Namespace | None, wt: Path, config: Config, head: str,
+def _verify_wait_snapshot(
+    args: argparse.Namespace | None, wt: Path, config: Config, head: str, current_head: str,
 ) -> None:
+    if current_head != head:
+        raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
     if args is None or (latest := _load_config(args, wt, pin_checks=True)) == config:
         return
     if _current_check_report(wt, latest, head) is None:
@@ -1243,27 +1249,26 @@ def _verify_wait_config(
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
-    args: argparse.Namespace | None = None, bounded: bool = False,
-) -> tuple[github.PR, github.Readiness, bool] | None:
-    """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
+    args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
+) -> tuple[github.PR, github.Readiness | None, bool] | None:
+    """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     current = pr
     stale_notice = False
     for _ in _poll_until(started, timeout, bounded=bounded):
         current = github.pr_view(config.repo, pr.number)
-        if current.head_sha != pr.head_sha:
-            raise CliError(
-                f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
-            )
-        _verify_wait_config(args, wt, config, pr.head_sha)
+        _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
+        if allow_merged and current.state == "MERGED":
+            return current, None, kicked
         _require_no_merge_hold(current)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons, args=args, bounded=bounded)
+                                    shown=readiness.reasons, args=args, bounded=bounded,
+                                    allow_merged=allow_merged)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
@@ -1480,7 +1485,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started,
-                                  args=args)
+                                  args=args, allow_merged=True)
         if waited is None:
             return 3
         pr, readiness, _ = waited

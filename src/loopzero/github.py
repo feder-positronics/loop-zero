@@ -33,6 +33,7 @@ MARKER_RE = re.compile(
 )
 PAGE = 100
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
+RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -285,9 +286,10 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
+    rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
     patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
     request_args = args
-    if diagnostic_api and not {"--include", "-i"} & set(args):
+    if (rest_api or diagnostic_api) and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
     cwd = cwd or Path("/")
@@ -316,10 +318,13 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                 ) from None
             _retry_sleep(_read_timeout(delay) if scope else delay)
             continue
-        tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
-        if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
-            reset = _graphql_reset(args, tail, cwd, selected)
-            guidance = reset + "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
+        status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
+                                 else (None, {}, done.stdout))
+        tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
+        if done.exit_code and ((rest_api and status == "429")
+                               or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
+            guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
+                        else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
@@ -337,7 +342,40 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
         raise GhError(error_command, error_tail, token=selected, guidance=guidance)
-    return _included_response(done.stdout)[2] if diagnostic_api else done.stdout
+    return body
+
+
+def _rest_rate_limit(headers: dict[str, str]) -> str:
+    resource = headers.get("x-ratelimit-resource", "")
+    remaining_value = headers.get("x-ratelimit-remaining", "")
+    remaining = int(remaining_value) if re.fullmatch(r"[0-9]{1,18}", remaining_value) else None
+    retry_after = headers.get("retry-after", "")
+    retry_seconds = re.fullmatch(r"[0-9]{1,18}", retry_after)
+    retry_date = re.fullmatch(
+        r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT", retry_after,
+    )
+    reset = ""
+    try:
+        if epoch := headers.get("x-ratelimit-reset"):
+            reset = datetime.fromtimestamp(int(epoch), UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        pass
+    evidence = []
+    if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", resource):
+        evidence.append(f"X-RateLimit-Resource: {resource}")
+    if remaining is not None:
+        evidence.append(f"X-RateLimit-Remaining: {remaining}")
+    if reset:
+        evidence.append(f"X-RateLimit-Reset: {reset}")
+    if retry_seconds or retry_date:
+        evidence.append(f"Retry-After: {retry_after}")
+    guidance = RATE_LIMIT_GUIDANCE
+    if remaining == 0:
+        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
+    elif remaining is not None or retry_seconds or retry_date:
+        delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
+        guidance = f"\nRate limited: short-window limit: retry after {delay}; No automatic retry."
+    return "".join(f"\n{line}" for line in evidence) + guidance
 
 
 def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:

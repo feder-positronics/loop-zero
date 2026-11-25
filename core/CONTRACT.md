@@ -20,23 +20,21 @@ own delivery state; `.loopzero/` holds task text and local receipts.
 4. `loopzero review` reviews the exact head, independently by default, and
    posts one GitHub review with inline findings: exit 0 `approve`,
    5 `request_changes`.
-5. `loopzero ready --wait` computes readiness and marks a ready PR ready for review.
-   A draft blocked only by missing/skipped required checks is activated to
-   trigger CI; without `--wait` it exits 3. `--wait[=SECONDS]` (default 1800)
-   observes the unchanged head, including after activation within the same
-   budget: 0 ready, 1 blocked, 3 timeout. Immediate green can precede
-   asynchronous CI scheduling. After two minutes of missing checks without
-   visible pending checks, inspect scheduling, triggers and permissions,
-   correct the cause, then retry.
+5. `loopzero ready --wait` marks ready PRs ready for review. It also activates
+   drafts blocked only by missing/skipped checks to trigger CI, even with
+   mergeability pending. Without waiting, activation exits 3.
+   Both waiters observe the unchanged head while all blockers can settle,
+   with `--wait[=SECONDS]` (default 1800). Pending mergeability can block with
+   green checks and gets its own timeout message (exit 3).
+   Green can precede CI scheduling. After two minutes with only missing checks
+   and none pending, inspect scheduling, triggers and permissions, then retry.
 6. After step 5 exits 0, run `(cd <worktree> && loopzero merge --wait)` from
    the repository root; the subshell avoids leaving the shell inside a deleted
    worktree. Merge rechecks readiness, uses the configured strategy, verifies
    the landed SHA, and deletes branch/worktree. A cleanup warning still means
    the merge landed; follow the next step it names. A queue initially enqueues;
-   `--wait[=SECONDS]` follows landing and cleanup. It first waits out
-   pending/missing required checks on the unchanged head within that same
-   budget; without it, those checks block merge and the command names the
-   waiter. Enqueueing without `--wait` returns 0 without cleanup.
+   `--wait` covers readiness, landing and cleanup within the same budget.
+   Enqueueing without `--wait` returns 0 without cleanup.
 
 Merge is authorized by default under [merge authority](#merge-authority).
 
@@ -44,10 +42,11 @@ On every start/resume, run `loopzero status`, then rerun the last `--wait`
 command if any; both are idempotent. Status derives the branch's stage from
 Git, GitHub and the check receipt. Never end a turn waiting for notice of an
 event that may already have happened; notifications never replace the waiter.
-Before yielding, record the head, last exit code, awaited event and next
-command in one PR comment per owner. Post it on the first yield and edit it in
-place on later yields (`gh api -X PATCH repos/O/R/issues/comments/ID`). Post a
-separate comment only for a request to a human, a blocker or stall, or the final
+Before yielding, record head, last exit code, awaited event and next command
+in one PR comment per owner. Post on first yield; update the existing comment ID
+with the full replacement Markdown from `body_file` on later yields:
+`gh api --method PATCH "repos/$owner/$repo/issues/comments/$comment_id" -f "body=$(cat "$body_file")"`.
+Post separately only for a human request, blocker, stall or final
 result. End delivery responses with complete, blocked (exact
 dependency/decision), or waiting (event, next action, automatic resume or
 requester needed).
@@ -117,10 +116,14 @@ holds also block the owner queue route below.
   whose blocking findings are resolved and followed only by clean base merges.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
-  source-preserving. It validates a separate integration candidate,
-  preserving authored-head review across base movement. Conflicts still
-  block; source edits require fresh checks and eligible review.
+  source-preserving. Its separate integration candidate preserves authored-head
+  review across base movement. Source edits need fresh checks and eligible review.
+- GitHub reports `UNKNOWN` mergeability for an open PR. Local waiters can
+  retry this state. Confirmed conflicts block immediately.
 - Any `[checks].required_ci` check missing or not green on the exact head.
+  If a check is absent and GitHub returns runs from 1,000 or more distinct
+  suites, the suite-limit diagnostic blocks readiness until the verdict is
+  visible. Ordinary missing-run grace and draft activation do not apply.
 
 Push fixes or use `loopzero resolve <id> "<reason>"` to reply to and resolve
 one finding; no bulk or silent resolution. The CLI has no waiver file or override

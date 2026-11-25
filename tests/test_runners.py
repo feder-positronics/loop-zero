@@ -64,61 +64,29 @@ def _native_codex_result(
     usage = {"input_tokens": 10, "output_tokens": 2}
     command = f"git -C {cwd} rev-parse HEAD && git -C {cwd} diff --no-color {base} {head}"
     item = {"id": "read-1", "type": "command_execution", "command": command}
+    finished = dict(item, status="completed", exit_code=0, aggregated_output=f"{head}\n{patch}\n")
     events = [
         {"type": "thread.started", "thread_id": session},
-        {"type": "item.started", "item": {**item, "status": "in_progress"}},
-        {
-            "type": "item.completed",
-            "item": {
-                **item,
-                "status": "completed",
-                "exit_code": 0,
-                "aggregated_output": head + "\n" + patch + "\n",
-            },
-        },
-        {
-            "type": "item.completed",
-            "item": {"id": "final", "type": "agent_message", "text": payload},
-        },
+        {"type": "item.started", "item": dict(item, status="in_progress")},
+        {"type": "item.completed", "item": finished},
+        {"type": "item.completed", "item": {"id": "final", "type": "agent_message", "text": payload}},
         {"type": "turn.completed", "usage": usage},
     ]
     settings = {"model": "gpt-6.2-astra", "effort": "medium"}
+    encoded_patch = patch.encode()
     context = {
-        "repo": repo,
-        "pr": number,
-        "publisher": publisher,
-        "head": head,
-        "kind": "primary",
-        "base": base,
-        "diff_sha256": hashlib.sha256(patch.encode()).hexdigest(),
-        "diff_bytes": len(patch.encode()),
-        "cwd": cwd,
-        "index": index,
-        "chunks": chunks,
-        "requested": settings,
-        **{
-            key: "1" * 64
-            for key in (
-                "fragment_sha256",
-                "prompt_sha256",
-                "policy_sha256",
-                "source_sha256",
-                "binary_sha256",
-                "argv_sha256",
-            )
-        },
+        "repo": repo, "pr": number, "publisher": publisher, "head": head,
+        "kind": "primary", "base": base, "cwd": cwd, "index": index, "chunks": chunks,
+        "requested": settings, "diff_bytes": len(encoded_patch),
+        "diff_sha256": hashlib.sha256(encoded_patch).hexdigest(),
     }
-    raw = json.dumps(
-        {
-            "type": "codex_exec_result",
-            "session_id": session,
-            "token_usage": usage,
-            "final_message": payload,
-            "events": events,
-            "reported_settings": settings,
-            "review_context": context,
-        }
-    )
+    for field in ("fragment", "prompt", "policy", "source", "binary", "argv"):
+        context[f"{field}_sha256"] = "1" * 64
+    raw = json.dumps({
+        "type": "codex_exec_result", "session_id": session, "token_usage": usage,
+        "final_message": payload, "events": events, "reported_settings": settings,
+        "review_context": context,
+    })
     result = runners.parse_review(APPROVE, family="codex", head=head, kind="primary", raw=raw)
     return dataclasses.replace(
         result,
@@ -259,11 +227,24 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
 
 
+def _fake_review(bin_dir, family):
+    if family == "claude":
+        return _fake_claude(bin_dir, _claude_envelope(APPROVE))
+    return _fake_codex(bin_dir, json.dumps(APPROVE))
+
+
 def _review(family: str, cwd: Path, diff: str = "--- a\n+++ b\n+x\n", **options):
     if not (cwd / ".git").exists():
         git(cwd, "init", "-q")
     return review_with(family, cwd=cwd, head="abc123", kind="primary",
                        diff=diff, task_text="Do the thing", **options)
+
+
+@pytest.fixture
+def repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    return repo
 
 
 # ----------------------------------------------------------------- prompt
@@ -284,10 +265,7 @@ def test_prompt_frames_exact_task_and_raw_diff() -> None:
 def test_review_instruction_channel_preserves_exact_material(
     fake_bin, tmp_path, family, kind, chunk
 ):
-    if family == "claude":
-        _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    else:
-        _fake_codex(fake_bin, json.dumps(APPROVE))
+    _fake_review(fake_bin, family)
     git(tmp_path, "init", "-q")
     policies = []
     for task, diff, head in (
@@ -346,8 +324,8 @@ def test_review_instruction_channel_preserves_exact_material(
 
 
 def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    _fake_codex(fake_bin, json.dumps(APPROVE))
+    _fake_review(fake_bin, "claude")
+    _fake_review(fake_bin, "codex")
     _review("claude", tmp_path)
     _review("codex", tmp_path)
     claude = _argv(fake_bin, "claude")
@@ -363,7 +341,7 @@ def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
 
 @pytest.mark.parametrize(("kind", "split"), [("primary", False), ("delta", False), ("primary", True)])
 def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path, kind, split):
-    _fake_codex(fake_bin, json.dumps(APPROVE))
+    _fake_review(fake_bin, "codex")
     git(tmp_path, "init", "-q")
     head, base = "a" * 40, "b" * 40
     task = "## Acceptance\nPreserve Ω."
@@ -403,22 +381,18 @@ def test_codex_observes_version_without_pinning(fake_bin, tmp_path, version):
     assert (fake_bin / "codex.stdin").exists()
 
 
-def test_codex_nonzero_version_probe_refuses_before_model_input(fake_bin, tmp_path):
-    _fake_codex(fake_bin, json.dumps(APPROVE), version_exit=1)
-    with pytest.raises(RunnerBadOutput, match="version probe failed"):
-        _review("codex", tmp_path)
-    assert not (fake_bin / "codex.stdin").exists()
-
-
-@pytest.mark.parametrize("failure", ["missing", "timeout"])
+@pytest.mark.parametrize("failure", ["nonzero", "missing", "timeout"])
 def test_codex_version_probe_errors_use_known_failure_path(fake_bin, tmp_path, monkeypatch, failure):
     from loopzero import _proc
-    _fake_codex(fake_bin, json.dumps(APPROVE))
+
+    _fake_codex(fake_bin, json.dumps(APPROVE), version_exit=int(failure == "nonzero"))
     original = _proc.run
+
     def probe(argv, **kwargs):
-        if argv[-1] == "--version":
+        if argv[-1] == "--version" and failure != "nonzero":
             raise (_proc.ToolMissing("gone") if failure == "missing" else _proc.ProcTimeout("late"))
         return original(argv, **kwargs)
+
     monkeypatch.setattr(_proc, "run", probe)
     with pytest.raises(RunnerBadOutput, match="version probe failed"):
         _review("codex", tmp_path)
@@ -465,7 +439,7 @@ def test_claude_approve(
 def test_reviewer_sandbox_binds_resolv_conf(
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path
 ) -> None:
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     _review("claude", tmp_path)
     argv = _bwrap_argv(fake_bwrap)
     resolv_conf = Path("/etc/resolv.conf")
@@ -480,7 +454,7 @@ def test_reviewer_sandbox_binds_resolv_conf(
 
 
 @pytest.mark.parametrize("credential", [None, ""])
-def test_claude_binds_config_and_state_read_write_without_copying(
+def test_claude_binds_config_and_state_read_write_without_copying(repo,
     fake_bin: Path,
     tmp_path: Path,
     fake_bwrap: Path,
@@ -501,9 +475,7 @@ def test_claude_binds_config_and_state_read_write_without_copying(
     monkeypatch.setenv("HOME", str(host_home))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
     monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    _fake_review(fake_bin, "claude")
     assert _review("claude", repo).verdict == "approve"
     binds = _pairs(_bwrap_argv(fake_bwrap), "--bind")
     assert (str(configured.resolve()), f"{SANDBOX_HOME}/.claude") in binds
@@ -517,7 +489,7 @@ def test_claude_binds_config_and_state_read_write_without_copying(
     ("synthetic-oauth-r2", ""), ("", "synthetic-api-r2"),
     ("synthetic-oauth-r2", "synthetic-api-r2"), (" ", ""), ("", " "),
 ], ids=["oauth", "api", "both", "whitespace-oauth", "whitespace-api"])
-def test_real_claude_environment_auth_hides_host_state(
+def test_real_claude_environment_auth_hides_host_state(repo,
     fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     custom: bool, oauth: str, api: str,
 ) -> None:
@@ -567,8 +539,6 @@ def test_real_claude_environment_auth_hides_host_state(
         printf '%s\\n' {shlex.quote(json.dumps(_claude_envelope(APPROVE)))}
     """)
     (fake_bin / "bwrap").unlink()  # Real kernel namespace, overriding the autouse fake.
-    repo = tmp_path / "repo"
-    repo.mkdir()
     result = _review("claude", repo)
     assert result.verdict == "approve"
     for value in (oauth, api):
@@ -581,7 +551,7 @@ def test_real_claude_environment_auth_hides_host_state(
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 @pytest.mark.parametrize("family", ["claude", "codex"])
-def test_real_file_auth_preserves_host_writes(
+def test_real_file_auth_preserves_host_writes(repo,
     fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, family: str,
 ) -> None:
     host = tmp_path / "host"
@@ -594,8 +564,6 @@ def test_real_file_auth_preserves_host_writes(
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
     monkeypatch.setenv("CODEX_HOME", str(host / ".codex"))
-    repo = tmp_path / "repo"
-    repo.mkdir()
     if family == "claude":
         _script(fake_bin, family, f"""
             set -eu
@@ -630,30 +598,15 @@ def test_real_file_auth_preserves_host_writes(
     assert state.read_text() == ("updated" if family == "claude" else "synthetic global state")
 
 
-def test_reviewer_does_not_bind_missing_auth_paths(
-    fake_bin: Path,
-    tmp_path: Path,
-    fake_bwrap: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.parametrize("family,variable", [("claude", "CLAUDE_CONFIG_DIR"), ("codex", "CODEX_HOME")])
+def test_reviewer_does_not_bind_missing_auth_paths(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch, family, variable):
     host_home = tmp_path / "empty-home"
     host_home.mkdir()
     monkeypatch.setenv("HOME", str(host_home))
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host_home / "missing-claude"))
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _review("claude", repo)
-    assert all(destination == SANDBOX_HOME for _, destination in _pairs(
-        _bwrap_argv(fake_bwrap), "--bind"
-    ))
-
-    monkeypatch.setenv("CODEX_HOME", str(host_home / "missing-codex"))
-    _fake_codex(fake_bin, json.dumps(APPROVE))
-    _review("codex", repo)
-    assert all(destination == SANDBOX_HOME for _, destination in _pairs(
-        _bwrap_argv(fake_bwrap), "--bind"
-    ))
+    monkeypatch.setenv(variable, str(host_home / f"missing-{family}"))
+    _fake_review(fake_bin, family)
+    _review(family, repo)
+    assert all(destination == SANDBOX_HOME for _, destination in _pairs(_bwrap_argv(fake_bwrap), "--bind"))
 
 
 @pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon"], ids=["ordinary", "newline"])
@@ -675,7 +628,7 @@ def test_linked_worktree_and_git_directory_are_read_only(
         return argv
 
     monkeypatch.setattr(sandbox, "bwrap_argv", record)
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     assert _review("claude", linked).verdict == "approve"
     binds = _pairs(captured, "--ro-bind")
     assert (str(linked.resolve()),) * 2 in binds
@@ -699,11 +652,18 @@ def test_claude_falls_back_to_result_text(fake_bin: Path, tmp_path: Path) -> Non
     assert _review("claude", tmp_path).verdict == "approve"
 
 
-def test_claude_malformed_json(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, "this is not json at all")
+@pytest.mark.parametrize("family,output,tail", [
+    ("claude", "this is not json at all", "not json"),
+    ("codex", "Sure! Here is my review: it looks fine.", "looks fine"),
+])
+def test_malformed_json_preserves_tail(fake_bin, tmp_path, family, output, tail):
+    if family == "claude":
+        _fake_claude(fake_bin, output)
+    else:
+        _fake_codex(fake_bin, output)
     with pytest.raises(RunnerBadOutput) as info:
-        _review("claude", tmp_path)
-    assert "not json" in info.value.tail.lower()
+        _review(family, tmp_path)
+    assert tail in (info.value.tail.lower() if family == "claude" else info.value.tail)
 
 
 def test_claude_bad_severity(fake_bin: Path, tmp_path: Path) -> None:
@@ -714,35 +674,25 @@ def test_claude_bad_severity(fake_bin: Path, tmp_path: Path) -> None:
         _review("claude", tmp_path)
 
 
-@pytest.mark.parametrize("payload,exit_code", [
-    ("Not logged in. Please run /login", 1),
+CLAUDE_EXPIRED_OAUTH = {
+    "is_error": True, "api_error_status": 401, "terminal_reason": "api_error",
+    "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue.",
+}
+
+
+@pytest.mark.parametrize("output,exit_code,diagnostic", [
+    ("Not logged in. Please run /login", 1, None),
     ({"type": "result", "subtype": "error", "is_error": True,
-      "result": "Invalid API key · Please run /login"}, 0),
+      "result": "Invalid API key · Please run /login"}, 0, None),
+    *((CLAUDE_EXPIRED_OAUTH, code, "claude: CLI is not authenticated") for code in (0, 1)),
+    *(({"api_error_status": status, "result": "Denied"}, code, None)
+      for status in (401, 403) for code in (0, 1)),
+    *(({"terminal_reason": "api_error", "result": reason}, code, None)
+      for reason in ("Cannot authenticate", "OAuth failure", "Session expired", "401") for code in (0, 1)),
 ])
-def test_claude_auth_failure_text_or_error_envelope(fake_bin: Path, tmp_path: Path, payload, exit_code) -> None:
-    _fake_claude(fake_bin, payload, exit_code=exit_code)
-    with pytest.raises(RunnerAuthFailed):
-        _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("exit_code", [0, 1])
-def test_claude_expired_oauth_envelope(fake_bin: Path, tmp_path: Path, exit_code: int) -> None:
-    envelope = {"is_error": True, "api_error_status": 401, "terminal_reason": "api_error",
-                "result": "Failed to authenticate. API Error: 401 OAuth access token has expired. "
-                          "Re-authenticate to continue."}
-    _fake_claude(fake_bin, envelope, exit_code=exit_code)
-    with pytest.raises(RunnerAuthFailed, match="claude: CLI is not authenticated"):
-        _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("exit_code", [0, 1])
-@pytest.mark.parametrize("envelope", [
-    {"api_error_status": status, "result": "Denied"} for status in (401, 403)
-] + [{"terminal_reason": "api_error", "result": result}
-     for result in ("Cannot authenticate", "OAuth failure", "Session expired", "401")])
-def test_claude_auth_failure_envelope(fake_bin: Path, tmp_path: Path, exit_code, envelope) -> None:
-    _fake_claude(fake_bin, envelope, exit_code=exit_code)
-    with pytest.raises(RunnerAuthFailed):
+def test_claude_auth_failure(fake_bin, tmp_path, output, exit_code, diagnostic):
+    _fake_claude(fake_bin, output, exit_code=exit_code)
+    with pytest.raises(RunnerAuthFailed, match=diagnostic):
         _review("claude", tmp_path)
 
 
@@ -767,17 +717,6 @@ def test_claude_subscription_exhaustion(fake_bin: Path, tmp_path: Path, exit_cod
     _fake_claude(fake_bin, {"is_error": True, **details}, exit_code=exit_code)
     with pytest.raises(RunnerUsageLimit):
         _review("claude", tmp_path)
-
-
-@pytest.mark.parametrize("family", ["claude", "codex"])
-def test_weekly_quota_plain_failure(fake_bin: Path, tmp_path: Path, family) -> None:
-    phrase = "You've hit your weekly limit · resets 11pm"
-    if family == "claude":
-        _fake_claude(fake_bin, phrase, exit_code=1)
-    else:
-        _fake_codex(fake_bin, "", stderr=phrase, exit_code=1)
-    with pytest.raises(RunnerUsageLimit):
-        _review(family, tmp_path)
 
 
 @pytest.mark.parametrize("family,message", [
@@ -825,6 +764,9 @@ def test_claude_nonzero_exit_is_bad_output(fake_bin: Path, tmp_path: Path) -> No
 
 
 @pytest.mark.parametrize("family,phrase,error", [
+    ("claude", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
+    ("codex", "You've hit your weekly limit · resets 11pm", RunnerUsageLimit),
+    ("codex", "Error: Not logged in. Run codex login first.", RunnerAuthFailed),
     ("claude", "Prompt is too long", RunnerPromptTooLong),
     ("claude", "prompt is too long", RunnerPromptTooLong),
     ("codex", "context_length_exceeded", RunnerPromptTooLong),
@@ -889,7 +831,7 @@ def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
 def test_secrets_never_appear_in_bwrap_argv(
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
     _review("claude", tmp_path)
     argv = fake_bwrap.read_text().splitlines()
@@ -898,7 +840,7 @@ def test_secrets_never_appear_in_bwrap_argv(
 
 
 def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path, fake_bwrap: Path) -> None:
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     allowed = tmp_path / "runtime"
     allowed.mkdir()
     if not (tmp_path / ".git").exists():
@@ -913,11 +855,9 @@ def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path
 
 
 @pytest.mark.parametrize("family,override", [("codex", "CODEX_HOME"), ("claude", "CLAUDE_CONFIG_DIR")])
-def test_blank_reviewer_home_matches_unset(family, override, tmp_path, fake_bwrap, monkeypatch):
+def test_blank_reviewer_home_matches_unset(repo, family, override, tmp_path, fake_bwrap, monkeypatch):
     from loopzero import runners
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
     git(repo, "init", "-q")
     host = tmp_path / "host"
     state = host / f".{family}"
@@ -943,17 +883,15 @@ def test_blank_reviewer_home_matches_unset(family, override, tmp_path, fake_bwra
     assert runners._auth_binds(family, blank_home) == unset_binds
 
 
-def test_empty_secure_storage_override_preserves_native_default(
+def test_empty_secure_storage_override_preserves_native_default(repo,
     fake_bin, tmp_path, fake_bwrap, monkeypatch,
 ) -> None:
-    repo = tmp_path / "repo"
-    repo.mkdir()
     host = tmp_path / "host"
     host.mkdir()
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.chdir(repo)
     monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     assert _review("claude", repo).verdict == "approve"
     with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
         _review("claude", repo, reviewer_ro_paths=(str(Path.home() / ".claude"),))
@@ -984,7 +922,7 @@ def test_review_refuses_additional_host_state_exposure(
                "alias": alias, "repository": protected}[exposure]
     repo = protected if exposure == "repository" else tmp_path / "repo"
     repo.mkdir(exist_ok=True)
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
         _review("claude", repo, reviewer_ro_paths=() if exposure == "repository" else (str(exposed),))
     assert not (fake_bin / "claude.stdin").exists()
@@ -992,7 +930,7 @@ def test_review_refuses_additional_host_state_exposure(
 @pytest.mark.parametrize("mode", [
     "implicit", "explicit", "state_file", "state_root", "real_claude", "real_codex", "codex_helper", "helper_alias",
 ])
-def test_review_mounts_only_implicit_runtime_files(fake_bin, tmp_path, fake_bwrap, monkeypatch, mode):
+def test_review_mounts_only_implicit_runtime_files(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch, mode):
     real = mode.startswith("real_")
     if real:
         (fake_bin / "bwrap").unlink()
@@ -1032,12 +970,8 @@ def test_review_mounts_only_implicit_runtime_files(fake_bin, tmp_path, fake_bwra
                               + shlex.quote(json.dumps(_claude_envelope(APPROVE))) + "\n")
         native.chmod(0o755)
     else:
-        source = (_fake_codex(fake_bin, json.dumps(APPROVE)) if family == "codex"
-                  else _fake_claude(fake_bin, _claude_envelope(APPROVE)))
-        source.replace(native)
+        _fake_review(fake_bin, family).replace(native)
     (fake_bin / family).symlink_to(native)
-    repo = tmp_path / "repo"
-    repo.mkdir()
     if real or mode in {"implicit", "codex_helper"}:
         assert _review(family, repo).verdict == "approve"
         assert history.read_text() == "private history marker"
@@ -1051,7 +985,7 @@ def test_review_mounts_only_implicit_runtime_files(fake_bin, tmp_path, fake_bwra
 
 
 @pytest.mark.parametrize("mount", ["system", "git"])
-def test_review_denies_state_exposure_from_non_runtime_mounts(
+def test_review_denies_state_exposure_from_non_runtime_mounts(repo,
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, mount: str,
 ) -> None:
     from loopzero import sandbox
@@ -1063,13 +997,11 @@ def test_review_denies_state_exposure_from_non_runtime_mounts(
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.setenv("CODEX_HOME", str(state))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / ".claude"))
-    repo = tmp_path / "repo"
-    repo.mkdir()
     if mount == "system":
         monkeypatch.setattr(sandbox, "SYSTEM_RO", (*sandbox.SYSTEM_RO, str(host)))
     else:
         git(repo, "init", "-q", "--separate-git-dir", str(state / "git"))
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
+    _fake_review(fake_bin, "claude")
     with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
         _review("claude", repo)
     assert not (fake_bin / "claude.stdin").exists()
@@ -1125,21 +1057,18 @@ def test_codex_retains_only_recognized_bounded_cli_claims(fake_bin, tmp_path, st
     assert "SECRET-NOT-PERSISTED" not in result.raw
 
 
-def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    (fake_bin / "bwrap").unlink()
-    monkeypatch.setattr(
-        "loopzero.runners.shutil.which",
-        lambda name: None if name == "bwrap" else str(fake_bin / name),
-    )
-    with pytest.raises(SandboxUnavailable, match="bwrap not found"):
-        _review("claude", tmp_path)
-
-
-def test_bwrap_probe_failure_fails_closed(fake_bin: Path, tmp_path: Path, fake_tool) -> None:
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    fake_tool("bwrap", "echo 'namespace denied' >&2\nexit 1\n")
-    with pytest.raises(SandboxUnavailable, match="namespace creation failed: exit 1"):
+@pytest.mark.parametrize("failure,diagnostic", [
+    ("missing", "bwrap not found"), ("probe", "namespace creation failed: exit 1"),
+])
+def test_bwrap_unavailable_fails_closed(fake_bin, tmp_path, monkeypatch, fake_tool, failure, diagnostic):
+    _fake_review(fake_bin, "claude")
+    if failure == "missing":
+        (fake_bin / "bwrap").unlink()
+        monkeypatch.setattr("loopzero.runners.shutil.which",
+                            lambda name: None if name == "bwrap" else str(fake_bin / name))
+    else:
+        fake_tool("bwrap", "echo 'namespace denied' >&2\nexit 1\n")
+    with pytest.raises(SandboxUnavailable, match=diagnostic):
         _review("claude", tmp_path)
     assert not (fake_bin / "claude.stdin").exists()
 
@@ -1147,7 +1076,7 @@ def test_bwrap_probe_failure_fails_closed(fake_bin: Path, tmp_path: Path, fake_t
 # ----------------------------------------------------------------- codex
 
 
-def test_codex_approve(
+def test_codex_approve(repo,
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     configured = tmp_path / "configured-codex"
@@ -1156,9 +1085,7 @@ def test_codex_approve(
     (configured / "config.toml").write_text('[mcp_servers.danger]\ncommand="mutate"\n')
     monkeypatch.setenv("CODEX_HOME", str(configured))
     monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
-    _fake_codex(fake_bin, json.dumps(APPROVE))
-    repo = tmp_path / "repo"
-    repo.mkdir()
+    _fake_review(fake_bin, "codex")
     result = _review("codex", repo, model="gpt-5.6-luna", effort="high")
     assert result.verdict == "approve" and result.family == "codex"
     assert result.model == "gpt-5.6-luna" and result.effort == "high"
@@ -1198,19 +1125,6 @@ def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
     assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
-def test_codex_malformed_json(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, "Sure! Here is my review: it looks fine.")
-    with pytest.raises(RunnerBadOutput) as info:
-        _review("codex", tmp_path)
-    assert "looks fine" in info.value.tail
-
-
-def test_codex_auth_failure_text(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, "", exit_code=1, stderr="Error: Not logged in. Run codex login first.")
-    with pytest.raises(RunnerAuthFailed):
-        _review("codex", tmp_path)
-
-
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         _review("gemini", tmp_path)
@@ -1240,9 +1154,10 @@ def test_timeout_becomes_bad_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: Path, fake_bwrap: Path
 ) -> None:
     from loopzero import _proc, runners
+    from loopzero.cli import _review_failure
 
     def timeout(*args, **kwargs):
-        raise _proc.ProcTimeout("timed out", "partial reviewer output")
+        raise _proc.ProcTimeout("timed out", "partial reviewer output", stderr="x" * 3000 + "waiting for proxy")
 
     _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
@@ -1251,6 +1166,9 @@ def test_timeout_becomes_bad_output(
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)
     assert "partial reviewer output" in info.value.tail
+    reason, detail, fallback = _review_failure("claude", info.value)
+    assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
+    assert len(detail.splitlines()[-1]) <= runners.TAIL_CHARS and "waiting for proxy" not in fallback
 
 
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:

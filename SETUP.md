@@ -15,7 +15,8 @@
   that accepts the new version. Tools that shape the build (`uv`,
   Python, a consumer's Node and package manager) change only with their pin in
   the repository, for example `uv` in `.github/workflows/checks.yml`.
-- `bwrap` on `PATH` (`loopzero check` refuses to run without it).
+- Linux with `bwrap` on `PATH` for default `loopzero check` and fresh local
+  `loopzero review` runs. Bubblewrap uses Linux kernel namespaces.
 - `claude` or `codex` CLI logged in; both if the reviewer must differ from
   the author.
 - On CI or any unattended host give Claude a non-rotating API key or setup
@@ -420,6 +421,15 @@ Set `[delivery].review_publishers` to the GitHub logins that publish model revie
 Local readiness reads that list from the base configuration (legacy installations
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
 its CI token's login is never a reviewer identity.
+
+Codex evidence v1 can include configured settings. For that shape the hosted
+reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
+or a newer compatible revision. An older reader can report `no review recorded
+for the current head` even when the publisher recorded a valid approval. Advance
+the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
+(the loop-zero checkout ref or installed package revision). Dispatch the
+eligibility workflow for the existing PR, or run the command below with its
+unchanged source SHA. The refreshed reader can use the approval already on GitHub.
 
 From a trusted base checkout, run:
 

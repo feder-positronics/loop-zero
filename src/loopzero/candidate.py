@@ -13,6 +13,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
@@ -39,6 +40,19 @@ _TREE_BYTES = 256 * 1024 * 1024
 _TREE_OUTPUT = 8 * 1024 * 1024
 _TREE_OBJECTS = 100_000
 _TREE_DEPTH = 200  # IntelFlo main at depth 200: ~16k objects, 29 MiB (full: 147k)
+# Apply the limit in a child interpreter before replacing it with Git.
+_LIMITED_GIT = """\
+import os
+import resource
+import sys
+
+limit = int(sys.argv[1])
+soft, _ = resource.getrlimit(resource.RLIMIT_FSIZE)
+if soft != resource.RLIM_INFINITY:
+    limit = min(limit, soft)
+resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
+os.execvp("git", sys.argv[2:])
+"""
 _FETCH_TRANSPORT_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
 
 JsonObject = dict[str, Any]
@@ -307,7 +321,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         def git(*args: str, command_env: dict[str, str] = env) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
-                    ["prlimit", f"--fsize={_TREE_BYTES}", "--",
+                    [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                      "-c", "maintenance.auto=false", *args], cwd=root, env=command_env,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,

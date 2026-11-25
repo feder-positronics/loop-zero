@@ -1,0 +1,86 @@
+{
+  "v1": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "bot"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJkaWZmX2V2ZW50Ijp7ImVuZCI6ODgsImlkIjoicmVhZC0xIiwic3RhcnQiOjQxfSwiZGlmZl9zaGEyNTYiOiJkNTAzZDA2MDhjNWVjMzM4MmQ4ODNjY2IwZDI1NTI4OGYwZjE0MmE5NzE5MTNmNzc2MjQzNGQyYTlmYTk3OTNlIiwiZmF0YWwiOiJhYnNlbnQiLCJoZWFkX2V2ZW50Ijp7ImVuZCI6NDAsImlkIjoicmVhZC0xIiwic3RhcnQiOjB9LCJpbmRleCI6MSwiaW5zcGVjdGlvbiI6InZlcmlmaWVkIiwicmVwb3J0ZWQiOnsiZWZmb3J0IjoibWVkaXVtIiwibW9kZWwiOiJncHQtNi4yLWFzdHJhIn0sInJlcXVlc3RlZCI6eyJlZmZvcnQiOiJtZWRpdW0iLCJtb2RlbCI6ImdwdC02LjItYXN0cmEifSwic2Vzc2lvbiI6Im5hdGl2ZS1zZXNzaW9uIn1dLCJjaHVua19jb3VudCI6MSwiY29tcGxldGUiOnRydWUsImZhbWlseSI6ImNvZGV4IiwiaGVhZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJraW5kIjoicHJpbWFyeSIsInByIjo3LCJwdWJsaXNoZXIiOiJib3QiLCJyYXdfYnl0ZXMiOjIxNTIsInJhd19zaGEyNTYiOiJkYmZkY2UxZmU2MGM2ZGIyMzFkMjJhM2FmNWY0NzhkZDQ5NGE4ZGJkZTBjNjA1YzJhN2Y3NTgzYTIzMTIzNWRlIiwicmVjZWlwdCI6Ii5sb29wemVyby9yZXZpZXctYWFhYWFhYWFhYWFhLXByaW1hcnkuanNvbiIsInJlcG8iOiJhY21lL3dpZGdldHMiLCJ2ZXJzaW9uIjoxfQ -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model unknown (effort unknown)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: dbfdce1fe60c6db231d22a3af5f478dd494a8dbde0c605c2a7f7583a231235de\n```\n</details>"
+    },
+    true
+  ],
+  "extended": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "bot"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJjb25maWd1cmVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJkaWZmX2V2ZW50Ijp7ImVuZCI6ODgsImlkIjoicmVhZC0xIiwic3RhcnQiOjQxfSwiZGlmZl9zaGEyNTYiOiJkNTAzZDA2MDhjNWVjMzM4MmQ4ODNjY2IwZDI1NTI4OGYwZjE0MmE5NzE5MTNmNzc2MjQzNGQyYTlmYTk3OTNlIiwiZmF0YWwiOiJhYnNlbnQiLCJoZWFkX2V2ZW50Ijp7ImVuZCI6NDAsImlkIjoicmVhZC0xIiwic3RhcnQiOjB9LCJpbmRleCI6MSwiaW5zcGVjdGlvbiI6InZlcmlmaWVkIiwicmVwb3J0ZWQiOnsiZWZmb3J0IjoibWVkaXVtIiwibW9kZWwiOiJncHQtNi4yLWFzdHJhIn0sInJlcXVlc3RlZCI6eyJlZmZvcnQiOiJtZWRpdW0iLCJtb2RlbCI6ImdwdC02LjItYXN0cmEifSwic2Vzc2lvbiI6Im5hdGl2ZS1zZXNzaW9uIn1dLCJjaHVua19jb3VudCI6MSwiY29tcGxldGUiOnRydWUsImZhbWlseSI6ImNvZGV4IiwiaGVhZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJraW5kIjoicHJpbWFyeSIsInByIjo3LCJwdWJsaXNoZXIiOiJib3QiLCJyYXdfYnl0ZXMiOjIyMjMsInJhd19zaGEyNTYiOiI1MmZhODY5N2EwYjM1YTc5Njc2M2VhOTk4NmZjZTQxMThmNGE4NjkxNDY2YzhhZTIzNDgxOTk0NzRhYTIyNjk5IiwicmVjZWlwdCI6Ii5sb29wemVyby9yZXZpZXctYWFhYWFhYWFhYWFhLXByaW1hcnkuanNvbiIsInJlcG8iOiJhY21lL3dpZGdldHMiLCJ2ZXJzaW9uIjoxfQ -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model gpt-6.2-astra (effort medium)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: 52fa8697a0b35a796763ea9986fce4118f4a8691466c8ae2348199474aa22699\n```\n</details>"
+    },
+    true
+  ],
+  "v2": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "bot"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJjb25maWd1cmVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJkaWZmX2V2ZW50Ijp7ImVuZCI6ODgsImlkIjoicmVhZC0xIiwic3RhcnQiOjQxfSwiZGlmZl9zaGEyNTYiOiJkNTAzZDA2MDhjNWVjMzM4MmQ4ODNjY2IwZDI1NTI4OGYwZjE0MmE5NzE5MTNmNzc2MjQzNGQyYTlmYTk3OTNlIiwiZmF0YWwiOiJhYnNlbnQiLCJoZWFkX2V2ZW50Ijp7ImVuZCI6NDAsImlkIjoicmVhZC0xIiwic3RhcnQiOjB9LCJpbmRleCI6MSwiaW5zcGVjdGlvbiI6InZlcmlmaWVkIiwicmVwb3J0ZWQiOnsiZWZmb3J0IjoibWVkaXVtIiwibW9kZWwiOiJncHQtNi4yLWFzdHJhIn0sInJlcXVlc3RlZCI6eyJlZmZvcnQiOiJtZWRpdW0iLCJtb2RlbCI6ImdwdC02LjItYXN0cmEifSwic2Vzc2lvbiI6Im5hdGl2ZS1zZXNzaW9uIn1dLCJjaHVua19jb3VudCI6MSwiY29tcGxldGUiOnRydWUsImZhbWlseSI6ImNvZGV4IiwiaGVhZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJraW5kIjoicHJpbWFyeSIsInByIjo3LCJwdWJsaXNoZXIiOiJib3QiLCJyYXdfYnl0ZXMiOjIyMjMsInJhd19zaGEyNTYiOiI1MmZhODY5N2EwYjM1YTc5Njc2M2VhOTk4NmZjZTQxMThmNGE4NjkxNDY2YzhhZTIzNDgxOTk0NzRhYTIyNjk5IiwicmVjZWlwdCI6Ii5sb29wemVyby9yZXZpZXctYWFhYWFhYWFhYWFhLXByaW1hcnkuanNvbiIsInJlcG8iOiJhY21lL3dpZGdldHMiLCJ2ZXJzaW9uIjoyfQ -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model gpt-6.2-astra (effort medium)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: 52fa8697a0b35a796763ea9986fce4118f4a8691466c8ae2348199474aa22699\n```\n</details>"
+    },
+    false
+  ],
+  "extra": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "bot"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJjb25maWd1cmVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJkaWZmX2V2ZW50Ijp7ImVuZCI6ODgsImlkIjoicmVhZC0xIiwic3RhcnQiOjQxfSwiZGlmZl9zaGEyNTYiOiJkNTAzZDA2MDhjNWVjMzM4MmQ4ODNjY2IwZDI1NTI4OGYwZjE0MmE5NzE5MTNmNzc2MjQzNGQyYTlmYTk3OTNlIiwiZXh0cmEiOnRydWUsImZhdGFsIjoiYWJzZW50IiwiaGVhZF9ldmVudCI6eyJlbmQiOjQwLCJpZCI6InJlYWQtMSIsInN0YXJ0IjowfSwiaW5kZXgiOjEsImluc3BlY3Rpb24iOiJ2ZXJpZmllZCIsInJlcG9ydGVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJyZXF1ZXN0ZWQiOnsiZWZmb3J0IjoibWVkaXVtIiwibW9kZWwiOiJncHQtNi4yLWFzdHJhIn0sInNlc3Npb24iOiJuYXRpdmUtc2Vzc2lvbiJ9XSwiY2h1bmtfY291bnQiOjEsImNvbXBsZXRlIjp0cnVlLCJmYW1pbHkiOiJjb2RleCIsImhlYWQiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwia2luZCI6InByaW1hcnkiLCJwciI6NywicHVibGlzaGVyIjoiYm90IiwicmF3X2J5dGVzIjoyMjIzLCJyYXdfc2hhMjU2IjoiNTJmYTg2OTdhMGIzNWE3OTY3NjNlYTk5ODZmY2U0MTE4ZjRhODY5MTQ2NmM4YWUyMzQ4MTk5NDc0YWEyMjY5OSIsInJlY2VpcHQiOiIubG9vcHplcm8vcmV2aWV3LWFhYWFhYWFhYWFhYS1wcmltYXJ5Lmpzb24iLCJyZXBvIjoiYWNtZS93aWRnZXRzIiwidmVyc2lvbiI6MX0 -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model gpt-6.2-astra (effort medium)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: 52fa8697a0b35a796763ea9986fce4118f4a8691466c8ae2348199474aa22699\n```\n</details>"
+    },
+    false
+  ],
+  "bad-settings": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "bot"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJjb25maWd1cmVkIjp7Im1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJkaWZmX2V2ZW50Ijp7ImVuZCI6ODgsImlkIjoicmVhZC0xIiwic3RhcnQiOjQxfSwiZGlmZl9zaGEyNTYiOiJkNTAzZDA2MDhjNWVjMzM4MmQ4ODNjY2IwZDI1NTI4OGYwZjE0MmE5NzE5MTNmNzc2MjQzNGQyYTlmYTk3OTNlIiwiZmF0YWwiOiJhYnNlbnQiLCJoZWFkX2V2ZW50Ijp7ImVuZCI6NDAsImlkIjoicmVhZC0xIiwic3RhcnQiOjB9LCJpbmRleCI6MSwiaW5zcGVjdGlvbiI6InZlcmlmaWVkIiwicmVwb3J0ZWQiOnsiZWZmb3J0IjoibWVkaXVtIiwibW9kZWwiOiJncHQtNi4yLWFzdHJhIn0sInJlcXVlc3RlZCI6eyJlZmZvcnQiOiJtZWRpdW0iLCJtb2RlbCI6ImdwdC02LjItYXN0cmEifSwic2Vzc2lvbiI6Im5hdGl2ZS1zZXNzaW9uIn1dLCJjaHVua19jb3VudCI6MSwiY29tcGxldGUiOnRydWUsImZhbWlseSI6ImNvZGV4IiwiaGVhZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJraW5kIjoicHJpbWFyeSIsInByIjo3LCJwdWJsaXNoZXIiOiJib3QiLCJyYXdfYnl0ZXMiOjIyMjMsInJhd19zaGEyNTYiOiI1MmZhODY5N2EwYjM1YTc5Njc2M2VhOTk4NmZjZTQxMThmNGE4NjkxNDY2YzhhZTIzNDgxOTk0NzRhYTIyNjk5IiwicmVjZWlwdCI6Ii5sb29wemVyby9yZXZpZXctYWFhYWFhYWFhYWFhLXByaW1hcnkuanNvbiIsInJlcG8iOiJhY21lL3dpZGdldHMiLCJ2ZXJzaW9uIjoxfQ -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model gpt-6.2-astra (effort medium)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: 52fa8697a0b35a796763ea9986fce4118f4a8691466c8ae2348199474aa22699\n```\n</details>"
+    },
+    false
+  ],
+  "too-long": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "bot"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJjb25maWd1cmVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoibW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tbW1tIn0sImRpZmZfZXZlbnQiOnsiZW5kIjo4OCwiaWQiOiJyZWFkLTEiLCJzdGFydCI6NDF9LCJkaWZmX3NoYTI1NiI6ImQ1MDNkMDYwOGM1ZWMzMzgyZDg4M2NjYjBkMjU1Mjg4ZjBmMTQyYTk3MTkxM2Y3NzYyNDM0ZDJhOWZhOTc5M2UiLCJmYXRhbCI6ImFic2VudCIsImhlYWRfZXZlbnQiOnsiZW5kIjo0MCwiaWQiOiJyZWFkLTEiLCJzdGFydCI6MH0sImluZGV4IjoxLCJpbnNwZWN0aW9uIjoidmVyaWZpZWQiLCJyZXBvcnRlZCI6eyJlZmZvcnQiOiJtZWRpdW0iLCJtb2RlbCI6ImdwdC02LjItYXN0cmEifSwicmVxdWVzdGVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJzZXNzaW9uIjoibmF0aXZlLXNlc3Npb24ifV0sImNodW5rX2NvdW50IjoxLCJjb21wbGV0ZSI6dHJ1ZSwiZmFtaWx5IjoiY29kZXgiLCJoZWFkIjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImtpbmQiOiJwcmltYXJ5IiwicHIiOjcsInB1Ymxpc2hlciI6ImJvdCIsInJhd19ieXRlcyI6MjIyMywicmF3X3NoYTI1NiI6IjUyZmE4Njk3YTBiMzVhNzk2NzYzZWE5OTg2ZmNlNDExOGY0YTg2OTE0NjZjOGFlMjM0ODE5OTQ3NGFhMjI2OTkiLCJyZWNlaXB0IjoiLmxvb3B6ZXJvL3Jldmlldy1hYWFhYWFhYWFhYWEtcHJpbWFyeS5qc29uIiwicmVwbyI6ImFjbWUvd2lkZ2V0cyIsInZlcnNpb24iOjF9 -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model gpt-6.2-astra (effort medium)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: 52fa8697a0b35a796763ea9986fce4118f4a8691466c8ae2348199474aa22699\n```\n</details>"
+    },
+    false
+  ],
+  "untrusted": [
+    {
+      "id": 100,
+      "commit_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "user": {
+        "login": "stranger"
+      },
+      "state": "COMMENTED",
+      "body": "<!-- loopzero:review v=1 head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa kind=primary source=model -->\n<!-- loopzero:codex-evidence v=1 eyJjYWxscyI6W3siYmFzZSI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJjb25maWd1cmVkIjp7ImVmZm9ydCI6Im1lZGl1bSIsIm1vZGVsIjoiZ3B0LTYuMi1hc3RyYSJ9LCJkaWZmX2V2ZW50Ijp7ImVuZCI6ODgsImlkIjoicmVhZC0xIiwic3RhcnQiOjQxfSwiZGlmZl9zaGEyNTYiOiJkNTAzZDA2MDhjNWVjMzM4MmQ4ODNjY2IwZDI1NTI4OGYwZjE0MmE5NzE5MTNmNzc2MjQzNGQyYTlmYTk3OTNlIiwiZmF0YWwiOiJhYnNlbnQiLCJoZWFkX2V2ZW50Ijp7ImVuZCI6NDAsImlkIjoicmVhZC0xIiwic3RhcnQiOjB9LCJpbmRleCI6MSwiaW5zcGVjdGlvbiI6InZlcmlmaWVkIiwicmVwb3J0ZWQiOnsiZWZmb3J0IjoibWVkaXVtIiwibW9kZWwiOiJncHQtNi4yLWFzdHJhIn0sInJlcXVlc3RlZCI6eyJlZmZvcnQiOiJtZWRpdW0iLCJtb2RlbCI6ImdwdC02LjItYXN0cmEifSwic2Vzc2lvbiI6Im5hdGl2ZS1zZXNzaW9uIn1dLCJjaHVua19jb3VudCI6MSwiY29tcGxldGUiOnRydWUsImZhbWlseSI6ImNvZGV4IiwiaGVhZCI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJraW5kIjoicHJpbWFyeSIsInByIjo3LCJwdWJsaXNoZXIiOiJib3QiLCJyYXdfYnl0ZXMiOjIyMjMsInJhd19zaGEyNTYiOiI1MmZhODY5N2EwYjM1YTc5Njc2M2VhOTk4NmZjZTQxMThmNGE4NjkxNDY2YzhhZTIzNDgxOTk0NzRhYTIyNjk5IiwicmVjZWlwdCI6Ii5sb29wemVyby9yZXZpZXctYWFhYWFhYWFhYWFhLXByaW1hcnkuanNvbiIsInJlcG8iOiJhY21lL3dpZGdldHMiLCJ2ZXJzaW9uIjoxfQ -->\nloopzero primary review by codex on `aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`, unknown: **approve** (0 critical, 0 important, 0 suggestion)\n\nSettings per native call (launch configuration and CLI claims, not backend attestation):\n- Call 1: requested model gpt-6.2-astra (effort medium); CLI-reported model gpt-6.2-astra (effort medium); configured model gpt-6.2-astra (effort medium)\n\n<details><summary>Raw reviewer output</summary>\n\n```\nNative Codex transcript retained in the restricted local review receipt; public evidence is publisher-derived, not backend attestation. Exact raw SHA256: 52fa8697a0b35a796763ea9986fce4118f4a8691466c8ae2348199474aa22699\n```\n</details>"
+    },
+    false
+  ]
+}
