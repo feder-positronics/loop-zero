@@ -1403,14 +1403,14 @@ def test_merged_branch_history_requires_terminal_page(gh: FakeGh) -> None:
     assert len(gh.calls) == 2
 
 
-def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> None:
+def test_merged_branch_history_fails_at_page_limit(monkeypatch) -> None:
     monkeypatch.setattr(github, "PAGE", 1)
-    for page in range(1, 101):
-        key = branch_history_key(page).replace("per_page=100", "per_page=1")
-        gh.respond(key, [closed_history_row(pr_json(number=page, state="CLOSED"))])
-
+    pages = ({branch_history_key(page).removeprefix("api ").replace("per_page=100", "per_page=1"):
+              [closed_history_row(pr_json(number=page, state="CLOSED"))]} for page in range(1, 101))
+    monkeypatch.setattr(github, "api_get", lambda endpoint: next(pages)[endpoint])
     with pytest.raises(github.GhError, match="exceeds 100-page publication limit"):
         github.merged_pr_for_branch(REPO, "lz/t1")
+    assert next(pages, None) is None
 
 
 @pytest.mark.parametrize("capped", [False, True])
