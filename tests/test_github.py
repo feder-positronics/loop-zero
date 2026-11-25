@@ -77,9 +77,6 @@ class FakeGh:
 
     def respond_pr_list(self, *snapshots: list[dict], branch: str = "lz/t1") -> None:
         """Arm explicit REST list and selected detail responses for successive lookups."""
-        head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
-        prefix = f"api repos/{REPO}/pulls?"
-        suffix = f"&head={head}&sort=created&direction=desc&per_page=1"
         open_pages, closed_pages = [], []
         details: dict[int, list[dict]] = {}
         for snapshot in snapshots:
@@ -91,9 +88,9 @@ class FakeGh:
             if selected is not None:
                 number = selected["number"]
                 details.setdefault(number, []).append(rest_pr_json(selected, branch=branch))
-        self.append(prefix + "state=open" + suffix, *open_pages)
+        self.append(pr_list_key(branch), *open_pages)
         if closed_pages:
-            self.append(prefix + "state=closed" + suffix, *closed_pages)
+            self.append(pr_list_key(branch, "closed"), *closed_pages)
         for number, responses in details.items():
             self.append(f"api repos/{REPO}/pulls/{number}", *responses)
 
@@ -1366,18 +1363,19 @@ def test_invalid_merge_evidence_fails_closed(gh, view):
         github.merged_sha(REPO, 7, expected_head=HEAD)
 
 
-def test_merged_branch_history_reads_past_newer_closed_page(gh: FakeGh) -> None:
+@pytest.mark.parametrize("merged", [None, pr_json(number=101, state="MERGED")])
+def test_merged_branch_history_reads_terminal_page(gh: FakeGh, merged: dict | None) -> None:
     gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [])
-    page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
-    merged = pr_json(number=101, state="MERGED")
-    gh.respond(branch_history_key(), page)
-    gh.respond(branch_history_key(2), [closed_history_row(merged)])
-    gh.respond(f"api repos/{REPO}/pulls/101", rest_pr_json(merged))
-
+    gh.respond(branch_history_key(), [
+        closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)
+    ])
+    gh.respond(branch_history_key(2), [closed_history_row(merged)] if merged else [])
+    if merged:
+        gh.respond_pr_view(merged)
     pr = github.merged_pr_for_branch(REPO, "lz/t1")
-
-    assert pr is not None and pr.number == 101 and pr.state == "MERGED"
+    assert ((pr.number, pr.state) if pr else None) == ((101, "MERGED") if merged else None)
+    assert gh.argv(3) == branch_history_key(2).split()
 
 
 @pytest.mark.parametrize("change", [
@@ -1406,15 +1404,6 @@ def test_merged_branch_history_rejects_changed_detail(gh: FakeGh, detail: dict) 
 
     with pytest.raises(github.GhError, match="PR changed during completion lookup"):
         github.merged_pr_for_branch(REPO, "lz/t1")
-
-
-def test_merged_branch_history_requires_terminal_page(gh: FakeGh) -> None:
-    page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
-    gh.respond(branch_history_key(), page)
-    gh.respond(branch_history_key(2), [])
-
-    assert github.merged_pr_for_branch(REPO, "lz/t1") is None
-    assert len(gh.calls) == 3
 
 
 def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> None:
