@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 from loopzero import candidate, config, github, runners
@@ -188,7 +189,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--head", required=True)
     parser.add_argument("--publish", action="store_true")
     args = parser.parse_args(argv)
-    cfg = config.load(args.config)
+    try:
+        cfg = config.load(args.config)
+    except config.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     if not cfg.review_publishers or args.pr <= 0 or not re.fullmatch(r"[0-9a-f]{40}", args.head):
         raise LoopZeroError("configure delivery.review_publishers and specify PR/full source SHA")
     def publish(state: str, description: str) -> None:

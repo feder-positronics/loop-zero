@@ -195,6 +195,25 @@ def without_accepted_receipt(out: str) -> str:
                    if not line.startswith("receipt accepted:"))
 
 
+@pytest.fixture
+def git_calls(monkeypatch):
+    calls = []
+    original = subprocess.run
+
+    def record(argv, *args, **kwargs):
+        if argv[0] == "git":
+            calls.append(argv[1:])
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record)
+    return calls
+
+
+def assert_git_cost(calls, total, workflow_reads):
+    assert len(calls) == total, calls
+    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == workflow_reads
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
@@ -508,10 +527,15 @@ def test_primary_review_diffs_from_merge_base_not_base_tip(
     assert code == 0 and "upstream = 1" not in prompt
 
 
+@pytest.mark.parametrize("workflow, error", [
+    ("[checks\n", "invalid TOML"),
+    ("checks = []\n", "[checks] must be a table"),
+    ("delivery = []\n", "[delivery] must be a table"),
+])
 def test_check_fails_when_base_workflow_is_malformed(
-    wt: Path, repo: Path, capsys
+    wt: Path, repo: Path, capsys, workflow, error,
 ) -> None:
-    (repo / "workflow.toml").write_text("[checks\n")
+    (repo / "workflow.toml").write_text(workflow)
     git(repo, "add", "workflow.toml")
     git(repo, "commit", "-q", "-m", "break workflow")
     git(repo, "push", "-q", "origin", "main")
@@ -519,7 +543,7 @@ def test_check_fails_when_base_workflow_is_malformed(
     code, out, err = run(capsys, "check")
 
     assert code == 1 and out == ""
-    assert "origin/main:workflow.toml: invalid TOML" in err
+    assert f"origin/main:workflow.toml: {error}" in err
 
 
 # --- pr ------------------------------------------------------------------------------------
@@ -544,6 +568,24 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
         assert "rerun `loopzero review`" in err
     assert [call["token"] or "" for call in gh.calls] == [token]
     assert not (fake_bin / "claude.stdin").exists()
+
+
+@pytest.mark.parametrize("options", [(), ("--repost",)])
+def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
+    monkeypatch.setattr(github, "app_token", lambda: "app-token")
+    endpoint = f"repos/{REPO}/pulls/7"
+    gh.respond(pr_list_key(), [{"number": 7}])
+    gh.fail(f"api {endpoint}", "gh: Not Found (HTTP 404)")
+
+    code, out, err = run(capsys, "review", *options)
+
+    assert (code, out) == (1, "")
+    assert "PR #7" in err and endpoint in err and "HTTP 404" in err
+    assert "branch" in err and "lz/t1" in err
+    assert "rerun `" + " ".join(("loopzero", "review", *options)) + "`" in err
+    assert [call["argv"] for call in gh.calls] == [
+        pr_list_key().split(), ["api", endpoint],
+    ]
 
 
 @pytest.mark.parametrize("branch", [
@@ -887,12 +929,14 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
-def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch) -> None:
+def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
+    git_calls.clear()
     code, out, err = run(capsys, "review")
+    assert_git_cost(git_calls, 16, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1235,17 +1279,21 @@ def test_review_chunks_oversized_diff_with_same_family(
         tasks.append(metadata["task_text"])
         fragments.append(metadata.get("fragment"))
         materials.append(diff)
-    assert len(set(policies)) == 1 and len(set(tasks)) == 1 and len(materials) > 1
+    assert len(set(tasks)) == 1 and len(materials) > 1
+    assert "fragment" not in policies[0] and len(set(policies[1:])) == 1
+    assert "do not judge whether the whole change is complete" in policies[1]
     full_diff, *chunks = materials
     assert all(len(part) <= 4096 for part in chunks)
-    assert fragments[0] is None and "whole change is complete" in policies[0] and all(
-        f.startswith(f"chunk {i} of ") and f.endswith("whole PR is complete from it")
-        for i, f in enumerate(fragments[1:], 1))
+    assert fragments[0] is None
     if chunk_auth:
         assert len(chunks) == 1 and full_diff.startswith(chunks[0])
+        assert re.fullmatch(r"chunk 1 of (?:[2-9]|[1-9][0-9]+)", fragments[1])
         header, fallback_diff = (fake_bin / "codex.stdin").read_bytes().split(b"\n", 1)
-        assert fallback_diff == full_diff and json.loads(header)["task_text"] == tasks[0]
+        fallback = json.loads(header)
+        assert fallback_diff == full_diff and fallback["task_text"] == tasks[0]
+        assert "fragment" not in fallback
     else:
+        assert fragments[1:] == [f"chunk {i} of {len(chunks)}" for i in range(1, len(chunks) + 1)]
         assert b"".join(chunks) == full_diff
     if chunk_auth:
         assert "reviewer claude unavailable:" in err and "CLI is not authenticated" in err
@@ -1781,11 +1829,13 @@ def test_outdated_blocker_requires_resolution_after_delta(wt, gh, capsys, head, 
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
-def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch) -> None:
+def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     arm_approved_ready_pr(gh, head, wt, branch=branch)
     gh.respond("pr ready", "")
+    git_calls.clear()
     code, out, err = run(capsys, "ready")
+    assert_git_cost(git_calls, 6, 1)
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -1884,6 +1934,19 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
 
 
 @pytest.mark.parametrize("draft", [True, False])
+def test_merge_skipped_check_points_to_ready_only_for_a_draft(
+    wt: Path, gh: FakeGh, capsys, head, draft
+) -> None:
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=draft)
+    code, out, err = run(capsys, "merge", "--wait=0")
+
+    assert (code, without_accepted_receipt(out)) == (1, "")
+    hint = "; next: loopzero ready --wait" if draft else ""
+    assert err == f"loopzero merge: not ready to merge: required check 'checks' is skipped{hint}\n"
+    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+@pytest.mark.parametrize("draft", [True, False])
 def test_ready_skipped_required_check_waits_only_for_a_draft(
     wt: Path, gh: FakeGh, capsys, head, draft
 ) -> None:
@@ -1894,13 +1957,32 @@ def test_ready_skipped_required_check_waits_only_for_a_draft(
     assert (code, err) == (3 if draft else 1, "")
     if draft:
         assert out.splitlines() == [
-            "marked ready; waiting for required checks: checks",
-            "waiting for required checks; next: loopzero ready --wait",
+            "marked ready; waiting for required checks: checks; next: loopzero ready --wait",
         ]
         assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
     else:
         assert out == "not ready: required check 'checks' is skipped\n"
         assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head):
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
+    skipped = [{"name": "checks", "status": "completed", "conclusion": "skipped"}]
+    pending = [{"name": "checks", "status": "in_progress"}]
+    success = [{"name": "checks", "status": "completed", "conclusion": "success"}]
+    arm_check_runs(gh, head, skipped, skipped, pending, success)
+    gh.respond("pr ready", "")
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    code, out, err = run(capsys, "ready", "--wait")
+
+    assert (code, err) == (0, "")
+    assert out.count("receipt accepted:") == 1
+    assert without_accepted_receipt(out).splitlines() == [
+        "marked ready; required check 'checks' is skipped",
+        "waiting: required check 'checks' is pending",
+        f"ready: {URL}",
+    ]
 
 
 @pytest.mark.parametrize("settled", ["success", "skipped"])
@@ -2811,7 +2893,7 @@ def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch,
     assert config.load(bad_config).scratch == ("./.venv",)
 
 
-def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
+def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
     code, out, _ = run(capsys, "status")
@@ -2820,7 +2902,9 @@ def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
     assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
+    git_calls.clear()
     code, out, _ = run(capsys, "status")
+    assert_git_cost(git_calls, 6, 1)
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
@@ -3102,6 +3186,27 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
         else:
             assert code == 1 and "HTTP 403" in err
             assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
+
+
+def test_resolve_reports_recovery_when_followup_read_fails(wt, gh, capsys, head):
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+    listing = threads_json(_finding_thread("0b9b59e7", head))
+    gh.respond("api graphql", listing, posted, {"data": {}},
+               {"stdout": "", "stderr": "gh: Forbidden (HTTP 403)", "exit_code": 1})
+
+    code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed the loop bound.")
+
+    assert code == 1 and "resolved 0b9b59e7" in out
+    assert "Resolved finding 0b9b59e7 on PR #7" in err
+    assert "could not refresh Loop-zero Eligibility" in err and "HTTP 403" in err
+    assert "run `loopzero resolve`" in err and "if no findings remain" in err
+    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
+    assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
+
+    gh.respond("api graphql", threads_json())
+    assert run(capsys, "resolve") == (0, "", "")
+    assert not any(endpoint in call["argv"] for call in gh.calls)
 
 
 @pytest.mark.parametrize("recovers", [True, False])

@@ -9,6 +9,7 @@ import importlib.metadata
 import io
 import json
 import os
+import shlex
 import random
 import re
 import sys
@@ -97,17 +98,17 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
     config = config_mod.load(path, checks={})
-    base_checks = config_mod.load_base(root, config.base_branch)
-    if base_checks is None:
+    base, revision = config_mod.load_base(root, config.base_branch)
+    if base is None:
         return config_mod.load(path)
+    base_checks = config_mod.base_section(base, config.base_branch, "checks")
     config = config_mod.load(
         path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
     )
-    delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
+    delivery = config_mod.base_section(base, config.base_branch, "delivery")
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
-        revision = config_mod.base_revision(root, config.base_branch)
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
     return config
 
@@ -125,10 +126,11 @@ def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) ->
         revision = _git(wt, "rev-parse", "--verify", f"refs/remotes/origin/{config.base_branch}")
     except CliError as exc:
         raise CliError("native review needs a remote base; fetch it or supply --config") from exc
-    checks = config_mod.load_base(wt, config.base_branch, revision=revision)
-    if checks is None:
+    base, _ = config_mod.load_base(wt, config.base_branch, revision=revision)
+    if base is None:
         raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
-    delivery = config_mod.load_base(wt, config.base_branch, "delivery", revision=revision) or {}
+    checks = config_mod.base_section(base, config.base_branch, "checks")
+    delivery = config_mod.base_section(base, config.base_branch, "delivery")
     pinned = dataclasses.replace(
         config_mod.load(
             wt / "workflow.toml", checks=checks,
@@ -630,15 +632,26 @@ def _published_fallback(note: str, candidates: list[str], excluded: list[str]) -
             and all(reason in _FALLBACK_REASONS for _family, _sep, reason in parts))
 
 
-def _require_review_pr(config: Config, branch: str) -> github.PR:
+def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.PR:
     try:
         return _require_pr(config, branch)
     except github.GhError as exc:
-        if "HTTP 404" in exc.tail and github.app_token():
+        if "HTTP 404" not in exc.tail or exc.command[:2] != ("gh", "api"):
+            raise
+        endpoint = exc.command[2]
+        pulls = f"repos/{config.repo}/pulls"
+        retry = "loopzero review --repost" if repost else "loopzero review"
+        number = endpoint.removeprefix(f"{pulls}/")
+        if endpoint.startswith(f"{pulls}/") and number.isdecimal():
+            raise CliError(
+                f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
+                f"then rerun `{retry}`. {exc}"
+            ) from exc
+        if endpoint.startswith(f"{pulls}?") and github.app_token():
             raise CliError(
                 f"GitHub App could not access pull requests for {config.repo} (HTTP 404). "
                 "Check that the GitHub App installation includes this repository, "
-                "then rerun `loopzero review`."
+                f"then rerun `{retry}`."
             ) from exc
         raise
 
@@ -648,7 +661,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
-    pr = _require_review_pr(config, branch)
+    pr = _require_review_pr(config, branch, repost=args.repost)
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
@@ -1056,13 +1069,13 @@ def cmd_ready(args: argparse.Namespace) -> int:
     started = time.monotonic()
     if waiting:
         github.mark_ready(config.repo, pr.number)
-        print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
         if args.wait is None:
-            print(f"waiting for required checks; {NEXT_WAIT}")
+            print(f"marked ready; waiting for required checks: {', '.join(waiting)}; {NEXT_WAIT}")
             return 3
+        print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                  args=args)
+                                  shown=readiness.reasons if kicked else (), args=args)
         if waited is None:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
@@ -1116,6 +1129,14 @@ def _pending_checks(
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
+def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
+    if _pending_checks(config, pr, readiness):
+        return "; next: loopzero merge --wait"
+    if _draft_checks_waiting(config, pr, readiness):
+        return "; next: loopzero ready --wait"
+    return ""
+
+
 def _poll_until(started: float, timeout: float) -> Iterator[None]:
     delay = WAIT_INTERVAL
     while True:
@@ -1139,12 +1160,13 @@ def _verify_wait_config(
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None, args: argparse.Namespace | None = None,
+    started: float | None = None, shown: tuple[str, ...] = (),
+    args: argparse.Namespace | None = None,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
-    shown, stale_notice = None, False
+    stale_notice = False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
@@ -1153,14 +1175,14 @@ def _wait_for_checks(
             )
         _verify_wait_config(args, wt, config, pr.head_sha)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
-        waiting = () if kicked else _draft_checks_waiting(config, current, readiness)
-        pending = _pending_checks(config, current, readiness, kicked)
-        if waiting:
+        if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
-            print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
-            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started, args=args)
+            print("marked ready; " + "; ".join(readiness.reasons))
+            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
+                                    shown=readiness.reasons, args=args)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             return None  # A post-transition read cannot grant success beyond the original deadline.
+        pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked
         if pending != shown:
@@ -1297,7 +1319,7 @@ def _merge_with_mergify(
     behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
     blockers = tuple(reason for reason in readiness.reasons if reason != behind)
     if blockers:
-        hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+        hint = _merge_check_hint(config, pr, readiness)
         raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
     queue = config.mergify_queue
     assert queue is not None
@@ -1382,7 +1404,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             return 3 if args.wait is not None else 0
     else:
         if not readiness.ready:
-            hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+            hint = _merge_check_hint(config, pr, readiness)
             raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
@@ -1442,7 +1464,20 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         raise CliError("a reply saying what changed (or why it does not apply) is required")
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
     print(f"resolved {args.finding}: {finding.title}")
-    if not github.open_blocking_findings(config.repo, pr.number):
+    try:
+        with github.api_error_diagnostics():
+            remaining = github.open_blocking_findings(config.repo, pr.number)
+    except (github.GhError, _proc.ProcTimeout, OSError) as exc:
+        retry = shlex.join(("gh", *github.eligibility_dispatch_args(
+            config.repo, pr.number, config.base_branch,
+        )))
+        raise CliError(
+            f"Resolved finding {args.finding} on PR #{pr.number}, but could not refresh "
+            f"Loop-zero Eligibility. {exc}\n"
+            "To check remaining findings, run `loopzero resolve` with no arguments. "
+            f"Then, if no findings remain, run `{retry}`."
+        ) from exc
+    if not remaining:
         github.refresh_eligibility(config.repo, pr.number, config.base_branch)
         print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0
