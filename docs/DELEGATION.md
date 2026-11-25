@@ -561,10 +561,11 @@ loopzero --config .loopzero/stack-workflow.toml review
 
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
 the coordinator must verify the copy and its one-field difference. Keep the
-producer as the base through primary review. After the producer lands, retarget
-the consumer to main before deleting the producer branch, then return to the
-canonical configuration. Use the supported CI trigger and verify that all
-required checks pass on the current head against the new base before readiness.
+producer as the base through primary review. Retarget the consumer to main
+before running the producer's `loopzero merge`, which deletes its branch. After
+the producer lands, confirm the consumer is open against main, return to the
+canonical configuration, and use the supported CI trigger. Verify that all
+required checks pass on the current head against main before readiness.
 Follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).
 

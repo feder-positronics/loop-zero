@@ -28,11 +28,16 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    green checks and gets its own timeout message (exit 3).
    Green can precede CI scheduling. After two minutes with only missing checks
    and none pending, inspect scheduling, triggers and permissions, then retry.
-6. After step 5 exits 0, run `(cd "/absolute/path/to/task-worktree" && loopzero merge --wait)`
-   from a directory that will survive cleanup, such as `/tmp`. Merge rechecks
-   readiness, uses the configured strategy, verifies the landed SHA, and deletes
-   the branch and worktree. A cleanup warning still means
-   the merge landed; follow the next step it names. A queue initially enqueues;
+6. After step 5 exits 0, run from a durable directory such as `/tmp`
+   using the absolute path to the task worktree.
+
+   ```sh
+   (cd "/absolute/path/to/task-worktree" && loopzero merge --wait)
+   ```
+
+   Merge rechecks readiness, uses the configured strategy, verifies the landed
+   SHA, and deletes the branch and worktree. If cleanup warns, the merge landed.
+   Follow the recovery step it names. A queue initially enqueues;
    `--wait` covers readiness, landing and cleanup within the same budget.
    Enqueueing without `--wait` returns 0 without cleanup.
 
