@@ -473,6 +473,33 @@ def _codex_supports_ignore_user_config(
     return done.exit_code == 0 and "--ignore-user-config" in f"{done.stdout}\n{done.stderr}"
 
 
+def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
+    """`-c` options disabling every skill Codex discovers in the reviewed tree.
+
+    Codex lists skills under the checkout's `.agents/skills` and `.codex/skills`, and a
+    `$name` mention in the prompt injects one; the PR controls both. Codex matches the
+    canonical SKILL.md path; its config offers no wildcard.
+    """
+    tree, paths = cwd.resolve(), set()
+    for root in (cwd / ".agents" / "skills", cwd / ".codex" / "skills"):
+        seen: set[Path] = set()
+        for directory, dirs, files in os.walk(root, followlinks=True):
+            real = Path(directory).resolve()
+            # Links leaving the checkout point at host files, not PR content.
+            if real in seen or not real.is_relative_to(tree):
+                dirs[:] = []
+                continue
+            seen.add(real)
+            if "SKILL.md" in files:
+                paths.add(os.path.realpath(os.path.join(directory, "SKILL.md")))
+    if not paths:
+        return []
+    entries = ",".join(
+        f"{{path={json.dumps(path, ensure_ascii=False)},enabled=false}}" for path in sorted(paths)
+    )
+    return ["-c", f"skills.config=[{entries}]"]
+
+
 def _claude_provenance(envelope: dict, raw: str) -> dict[str, object]:
     required = ("session_id", "usage", "total_cost_usd", "duration_api_ms")
     if any(name not in envelope for name in required):
@@ -1244,6 +1271,10 @@ def _review_codex(
             "--skip-git-repo-check",
             "-c",
             "mcp_servers={}",
+            # The reviewed head controls AGENTS.md and its skills; keep both out of context.
+            "-c",
+            "project_doc_max_bytes=0",
+            *_codex_repository_skill_overrides(cwd),
             "--output-schema",
             f"{sandbox.SANDBOX_HOME}/schema.json",
             "--output-last-message",

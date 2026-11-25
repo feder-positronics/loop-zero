@@ -1076,6 +1076,30 @@ def test_bwrap_unavailable_fails_closed(fake_bin, tmp_path, monkeypatch, fake_to
 # ----------------------------------------------------------------- codex
 
 
+def test_codex_ignores_repository_instructions_and_skills(
+    repo, fake_bin: Path, tmp_path: Path, fake_bwrap: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    for skill in (repo / ".agents/skills/a/b", repo / ".codex/skills/c", repo / "docs/d", outside):
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: planted\ndescription: planted\n---\n")
+    (repo / "AGENTS.md").write_text("planted")
+    (repo / ".agents/skills/linked").symlink_to(repo / "docs/d")
+    (repo / ".agents/skills/loop").symlink_to(repo / ".agents/skills")
+    (repo / ".codex/skills/host").symlink_to(outside)
+    _fake_review(fake_bin, "codex")
+    _review("codex", repo)
+    argv = _argv(fake_bin, "codex")
+    assert "project_doc_max_bytes=0" in argv
+    (override,) = [a for a in argv if a.startswith("skills.config=")]
+    disabled = tomllib.loads(override)["skills"]["config"]
+    real = repo.resolve()
+    assert disabled == [{"path": str(path), "enabled": False} for path in (
+        real / ".agents/skills/a/b/SKILL.md", real / ".codex/skills/c/SKILL.md",
+        real / "docs/d/SKILL.md",
+    )]
+
+
 def test_codex_approve(repo,
     fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1099,6 +1123,7 @@ def test_codex_approve(repo,
     assert "--ignore-user-config" in argv
     assert argv[argv.index("--cd") + 1] == str(repo.resolve()) and "--ephemeral" not in argv
     assert "mcp_servers={}" in argv
+    assert "project_doc_max_bytes=0" in argv and not any(a.startswith("skills.") for a in argv)
     assert argv[-1] == "-"
     isolated = (fake_bin / "codex.home").read_text()
     assert isolated != str(configured) and "loopzero-review-home-" in isolated
