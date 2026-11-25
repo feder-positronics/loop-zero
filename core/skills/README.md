@@ -19,6 +19,7 @@ and [setup guidance](../../SETUP.md#api-keys-for-local-agents).
 | `explain` | Explain complex topics in Markdown, HTML or an evidence-backed briefing. |
 | `backlog` | Inspect live GitHub issues, PRs, blockers, collisions and next work read-only. |
 | `diagnose` | Diagnose failures and repair the correct owner when commissioned. |
+| [`retro`](retro/SKILL.md) | Judge recent workflow changes and pick at most one next change in the weekly retro. |
 | `resolve-findings` | Decide bounded responses to existing PR threads before applying fixes. |
 | `code-review` | Review a frozen code diff against acceptance; emit JSON for `loopzero review`. |
 | `review` | Assess an artifact, system, architecture, workflow, agent configuration or idea read-only. |
