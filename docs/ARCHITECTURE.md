@@ -471,7 +471,8 @@ Declared `[checks.inputs]` pathspecs opt commands into local passing-result reus
 Keys bind committed paths/blob IDs, command, version, sandbox configuration and
 the resolved base SHA. The receipt fingerprint also binds that SHA when reuse
 is configured, so advancing the base invalidates a pass at the same task head.
-If the remote ref is absent, checks use the task's recorded base.
+If the remote ref is absent, checks use the task's recorded base. Without
+either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.

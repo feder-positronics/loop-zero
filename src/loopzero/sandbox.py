@@ -23,6 +23,7 @@ from pathlib import Path
 from . import __version__, _proc
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
+from .worktree import WorktreeError
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -137,7 +138,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                                                    "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config, worktree, base=base)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -214,14 +215,18 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
 
 def _check_base(config: Config, worktree: Path) -> str:
     if config.check_runner or config.inputs:
-        return config_mod.base_revision(worktree, config.base_branch)
+        try:
+            return config_mod.base_revision(worktree, config.base_branch)
+        except (config_mod.ConfigError, WorktreeError):
+            if config.check_runner:
+                raise
     return ""
 
 
 def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
-    if base:
+    if config.check_runner or config.inputs:
         settings["base"] = base
     if config.check_runner:
         settings["runner_executable"] = _runner_executable(config)
@@ -239,11 +244,9 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str | None = None) -> str | None:
-    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+def _input_key(config: Config, worktree: Path, command: str, base: str) -> str | None:
+    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
         return None
-    if base is None:
-        base = _check_base(config, worktree)
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()

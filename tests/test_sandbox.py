@@ -683,7 +683,9 @@ _save_report(repo, report)
 
 @pytest.fixture
 def fetched_base(git_repo):
-    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "update-ref", "refs/remotes/origin/main", head)
+    return head
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
@@ -693,9 +695,9 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
-        assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted') is None
+        assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
     whole = replace(cfg, inputs={'*': ('.',)})
-    key = sandbox._input_key(whole, git_repo, 'unlisted')
+    key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
     _save_report(git_repo, sandbox.run_checks(cfg, git_repo))
     receipt = git_repo / '.loopzero/checks.json'
@@ -708,7 +710,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         if change != 'dirty_tree':
             git(git_repo, 'add', path)
             git(git_repo, 'commit', '-m', change)
-            assert key != sandbox._input_key(whole, git_repo, 'unlisted')
+            assert key != sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     elif change == 'command':
         cfg = replace(cfg, checks=('echo changed',), inputs={'echo changed': ('README.md',)})
     elif change == 'network':
@@ -783,13 +785,26 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
+def test_local_checks_run_fresh_without_a_base(git_repo, bwrap_log):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    config = make_config(inputs={"*": (".",)})
+    first = sandbox.run_checks(config, git_repo)
+    assert first.ok
+    _save_report(git_repo, first)
+
+    second = sandbox.run_checks(config, git_repo)
+    assert second.ok
+    assert second.results[0].input_key is None
+    assert second.results[0].reused_from is None
+
+
 @pytest.mark.parametrize('symlink', [False, True])
 def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink):
     from loopzero.types import CheckReport, CheckResult
 
     command = 'echo stage-ran; exit 7'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
-    key = sandbox._input_key(cfg, git_repo, command)
+    key = sandbox._input_key(cfg, git_repo, command, fetched_base)
     _save_report(git_repo, CheckReport(
         git(git_repo, 'rev-parse', 'HEAD').strip(), False,
         (CheckResult(command, 0, 0.0, 'forged pass', key),),
@@ -801,7 +816,7 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     git(git_repo, 'add', '-f', *(['.loopzero', 'forged'] if symlink else ['.loopzero/checks.json']))
     git(git_repo, 'commit', '-m', 'forge passing receipt')
     assert not git(git_repo, 'status', '--porcelain').strip()
-    assert key == sandbox._input_key(cfg, git_repo, command)
+    assert key == sandbox._input_key(cfg, git_repo, command, fetched_base)
 
     report = sandbox.run_checks(cfg, git_repo)
     assert not report.dirty
@@ -820,7 +835,7 @@ def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
 def test_input_key_distinguishes_runners(git_repo, fetched_base):
     keys = {
         sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
-                           git_repo, 'echo one')
+                           git_repo, 'echo one', fetched_base)
         for runner in ((), ('runner-a',), ('runner-b',))
     }
     assert None not in keys
