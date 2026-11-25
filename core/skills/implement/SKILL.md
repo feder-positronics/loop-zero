@@ -57,7 +57,9 @@ where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
 floor. Honor host execution approval rules; use dry run until execution is
 authorized. If no job is named or any condition is unproved, preserve the leftovers
 and report cleanup to the owner. Successful `loopzero merge` already performs its
-own cleanup under the delivery contract.
+own cleanup under the delivery contract. For a confirmed-abandoned task outside
+the job's scope, give the owner the
+[manual worktree procedure](../../../SETUP.md#removing-an-abandoned-task-worktree).
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head.

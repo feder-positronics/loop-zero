@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -156,3 +157,35 @@ def test_cleanup_refuses_dirty(repo: Path) -> None:
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
         worktree.cleanup(repo / ".worktrees" / "ghost")
+
+
+@pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
+def test_abandoned_worktree_guide(repo: Path, state: str) -> None:
+    wt = worktree.start(repo, "abandoned", "main")
+    git(wt, "commit", "--allow-empty", "-m", "published task")
+    head = worktree.head(wt)
+    if state != "unpublished":
+        git(wt, "push", "-u", "origin", "lz/abandoned")
+    if state == "dirty":
+        (wt / "untracked.txt").write_text("keep my work")
+    if state == "divergent":
+        git(wt, "commit", "--allow-empty", "-m", "local follow-up")
+    if state == "remote-moved":
+        git(repo, "push", "--force", "origin", "main:refs/heads/lz/abandoned")
+
+    if state == "stash":
+        (repo / "README.md").write_text("keep my stashed work")
+        git(repo, "stash", "push")
+
+    setup = (Path(__file__).resolve().parents[1] / "SETUP.md").read_text()
+    _, heading, section = setup.partition("## Removing an abandoned task worktree")
+    assert heading, "the guide must cover closed, unmerged tasks outside retention"
+    commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
+    result = subprocess.run(
+        ["sh", "-c", commands, "cleanup-guide", "abandoned", head],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+
+    assert (result.returncode == 0) == (state == "clean"), result.stderr
+    assert wt.exists() == (state != "clean")
+    assert git(repo, "show-ref", "--verify", "refs/heads/lz/abandoned")
