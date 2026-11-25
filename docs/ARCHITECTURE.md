@@ -391,7 +391,7 @@ not a new scheduler or permission to adopt upstream policy. Version-specific
 comparisons remain dated evidence; the running tools and instructions must be
 reconciled with matching source before changing the integration.
 
-Run `python3 scripts/check_architecture_docs.py [BASE]`. It compares the base
+Run `uv run --python 3.14 python scripts/check_architecture_docs.py [BASE]`. It compares the base
 (default: merge-base of HEAD and `origin/main`) with the working tree, including
 new files, and validates local Markdown links and anchors in this guide, the docs
 index, README and AGENTS guidance without network access. The repository's
