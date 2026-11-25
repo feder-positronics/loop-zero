@@ -8,6 +8,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import math
 import os
 import shlex
 import random
@@ -1586,6 +1587,16 @@ def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readi
 # --------------------------------------------------------------------------- entry point
 
 
+def _wait_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("expected a finite, nonnegative number of seconds")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopzero", description="One task, one branch, one draft PR, one review, one merge."
@@ -1617,7 +1628,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for waiter, what in ((ready, "required checks on this head"), (merge, "required checks and the landed merge")):
         waiter.add_argument(
-            "--wait", nargs="?", const=WAIT_TIMEOUT, type=float, metavar="SECONDS",
+            "--wait", nargs="?", const=WAIT_TIMEOUT, type=_wait_seconds, metavar="SECONDS",
             help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",
         )
     merge.add_argument(

@@ -2126,6 +2126,22 @@ def test_ready_waits_for_checks_on_original_head(
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("budget,conclusion", [
+    ("-1", "success"), ("NaN", "pending"), ("inf", "success"), ("-inf", "success"),
+])
+def test_invalid_wait_does_not_read_pr_state(wt: Path, gh: FakeGh, capsys, head, command, budget, conclusion):
+    arm_approved_pr_with_check_result(gh, head, wt, conclusion, isDraft=False)
+
+    with pytest.raises(SystemExit) as error:
+        cli.main([command, f"--wait={budget}"])
+
+    out, err = capsys.readouterr()
+    assert error.value.code == 2 and out == ""
+    assert "argument --wait: expected a finite, nonnegative number of seconds" in err
+    assert gh.calls == []
+
+
 @pytest.mark.parametrize("wait", [False, True])
 def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", mergeable="UNKNOWN")
