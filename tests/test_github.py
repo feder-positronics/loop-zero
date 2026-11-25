@@ -1243,12 +1243,15 @@ def _queue_json(queued: bool) -> dict:
     return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
 
 
-def test_merge_unverified(gh: FakeGh) -> None:
+@pytest.mark.parametrize("missing", [False, True])
+def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
     unmerged = merge_json(state='OPEN', head=HEAD, sha=None)
     gh.respond("pr merge", "")
     gh.respond(f"api repos/{REPO}/pulls/7", unmerged, unmerged)
-    gh.respond("api graphql", _queue_json(False))
-    with pytest.raises(github.MergeFailed, match="neither merged nor queued"):
+    response = {"data": {"repository": {"pullRequest": None}}} if missing else _queue_json(False)
+    gh.respond("api graphql", response)
+    message = "GitHub queue lookup for PR #7: queue status could not be verified" if missing else "neither merged nor queued"
+    with pytest.raises(github.MergeFailed, match=message):
         github.merge(REPO, 7, "merge", HEAD)
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
 
