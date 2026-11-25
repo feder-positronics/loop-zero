@@ -5,11 +5,15 @@ import json
 import os
 import resource
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import traceback
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from select import select
 
 import pytest
 
@@ -585,6 +589,96 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
         sandbox.run_checks(make_config(), git_repo, status=heartbeat)
     assert events and all("running" in event for event in events)
     assert all(not reporter.is_alive() for reporter in reporters)
+
+
+@pytest.mark.parametrize("mode", ["running", "blocked-heartbeat", "creation", "dispatch", "removal"])
+def test_sigterm_cleans_only_the_cancelled_checks_private_directories(
+    git_repo, bwrap_log, tmp_path, mode,
+):
+    script = """
+import shutil, signal, sys, tempfile, threading
+from collections import deque
+from contextlib import ExitStack
+from pathlib import Path
+from tests.test_sandbox import _save_report, make_config, sandbox
+
+mode = sys.argv[1]
+if mode == "creation":
+    mkdtemp = tempfile.mkdtemp
+
+    def create(*args, **kwargs):
+        path = mkdtemp(*args, **kwargs)
+        print("creation", flush=True)
+        signal.raise_signal(signal.SIGTERM)
+        return path
+
+    tempfile.mkdtemp = create
+
+if mode == "removal":
+    rmtree = shutil.rmtree
+
+    def remove(path, **kwargs):
+        print("removal", flush=True)
+        signal.raise_signal(signal.SIGTERM)
+        rmtree(path, **kwargs)
+
+    shutil.rmtree = remove
+
+if mode == "dispatch":
+    class Callbacks(deque):
+        def pop(self):
+            callback = super().pop()
+            print("dispatch", flush=True)
+            signal.raise_signal(signal.SIGTERM)
+            return callback
+
+    class Stack(ExitStack):
+        def __init__(self):
+            super().__init__()
+            self._exit_callbacks = Callbacks()
+
+    sandbox.ExitStack = Stack
+
+def status(message):
+    if mode in {"running", "blocked-heartbeat"}:
+        print(message, flush=True)
+    if mode == "blocked-heartbeat":
+        threading.Event().wait()
+
+sandbox.HEARTBEAT_INTERVAL = 0.03
+repo = Path.cwd()
+command = "echo complete" if mode in {"dispatch", "removal"} else "exec sleep 30"
+report = sandbox.run_checks(make_config(checks=(command,)), repo, status=status)
+_save_report(repo, report)
+"""
+    with ExitStack() as processes:
+        def start_check(check_mode):
+            process = processes.enter_context(subprocess.Popen(
+                [sys.executable, "-c", script, check_mode], cwd=git_repo, stdout=subprocess.PIPE,
+                env={**os.environ, "TMPDIR": str(tmp_path), "PYTHONPATH": str(Path.cwd())}, text=True,
+            ))
+            processes.callback(process.kill)
+            assert select([process.stdout], [], [], 5)[0]
+            marker = check_mode if check_mode in {"creation", "dispatch", "removal"} else "running"
+            assert marker in process.stdout.readline()
+            return process
+
+        concurrent = start_check("running")
+        concurrent_dirs = set(tmp_path.glob("loopzero-*"))
+        assert len(concurrent_dirs) == 2
+        for directory in concurrent_dirs:
+            (directory / "marker").write_text("keep")
+        cancelled = start_check(mode)
+        if mode in {"running", "blocked-heartbeat"}:
+            assert len(set(tmp_path.glob("loopzero-*")) - concurrent_dirs) == 2
+            cancelled.terminate()
+        assert cancelled.wait(timeout=5) == -signal.SIGTERM
+        assert set(tmp_path.glob("loopzero-*")) == concurrent_dirs
+        assert all((directory / "marker").read_text() == "keep" for directory in concurrent_dirs)
+        assert concurrent.poll() is None
+        assert not (git_repo / ".loopzero/checks.json").exists()
+        concurrent.terminate()
+        assert concurrent.wait(timeout=5) == -signal.SIGTERM
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
