@@ -11,8 +11,12 @@ from tests.conftest import git
 
 
 @pytest.fixture
-def repo(git_repo: Path, tmp_path: Path) -> Path:
+def repo(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`git_repo` wired to a bare origin that already holds `main`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     origin = tmp_path / "origin.git"
     git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
     git(git_repo, "remote", "add", "origin", str(origin))
