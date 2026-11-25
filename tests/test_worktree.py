@@ -55,6 +55,38 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
 
 
+@pytest.mark.parametrize("dirty", [False, True])
+def test_start_retries_after_git_creates_worktree(repo, monkeypatch, dirty):
+    base = commit_on_origin(repo, "base-change")
+    wt = repo / ".worktrees" / "my-task"
+    run_git = worktree._git
+
+    def interrupt_after_add(cwd, *args, **kwargs):
+        output = run_git(cwd, *args, **kwargs)
+        if args[:2] == ("worktree", "add"):
+            raise KeyboardInterrupt
+        return output
+
+    with monkeypatch.context() as patch:
+        patch.setattr(worktree, "_git", interrupt_after_add)
+        with pytest.raises(KeyboardInterrupt):
+            worktree.start(repo, "my-task", "main")
+    task = worktree.task_file(wt)
+    assert worktree.branch(wt) == "lz/my-task" and worktree.head(wt) == base
+    assert not task.exists()
+    if dirty:
+        (wt / "untracked").write_text("work in progress")
+        with pytest.raises(worktree.WorktreeError):
+            worktree.start(repo, "my-task", "main")
+        assert not task.exists()
+        return
+
+    assert worktree.start(repo, "my-task", "main") == wt
+    assert worktree.base_sha(wt) == base
+    assert task.read_text().startswith("# My task\n")
+    assert task.read_text().endswith("(filled by `loopzero review`)\n")
+
+
 def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
