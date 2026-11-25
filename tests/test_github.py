@@ -811,6 +811,19 @@ def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> No
     assert github.check_runs(REPO, HEAD) == expected
 
 
+@pytest.mark.parametrize("page", [{"total_count": 1}, {"check_runs": 1}, {"check_runs": []}])
+def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
+    endpoint = f"repos/{REPO}/commits/{HEAD}/check-runs"
+    gh.respond(f"api {endpoint}", page)
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
+
+    if page.get("check_runs") == []:
+        assert github.check_runs(REPO, HEAD) == {}
+    else:
+        with pytest.raises(github.GhError, match=endpoint):
+            github.check_runs(REPO, HEAD)
+
+
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
     page = [{"context": f"old-{i}", "state": "success"} for i in range(99)]
