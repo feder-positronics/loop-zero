@@ -903,8 +903,8 @@ def _run_review(
         raise CliError(
             f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
             "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
-            "`git reset --hard <original-tip>` and replay any later fixes. Push the restored head "
-            f"and run `loopzero review` before merging {config.base_branch}, or open a new PR "
+            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
+            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
             "from the current branch"
         )
     if kind == "delta" and (merges := worktree.merges_since(wt, since)):
@@ -912,7 +912,8 @@ def _run_review(
         raise CliError(
             f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
             f"merged-in changes in the delta material. To recover, {recovery}. "
-            f"Push the recovered head and run `loopzero review` before merging {config.base_branch} again"
+            f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
+            f"before merging {config.base_branch} again"
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
