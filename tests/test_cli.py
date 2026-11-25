@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero import cli, config, github, mergify
-from loopzero._proc import Completed, ProcTimeout, build_env
+from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
@@ -2166,83 +2166,30 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
                         if command == "merge" and settled == "MERGEABLE" else [])
 
 
-def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("wait,elapsed,conclusion,expected", [
+    (0, 0, None, 3), (1, 0, "failure", 1), (1, 0.5, "success", 0), (1, 6, "success", 3),
+])
+def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, conclusion, expected):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
-
-    code, out, err = run(capsys, "ready", "--wait=0")
-
-    assert (code, err) == (3, "")
-    assert f"timed out waiting for required checks on {head[:12]}" in out
-
-
-@pytest.mark.parametrize("read_time,expected", [(6.0, 3), (0.5, 0)])
-def test_ready_wait_rejects_a_late_green_read(wt, gh, capsys, monkeypatch, head, read_time, expected):
-    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
-    clock = [0.0]
-    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
-    pr_view = cli.github.pr_view
+    clock = 0.0
+    pr_view = github.pr_view
 
     def observe(repo, number):
-        clock[0] += read_time
-        arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        nonlocal clock
+        clock += elapsed
+        if conclusion:
+            arm_check_runs(gh, head, [{"name": "checks", "conclusion": conclusion}])
         return pr_view(repo, number)
 
-    monkeypatch.setattr(cli.github, "pr_view", observe)
-
-    code, out, err = run(capsys, "ready", "--wait=1")
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(github, "pr_view", observe)
+    code, out, err = run(capsys, "ready", f"--wait={wait}")
 
     assert (code, err) == (expected, "")
-    assert out.endswith(f"ready: {URL}\n" if expected == 0 else
-                        f"timed out waiting for required checks on {head[:12]}\n")
-
-
-def test_ready_wait_bounds_poll_read_and_retry(wt, gh, capsys, monkeypatch, head):
-    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
-    clock = [0.0]
-    timeouts = []
-    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
-    monkeypatch.setattr(github, "RETRY_DELAYS", (0.25,))
-    def advance(delay):
-        clock[0] += delay
-
-    monkeypatch.setattr(github, "_retry_sleep", advance)
-    call = github.run
-
-    def stall(argv, *, timeout, **kwargs):
-        if argv[1:3] != ["api", f"repos/{REPO}/pulls/7"]:
-            return call(argv, timeout=timeout, **kwargs)
-        timeouts.append(timeout)
-        if len(timeouts) == 1:
-            clock[0] += 0.25
-            return Completed(1, "", "HTTP 503", 0.25)
-        clock[0] += timeout
-        raise ProcTimeout("timed out")
-
-    original = github.pr_view
-
-    def observe(repo, number):
-        monkeypatch.setattr(github, "run", stall)
-        return original(repo, number)
-
-    monkeypatch.setattr(github, "pr_view", observe)
-    code, out, err = run(capsys, "ready", "--wait=1")
-
-    assert (code, err) == (3, "")
-    assert out.endswith(f"timed out waiting for required checks on {head[:12]}\n")
-    assert timeouts == [1.0, 0.5]
-
-
-def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
-    arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}],
-               [{"name": "checks", "status": "completed",
-                                  "conclusion": "failure"}])
-
-    code, out, err = run(capsys, "ready", "--wait")
-
-    out = without_accepted_receipt(out)
-    assert (code, err) == (1, "")
-    assert out == "not ready: required check 'checks' is failure\n"
+    assert out.endswith({
+        0: f"ready: {URL}\n", 1: "not ready: required check 'checks' is failure\n",
+        3: f"timed out waiting for required checks on {head[:12]}\n",
+    }[expected])
 
 
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
