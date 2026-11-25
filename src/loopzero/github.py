@@ -802,9 +802,12 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
             try:
-                _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}",
-                    retry_idempotent=True)
-            except (GhError, ProcTimeout) as exc:
+                response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
+                               "-F", f"thread={thread_id}", retry_idempotent=True)
+                thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
+                if thread["isResolved"] is not True:
+                    raise ValueError("GitHub did not return isResolved=true")
+            except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
                 raise GhError(
                     ("resolve", finding_id),
                     f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
