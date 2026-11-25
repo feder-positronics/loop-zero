@@ -1270,7 +1270,19 @@ def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, c
     code, out, err = run(capsys, "review")
     assert code != 0 and out == "" and not (fake_bin / "claude.stdin").exists()
     assert f"merge commit {merge[:12]} since the reviewed head {reviewed[:12]}" in err
-    assert "delta review needs the reviewed head as an " in err
+    assert f"`git reset --hard {reviewed}`" in err
+    assert "cherry-pick any later fixes" in err
+    assert "run `loopzero review` before merging main again" in err
+
+
+def test_review_delta_refuses_rewritten_primary(wt, gh, fake_bin, capsys):
+    reviewed = head_of(wt)
+    git(wt, "commit", "--amend", "-q", "-m", "rewritten feature")
+    prepare_review(wt, gh, fake_bin, history=[rev(reviewed, "primary")])
+    code, out, err = run(capsys, "review")
+    assert code == 1 and not out and not (fake_bin / "claude.stdin").exists()
+    assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
+    assert "git reflog" in err and "open a new PR" in err
 
 
 def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
@@ -1600,6 +1612,10 @@ def test_ready_after_reviewed_head(wt, gh, capsys, head, kind, resolved, ancesto
     assert code == (0 if ready else 1)
     if not resolved:
         assert "open important finding" in out and "no review recorded" not in out
+    if kind == "delta" and not ancestor:
+        assert f"review cap spent (primary + delta) and {head[:12]} has no eligible review" in out
+    else:
+        assert "review cap spent" not in out
     gh.respond_pr_view(pr_json(headRefOid=head))
     assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
 
