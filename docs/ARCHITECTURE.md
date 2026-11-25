@@ -99,13 +99,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    digest covers execution and stage reuse settings, including the effective
    allowlisted environment, without recording raw environment values. Waiters
    check for policy changes on every poll.
-   Ancestor coverage includes outdated unresolved threads
-   when checking for blocking findings and requires GitHub to report the current head as ahead.
-   This comparison establishes ancestry for both merge commits and ordinary commits.
-   An approved primary or eligible delta can carry forward on that ancestry check. A
-   primary that requested changes also requires resolved blocking findings at the reviewed
-   head and a first-parent chain of verified merges from the PR base. Readiness
-   reconstructs each merge in an isolated Git repository and checks its tree.
+   Local readiness and hosted eligibility carry a review forward only across
+   a first-parent chain of verified merges from the configured PR base. They
+   reconstruct each merge in an isolated Git repository and compare its tree
+   with the actual merge tree. Unavailable history blocks inherited coverage.
+   Ancestor coverage includes outdated unresolved blocking threads. A primary
+   that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede

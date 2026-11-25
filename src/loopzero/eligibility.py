@@ -87,12 +87,13 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     return latest if verdict else None
 
 
-def _clean_base_merges(repo: str, number: int, reviewed: str, head: str) -> bool:
+def _clean_base_merges(repo: str, number: int, reviewed: str, head: str, base_branch: str) -> bool:
     """Prove each intervening first-parent commit is an unmodified merge from the base."""
     try:
         pr = github.api_get(f"repos/{repo}/pulls/{number}")
         base = pr["base"]["sha"]
-        if pr["head"]["sha"] != head or not re.fullmatch(r"[0-9a-f]{40}", base):
+        if (pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch
+                or not re.fullmatch(r"[0-9a-f]{40}", base)):
             return False
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
             history = git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}")
@@ -117,7 +118,7 @@ def _clean_base_merges(repo: str, number: int, reviewed: str, head: str) -> bool
 
 
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
-                     repo: str, number: int) -> dict | None:
+                     repo: str, number: int, base_branch: str) -> dict | None:
     """An eligible review at the current head or an ancestor that covers it."""
     trusted = {login.casefold() for login in publishers}
     marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
@@ -131,7 +132,6 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
-    resolved_primary = False
     if marker[2] == "primary":
         _, machine_block = runners.leading_review_block(latest["body"])
         # App reviews use COMMENTED for either verdict. Read the publisher's
@@ -146,13 +146,9 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
             if github.open_blocking_findings(repo, number, reviewed):
                 return None
-            resolved_primary = True
         elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
-    comparison = github.api_get(f"repos/{repo}/compare/{reviewed}...{head}")
-    if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
-        return None
-    if resolved_primary and not _clean_base_merges(repo, number, reviewed, head):
+    if not _clean_base_merges(repo, number, reviewed, head, base_branch):
         return None
     return latest
 
@@ -174,7 +170,7 @@ def evaluate(repo: str, number: int, head: str, base: str,
         if len(batch) < 100:
             break
         page += 1
-    review = readiness_review(reviews, head, publishers, repo=repo, number=number)
+    review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head)
     if github.pr_view(repo, number).head_sha != head:
