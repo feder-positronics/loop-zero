@@ -1826,6 +1826,19 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
 
 
 @pytest.mark.parametrize("draft", [True, False])
+def test_merge_skipped_check_points_to_ready_only_for_a_draft(
+    wt: Path, gh: FakeGh, capsys, head, draft
+) -> None:
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=draft)
+    code, out, err = run(capsys, "merge", "--wait=0")
+
+    assert (code, without_accepted_receipt(out)) == (1, "")
+    hint = "; next: loopzero ready --wait" if draft else ""
+    assert err == f"loopzero merge: not ready to merge: required check 'checks' is skipped{hint}\n"
+    assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+@pytest.mark.parametrize("draft", [True, False])
 def test_ready_skipped_required_check_waits_only_for_a_draft(
     wt: Path, gh: FakeGh, capsys, head, draft
 ) -> None:

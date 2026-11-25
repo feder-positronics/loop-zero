@@ -1087,6 +1087,14 @@ def _pending_checks(
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
+def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
+    if _pending_checks(config, pr, readiness):
+        return "; next: loopzero merge --wait"
+    if _draft_checks_waiting(config, pr, readiness):
+        return "; next: loopzero ready --wait"
+    return ""
+
+
 def _poll_until(started: float, timeout: float) -> Iterator[None]:
     delay = WAIT_INTERVAL
     while True:
@@ -1256,7 +1264,7 @@ def _merge_with_mergify(
     behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
     blockers = tuple(reason for reason in readiness.reasons if reason != behind)
     if blockers:
-        hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+        hint = _merge_check_hint(config, pr, readiness)
         raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
     queue = config.mergify_queue
     assert queue is not None
@@ -1340,7 +1348,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             return 3 if args.wait is not None else 0
     else:
         if not readiness.ready:
-            hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+            hint = _merge_check_hint(config, pr, readiness)
             raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
