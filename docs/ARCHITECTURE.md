@@ -55,7 +55,7 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
-Private review receipts and sidecars live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
+Private review receipts, sidecars and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.
@@ -72,10 +72,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    focused tests start early. `check` runs deterministic checks in a read-only
    source sandbox. Its simple-command preflight catches missing local scripts,
    prepares recognized uv dependency groups offline in that sandbox and prints
-   progress before each command, metadata-only stage heartbeats every 30 seconds
-   (including silent children), and exit code/duration immediately after each stage.
+   progress before each command, metadata-only stage heartbeats after 30 seconds
+   and every five minutes thereafter (including silent children), and exit
+   code/duration immediately after each stage.
    Heartbeats stop on completion or cancellation and never supply a verdict; child
-   streams remain captured for the existing final report and failing output tail.
+   streams remain captured for the final report. Oversized failure output gets a
+   terminal preview and keeps its diagnostic tail in the check receipt.
    Trusted-base commands remain authoritative;
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
@@ -108,6 +110,7 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    reconstructs each merge in an isolated Git repository and checks its tree.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   The shared check waiter reports initial blockers and subsequent changes.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute
