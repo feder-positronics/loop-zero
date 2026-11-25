@@ -270,14 +270,16 @@ Outside that confirmed scope, retain all-writer trailers.
 
 ## Sandbox rules for checks
 
-Checks run with read-only source/Git, scratch writes, isolated HOME, only
+Local checks run with read-only source/Git, scratch writes, isolated HOME, only
 configured `[checks].ro_paths`/`[checks].writable` home paths, no network unless
 `[checks].network = true`, and allowlisted environment (default
 `PATH HOME LANG LC_ALL TERM`) plus `[checks].env`.
 
-Checks and reviews require working `bwrap`; neither falls back to the host.
-Unavailable sandboxes fail with `SandboxUnavailable`. Both recheck HEAD and
-dirtiness after running; changes during the run invalidate results.
+Local checks and native reviews require working `bwrap` and fail without it.
+A configured [stage runner](../docs/ARCHITECTURE.md#check-stage-runners) can
+execute checks without local `bwrap`. If the runner reports that it did not
+start a stage, local fallback requires `bwrap`. Checks and reviews recheck HEAD
+and dirtiness after running. Changes during the run invalidate results.
 
 Reviews use read-only worktree/Git, private HOME, reviewer runtime paths and
 network. Auth binds remain route-specific exceptions to state isolation;

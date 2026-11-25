@@ -421,7 +421,8 @@ leaving this guide evergreen.
 ## Check stage runners
 
 `[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
-from a fresh temporary directory outside the task worktree. Its executable must
+from a fresh temporary directory outside the task worktree. Delegation does not
+require local bwrap. Its executable must
 be an absolute path or a bare PATH command; later arguments may be relative.
 Execute the configured path (or PATH lookup result) without resolving symlinks.
 For containment only, resolve the executable, absolute arguments, joined short
@@ -442,7 +443,7 @@ one JSON object echoing worktree, head, base, command, network and env_sha256, p
 on stderr. Missing, extra, duplicate, malformed or mismatched fields and runner
 process failures fail the stage closed. Runner timeouts report exit code 124
 and the measured elapsed duration. `not_started=true` requires exit_code=0,
-duration_s=0 and empty tail, and permits only sandboxed local fallback.
+duration_s=0 and empty tail, and permits only local fallback through bwrap.
 
 The runner may read `worktree` as data to execute the exact clean head, including
 unpushed local commits, with the supplied environment and network policy under
