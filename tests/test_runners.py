@@ -1240,9 +1240,10 @@ def test_timeout_becomes_bad_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_bin: Path, fake_bwrap: Path
 ) -> None:
     from loopzero import _proc, runners
+    from loopzero.cli import _review_failure
 
     def timeout(*args, **kwargs):
-        raise _proc.ProcTimeout("timed out", "partial reviewer output")
+        raise _proc.ProcTimeout("timed out", "partial reviewer output", stderr="x" * 3000 + "waiting for proxy")
 
     _fake_claude(fake_bin, {})
     monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
@@ -1251,6 +1252,9 @@ def test_timeout_becomes_bad_output(
     with pytest.raises(RunnerBadOutput, match="timed out") as info:
         _review("claude", tmp_path)
     assert "partial reviewer output" in info.value.tail
+    reason, detail, fallback = _review_failure("claude", info.value)
+    assert reason.startswith("claude: timed out after ") and detail.endswith("waiting for proxy")
+    assert len(detail.splitlines()[-1]) <= runners.TAIL_CHARS and "waiting for proxy" not in fallback
 
 
 def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:

@@ -270,7 +270,9 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
-        raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", _tail(exc.stdout)) from exc
+        stderr_line = _tail(exc.stderr.rstrip()).rpartition("\n")[2]
+        tail = f"{stderr_line}\n{_tail(exc.stdout)}".strip()
+        raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
     if done.exit_code != 0:
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
