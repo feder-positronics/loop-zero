@@ -530,7 +530,9 @@ its PR against the producer branch once its checks pass, is reviewed there and
 is retargeted when the producer merges. Retarget stacked PRs before deleting
 their base.
 
-For a stack, agree the configuration with the coordinator: copy the trusted
+### Stacked delivery
+
+Agree the configuration with the coordinator: copy the trusted
 base's complete `workflow.toml` to `.loopzero/stack-workflow.toml` and change
 only `[repo].base` to the producer branch (for example `base = "lz/producer"`).
 Keep every check, required CI name, publisher and reviewer setting intact;
@@ -544,8 +546,8 @@ loopzero --config .loopzero/stack-workflow.toml review
 ```
 
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
-the coordinator must verify the copy and its one-field difference. Do not
-retarget to main just to launch review. After the producer lands, retarget the
+the coordinator must verify the copy and its one-field difference. Keep the
+producer as the base through primary review. After the producer lands, retarget the
 consumer to main and return to the canonical configuration. Before readiness and
 merge, follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).
