@@ -1,9 +1,17 @@
-"""Mergify candidate attestation at the trusted hosted boundary."""
+"""Mergify candidate attestation at the trusted hosted boundary.
+
+For the IntelFlo replay, set INTELFLO_CANDIDATE_POLICY_DIR to a scratch directory
+containing IntelFlo's check_mergify_candidate_policy.py, check_pr_body_contract.py
+and migration_prereq_policy.py from scripts/ci. Save loop-zero's candidate.py from
+the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.py.
+"""
 
 from __future__ import annotations
 
 from copy import deepcopy
+from importlib import import_module
 from itertools import cycle
+from os import environ
 
 import pytest
 
@@ -275,7 +283,8 @@ def tree_candidate(tmp_path, monkeypatch):
 
     def attest(
         *, head=candidate_sha, main_head=main, policy=lambda _n, _s: None,
-        main_after=None, extra_source=None,
+        main_after=None, extra_source=None, lineage="vanished", run=attest_candidate,
+        held_source=None,
     ):
         candidate_event = event()
         candidate_event["pull_request"]["head"]["sha"] = head
@@ -285,26 +294,43 @@ def tree_candidate(tmp_path, monkeypatch):
             "status": "ahead",
             "merge_base_commit": {"sha": source},
         }
-        vanished = status()
-        vanished["batches"].pop(0)
+        queue = status()
+        if lineage != "stacked":
+            queue["batches"].pop(0)
+        if lineage == "single":
+            queue["batches"][0]["sub_batches"][0]["parent_ids"] = []
+        if lineage == "stacked":
+            values["/repos/owner/repo/pulls/101"] = pull(101, parent)
+            values[f"/repos/owner/repo/compare/{parent}...{head}"] = {
+                "status": "ahead",
+                "merge_base_commit": {"sha": parent},
+            }
         if extra_source:
             values["/repos/owner/repo/pulls/101"] = pull(101, extra_source)
             values[f"/repos/owner/repo/compare/{extra_source}...{head}"] = {
                 "status": "ahead",
                 "merge_base_commit": {"sha": extra_source},
             }
-            vanished["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
+            queue["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
+        for number in (101, 102):
+            values[f"/repos/owner/repo/pulls/{number}"].update(
+                labels=[{"name": "hold"}] if number == held_source else [],
+                body="## Objective\nApply a reviewed source change.",
+            )
+            for endpoint in ("commits", "files"):
+                values[f"/repos/owner/repo/pulls/{number}/{endpoint}?per_page=100&page=1"] = []
         reads = cycle([main_head, main_after or main_head])
 
         def get(path):
             if path.endswith("/git/ref/heads/main"):
-                return {"object": {"sha": next(reads)}}
+                sha = next(reads)
+                return {"object": {"sha": sha}} if sha else {}
             return deepcopy(values[path])
 
-        return attest_candidate(
+        return run(
             candidate_event,
             github_get=get,
-            mergify_status=lambda *_: deepcopy(vanished),
+            mergify_status=lambda *_: deepcopy(queue),
             source_policy=policy,
         )
 
@@ -375,6 +401,102 @@ def test_vanished_parent_orders_live_sources_by_topology(tree_candidate):
         {"number": 101, "head_sha": second},
         {"number": 102, "head_sha": source},
     ]
+
+
+@pytest.fixture
+def intelflo_policy(monkeypatch):
+    # This replay is opt-in so ordinary checks can run without an IntelFlo checkout or network.
+    snapshot = environ.get("INTELFLO_CANDIDATE_POLICY_DIR")
+    if not snapshot:
+        pytest.skip("set INTELFLO_CANDIDATE_POLICY_DIR to the fetched policy and workflow pin")
+    monkeypatch.syspath_prepend(snapshot)
+    wrapper = import_module("check_mergify_candidate_policy")
+    pinned = import_module("pinned_candidate")
+    monkeypatch.setattr(wrapper, "attest_candidate", pinned.attest_candidate)
+    clock = [0.0]
+    monkeypatch.setattr(pinned, "_retry_clock", lambda: clock[0])
+    monkeypatch.setattr(pinned, "_retry_sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+
+    def run(event, *, github_get, mergify_status, source_policy):
+        return wrapper.validate_candidate_policy(
+            event, github_get=github_get, mergify_status=mergify_status,
+        )
+
+    return pinned, run
+
+
+@pytest.fixture(params=["loopzero", "intelflo"])
+def candidate_policy(request):
+    from loopzero import candidate
+
+    if request.param == "intelflo":
+        return request.getfixturevalue("intelflo_policy")
+    return candidate, attest_candidate
+
+
+@pytest.mark.parametrize("case", [
+    "single", "stacked", "combined", "mismatch", "incomplete", "stale", "ambiguous", "budget",
+])
+def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monkeypatch, case):
+    attest, git, commit, base, parent, source, candidate_sha = tree_candidate
+    implementation, run = candidate_policy
+    if case == "single":
+        head = git("commit-tree", f"{source}^{{tree}}", "-p", base, "-p", source,
+                   "-m", "single source integration")
+        assert attest(run=run, lineage="single", head=head, main_head=base) == [
+            {"number": 102, "head_sha": source},
+        ]
+        return
+    if case == "stacked":
+        assert attest(run=run, lineage="stacked", main_head=base) == [
+            {"number": 101, "head_sha": parent},
+            {"number": 102, "head_sha": source},
+        ]
+        return
+
+    # The earlier batch has landed by squash. Both live source heads still need
+    # to be recovered, and their integration must reproduce the candidate tree.
+    git("checkout", "-b", "second", source)
+    second = commit("source", "reviewed second version\n")
+    git("checkout", "candidate")
+    git("merge", "--no-ff", second, "-m", "second integration")
+    head = git("rev-parse", "HEAD")
+    if case == "combined":
+        assert attest(run=run, head=head, extra_source=second) == [
+            {"number": 101, "head_sha": second},
+            {"number": 102, "head_sha": source},
+        ]
+        return
+
+    kwargs = {}
+    if case == "mismatch":
+        changed = commit("injected", "unreviewed\n")
+        parents = git("show", "-s", "--format=%P", head).split()
+        head = git("commit-tree", f"{changed}^{{tree}}", "-p", parents[0], "-p", parents[1],
+                   "-m", "forged merge")
+        diagnostic = "tree mismatch"
+    elif case == "incomplete":
+        kwargs["main_head"] = ""
+        diagnostic = "main object unavailable"
+    elif case == "stale":
+        kwargs["main_after"] = base
+        diagnostic = "main changed"
+    elif case == "ambiguous":
+        head = git("commit-tree", f"{head}^{{tree}}", "-p", candidate_sha, "-p", second,
+                   "-p", parent, "-m", "octopus")
+        diagnostic = "ambiguous"
+    else:
+        monkeypatch.setattr(implementation, "_TREE_OBJECTS", 1)
+        diagnostic = "object count bound"
+    with pytest.raises(implementation.CandidateError, match=diagnostic):
+        attest(run=run, head=head, extra_source=second, **kwargs)
+
+
+def test_intelflo_wrapper_applies_source_policy(tree_candidate, intelflo_policy):
+    _, run = intelflo_policy
+    wrapper = import_module("check_mergify_candidate_policy")
+    with pytest.raises(wrapper.PolicyError, match="source PR #102 has a hold label"):
+        tree_candidate[0](run=run, lineage="stacked", held_source=102)
 
 
 def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
