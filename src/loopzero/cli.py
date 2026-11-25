@@ -1351,24 +1351,22 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "next: loopzero merge --wait follows the queue, verifies and cleans up"
             )
             return 0
-    if _delete_remote_branch(config, branch, pr.head_sha):
-        _delete_tracking_ref(wt, branch, pr.head_sha)
+    _cleanup_remote_refs(wt, config, branch, pr.head_sha)
     _cleanup(wt, pr)
     print(sha)
     return 0
 
 
-def _delete_remote_branch(config: Config, branch: str, expected_head: str) -> bool:
+def _cleanup_remote_refs(wt: Path, config: Config, branch: str, expected_head: str) -> None:
     try:
         if github.delete_remote_branch(config.repo, branch, expected_head):
-            return True
+            _delete_tracking_ref(wt, branch, expected_head)
+            return
         print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
               "skipping deletion", file=sys.stderr)
     except (github.GhError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
               f"delete {branch!r} in {config.repo} if it still points at the merged head", file=sys.stderr)
-
-    return False
 
 
 def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
