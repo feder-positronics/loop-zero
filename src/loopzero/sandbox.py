@@ -270,7 +270,7 @@ def _run_one(
         )
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
-                           _proc.tail(exc.output + f"\n[loopzero] timed out after {timeout:g}s"))
+                           _proc.tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
     return CheckResult(command, done.exit_code, done.duration_s, _proc.tail(done.stdout))
 
 
@@ -442,6 +442,6 @@ def _dispatch_one(
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT,
                            exc.duration_s if exc.duration_s is not None else timeout,
-                           _proc.tail(exc.output + f"\n[loopzero] timed out after {timeout:g}s"))
+                           _proc.tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
         return CheckResult(command, 1, 0.0, f"Stage runner failed: {exc}")
