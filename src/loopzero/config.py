@@ -58,7 +58,12 @@ def load(path: Path | str, *, checks: dict[str, Any] | None = None) -> Config:
         with path.open("rb") as handle:
             data = tomllib.load(handle)
     except FileNotFoundError as exc:
-        raise ConfigError(f"{path}: config file not found") from exc
+        raise ConfigError(
+            f"{path}: config file not found. Check out the intended repository, "
+            "configure loop-zero for this repository "
+            "(https://github.com/feder-positronics/loop-zero/blob/main/SETUP.md#configure), "
+            "or follow this repository's review process if it has one."
+        ) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     if checks is not None:
