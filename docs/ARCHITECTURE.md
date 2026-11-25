@@ -93,7 +93,13 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings,
-   target branch and required CI. Ancestor coverage includes outdated unresolved threads
+   target branch and required CI. The receipt must record a clean passing run
+   at that head with the current commands and check settings digest. A settings
+   change or an older receipt without the digest requires a fresh check. The
+   digest covers execution and stage reuse settings, including the effective
+   allowlisted environment, without recording raw environment values. Waiters
+   check for policy changes on every poll.
+   Ancestor coverage includes outdated unresolved threads
    when checking for blocking findings and requires GitHub to report the current head as ahead.
    This comparison establishes ancestry for both merge commits and ordinary commits.
    An approved primary or eligible delta can carry forward on that ancestry check. A
@@ -468,5 +474,5 @@ when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them
 Consumers own complete input declarations.
 Only this worktree's clean passing keyed receipt is eligible; dirty trees run
 fresh. A tracked receipt is never eligible for reuse.
-New receipts still bind the current head, so readiness is unchanged.
+Receipts that use saved stage results bind the current head and check settings.
 CI and merge-queue candidates run fresh without a local worktree receipt.
