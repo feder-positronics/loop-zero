@@ -272,11 +272,8 @@ def _readiness(
             workflow_wait and review_age is not None and 0 <= review_age < STALE_VERDICT_GRACE
         ),
     )
-    report = _load_report(wt)
-    if (report is None or report.head != head or report.dirty or not report.ok
-            or tuple(result.command for result in report.results) != config.checks
-            or report.settings_sha256 is None
-            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
+    report = _current_check_report(wt, config, head)
+    if report is None:
         result = github.Readiness(
             ready=False,
             reasons=(*result.reasons, "run loopzero check at this head"),
@@ -304,6 +301,16 @@ def _readiness(
 
 
 # --------------------------------------------------------------------------- checks report
+
+
+def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
+    report = _load_report(wt)
+    if (report is None or report.head != head or report.dirty or not report.ok
+            or tuple(result.command for result in report.results) != config.checks
+            or report.settings_sha256 is None
+            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
+        return None
+    return report
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -1113,12 +1120,15 @@ def _wait_for_checks(
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
+        if args is not None:
+            latest_config = _load_config(args, wt, pin_checks=True)
+            if latest_config != config:
+                if _current_check_report(wt, latest_config, pr.head_sha) is None:
+                    raise CliError("workflow settings changed while waiting; run loopzero check and retry")
+                raise CliError("workflow settings changed while waiting; retry with the current settings")
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         waiting = () if kicked else _draft_checks_waiting(config, current, readiness)
         pending = _pending_checks(config, current, readiness, kicked)
-        if ((waiting or not pending) and args is not None
-                and _load_config(args, wt, pin_checks=True) != config):
-            raise CliError("workflow settings changed while waiting; run loopzero check and retry")
         if waiting:
             github.mark_ready(config.repo, pr.number)
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}")

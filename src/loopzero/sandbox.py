@@ -149,6 +149,9 @@ def _execution_settings(config: Config, base: str) -> dict:
     if config.check_runner:
         settings["base"] = base
         settings["runner_executable"] = _runner_executable(config)
+        settings["environment"] = _proc.build_env(config.env_allowlist)
+    else:
+        settings["environment"] = _sandbox_environment(config)
     return settings
 
 
@@ -168,9 +171,7 @@ def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> 
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    settings = _execution_settings(config, base)
-    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
-    payload = [command, __version__, settings, blobs]
+    payload = [command, __version__, _execution_settings(config, base), blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -312,6 +313,15 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         raise SandboxUnavailable(f"bwrap namespace creation failed: {reason}{remedy}")
 
 
+def _sandbox_environment(config: Config) -> dict[str, str]:
+    return {
+        **SANDBOX_ENV,
+        **_proc.build_env(config.env_allowlist),
+        **dict(config.env),
+        "HOME": SANDBOX_HOME,
+    }
+
+
 def bwrap_argv(
     config: Config,
     worktree: Path,
@@ -367,8 +377,7 @@ def bwrap_argv(
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
-    env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist), **dict(config.env)}
-    for key, value in env.items():
+    for key, value in _sandbox_environment(config).items():
         if key != "HOME":
             argv += ["--setenv", key, value]
     argv += ["--setenv", "HOME", SANDBOX_HOME, "--"]

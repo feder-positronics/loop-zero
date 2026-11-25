@@ -94,10 +94,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    target branch and required CI. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
-   digest covers configured execution and stage reuse settings without recording
-   raw environment values. Host environment values stay in per-stage reuse keys
-   so a full receipt can be read on a different coordinator host. The waiters
-   verify that the loaded workflow settings still match before returning a verdict.
+   digest covers execution and stage reuse settings, including the effective
+   allowlisted environment, without recording raw environment values. Waiters
+   check for policy changes on every poll.
    Ancestor coverage includes outdated unresolved threads
    when checking for blocking findings and requires GitHub to report the current head as ahead.
    This comparison establishes ancestry for both merge commits and ordinary commits.

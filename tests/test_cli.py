@@ -2225,20 +2225,45 @@ def test_ready_requires_receipt_from_current_check_environment(
     if wait_for:
         arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
 
-        def finish_checks(_seconds):
+        def change_policy(_seconds):
+            assert config_path.read_text() == config
             config_path.write_text(new_config)
-            arm_check_runs(gh, head, [
-                {"name": "checks", "status": "completed", "conclusion": "success"}])
 
-        monkeypatch.setattr(cli, "_sleep", finish_checks)
+        monkeypatch.setattr(cli, "_sleep", change_policy)
         code, _, err = run(capsys, *args, wait_for, "--wait")
         assert code == 1 and "workflow settings changed while waiting; run loopzero check" in err
+        arm_check_runs(gh, head, [
+            {"name": "checks", "status": "completed", "conclusion": "success"}])
     else:
         config_path.write_text(new_config)
     code, out, _ = run(capsys, *args, "ready")
     assert code == 1
     assert out.endswith("not ready: run loopzero check at this head\n")
     assert run(capsys, *args, "check")[0] == 1
+
+
+@pytest.mark.parametrize("fixed", [False, True])
+def test_ready_matches_effective_inherited_check_environment(
+    wt, gh, capsys, head, tmp_path, monkeypatch, fixed,
+):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    config_path = tmp_path / "check-policy.toml"
+    command = 'test "$CHECK_POLICY" = old'
+    config = WORKFLOW.replace('"echo ok"', json.dumps(command))
+    config = config.replace("[checks]", '[checks]\nenv_allowlist = ["PATH", "CHECK_POLICY"]')
+    if fixed:
+        config = config.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "old" }')
+    config_path.write_text(config)
+    args = ("--config", str(config_path))
+
+    monkeypatch.setenv("CHECK_POLICY", "old")
+    assert run(capsys, *args, "check")[0] == 0
+    monkeypatch.setenv("CHECK_POLICY", "new")
+    code, out, _ = run(capsys, *args, "ready")
+    if fixed:
+        assert code == 0
+    else:
+        assert code == 1 and out.endswith("not ready: run loopzero check at this head\n")
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
