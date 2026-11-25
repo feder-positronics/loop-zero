@@ -770,13 +770,14 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
 
     monkeypatch.setattr(github.time, "time", lambda: wall[0])
     monkeypatch.setattr(github, "run", run_then_suspend)
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
     monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend(3601))
     gh.expect(["api", "repos/acme/widgets"], {})
     gh.expect(["api", "repos/acme/widgets"], exit=1, stderr="HTTP 502: Bad Gateway")
     gh.expect(["api", "repos/acme/widgets"], {})
-    github.api_get("repos/acme/widgets")  # mint, then suspend before the token is cached
+    github.api_get("repos/acme/widgets")  # mint, then suspend before the token is used
     github.api_get("repos/acme/widgets")  # fails transiently, then suspends in the backoff
-    assert [c["token"] for c in gh.calls] == ["synthetic-token-1", "synthetic-token-2", "synthetic-token-3"]
+    assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
 
 
 def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:

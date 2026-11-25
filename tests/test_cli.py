@@ -1524,13 +1524,14 @@ def test_review_publisher_check_uses_app_identity(
         assert "not a configured review publisher" in err
 
 
-@pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]"])
+@pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]", "helper fails"])
 def test_review_reminted_app_token_keeps_publisher(
     wt: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys, after_review: str,
 ) -> None:
     helper = tmp_path / "app-token"
     counter = tmp_path / "helper-calls"
-    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
+    fail = f"[ $(wc -l < {counter}) -eq 1 ] || exit 1\n" if after_review == "helper fails" else ""
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\n{fail}echo synthetic-token-$(wc -l < {counter})\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     wall, run_review = [1_000_000.0], cli._run_review
@@ -1545,7 +1546,7 @@ def test_review_reminted_app_token_keeps_publisher(
     (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
-    prepare_review(wt, gh, fake_bin, post_id=3)
+    head = prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}},
                {"data": {"viewer": {"login": after_review}}})
     code, _, err = run(capsys, "review")
@@ -1553,7 +1554,8 @@ def test_review_reminted_app_token_keeps_publisher(
     if after_review == "app[bot]":
         assert code == 0 and posts == ["synthetic-token-2"]
     else:
-        assert code == 1 and "publisher identity changed" in err and posts == []
+        assert code == 1 and "could not refresh the app token" in err and "--repost" in err and posts == []
+        assert cli._review_file(wt, head, "primary").is_file()
 
 
 @pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN), (["app", ""], "app[bot]")])
@@ -1566,13 +1568,16 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
-    assert run(capsys, "review")[0] == 0
+    code, _, err = run(capsys, "review")
+    posts = [c["token"] or "" for c in gh.calls if "/reviews" in " ".join(c["argv"]) and "POST" in c["argv"]]
+    if publisher != LOGIN:  # the app token can no longer be minted: hold rather than post as the operator
+        assert code == 1 and "--repost" in err and posts == []
+        return
+    assert code == 0
     assert len(gh.calls) == 7  # Includes the body refresh after review publication.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
-    assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
-    assert [c["token"] or "" for c in gh.calls if "/reviews" in " ".join(c["argv"])
-            and "POST" in c["argv"]] == ["" if publisher == LOGIN else "app"]
+    assert posted_review(gh)["event"] == "APPROVE" and posts == [""]
 
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])

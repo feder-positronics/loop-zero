@@ -729,7 +729,6 @@ def cmd_review(args: argparse.Namespace) -> int:
                 f"dirty before False, dirty after {final_dirty}"
             )
         prefix = review_marker(head, kind, "model")
-        token = _refresh_publisher_token(token, publisher)
     try:
         evidence = runners.codex_evidence(result)
     except runners.RunnerBadOutput:
@@ -740,6 +739,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         prefix = _repost_prefix(result)
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
+    token = _refresh_publisher_token(token, publisher)
     try:
         github.post_review(
             config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -767,12 +767,12 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def _refresh_publisher_token(token: str, publisher: str) -> str:
-    """The reviewer may outlive the app token: re-mint it, but only for the same publisher."""
-    fresh = github.app_token() if token else ""
-    if not fresh or fresh == token:
+    """The review may outlive the app token: re-mint it, but only for the same publisher."""
+    if not token or (fresh := github.app_token()) == token:
         return token
-    if github.login(token=fresh).casefold() != publisher.casefold():
-        raise CliError("review publisher identity changed during review; HOLD")
+    if not fresh or github.login(token=fresh).casefold() != publisher.casefold():
+        raise CliError(f"could not refresh the app token for review publisher {publisher}; the review "
+                       "is saved: fix the app token helper, then run `loopzero review --repost`")
     return fresh
 
 
