@@ -303,8 +303,9 @@ are not features shipped by loop-zero.
 The current CLI writes PR bodies only when content changes, excluding volatile
 check timing from the generated validation block. Keep refreshes idempotent:
 one state transition should not become repeated writes that trigger policy CI.
-GitHub reads retry transient failures up to three times (5/20/60 seconds) and
-stop on rate limits; Mergify reads retry server errors, throttling and failed
+GitHub reads and the idempotent thread resolution mutation retry transient
+failures up to three times (5/20/60 seconds) and stop on rate limits. Mergify
+reads retry server errors, throttling and failed
 reads up to twice (2/5 seconds). Waits use bounded backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
 The optional host ai-accounts helper owns managed credential selection and exact-model
