@@ -782,7 +782,7 @@ def _repost_prefix(result: ReviewResult) -> str:
 
 def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, token: str) -> tuple[bool, list[dict]]:
-    with github.bounded_reads(30, token=token):
+    with github.bounded_reads(time.monotonic() + 30, token=token):
         reviews = _pr_reviews(config.repo, pr.number)
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
@@ -1062,8 +1062,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                  shown=readiness.reasons if kicked else ())
+        waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
+                                     shown=readiness.reasons if kicked else ())
         if waited is None:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
@@ -1071,7 +1071,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
-            waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started)
+            waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started)
             if waited is None:
                 print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
                 return 3
@@ -1135,6 +1135,23 @@ def _poll_until(started: float, timeout: float) -> Iterator[None]:
         delay = min(120.0, delay * 2)
 
 
+def _wait_with_deadline(
+    wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
+    started: float | None = None, shown: tuple[str, ...] = (),
+) -> tuple[github.PR, github.Readiness, bool] | None:
+    started = time.monotonic() if started is None else started
+    if timeout == 0:
+        return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started, shown=shown)
+    deadline = started + timeout
+    if time.monotonic() >= deadline:
+        return None
+    try:
+        with github.bounded_reads(deadline, token=None, retry=True):
+            return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started, shown=shown)
+    except github.ReadDeadline:
+        return None
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
@@ -1155,8 +1172,6 @@ def _wait_for_checks(
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
                                     shown=readiness.reasons)
-        if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
-            return None  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked

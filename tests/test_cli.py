@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero import cli, config, github, mergify
-from loopzero._proc import Completed, build_env
+from loopzero._proc import Completed, ProcTimeout, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
@@ -2034,6 +2034,63 @@ def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys, head) ->
     assert f"timed out waiting for required checks on {head[:12]}" in out
 
 
+@pytest.mark.parametrize("read_time,expected", [(6.0, 3), (0.5, 0)])
+def test_ready_wait_rejects_a_late_green_read(wt, gh, capsys, monkeypatch, head, read_time, expected):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    pr_view = cli.github.pr_view
+
+    def observe(repo, number):
+        clock[0] += read_time
+        arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        return pr_view(repo, number)
+
+    monkeypatch.setattr(cli.github, "pr_view", observe)
+
+    code, out, err = run(capsys, "ready", "--wait=1")
+
+    assert (code, err) == (expected, "")
+    assert out.endswith(f"ready: {URL}\n" if expected == 0 else
+                        f"timed out waiting for required checks on {head[:12]}\n")
+
+
+def test_ready_wait_bounds_poll_read_and_retry(wt, gh, capsys, monkeypatch, head):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [0.0]
+    timeouts = []
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(github, "RETRY_DELAYS", (0.25,))
+    def advance(delay):
+        clock[0] += delay
+
+    monkeypatch.setattr(github, "_retry_sleep", advance)
+    call = github.run
+
+    def stall(argv, *, timeout, **kwargs):
+        if argv[1:3] != ["api", f"repos/{REPO}/pulls/7"]:
+            return call(argv, timeout=timeout, **kwargs)
+        timeouts.append(timeout)
+        if len(timeouts) == 1:
+            clock[0] += 0.25
+            return Completed(1, "", "HTTP 503", 0.25)
+        clock[0] += timeout
+        raise ProcTimeout("timed out")
+
+    original = github.pr_view
+
+    def observe(repo, number):
+        monkeypatch.setattr(github, "run", stall)
+        return original(repo, number)
+
+    monkeypatch.setattr(github, "pr_view", observe)
+    code, out, err = run(capsys, "ready", "--wait=1")
+
+    assert (code, err) == (3, "")
+    assert out.endswith(f"timed out waiting for required checks on {head[:12]}\n")
+    assert timeouts == [1.0, 0.5]
+
+
 def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}],
@@ -2065,6 +2122,8 @@ def test_ready_wait_tracks_the_replacement_workflow(
     elapsed = 0.0
     monkeypatch.setattr(cli.time, "monotonic", lambda: elapsed)
     if replacement != "pending":
+        monkeypatch.setattr(cli, "WAIT_INTERVAL", 0.5)
+
         def sleep(seconds: float) -> None:
             nonlocal elapsed
             elapsed += seconds
@@ -2120,11 +2179,14 @@ def test_ready_wait_revalidates_its_ready_transition(
     monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
     monkeypatch.setattr(cli, "_sleep", advance)
 
-    code, out, err = run(capsys, "ready", "--wait=40")
+    code, out, err = run(capsys, "ready", "--wait=40" if replacement == "pending" else "--wait=61")
 
     assert (code, err) == (expected, "")
     assert "waiting: required check 'checks' is cancelled" in out
-    assert sleeps == ([30.0, 10.0] if initial_pending or replacement == "pending" else [30.0])
+    if initial_pending or replacement == "pending":
+        assert sleeps == [30.0, 10.0 if replacement == "pending" else 30.0]
+    else:
+        assert sleeps == [30.0]
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         "not ready: required check 'checks' is failure\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}\n")
