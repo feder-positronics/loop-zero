@@ -37,9 +37,10 @@ limit on the backlog.
   update its latest observation; distinct failures, especially security or
   privacy defects, get their own issue. A confirmed recurrence of a closed one
   reopens it under the same recovery rule.
-- **Work and close:** follow the [contract](../core/CONTRACT.md) for ownership,
-  [holds](../core/CONTRACT.md#merge-authority), closure and [review findings](../core/CONTRACT.md#findings).
-  Age, a count target or an unrelated green job never sets a hold or closes an issue.
+- **Work and close:** follow [delivery roles](DELEGATION.md) for ownership and
+  closure, and the contract for [holds](../core/CONTRACT.md#merge-authority)
+  and [review findings](../core/CONTRACT.md#findings). Age, a count target or an
+  unrelated green job never sets a hold or closes an issue.
 - **Summary:** the existing delivery sweep refreshes the pinned summary through
   the REST API and reports any unlabelled or conflicting issues. Add no gate,
   ledger or second work state.
