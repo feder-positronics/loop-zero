@@ -1,6 +1,6 @@
 ---
 name: work-issue
-description: Deliver one live GitHub issue through verified merge and closure or an explicit partial-delivery boundary; use only for work anchored to an issue.
+description: Own full delivery of a live GitHub issue through verified merge and closure or an explicit partial handoff.
 ---
 
 # Work Issue

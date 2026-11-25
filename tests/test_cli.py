@@ -3497,6 +3497,69 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
             assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
 
 
+@pytest.mark.parametrize("cut", ["reply", "resolution"])
+def test_resolve_resumes_after_github_accepts_mutation(gh, wt, capsys, monkeypatch, head, cut):
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    node = _finding_thread("0b9b59e7", head)
+    reply = "Fixed the loop bound."
+    accepted = {"reply": 0, "resolution": 0}
+
+    def github_call(*args, **kwargs):
+        query = args[3]
+        if "reviewThreads(" in query:
+            node["isResolved"] = bool(accepted["resolution"])
+            node["comments"]["pageInfo"] = {
+                "hasNextPage": bool(accepted["reply"]), "endCursor": "ROOT",
+            }
+            return threads_json(node)
+        if "comments(first: 100" in query:
+            if "after=ROOT" in args:
+                return {"data": {"node": {"comments": {
+                    "nodes": [{"body": reply, "viewerDidAuthor": False},
+                              {"body": "Different text", "viewerDidAuthor": True}],
+                    "pageInfo": {"hasNextPage": True, "endCursor": "PAGE"},
+                }}}}
+            assert "after=PAGE" in args
+            return {"data": {"node": {"comments": {
+                "nodes": [{"body": reply, "viewerDidAuthor": True}],
+                "pageInfo": {"hasNextPage": False},
+            }}}}
+        assert "addPullRequestReviewThreadReply" in query
+        accepted["reply"] += 1
+        if cut == "reply" and accepted["reply"] == 1:
+            raise KeyboardInterrupt
+        return {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+
+    original_gh = github._gh
+    original_json = github._gh_json
+
+    def read_or_reply(*args, **kwargs):
+        if args[:2] == ("api", "graphql"):
+            return github_call(*args, **kwargs)
+        return original_json(*args, **kwargs)
+
+    def resolve_or_dispatch(*args, **kwargs):
+        if args[:2] == ("api", "graphql") and "resolveReviewThread" in args[3]:
+            accepted["resolution"] += 1
+            if cut == "resolution" and accepted["resolution"] == 1:
+                raise KeyboardInterrupt
+            return json.dumps({"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}})
+        return original_gh(*args, **kwargs)
+
+    monkeypatch.setattr(github, "_gh_json", read_or_reply)
+    monkeypatch.setattr(github, "_gh", resolve_or_dispatch)
+    gh.respond("api -X", "")
+
+    assert run(capsys, "resolve", "0b9b59e7", reply)[0] == 130
+    code, out, err = run(capsys, "resolve", "0b9b59e7", reply)
+
+    assert (code, err) == (0, "")
+    assert accepted == {"reply": 1, "resolution": 1}
+    assert "refreshed Loop-zero Eligibility for PR #7" in out
+    assert sum("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls) == 1
+    assert run(capsys, "resolve") == (0, "", "")
+
+
 @pytest.mark.parametrize("response", [
     {"data": {"resolveReviewThread": {"thread": {"isResolved": False}}}},
     {"data": {"resolveReviewThread": {"thread": {}}}},
@@ -3512,7 +3575,7 @@ def test_resolve_requires_confirmation_from_github(wt: Path, gh: FakeGh, capsys,
 
     assert (code, out) == (1, "")
     assert "reply posted to finding 0b9b59e7" in err and "PR #7" in err
-    assert "resolve it there" in err and "Do not rerun loopzero resolve" in err
+    assert "Retry loopzero resolve with the same reply" in err
     assert not any("eligibility.yml/dispatches" in " ".join(call["argv"]) for call in gh.calls)
     assert sum("addPullRequestReviewThreadReply" in " ".join(call["argv"]) for call in gh.calls) == 1
     assert run(capsys, "resolve") == (0, "0b9b59e7  important  src/a.py:3  Off by one\n", "")
@@ -3563,7 +3626,7 @@ def test_resolve_retries_only_thread_resolution(wt: Path, gh: FakeGh, capsys, mo
     else:
         assert code == 1
         assert "reply posted to finding 0b9b59e7" in err
-        assert "Do not rerun loopzero resolve" in err
+        assert "Retry loopzero resolve with the same reply" in err
     queries = [c["argv"][3] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]]
     assert len(queries) == 2 + len(outcomes) + recovers
     assert "addPullRequestReviewThreadReply" in queries[1]

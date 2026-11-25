@@ -32,6 +32,7 @@ MARKER_RE = re.compile(
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
 PAGE = 100
+PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
 CHECK_SUITE_LIMIT = 1_000
@@ -48,7 +49,7 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line
-          comments(first: 1) { nodes { body } }
+          comments(first: 1) { nodes { body } pageInfo { hasNextPage endCursor } }
         }
       }
     }
@@ -756,11 +757,35 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     return lines, first_added
 
 
-def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]:
+def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
+                                findings: tuple[Finding, ...]) -> None:
+    paths = {entry["filename"] for entry in entries}
+    missing = next(
+        (finding.path for finding in findings
+         if finding.severity in BLOCKING and finding.path and finding.path not in paths),
+        None,
+    )
+    if missing is None:
+        return
+    pr, detail = _pr_detail(repo, number)
+    request = ("gh", "api", f"repos/{repo}/pulls/{number}/files")
+    if pr.head_sha != head_sha:
+        raise GhError(request, f"PR #{number} head moved from {head_sha[:12]} to {pr.head_sha[:12]}; rerun review")
+    if detail.get("changed_files") != len(paths):
+        raise GhError(request,
+                      f"cannot place finding on PR #{number} at {missing!r}: "
+                      f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
+
+
+def _diff_map(repo: str, number: int, head_sha: str,
+              findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
     """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
+    entries = _paged(f"repos/{repo}/pulls/{number}/files")
+    if len(entries) >= PR_FILE_LIMIT:
+        _require_complete_file_list(repo, number, head_sha, entries, findings)
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    for entry in _paged(f"repos/{repo}/pulls/{number}/files"):
+    for entry in entries:
         lines, first_added = _right_lines(entry.get("patch") or "")
         if not lines:
             continue
@@ -780,7 +805,8 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
                     formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
-    commentable, anchor = _diff_map(repo, number) if result.findings else ({}, None)
+    commentable, anchor = (_diff_map(repo, number, head_sha, result.findings)
+                           if result.findings else ({}, None))
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
@@ -888,10 +914,53 @@ def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
     ]
 
 
+_THREAD_REPLIES_QUERY = """
+query($thread: ID!, $after: String!) {
+  node(id: $thread) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $after) {
+        nodes { body viewerDidAuthor }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+"""
+
+
+def _has_thread_reply(node: dict, reply: str) -> bool:
+    page = node["comments"].get("pageInfo", {})
+    while page.get("hasNextPage"):
+        data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
+                        "-F", f"thread={node['id']}", "-f", f"after={page['endCursor']}")
+        try:
+            comments = data["data"]["node"]["comments"]
+            page = comments["pageInfo"]
+            if any(comment.get("viewerDidAuthor") is True and comment.get("body") == reply
+                   for comment in comments["nodes"]):
+                return True
+        except (KeyError, TypeError) as exc:
+            raise GhError(("resolve", node["id"]), "could not read thread replies") from exc
+    return False
+
+
 def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
-    """Reply in the thread of open finding `finding_id` and resolve it."""
-    for marker_id, thread_id, finding in open_findings(repo, number):
-        if marker_id == finding_id:
+    """Reply to a blocking finding, or resume an identical resolution."""
+    threads = _review_threads(repo, number, include_resolved=True)
+    for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
+        finding = _parse_thread(node, None)
+        if finding is None:
+            continue
+        marker = MARKER_RE.search(node["comments"]["nodes"][0]["body"])
+        thread_id = node["id"]
+        if (marker.group("id") or thread_id) != finding_id:
+            continue
+        confirmed = _has_thread_reply(node, reply)
+        if node.get("isResolved"):
+            if confirmed:
+                return finding
+            continue
+        if not confirmed:
             # Two calls on purpose: fields of one mutation are not transactional, and a
             # thread must never be resolved unless its reply was confirmed.
             posted = _gh_json("api", "graphql", "-f", f"query={_REPLY_MUTATION}",
@@ -900,20 +969,19 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
                 posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
-            try:
-                response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
-                               "-F", f"thread={thread_id}", retry_idempotent=True)
-                thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
-                if thread["isResolved"] is not True:
-                    raise ValueError("GitHub did not return isResolved=true")
-            except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
-                raise GhError(
-                    ("resolve", finding_id),
-                    f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
-                    f"If its thread is still open on PR #{number}, resolve it there. "
-                    f"Do not rerun loopzero resolve (it could post the reply again).\n{exc}",
-                ) from exc
-            return finding
+        try:
+            response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
+                           "-F", f"thread={thread_id}", retry_idempotent=True)
+            thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
+            if thread["isResolved"] is not True:
+                raise ValueError("GitHub did not return isResolved=true")
+        except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+            raise GhError(
+                ("resolve", finding_id),
+                f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
+                f"Retry loopzero resolve with the same reply on PR #{number}.\n{exc}",
+            ) from exc
+        return finding
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
 
@@ -945,6 +1013,10 @@ def open_blocking_findings(
 
 
 def _unresolved_threads(repo: str, number: int) -> list[dict]:
+    return _review_threads(repo, number)
+
+
+def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -> list[dict]:
     owner, name = repo.split("/", 1)
     after: str | None = None
     found: list[dict] = []
@@ -960,7 +1032,7 @@ def _unresolved_threads(repo: str, number: int) -> list[dict]:
             threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
             nodes = threads["nodes"]
             page = threads["pageInfo"]
-            found += [node for node in nodes if not node.get("isResolved")]
+            found += [node for node in nodes if include_resolved or not node.get("isResolved")]
             if not page["hasNextPage"]:
                 return found
             after = page["endCursor"]
