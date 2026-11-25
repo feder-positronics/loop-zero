@@ -682,9 +682,14 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
 
 
 def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
-                   body_prefix: str, *, legacy_settings: bool = False,
-                   legacy_display: bool = False) -> dict:
+                   body_prefix: str) -> dict:
     """Regenerate the publication content from the runner result and current PR diff."""
+    return review_payloads(repo, number, head_sha, result, [(body_prefix, False, False)])[0]
+
+
+def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
+                    formats: list[tuple[str, bool, bool]]) -> list[dict]:
+    """Place findings once for all exact body formats used in read-back."""
     commentable, anchor = _diff_map(repo, number)
     comments: list[dict] = []
     loose: list[Finding] = []
@@ -700,12 +705,12 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
         else:
             note = _MOVED_NOTE.format(where=f"{f.path}:{f.line}") if f.path else _ANCHOR_NOTE
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
-    return {
+    return [{
         "commit_id": head_sha,
         "body": _review_body(result, loose, body_prefix, legacy_settings=legacy_settings,
                              legacy_display=legacy_display, publication=(repo, number)),
         "comments": comments,
-    }
+    } for body_prefix, legacy_settings, legacy_display in formats]
 
 
 def post_review(
