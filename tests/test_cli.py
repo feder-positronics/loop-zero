@@ -1807,9 +1807,16 @@ def test_ready_wait_tracks_the_replacement_workflow(
         {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": head,
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
+    elapsed = 0.0
+    monkeypatch.setattr(cli.time, "monotonic", lambda: elapsed)
     if replacement != "pending":
-        monkeypatch.setattr(cli, "_sleep", lambda _: arm_check_runs(gh, head, [
-            {"id": 101, "name": "checks", "status": "completed", "conclusion": replacement}]))
+        def sleep(seconds: float) -> None:
+            nonlocal elapsed
+            elapsed += seconds
+            arm_check_runs(gh, head, [
+                {"id": 101, "name": "checks", "status": "completed", "conclusion": replacement}])
+
+        monkeypatch.setattr(cli, "_sleep", sleep)
     code, out, err = run(capsys, "ready", "--wait=0" if replacement == "pending" else "--wait=1")
     assert (code, err) == (expected, "")
     assert f"waiting: required check 'checks' is {old_conclusion}" in out
