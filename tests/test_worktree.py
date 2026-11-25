@@ -36,8 +36,17 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return git(clone, "rev-parse", "HEAD").strip()
 
 
-def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
+@pytest.mark.parametrize("branch", [None, "feature/ci+release"])
+def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None) -> None:
+    if branch:
+        git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{branch}")
     upstream = commit_on_origin(repo, "feature.txt")
+    if branch:
+        checkout = repo.parent / "single-branch"
+        origin = (repo.parent / "origin.git").as_uri()
+        git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
+        assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
+        repo = checkout
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
