@@ -16,6 +16,7 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 @pytest.mark.parametrize('body,verdict,tails', [
     ('print(json.dumps(r))', True, ['ok', 'ok']),
     ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
+    ('print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
     ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
     ('r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
     *[(body, False, None) for body in [
@@ -56,6 +57,10 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
         assert report.results[0].exit_code == 7
+    if 'sys.exit(42)' in body:
+        result = report.results[0]
+        assert result.exit_code == 42 and result.duration_s > 0
+        assert result.tail == 'Stage runner failed: process exit 42\n' + ('x' * 3000 + 'worker socket unavailable')[-2000:]
     if tails is not None:
         assert [r.tail for r in report.results] == tails
     if not verdict:
