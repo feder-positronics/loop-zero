@@ -244,8 +244,9 @@ def is_dirty(wt: Path) -> bool:
     return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
-def diff_since(wt: Path, sha: str) -> str:
-    return _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+def diff_since(wt: Path, sha: str) -> bytes:
+    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    return diff.encode("utf-8", errors="surrogateescape")
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

@@ -158,6 +158,14 @@ def _review_policy(kind: str, *, split: bool) -> str:
     )
 
 
+def render_patch(patch: bytes) -> str:
+    """Keep UTF-8 patches exact. Escape invalid bytes and literal backslashes otherwise."""
+    try:
+        return patch.decode("utf-8")
+    except UnicodeDecodeError:
+        return patch.replace(b"\\", b"\\\\").decode("utf-8", errors="backslashreplace")
+
+
 def build_prompt(*, kind: str, head: str, task_text: str, diff: str,
                  chunk: tuple[int, int] | None = None) -> str:
     """Frame exact review material without putting fixed reviewer policy on stdin."""

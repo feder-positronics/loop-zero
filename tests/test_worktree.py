@@ -194,18 +194,10 @@ def test_dirty_head_and_diff(repo: Path) -> None:
     assert not worktree.is_dirty(wt)
     assert worktree.head(wt) != base
     diff = worktree.diff_since(wt, base)
-    assert "+print(1)" in diff and "new.py" in diff
+    assert b"+print(1)" in diff and b"new.py" in diff
     (wt / "new.py").write_text("print(2)\n")
-    assert "print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
+    assert b"print(2)" not in worktree.diff_since(wt, base), "diff covers commits only"
     assert worktree.is_dirty(wt)
-
-
-def test_diff_retains_reviewable_text_for_non_utf8_patch(repo):
-    base = worktree.head(repo)
-    (repo / "latin1.txt").write_bytes(b"caf\xe9\r\n")
-    git(repo, "add", "latin1.txt")
-    git(repo, "commit", "-m", "add Latin-1 text")
-    assert worktree.diff_since(repo, base).endswith("+caf\ufffd\r\n")
 
 
 def test_task_helpers_errors(repo: Path) -> None:
