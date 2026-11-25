@@ -1939,7 +1939,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
     assert (code, err) == (1, "")
     assert out.splitlines() == [
         "not ready: required check 'checks' is pending",
-        "not ready: required checks pending or missing; next: loopzero ready --wait",
+        "next: loopzero ready --wait",
     ]
 
     arm_pr(gh, head, isDraft=False)
@@ -2023,6 +2023,46 @@ def test_ready_waits_for_checks_on_original_head(
     assert "required check 'a' is pending" in out
     assert all("f" * 40 not in " ".join(c["argv"]) for c in gh.calls)
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", mergeable="UNKNOWN")
+    gh.respond("pr ready", "")
+
+    code, out, err = run(capsys, "ready", *(["--wait=0"] if wait else []))
+
+    assert (code, err) == (3, "")
+    assert "marked ready;" in out and "checks" in out
+    assert "GitHub is computing mergeability" in out
+    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+
+
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("settled", ["CONFLICTING", "MERGEABLE", "UNKNOWN"])
+def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, mergeable="UNKNOWN", isDraft=False)
+    gh.respond_pr_view(pr_json(headRefOid=head, mergeable=settled, isDraft=False,
+                               mergeStateStatus="BEHIND"))
+    requests = []
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+
+    code, out, err = run(capsys, command, "--wait=0")
+
+    if settled == "CONFLICTING":
+        assert code == 1 and "has merge conflicts" in out + err
+    elif settled == "UNKNOWN":
+        assert code == 3 and "timed out waiting for GitHub to compute mergeability" in out
+    else:
+        assert code == (0 if command == "ready" else 3)
+    assert requests == ([(REPO, 7, head, "main")]
+                        if command == "merge" and settled == "MERGEABLE" else [])
 
 
 def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys, head) -> None:
