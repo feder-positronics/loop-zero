@@ -536,12 +536,15 @@ commands before shedding agents; preserve their work. Grant only a needed cache
 directory (`--add-dir ~/.cache/uv`);
 shared `/tmp` caches can exhaust host inodes. If a linked worktree's shared Git
 directory is outside the writable sandbox, leave commits to the parent. Every
-dependency names its producer and the producer's next action. A consumer opens
-its PR against the producer branch once its checks pass, is reviewed there and
-is retargeted when the producer merges. Retarget stacked PRs before deleting
-their base.
+dependency names its producer and the producer's next action.
 
 ### Stacked delivery
+
+Use a stack only if the repository supports it and has a supported trigger for
+required target-branch CI after retargeting. Workflows can exclude the producer
+branch and ignore both base edits and draft activation. If either prerequisite
+is missing, follow the repository's dependency route and publish against the
+configured integration base.
 
 Agree the configuration with the coordinator: copy the trusted
 base's complete `workflow.toml` to `.loopzero/stack-workflow.toml` and change
@@ -558,9 +561,11 @@ loopzero --config .loopzero/stack-workflow.toml review
 
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
 the coordinator must verify the copy and its one-field difference. Keep the
-producer as the base through primary review. After the producer lands, retarget the
-consumer to main and return to the canonical configuration. Before readiness and
-merge, follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
+producer as the base through primary review. After the producer lands, retarget
+the consumer to main before deleting the producer branch, then return to the
+canonical configuration. Use the supported CI trigger and verify that all
+required checks pass on the current head against the new base before readiness.
+Follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).
 
 Nested background results may reach the top-level session instead of their
