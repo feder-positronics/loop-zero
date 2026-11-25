@@ -469,8 +469,10 @@ def test_check_reads_workflow_from_reported_base_commit(wt, repo, capsys):
     code, out, err = run(capsys, "check")
 
     assert (code, err) == (0, "")
-    assert "  echo current-base" in out and f"checks pinned to origin/main@{base}" in out
-    assert "  echo ok" not in out
+    lines = out.splitlines()
+    assert f"checks pinned to origin/main@{base}" in lines
+    assert "running: echo current-base" in lines
+    assert "running: echo ok" not in lines
 
 
 def test_check_uses_worktree_checks_when_base_has_no_workflow(
