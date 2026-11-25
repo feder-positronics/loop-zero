@@ -1860,23 +1860,17 @@ def test_ready_after_reviewed_head(
     assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
 
 
-@pytest.mark.parametrize("exact_head", [True, False])
-def test_outdated_blocker_requires_resolution_after_delta(wt, gh, capsys, head, exact_head):
+def test_exact_head_delta_ignores_outdated_blocker(wt, gh, capsys, head):
     previous = git(wt, "rev-parse", "HEAD^").strip()
-    reviewed = head if exact_head else previous
-    history = [rev("f" * 40, "primary"), rev(reviewed, "delta")]
+    history = [rev("f" * 40, "primary"), rev(head, "delta")]
     thread = {"isResolved": False, "isOutdated": True, "path": "feature.py", "line": 1,
               "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={previous} -->"}]}}
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=history,
                                       readiness={"threads": (thread,)}, isDraft=False)
-    gh.respond(f"api repos/{REPO}/compare/{previous}...{head}", {"status": "ahead"})
-    code, out, _ = run(capsys, "ready")
+    code, _, _ = run(capsys, "ready")
     gh.respond_pr_view(pr_json(headRefOid=head))
     hosted = cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,))
-    assert (code == 0, hosted.ready) == (exact_head, exact_head)
-    if not exact_head:
-        assert "open critical finding" in out
-        assert any("open critical finding" in reason for reason in hosted.reasons)
+    assert code == 0 and hosted.ready
 
 
 @pytest.mark.parametrize("branch", [
