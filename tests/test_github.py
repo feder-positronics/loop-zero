@@ -19,6 +19,10 @@ REPO = "acme/widgets"
 HEAD = "a" * 40
 
 
+def branch_head_key(branch: str = "lz/t1") -> str:
+    return f"api repos/{REPO}/branches/{quote(branch, safe='')}"
+
+
 def pr_list_key(branch: str = "lz/t1", state: str = "open") -> str:
     head = quote(f"{REPO.split('/')[0]}:{branch}", safe="")
     return (f"api repos/{REPO}/pulls?state={state}&head={head}"
@@ -271,8 +275,10 @@ def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:
 def test_pr_for_branch_none_when_empty(gh: FakeGh) -> None:
     gh.respond_pr_list([], branch="lz/x")
     assert github.pr_for_branch(REPO, "lz/x") is None
-    assert gh.argv(0) == pr_list_key("lz/x").split(" ", 1)
-    assert gh.argv(1)[1].startswith(f"repos/{REPO}/pulls?state=closed")
+    assert [c["argv"] for c in gh.calls] == [
+        branch_head_key("lz/x").split(), pr_list_key("lz/x").split(),
+        pr_list_key("lz/x", "closed").split(),
+    ]
 
 
 def test_pr_for_branch_prefers_open(gh: FakeGh) -> None:
@@ -289,7 +295,7 @@ def test_pr_for_branch_falls_back_to_latest_closed_or_merged(gh: FakeGh) -> None
     pr = github.pr_for_branch(REPO, "lz/x")
 
     assert pr is not None and pr.number == 9 and pr.state == "MERGED"
-    assert [c["argv"][1] for c in gh.calls[:2]] == [
+    assert [c["argv"][1] for c in gh.calls[1:3]] == [
         pr_list_key("lz/x").split(" ", 1)[1],
         pr_list_key("lz/x", "closed").split(" ", 1)[1],
     ]
@@ -300,7 +306,7 @@ def test_pr_for_branch_encodes_qualified_unicode_head(gh: FakeGh) -> None:
     gh.respond_pr_list([pr_json()], branch=branch)
 
     assert github.pr_for_branch(REPO, branch) is not None
-    assert gh.argv(0) == pr_list_key(branch).split(" ", 1)
+    assert gh.argv(1) == pr_list_key(branch).split(" ", 1)
 
 
 @pytest.mark.parametrize("head_change", [
@@ -1328,7 +1334,7 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
         worktree.rmdir()
         with pytest.raises(github.GhError, match="Rate limited"):
             github.pr_for_branch(REPO, "lz/x")
-    assert len(gh.calls) == 1
+    assert len(gh.calls) == 2  # Remote branch read, then the rate-limited fallback.
 
 
 def test_graphql_limit_reports_verified_reset_from_one_diagnostic(gh: FakeGh) -> None:
@@ -1383,6 +1389,8 @@ def test_invalid_merge_evidence_fails_closed(gh, view):
 
 
 def test_merged_branch_history_reads_past_newer_closed_page(gh: FakeGh) -> None:
+    gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [])
     page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
     merged = pr_json(number=101, state="MERGED")
     gh.respond(branch_history_key(), page)
@@ -1428,7 +1436,7 @@ def test_merged_branch_history_requires_terminal_page(gh: FakeGh) -> None:
     gh.respond(branch_history_key(2), [])
 
     assert github.merged_pr_for_branch(REPO, "lz/t1") is None
-    assert len(gh.calls) == 2
+    assert len(gh.calls) == 3
 
 
 def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> None:
@@ -1439,3 +1447,24 @@ def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> N
 
     with pytest.raises(github.GhError, match="exceeds 100-page publication limit"):
         github.merged_pr_for_branch(REPO, "lz/t1")
+
+
+@pytest.mark.parametrize("completion", [False, True])
+def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, completion: bool) -> None:
+    state = "MERGED" if completion else "OPEN"
+    matching = closed_history_row(pr_json(state=state))
+    matching["created_at"] = "2026-10-06T00:00:00Z"
+    other_branch = matching | {"number": 8, "head": matching["head"] | {"ref": "lz/other"}}
+    fork = matching | {"number": 9, "head": matching["head"] | {"repo": {"full_name": "fork/widgets"}}}
+    ref = branch_head_key().split()[1]
+    commits = f"repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
+    detail = f"repos/{REPO}/pulls/7"
+    gh.respond(f"api {ref}", {"commit": {"sha": HEAD}})
+    gh.respond(f"api {commits}", [fork, other_branch, matching])
+    gh.respond(f"api {detail}", matching)
+
+    lookup = github.merged_pr_for_branch if completion else github.pr_for_branch
+    pr = lookup(REPO, "lz/t1")
+
+    assert pr is not None and pr.number == 7 and pr.state == state
+    assert [call["argv"] for call in gh.calls] == [["api", path] for path in (ref, commits, detail)]

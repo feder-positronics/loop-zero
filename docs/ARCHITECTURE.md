@@ -80,12 +80,16 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    stale task trees need integration only when prerequisites are missing,
    preserving source-preserving queue eligibility for behind branches.
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
-3. Before pushing or writing, `pr` reads the branch's closed PR history through
-   GitHub REST. A confirmed merged PR completes that branch, even when a newer
-   duplicate exists; the caller must start a new task. Absence requires complete
-   typed pages, bounded to 100; failed, malformed, repeated or truncated history
-   blocks publication. Other commands use open-first, newest-closed lookup. An
-   unfinished branch creates or refreshes a draft PR.
+3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
+   endpoint. It matches the source branch and repository, then re-reads PR
+   detail. Other commands prefer open PRs, then the newest closed PR, with
+   pull-list fallback when the branch or a matching PR is absent. Before pushing
+   or writing, `pr` requires a confirmed merge or a complete closed-history read
+   through GitHub REST. A confirmed merge completes that branch even when a
+   newer duplicate exists. If the head commit cannot prove completion, the
+   pull-list fallback also checks earlier commits of the branch. Failed,
+   malformed, repeated or truncated history blocks publication, with a limit of
+   100 pages. An unfinished branch creates or refreshes a draft PR.
 4. `review` publishes one native review of the exact authored SHA. The contract's
    [review budget](../core/CONTRACT.md#review-budget) owns contributor exclusion,
    the PR-wide cap of one primary and one delta across head rewrites, and the
