@@ -614,11 +614,11 @@ def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_pat
     assert loaded.raw == changed.raw and body(loaded) == body(changed)
 
 
-def test_frozen_five_and_legacy_truncated_unknown_are_unchanged():
-    fixture = Path(__file__).parent / "fixtures/review-runtime-20261027.json"
+def test_frozen_synthetic_five_and_legacy_truncated_unknown():
+    fixture = Path(__file__).parent / "fixtures/review-runtime-startup-five.json"
     assert (
         hashlib.sha256(fixture.read_bytes()).hexdigest()
-        == "97ad4dd88afadbf1b663ae94078455a9d985b562c90f3e8168a7c21f7dd05d23"
+        == "e689b693240bc1e6b66a5c094a263bff6ecbb74933cd77974875d6becf3f4988"
     )
     head = "a" * 40
     legacy = {

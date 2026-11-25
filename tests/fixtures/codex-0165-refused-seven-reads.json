@@ -1,0 +1,206 @@
+{
+  "type": "codex_exec_result",
+  "session_id": "settings-2",
+  "token_usage": {
+    "input_tokens": 30,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 0,
+    "output_tokens": 12,
+    "reasoning_output_tokens": 0
+  },
+  "final_message": "{\"verdict\": \"approve\", \"findings\": []}",
+  "events": [
+    {
+      "type": "thread.started",
+      "thread_id": "settings-2"
+    },
+    {
+      "type": "turn.started"
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "head",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/seven-reads\" rev-parse HEAD'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "head",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/seven-reads\" rev-parse HEAD'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": "0000000000000000000000000000000000000002\n"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "diff",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/seven-reads\" diff --no-color bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0000000000000000000000000000000000000002'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "diff",
+        "command": "/bin/bash -lc 'git -C \"/synthetic/seven-reads\" diff --no-color bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb 0000000000000000000000000000000000000002'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": "diff --git a/example.txt b/example.txt\n--- a/example.txt\n+++ b/example.txt\n@@ -1 +1 @@\n-draft\n+ready\n"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "status-2",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "status-2",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": ""
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "status-3",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "status-3",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": ""
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "status-4",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "status-4",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": ""
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "status-5",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "status-5",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": ""
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "type": "command_execution",
+        "id": "status-6",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "command_execution",
+        "id": "status-6",
+        "command": "/bin/bash -lc 'git status --short'",
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": ""
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "type": "agent_message",
+        "id": "final",
+        "text": "{\"verdict\": \"approve\", \"findings\": []}"
+      }
+    },
+    {
+      "type": "turn.completed",
+      "usage": {
+        "input_tokens": 30,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 12,
+        "reasoning_output_tokens": 0
+      }
+    }
+  ],
+  "reported_settings": {
+    "model": null,
+    "effort": null
+  },
+  "review_context": {
+    "repo": "example/widgets",
+    "pr": 2,
+    "publisher": "example-review[bot]",
+    "head": "0000000000000000000000000000000000000002",
+    "kind": "primary",
+    "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "diff_sha256": "a5c407418b314fb87e2e344dfb766735c1ba219de9d999fd8a73ab6c807241a7",
+    "diff_bytes": 101,
+    "cwd": "/synthetic/seven-reads",
+    "index": 1,
+    "chunks": 1,
+    "requested": {
+      "model": "gpt-6-astra",
+      "effort": "medium"
+    },
+    "fragment_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "prompt_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "policy_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "binary_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+    "argv_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  }
+}
