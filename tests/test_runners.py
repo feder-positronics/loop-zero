@@ -842,6 +842,37 @@ def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path
     assert str(fake_bin) not in [path for pair in _pairs(argv, "--ro-bind-try") for path in pair]
 
 
+@pytest.mark.parametrize("family,override", [("codex", "CODEX_HOME"), ("claude", "CLAUDE_CONFIG_DIR")])
+def test_blank_reviewer_home_matches_unset(family, override, tmp_path, fake_bwrap, monkeypatch):
+    from loopzero import runners
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    host = tmp_path / "host"
+    state = host / f".{family}"
+    state.mkdir(parents=True)
+    (state / "auth.json").touch()
+    monkeypatch.setenv("HOME", str(host))
+    monkeypatch.chdir(repo)
+    for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+                 *runners.CLAUDE_AUTH_ENV):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(runners, "_review_binary", lambda _: Path("/usr/bin/true"))
+    monkeypatch.setattr(runners.sandbox, "probe", lambda *_: None)
+
+    home = tmp_path / "sandbox"
+    home.mkdir()
+    unset_prefix = runners._sandbox_prefix(family, repo, home, (), ())
+    unset_binds = runners._auth_binds(family, home)
+    assert unset_binds
+    monkeypatch.setenv(override, "")
+    assert runners._sandbox_prefix(family, repo, home, (), ()) == unset_prefix
+    blank_home = tmp_path / "blank-sandbox"
+    blank_home.mkdir()
+    assert runners._auth_binds(family, blank_home) == unset_binds
+
+
 def test_empty_secure_storage_override_preserves_native_default(
     fake_bin, tmp_path, fake_bwrap, monkeypatch,
 ) -> None:

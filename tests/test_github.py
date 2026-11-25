@@ -1245,11 +1245,16 @@ def test_gh_retries_only_transient_reads(monkeypatch, args, attempts, error):
 @pytest.mark.parametrize("error", ["API rate limit exceeded", "API rate limit already exceeded",
                                   "secondary rate limit", "HTTP 429 Too Many Requests",
                                   "GraphQL: API rate limit exceeded"])
-def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, error):
+def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, error):
     gh.fail(pr_list_key("lz/x"), error)
     monkeypatch.setattr(github, "_retry_sleep", lambda _: pytest.fail("retried rate limit"))
-    with pytest.raises(github.GhError, match="Rate limited"):
-        github.pr_for_branch(REPO, "lz/x")
+    worktree = tmp_path / "removed-worktree"
+    worktree.mkdir()
+    with monkeypatch.context() as m:
+        m.chdir(worktree)
+        worktree.rmdir()
+        with pytest.raises(github.GhError, match="Rate limited"):
+            github.pr_for_branch(REPO, "lz/x")
     assert len(gh.calls) == 1
 
 
