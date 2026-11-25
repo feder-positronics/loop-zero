@@ -1480,3 +1480,25 @@ def test_closed_commit_pr_does_not_mask_unindexed_open_pr(gh: FakeGh) -> None:
     pr = github.pr_for_branch(REPO, "lz/t1")
 
     assert pr is not None and pr.number == 7 and pr.state == "OPEN"
+
+
+@pytest.mark.parametrize("capped", [False, True])
+def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: FakeGh, capped: bool) -> None:
+    arm_readiness(gh)
+    runs = [
+        {"name": "required-ci", "conclusion": "success", "check_suite": {"id": 1}},
+        *({"name": "unrelated", "conclusion": "success", "check_suite": {"id": suite}}
+          for suite in range(2, 1002)),
+    ]
+    visible = runs[-1000:] if capped else runs[1:-1]
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
+               *({"check_runs": visible[i:i + 100]} for i in range(0, len(visible) + 1, 100)))
+
+    result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
+                              "main", ("required-ci",), HEAD)
+
+    assert not result.ready
+    assert result.reasons == (
+        f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"
+        if capped else f"required check 'required-ci' missing on {HEAD[:12]}",
+    )

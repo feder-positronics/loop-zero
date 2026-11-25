@@ -58,11 +58,29 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
+after GitHub may have accepted a Claude review, run `loopzero review --repost`
+with the publishing CLI revision or a newer compatible revision. The rollback
+CLI predating #732 expects a transcript where the newer publication has a
+retention notice. Keep the original local receipt and confirm the existing
+publication before resuming the rollback.
+
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
 SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
 mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
-ln -sfn "$CHECKOUT" "$SRC.new" && mv -T "$SRC.new" "$SRC"
+python3 - "$CHECKOUT" "$SRC" <<'PYTHON' &&
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+checkout, source = map(Path, sys.argv[1:])
+with TemporaryDirectory(dir=source.parent) as staging:
+    link = Path(staging) / source.name
+    link.symlink_to(checkout.resolve(strict=True), target_is_directory=True)
+    os.replace(link, source)
+PYTHON
 for d in "$SRC"/core/skills/*/; do
   n=$(basename "$d")
   ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
@@ -269,6 +287,10 @@ the two systemd units to `~/.config/systemd/user/`, then
   may restart its provider and interrupt running sessions.
 
 ## First run
+
+Commit and push `workflow.toml` to the configured remote base
+(`origin/main` by default) before your first task. `loopzero start` fetches
+that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
