@@ -45,8 +45,8 @@ required behavior is not closure evidence.
 
 ## Re-entry
 
-After interruption/context loss, re-read the issue, PR head, remote branch,
-CI and open threads before resuming.
+Re-read the issue, PR head, remote branch, CI and open threads after interruption or context loss.
+Follow the contract's [resume rules](../../CONTRACT.md#the-six-steps).
 
 ## Premature closure
 
