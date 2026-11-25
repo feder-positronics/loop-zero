@@ -443,7 +443,9 @@ def test_check_offline_cache_preflight(wt, repo, fake_tool, capsys, uv, failed):
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
     fake_tool("bwrap", "echo 'bwrap: No permissions' >&2\nexit 1\n")
     code, out, err = run(capsys, "check")
-    assert code == 2 and out.startswith("checks pinned to origin/main@") and "No permissions" in err
+    assert code == 2 and out.startswith("checks pinned to origin/main@")
+    assert "namespace creation failed: exit 1" in err
+    assert "kernel.apparmor_restrict_unprivileged_userns=0" in err
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
