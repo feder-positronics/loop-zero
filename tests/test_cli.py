@@ -3702,6 +3702,78 @@ def test_mergify_reports_admission_wait(wt, gh, capsys, monkeypatch, report):
         assert (f"{URL}#issuecomment-43" in out) is (report == "current")
 
 
+@pytest.mark.parametrize("confirmed,attribution,stale", [
+    (False, "stacked", ""), (True, "stacked", ""), (True, "isolated", ""),
+    (True, "unknown", ""), (False, "stacked", "head"), (False, "stacked", "requeue"),
+    (False, "stacked", "author"), (False, "stacked", "landed"),
+])
+def test_mergify_reports_departure_for_current_attempt(wt, gh, capsys, monkeypatch, confirmed, attribution, stale):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    payload = {"version": 1, "state": "dequeued", "queue_rule_name": "main",
+               "dequeue_reason": {"code": "CHECKS_FAILED", "checks": ["checks"]}}
+    report_head = "f" * 7 if stale == "head" else head[:7]
+    evidence = {
+        "stacked": "**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.",
+        "isolated": "**The failure is in this pull request.** It failed tested alone on top of `main`.",
+        "unknown": "",
+    }
+    comments = [
+        {"id": 42, "user": {"login": LOGIN},
+         "body": f"@mergifyio queue\n\n<!-- loopzero:mergify-request head={head} queue=main -->"},
+        {"id": 43, "user": {"login": "someone-else" if stale == "author" else "mergify[bot]"},
+         "body": f"""<!---
+DO NOT EDIT
+-*- Mergify Payload -*-
+{json.dumps(payload)}
+-*- Mergify Payload End -*-
+-->
+
+### ❌ Left the queue · `checks` failed
+
+**So far**
+- ✅ **Entered the queue** Wed 25 Nov, 22:12 · rule `main` · triggered by @eowca with the [`@mergifyio queue` command]({URL}#issuecomment-42)
+- ❌ **Checks failed** · draft [#965](/feder-positronics/loop-zero/pull/965)
+- 🚫 **Left the queue** 22:13 · `{report_head}`
+
+{evidence[attribution]}
+"""},
+    ]
+    if stale == "requeue":
+        comments.append({"id": 44, "user": {"login": LOGIN}, "body": "@mergifyio queue"})
+    gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    membership = iter([mergify.Membership()] if confirmed else [])
+    monkeypatch.setattr(mergify, "membership", lambda *_: next(membership, None))
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("already requested"))
+
+    if stale == "landed":
+        open_pr = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
+        gh.append(f"api repos/{REPO}/pulls/7", open_pr, open_pr, open_pr,
+                  merge_json(state="MERGED", head=head, sha="e" * 40))
+        gh.respond("api -X", "")
+
+    code, out, err = run(capsys, "merge", "--wait=0")
+
+    if stale == "landed":
+        assert (code, err) == (0, "")
+        assert not wt.exists() and out.splitlines()[-1] == "e" * 40
+        return
+    assert wt.exists()
+    if stale:
+        assert code == 3 and "waiting for admission" in out
+    else:
+        assert code == 1 and f"{URL}#issuecomment-43" in err and "'checks'" in err
+        if attribution == "stacked":
+            assert "stack" in err and "earlier" in err
+        elif attribution == "isolated":
+            assert "tested this PR alone" in err and "flake" in err
+        else:
+            assert "Address it before requeueing" in err
+
+
 @pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None])
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     commit_mergify_configuration(wt)
