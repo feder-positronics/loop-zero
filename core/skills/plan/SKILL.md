@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Plan PR-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or approved blueprints.
+description: Plan PR-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints.
 ---
 
 # Plan
