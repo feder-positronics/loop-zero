@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from loopzero import sandbox
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -655,16 +656,30 @@ def test_reviewer_does_not_bind_missing_auth_paths(
     ))
 
 
+@pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon"], ids=["ordinary", "newline"])
 def test_linked_worktree_and_git_directory_are_read_only(
-    git_repo: Path, tmp_path: Path, fake_bin: Path, fake_bwrap: Path
+    git_repo: Path, tmp_path: Path, fake_bin: Path, monkeypatch, repo_name: str,
 ) -> None:
+    if git_repo.name != repo_name:
+        git_repo = git_repo.rename(tmp_path / repo_name)
     linked = tmp_path / "linked"
     git(git_repo, "worktree", "add", "-q", str(linked), "-b", "review")
+    common = (git_repo / ".git").resolve()
+    captured = []
+    bwrap_argv = sandbox.bwrap_argv
+
+    def record(config, cwd, home, common_dir, git_dir, **kwargs):
+        assert (common_dir, git_dir) == (common, common / "worktrees" / linked.name)
+        argv = bwrap_argv(config, cwd, home, common_dir, git_dir, **kwargs)
+        captured.extend(argv)
+        return argv
+
+    monkeypatch.setattr(sandbox, "bwrap_argv", record)
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     assert _review("claude", linked).verdict == "approve"
-    binds = _pairs(_bwrap_argv(fake_bwrap), "--ro-bind")
+    binds = _pairs(captured, "--ro-bind")
     assert (str(linked.resolve()),) * 2 in binds
-    assert (str((git_repo / ".git").resolve()),) * 2 in binds
+    assert (str(common),) * 2 in binds
 
 
 def test_claude_request_changes_escalates_verdict(fake_bin: Path, tmp_path: Path) -> None:
@@ -1230,7 +1245,7 @@ def test_timeout_becomes_bad_output(
         raise _proc.ProcTimeout("timed out", "partial reviewer output")
 
     _fake_claude(fake_bin, {})
-    monkeypatch.setattr(runners, "_git_dir", lambda cwd, flag, env: cwd)
+    monkeypatch.setattr(runners, "_git_dirs", lambda cwd, env: (cwd, cwd))
     monkeypatch.setattr(runners.sandbox, "probe", lambda config, cwd, prefix: None)
     monkeypatch.setattr(runners._proc, "run", timeout)
     with pytest.raises(RunnerBadOutput, match="timed out") as info:

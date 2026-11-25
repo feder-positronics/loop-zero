@@ -954,7 +954,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 16, 2)
+    assert_git_cost(git_calls, 15, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1254,7 +1254,7 @@ def test_repost_refuses_missing_stale_or_hand_written_review(
 
 @pytest.mark.parametrize("chunk_auth", [False, True])
 def test_review_chunks_oversized_diff_with_same_family(
-    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth
+    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth, git_calls
 ) -> None:
     workflow = (wt / "workflow.toml").read_text().replace(
         'reviewers = ["claude", "codex"]',
@@ -1282,7 +1282,10 @@ def test_review_chunks_oversized_diff_with_same_family(
         echo '{envelope}'
     """)
 
+    git_calls.clear()
     code, out, err = run(capsys, "review")
+    probes = [cmd for cmd in git_calls if "--git-common-dir" in cmd or "--git-dir" in cmd]
+    assert len(probes) == (3 if chunk_auth else 6), probes
 
     assert code == 0 and f"review by {'codex' if chunk_auth else 'claude'}" in out
     materials, policies, tasks, fragments = [], [], [], []
