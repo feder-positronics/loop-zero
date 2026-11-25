@@ -651,7 +651,7 @@ def test_pr_list_404_explains_app_installation(
     assert '"message": "Not Found"' in err
     assert ("Check that the GitHub App installation includes this repository" in err) == use_app
     assert [(call["argv"], call["token"]) for call in gh.calls] == [
-        (key.split(), "app-token" if use_app else "personal-token"),
+        ([*key.split(), "--include"], "app-token" if use_app else "personal-token"),
     ]
     assert git(repo.parent / "origin.git", "branch", "--list", "lz/t1").strip() == ""
 
@@ -670,7 +670,7 @@ def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
     assert "branch" in err and "lz/t1" in err
     assert "rerun `" + " ".join(("loopzero", "review", *options)) + "`" in err
     assert [call["argv"] for call in gh.calls] == [
-        pr_list_key().split(), ["api", endpoint],
+        [*pr_list_key().split(), "--include"], ["api", endpoint, "--include"],
     ]
 
 
@@ -1063,7 +1063,7 @@ def test_review_summary_uses_body_edited_during_review(wt, gh, fake_bin, capsys,
     assert code == 0 and f"primary review by claude on {head[:12]}: approve" in out
     posted_review(gh)
     post_index = next(i for i, call in enumerate(gh.calls) if call["argv"][:2] == post_key().split())
-    assert gh.calls[post_index + 1]["argv"] == detail_key.split()
+    assert gh.calls[post_index + 1]["argv"] == [*detail_key.split(), "--include"]
     patches = [call for call in gh.calls if "PATCH" in call["argv"]]
     if refresh_fails:
         assert not patches
@@ -2916,7 +2916,7 @@ def test_merge_warns_when_remote_branch_moves(wt: Path, gh: FakeGh, capsys, head
     assert code == 0
     assert out.splitlines()[-1] == landed_sha
     assert f"warning: merged; remote branch lz/t1 moved from {head[:12]}; skipping deletion" in err
-    assert any(call["argv"] == ["api", remote_ref] for call in gh.calls)
+    assert any(call["argv"] == ["api", remote_ref, "--include"] for call in gh.calls)
     assert not any(call["argv"][:3] == ["api", "-X", "DELETE"] for call in gh.calls)
 
 
@@ -3298,7 +3298,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
         assert (code, err, dispatches) == (0, "", [])
         assert len(out.splitlines()) == 1
     else:
-        assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7"]]
+        assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]]
         if outcome == "refreshed":
             assert (code, err) == (0, "") and out.splitlines()[-1] == "refreshed Loop-zero Eligibility for PR #7"
         else:

@@ -181,16 +181,17 @@ def test_comment_writes_use_github_rest_api(monkeypatch, writer, body):
     calls = []
 
     def run(argv, **_kwargs):
-        with open(argv[-1], encoding="utf-8") as handle:
+        input_index = argv.index("--input") + 1
+        with open(argv[input_index], encoding="utf-8") as handle:
             payload = json.load(handle)
-        calls.append((argv[1:-1], payload))
+        calls.append((argv[1:input_index] + argv[input_index + 1:], payload))
         return type("Done", (), {"exit_code": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(mergify.github, "run", run)
     writer("acme/widgets", 7, "abc", "main")
 
     assert calls == [([
-        "api", "repos/acme/widgets/issues/7/comments", "--method", "POST", "--input",
+        "api", "repos/acme/widgets/issues/7/comments", "--method", "POST", "--input", "--include",
     ], {"body": body})]
 
 
