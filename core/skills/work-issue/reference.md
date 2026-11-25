@@ -1,18 +1,14 @@
 # Work Issue Delivery Safeguards
 
-Read each section when its condition applies.
+## API shape changes
 
-## Implementation boundaries
+API shape changes require regenerated checked-in schema/client artifacts and
+caller validation against them.
 
-- API shape changes require regenerated checked-in schema/client artifacts and
-  caller validation against them.
-- Seeded browser state or changed prerequisites require fresh-stack proof,
-  not just an already-running stack.
-- Before review, record documentation impact; update docs or give an
-  evidence-backed reason they need no update.
-- Before publication, inspect the issue and linked artifacts for its lifecycle
-  blueprint. Include required completion in the closing delivery. A child issue
-  does not own its parent's blueprint.
+## Fresh-stack proof
+
+Seeded browser state or changed prerequisites require fresh-stack proof,
+not just an already-running stack.
 
 ## Evidence for approval
 
@@ -35,35 +31,39 @@ When authorized integration rewrites commits, use `git range-diff` to inspect
 what changed, then obtain behavior proof, checks and review for the resulting
 head under the existing rules. A series comparison is not behavior proof.
 
-## Integration, waiting and re-entry
+## Integration without a queue
 
-For CI, review, ready and merge waits, follow the blocking wait and producer
-output limits in [implement](../implement/SKILL.md); read completion once.
+Without a base merge queue, defer base updates while implementing or repairing
+a merely-behind branch. Follow the contract's [review budget](../../CONTRACT.md#review-budget)
+when updating the base. Serialize parallel tasks' final integration.
 
-- Without a base merge queue, defer base updates while implementing or repairing
-  a merely-behind branch. Follow the contract's [review budget](../../CONTRACT.md#review-budget)
-  when updating the base. Serialize parallel tasks' final integration.
-- Treat the issue as singly owned; perform the checks before editing,
-  publication and merge in [Work Issue](SKILL.md). Stop and reconcile
-  competing deliveries.
-- Review, CI and observable post-merge acceptance waits remain this task;
-  neither bypass them nor start another issue.
-- For CI or observation-based acceptance, record the behavior exercised,
-  lane, landed head and interval or sample count. A green run that skipped the
-  required behavior is not closure evidence.
-- After interruption/context loss, re-read the issue, PR head, remote branch,
-  CI and open threads before resuming. Follow the
-  [contract's resume/wait rules](../../CONTRACT.md#the-six-steps), not memory.
+## Acceptance evidence
 
-## Late evidence
+For CI or observation-based acceptance, record the behavior exercised,
+lane, landed head and interval or sample count. A green run that skipped the
+required behavior is not closure evidence.
 
-- If partial delivery auto-closes the issue, inspect the event and delivery
-  evidence. If a closing reference caused it while acceptance remains, remove
-  editable PR references, exclude them from subsequent commits, reopen under
-  existing task authorization and verify open state. Do not rewrite merged
-  history solely to remove a reference.
-- After completed acceptance, late findings need a fresh follow-up branch/PR.
-  Reopen the issue only for regression of previously satisfied acceptance.
-- Ordinary monitoring after shipped acceptance is separate work. Later evidence
-  needs a newly requested review/issue; create no reminder issues.
-- Deferred work requires a separate request, preferably a fresh session.
+## Re-entry
+
+After interruption/context loss, re-read the issue, PR head, remote branch,
+CI and open threads before resuming.
+
+## Premature closure
+
+If partial delivery auto-closes the issue, inspect the event and delivery
+evidence. If a closing reference caused it while acceptance remains, remove
+editable PR references, exclude them from subsequent commits, reopen under
+existing task authorization and verify open state. Do not rewrite merged
+history solely to remove a reference.
+
+## Late findings
+
+After completed acceptance, late findings need a fresh follow-up branch/PR.
+Reopen the issue only for regression of previously satisfied acceptance.
+
+## Monitoring and deferred work
+
+Ordinary monitoring after shipped acceptance is separate work. Later evidence
+needs a newly requested review/issue; create no reminder issues.
+
+Deferred work requires a separate request, preferably a fresh session.

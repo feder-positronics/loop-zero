@@ -58,7 +58,7 @@ class CheckResult:
     command: str
     exit_code: int
     duration_s: float
-    tail: str  # last 40 lines of combined output
+    tail: str  # last 40 lines of combined output, up to 16 KiB of UTF-8
     input_key: str | None = None
     reused_from: str | None = None
 
@@ -68,6 +68,7 @@ class CheckReport:
     head: str
     dirty: bool
     results: tuple[CheckResult, ...]
+    settings_sha256: str | None = None
 
     @property
     def ok(self) -> bool:
