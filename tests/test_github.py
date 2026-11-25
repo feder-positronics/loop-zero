@@ -272,41 +272,19 @@ def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:
 # --- PR lookup / creation -----------------------------------------------------------
 
 
-def test_pr_for_branch_none_when_empty(gh: FakeGh) -> None:
-    gh.respond_pr_list([], branch="lz/x")
-    assert github.pr_for_branch(REPO, "lz/x") is None
-    assert [c["argv"] for c in gh.calls] == [
-        branch_head_key("lz/x").split(), pr_list_key("lz/x").split(),
-        pr_list_key("lz/x", "closed").split(),
-    ]
-
-
-def test_pr_for_branch_prefers_open(gh: FakeGh) -> None:
-    gh.respond_pr_list([pr_json(number=3, state="CLOSED"), pr_json(number=9)], branch="lz/x")
-    pr = github.pr_for_branch(REPO, "lz/x")
-    assert pr == github.PR(9, f"https://github.com/{REPO}/pull/7", HEAD, "main", True,
-                           "OPEN", "MERGEABLE", "someone-else")
-
-
-def test_pr_for_branch_falls_back_to_latest_closed_or_merged(gh: FakeGh) -> None:
-    gh.respond_pr_list([pr_json(number=9, state="MERGED"),
-                        pr_json(number=3, state="CLOSED")], branch="lz/x")
-
-    pr = github.pr_for_branch(REPO, "lz/x")
-
-    assert pr is not None and pr.number == 9 and pr.state == "MERGED"
-    assert [c["argv"][1] for c in gh.calls[1:3]] == [
-        pr_list_key("lz/x").split(" ", 1)[1],
-        pr_list_key("lz/x", "closed").split(" ", 1)[1],
-    ]
-
-
-def test_pr_for_branch_encodes_qualified_unicode_head(gh: FakeGh) -> None:
+@pytest.mark.parametrize("states, expected", [
+    ([], None), (["CLOSED", "OPEN"], "OPEN"), (["MERGED", "CLOSED"], "MERGED"),
+])
+def test_pr_lookup_fallback_for_deleted_branch(gh: FakeGh, states: list[str], expected: str | None) -> None:
     branch = "lz/fün/space name"
-    gh.respond_pr_list([pr_json()], branch=branch)
-
-    assert github.pr_for_branch(REPO, branch) is not None
-    assert gh.argv(1) == pr_list_key(branch).split(" ", 1)
+    gh.respond_pr_list([pr_json(number=n, state=state) for n, state in enumerate(states, 8)], branch=branch)
+    pr = github.pr_for_branch(REPO, branch)
+    assert (pr.state if pr else None) == expected
+    assert [c["argv"] for c in gh.calls[:2]] == [branch_head_key(branch).split(), pr_list_key(branch).split()]
+    if expected != "OPEN":
+        assert gh.argv(2) == pr_list_key(branch, "closed").split()
+    if pr:
+        assert pr.number == (8 if expected == "MERGED" else 9)
 
 
 @pytest.mark.parametrize("head_change", [
@@ -1449,37 +1427,23 @@ def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> N
         github.merged_pr_for_branch(REPO, "lz/t1")
 
 
-@pytest.mark.parametrize("completion", [False, True])
-def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, completion: bool) -> None:
-    state = "MERGED" if completion else "OPEN"
-    matching = closed_history_row(pr_json(state=state))
-    matching["created_at"] = "2026-10-06T00:00:00Z"
-    other_branch = matching | {"number": 8, "head": matching["head"] | {"ref": "lz/other"}}
-    fork = matching | {"number": 9, "head": matching["head"] | {"repo": {"full_name": "fork/widgets"}}}
-    ref = branch_head_key().split()[1]
-    commits = f"repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
-    detail = f"repos/{REPO}/pulls/7"
-    gh.respond(f"api {ref}", {"commit": {"sha": HEAD}})
-    gh.respond(f"api {commits}", [fork, other_branch, matching])
-    gh.respond(f"api {detail}", matching)
-
-    lookup = github.merged_pr_for_branch if completion else github.pr_for_branch
-    pr = lookup(REPO, "lz/t1")
-
-    assert pr is not None and pr.number == 7 and pr.state == state
-    assert [call["argv"] for call in gh.calls] == [["api", path] for path in (ref, commits, detail)]
-
-
-def test_closed_commit_pr_does_not_mask_unindexed_open_pr(gh: FakeGh) -> None:
-    closed = closed_history_row(pr_json(number=6, state="CLOSED"))
-    closed["created_at"] = "2026-10-06T00:00:00Z"
+@pytest.mark.parametrize("state", ["OPEN", "MERGED", "CLOSED"])
+def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, state: str) -> None:
+    row = closed_history_row(pr_json(number=6 if state == "CLOSED" else 7, state=state))
+    row["created_at"] = "2026-10-06T00:00:00Z"
+    fork = row | {"number": 9, "head": row["head"] | {"repo": {"full_name": "fork/widgets"}}}
+    other_branch = row | {"number": 8, "head": row["head"] | {"ref": "lz/other"}}
+    commits = f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
     gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [closed])
-    gh.respond_pr_list([pr_json()])
-
-    pr = github.pr_for_branch(REPO, "lz/t1")
-
-    assert pr is not None and pr.number == 7 and pr.state == "OPEN"
+    gh.respond(commits, [fork, other_branch, row])
+    if state == "CLOSED":
+        gh.respond_pr_list([pr_json()])
+    else:
+        gh.respond(f"api repos/{REPO}/pulls/7", row)
+    lookup = github.merged_pr_for_branch if state == "MERGED" else github.pr_for_branch
+    pr = lookup(REPO, "lz/t1")
+    assert pr is not None and pr.number == 7 and pr.state == ("OPEN" if state == "CLOSED" else state)
+    assert gh.argv(2) == (pr_list_key().split() if state == "CLOSED" else ["api", f"repos/{REPO}/pulls/7"])
 
 
 @pytest.mark.parametrize("capped", [False, True])
