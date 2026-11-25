@@ -591,12 +591,14 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
     assert all(not reporter.is_alive() for reporter in reporters)
 
 
-@pytest.mark.parametrize("mode", ["running", "blocked-heartbeat", "creation", "removal"])
+@pytest.mark.parametrize("mode", ["running", "blocked-heartbeat", "creation", "dispatch", "removal"])
 def test_sigterm_cleans_only_the_cancelled_checks_private_directories(
     git_repo, bwrap_log, tmp_path, mode,
 ):
     script = """
 import shutil, signal, sys, tempfile, threading
+from collections import deque
+from contextlib import ExitStack
 from pathlib import Path
 from tests.test_sandbox import _save_report, make_config, sandbox
 
@@ -622,15 +624,30 @@ if mode == "removal":
 
     shutil.rmtree = remove
 
+if mode == "dispatch":
+    class Callbacks(deque):
+        def pop(self):
+            callback = super().pop()
+            print("dispatch", flush=True)
+            signal.raise_signal(signal.SIGTERM)
+            return callback
+
+    class Stack(ExitStack):
+        def __init__(self):
+            super().__init__()
+            self._exit_callbacks = Callbacks()
+
+    sandbox.ExitStack = Stack
+
 def status(message):
-    if mode != "removal":
+    if mode in {"running", "blocked-heartbeat"}:
         print(message, flush=True)
     if mode == "blocked-heartbeat":
         threading.Event().wait()
 
 sandbox.HEARTBEAT_INTERVAL = 0.03
 repo = Path.cwd()
-command = "echo complete" if mode == "removal" else "exec sleep 30"
+command = "echo complete" if mode in {"dispatch", "removal"} else "exec sleep 30"
 report = sandbox.run_checks(make_config(checks=(command,)), repo, status=status)
 _save_report(repo, report)
 """
@@ -642,7 +659,7 @@ _save_report(repo, report)
             ))
             processes.callback(process.kill)
             assert select([process.stdout], [], [], 5)[0]
-            marker = check_mode if check_mode in {"creation", "removal"} else "running"
+            marker = check_mode if check_mode in {"creation", "dispatch", "removal"} else "running"
             assert marker in process.stdout.readline()
             return process
 
