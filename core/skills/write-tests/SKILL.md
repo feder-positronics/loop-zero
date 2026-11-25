@@ -18,11 +18,12 @@ outputs, transitions and effects; mock calls, snapshots, internal steps or copie
 implementation calculations alone are insufficient.
 
 Cover material success, denial/isolation, validation, transitions and failures.
-Follow repository conventions with minimal, deterministic, isolated fixtures;
-avoid shared mutable state, timing tolerance and duplicate cases. For bug fixes,
-observe the regression test fail on pre-fix code; only when that is impossible,
-explain the oracle and its limits. Infrastructure failures do not demonstrate
-regression detection.
+For minimal, deterministic, isolated fixtures that follow repository conventions,
+use the real producer where cheap or match the consumed fields and behavior of
+its public interface, and avoid shared mutable state, timing tolerance and
+duplicate cases. For bug fixes, observe the regression test fail on pre-fix code;
+only when that is impossible, explain the oracle and its limits. Infrastructure
+failures do not demonstrate regression detection.
 A new or changed test blocks other changes only through the consumer's
 admission rule; established critical assertions stay blocking.
 Coverage-only tests may pass existing code.
