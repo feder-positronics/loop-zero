@@ -97,8 +97,8 @@ repository root and set `[repo] name`. `loopzero check` uses the base branch's
 `[checks]` when present: edited commands take effect after merging; `--config`
 unpins them. Then:
 
-- `[checks] commands` — must exit zero before a PR opens; for uv projects
-  `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
+- Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
+  For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
