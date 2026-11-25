@@ -91,6 +91,15 @@ After the wait, a missing `LOG.exit` means the job was killed, timed out or
 cancelled. To cancel, check `LOG.exit` first and run `systemctl --user stop NAME`
 if the file is absent.
 
+### Leftover cleanup
+
+The job must confirm a pushed branch, merged or closed PR,
+retention of any evidence required by the delivery contract, clean tracked/untracked
+Git state, an empty shared stash, inactivity, no unarchived T3 thread binding
+where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
+floor. Honor host execution approval rules; use dry run until execution is
+authorized.
+
 ## Team roles
 
 A long-running team gives each role one current owner. Owners read state from
