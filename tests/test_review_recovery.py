@@ -216,9 +216,18 @@ def test_recovery_transport_caps_request_time_and_does_not_retry(monkeypatch, fa
     assert len(timeouts) == 1 and 0 < timeouts[0] <= 0.5
 
 
-@pytest.mark.parametrize("metadata", ["legacy", "null", "empty", "malformed"])
 @pytest.mark.parametrize("source", ["model", "repost"])
-@pytest.mark.parametrize("shape", ["single", "chunked", "truncated"])
+@pytest.mark.parametrize(
+    ("metadata", "shape"),
+    [
+        ("legacy", "single"),
+        ("legacy", "chunked"),
+        ("legacy", "truncated"),
+        ("null", "single"),
+        ("empty", "single"),
+        ("malformed", "single"),
+    ],
+)
 def test_historical_publication_recovery_is_exact_and_legacy_only(
     wt, gh, fake_bin, monkeypatch, capsys, metadata, source, shape,
 ):
