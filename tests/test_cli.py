@@ -95,7 +95,7 @@ def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     return fake
 
 
-@pytest.mark.parametrize("link_error", [errno.EOPNOTSUPP, errno.EEXIST])
+@pytest.mark.parametrize("link_error", [errno.EOPNOTSUPP, errno.EPERM, errno.EEXIST])
 def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, link_error):
     monkeypatch.chdir(repo)
     task = repo / ".worktrees" / "t1" / ".loopzero" / "task.md"
@@ -109,12 +109,12 @@ def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, li
     assert cli.main(["start", "t1"]) == 1
     error = capsys.readouterr().err
     assert str(task) in error
-    if link_error == errno.EOPNOTSUPP:
-        assert "from a checkout on a filesystem that supports hard links" in error
-        assert not task.exists()
-    else:
+    if link_error == errno.EEXIST:
         assert "task file already exists" in error
         assert task.read_text() == "existing handoff"
+    else:
+        assert "from a checkout on a filesystem that supports hard links" in error
+        assert not task.exists()
     assert not list(task.parent.glob(".task.md-*"))
 
 

@@ -126,8 +126,8 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
             raise WorktreeError(refusal)
         if existing_head != base:
             raise WorktreeError(
-                f"cannot resume start at {wt}: existing HEAD is {existing_head}, "
-                f"but {base_ref} is now at {base}; run loopzero start with a new slug"
+                f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
+                f"{base_ref} at {base}; run loopzero start with a new slug"
             )
     _ensure_excludes(repo_root)
     if not existing:
@@ -172,10 +172,10 @@ def _initialize_task(task: Path, text: str) -> None:
             except FileExistsError as exc:
                 raise WorktreeError(f"task file already exists: {task}") from exc
             except OSError as exc:
-                if exc.errno not in (errno.EOPNOTSUPP, errno.ENOSYS):
+                if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS, errno.EPERM):
                     raise
                 raise WorktreeError(
-                    f"cannot publish task file {task}: hard links are required; "
+                    f"cannot publish task file {task} ({exc.strerror}): hard links are required; "
                     "run loopzero start from a checkout on a filesystem that supports hard links"
                 ) from exc
         finally:
