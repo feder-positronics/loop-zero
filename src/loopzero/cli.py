@@ -1166,13 +1166,26 @@ def _wait_with_deadline(
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started, shown=shown)
     deadline = started + timeout
     if time.monotonic() >= deadline:
+        _print_check_wait_timeout(pr)
         return None
+    reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
-            return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                    shown=shown, bounded=True)
+            waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
+                                      shown=shown, bounded=True)
+            reported_timeout = waited is None
     except github.ReadDeadline:
+        if not reported_timeout:
+            _print_check_wait_timeout(pr)
         return None
+    return waited
+
+
+def _print_check_wait_timeout(pr: github.PR) -> None:
+    if pr.mergeable == "UNKNOWN":
+        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
+    else:
+        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
 
 
 def _wait_for_checks(
@@ -1223,10 +1236,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
-    if current.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
+    _print_check_wait_timeout(current)
     return None
 
 
