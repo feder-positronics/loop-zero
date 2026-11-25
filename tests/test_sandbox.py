@@ -553,7 +553,7 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
-                                    'failed', 'dirty_receipt', 'keyless', 'dirty_tree'])
+                                    'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless', 'dirty_tree'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     import json
     from dataclasses import replace
@@ -588,9 +588,9 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
         monkeypatch.setattr(sandbox, '__version__', 'new')
     else:
         data = json.loads(receipt.read_text())
-        if change == 'failed':
+        if change in {'failed', 'boolean_exit_code'}:
             for row in data['results']:
-                row['exit_code'] = 1
+                row['exit_code'] = False if change == 'boolean_exit_code' else 1
         elif change == 'dirty_receipt':
             data['dirty'] = True
         else:

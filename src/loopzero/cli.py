@@ -21,7 +21,7 @@ from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
-from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
+from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult, is_check_exit_code
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
@@ -347,7 +347,7 @@ def _load_report(wt: Path) -> CheckReport | None:
     try:
         data = json.loads(path.read_text())
         results = tuple(CheckResult(**item) for item in data["results"])
-        if any(type(result.exit_code) is not int for result in results):
+        if any(not is_check_exit_code(result.exit_code) for result in results):
             raise TypeError("exit_code must be an integer")
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
