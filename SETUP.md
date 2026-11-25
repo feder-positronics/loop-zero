@@ -270,6 +270,10 @@ the two systemd units to `~/.config/systemd/user/`, then
 
 ## First run
 
+Commit and push `workflow.toml` to the configured remote base
+(`origin/main` by default) before your first task. `loopzero start` fetches
+that base and creates the task worktree from it.
+
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
 $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
