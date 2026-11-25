@@ -397,7 +397,7 @@ def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
                          re.DOTALL | re.MULTILINE)
     match = pattern.search(body)
     if match is None:
-        return f"{body.rstrip()}\n\n## Validation\n{block}\n"
+        return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = match.group(1)
     if _CHECKS_START in content or _CHECKS_END in content:
         if (content.count(_CHECKS_START) != 1 or content.count(_CHECKS_END) != 1
@@ -414,7 +414,17 @@ def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
             "", content, flags=re.MULTILINE,
         )
         content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
-    return body[:match.start()] + "## Validation\n" + content + body[match.end():]
+    return _validate_pr_body_size(body[:match.start()] + "## Validation\n" + content + body[match.end():])
+
+
+def _validate_pr_body_size(body: str) -> str:
+    limit = 65_536
+    if len(body) > limit:
+        raise CliError(
+            f"generated PR body is {len(body)} characters; GitHub allows {limit}. "
+            "Shorten the PR description or validation text and rerun the command."
+        )
+    return body
 
 
 def _sync_task_narrative(wt: Path, existing: str) -> str:
@@ -575,6 +585,8 @@ def cmd_pr(args: argparse.Namespace) -> int:
             f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
             "run `loopzero start <new-task-slug>` for a new task"
         )
+    existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
+    body = _pr_body(wt, head, existing)
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
     if force_lease:
@@ -594,12 +606,11 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
         raise
     if pr is not None and pr.state == "OPEN":
-        body = _pr_body(wt, head, _sync_task_narrative(wt, pr.body or ""))
         if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
-            config.repo, branch, config.base_branch, _pr_title(wt, branch), _pr_body(wt, head)
+            config.repo, branch, config.base_branch, _pr_title(wt, branch), body
         )
     print(pr.url)
     return 0
