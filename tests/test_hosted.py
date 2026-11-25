@@ -115,11 +115,14 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, er
         publisher.respond_pr_view(pr_json(), pr_json(headRefOid="b" * 40))
     elif error == "publication":
         publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {},
-                          {"stdout": "", "exit": 1, "stderr": "HTTP 422"})
+                          {"stdout": "", "exit": 1, "stderr": "invalid description (HTTP 422)"})
+        publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [{"context": "other"}])
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
-    with pytest.raises((github.GhError, hosted.LoopZeroError), match=(r"method=GET endpoint=/repos/acme/widgets/pulls/7/reviews status=503 request_id=GHREQ-8774 message=Service unavailable \[REDACTED\]" if error == "api" else None)):
+    with pytest.raises((github.GhError, hosted.LoopZeroError), match=(r"method=GET endpoint=/repos/acme/widgets/pulls/7/reviews status=503 request_id=GHREQ-8774 message=Service unavailable \[REDACTED\]" if error == "api" else None)) as raised:
         hosted.main()
+    if error == "publication":
+        assert "invalid description (HTTP 422)" in str(raised.value)
     statuses = [json.loads(c["--input"])["state"] for c in publisher.calls if "--input" in c]
     assert statuses == ([] if error == "config" else ["pending", "pending", "failure"]
                         if error == "publication" else ["pending", "failure"])
@@ -228,3 +231,42 @@ def test_privileged_workflow_runs_only_the_trusted_default_branch_package():
                        if rule["type"] == "required_status_checks")
     assert [check["context"] for check in
             status_rule["parameters"]["required_status_checks"]] == ["checks", "Loop-zero Eligibility"]
+
+
+@pytest.mark.parametrize("prior", [998, 999, 1000])
+def test_source_status_limit(publisher, monkeypatch, capsys, prior):
+    context = hosted.eligibility.CONTEXT
+    statuses = [{"context": context, "state": "success"} for _ in range(prior)]
+    writes = []
+    endpoint = f"repos/{REPO}/statuses/{HEAD}"
+
+    def post(path, payload):
+        assert path == endpoint and payload["context"] == context
+        writes.append(payload["state"])
+        if len(statuses) == 1000:
+            pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
+            publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
+            raise github.GhError(("gh", "api", path), "Validation Failed (HTTP 422)")
+        statuses.insert(0, payload)
+
+    monkeypatch.setattr(github, "_api", post)
+    monkeypatch.setattr(hosted.eligibility, "evaluate", lambda *args: SimpleNamespace(
+        ready=True, reasons=(),
+    ))
+
+    if prior == 998:
+        assert hosted.main() == 0
+        assert writes == ["pending", "success"]
+        assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)
+        return
+
+    message = rf"{HEAD}.*{context}.*1,000.*fresh head.*review"
+    with pytest.raises(github.GhError, match=message):
+        hosted.main()
+    assert writes == (["pending", "success"] if prior == 999 else ["pending"])
+    assert statuses[0]["state"] == ("pending" if prior == 999 else "success")
+
+    with pytest.raises(github.GhError, match=message):
+        hosted.main()
+    assert writes[-1] == "pending"
+    assert capsys.readouterr().out == ""

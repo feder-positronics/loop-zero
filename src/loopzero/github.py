@@ -9,7 +9,7 @@ import re
 import shlex
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -62,6 +62,10 @@ class GhError(Exception):
         self.tail = _redact_tokens(tail, token) + guidance
         command_text = _redact_tokens(" ".join(command), token)
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
+
+
+class StatusLimitReached(GhError):
+    """GitHub has no status slots left for this commit and context."""
 
 
 class GhMissing(GhError):
@@ -1181,5 +1185,23 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
-    _api(f"repos/{repo}/statuses/{head}",
-         {"state": state, "context": context, "description": description})
+    endpoint = f"repos/{repo}/statuses/{head}"
+    try:
+        _api(endpoint, {"state": state, "context": context, "description": description})
+    except GhError as exc:
+        if re.search(r"\bHTTP 422\b", exc.tail) and _status_limit_reached(repo, head, context):
+            raise StatusLimitReached(
+                exc.command, f"{head} context {context!r} reached GitHub's 1,000-status limit. "
+                "Push a fresh head and obtain review evidence for it before refreshing eligibility."
+            ) from exc
+        raise
+
+
+def _status_limit_reached(repo: str, head: str, context: str) -> bool:
+    # A validation error alone does not prove exhaustion.
+    with suppress(GhError, ProcTimeout, OSError):
+        return sum(
+            str(status.get("context", "")).casefold() == context.casefold()
+            for status in _paged(f"repos/{repo}/commits/{head}/statuses")
+        ) >= 1_000
+    return False
