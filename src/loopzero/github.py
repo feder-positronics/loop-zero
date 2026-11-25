@@ -1217,32 +1217,38 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
-def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
-    """Return False if the remote ref moved, or True if deleted or absent."""
-    ref = f"heads/{quote(branch, safe='/')}"
-    endpoint = f"repos/{repo}/git/ref/{ref}"
+def _remote_branch_head(endpoint: str) -> str | None:
     try:
         current = api_get(endpoint)
     except GhError as exc:
         if re.search(r"\bHTTP 404\b", exc.tail):
-            return True
+            return None
         raise
     obj = current.get("object") if isinstance(current, dict) else None
     sha = obj.get("sha") if isinstance(obj, dict) else None
     if not isinstance(sha, str) or not sha:
         raise GhError(("gh", "api", endpoint), "missing remote ref SHA")
-    if sha != expected_head:
-        return False
-    try:
-        _gh("api", "-X", "DELETE", f"repos/{repo}/git/refs/{ref}")
-    except GhError as exc:
-        absent = re.search(r"\bHTTP 404\b", exc.tail) or (
-            re.search(r"\bHTTP 422\b", exc.tail)
-            and re.search(r"reference does not exist", exc.tail, re.IGNORECASE)
-        )
-        if not absent:
-            raise
-    return True
+    return sha
+
+
+def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
+    """Return False if the remote ref moved, or True if deleted or absent."""
+    endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
+    current = _remote_branch_head(endpoint)
+    if current != expected_head:
+        return current is None
+    ref = f"refs/heads/{branch}"
+    argv = ("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+            "push", "--no-verify", "--no-follow-tags", f"--force-with-lease={ref}:{expected_head}",
+            f"https://github.com/{repo}.git", f":{ref}")
+    done = run(argv, cwd=Path.cwd(), env_allowlist=GH_ENV, timeout=120,
+               extra_env={"GIT_TERMINAL_PROMPT": "0"})
+    if done.exit_code == 0:
+        return True
+    current = _remote_branch_head(endpoint)
+    if current != expected_head:
+        return current is None
+    raise GhError(argv, done.stderr or done.stdout)
 
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:

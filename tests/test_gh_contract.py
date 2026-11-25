@@ -45,8 +45,7 @@ def captured_argv(fake_bin: Path, tmp_path: Path) -> list[dict]:
     fake.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
     fake.respond("pr ready", "")
     fake.respond("pr merge", "")
-    fake.respond(f"api repos/{REPO}/git/ref/heads/lz/x", {"object": {"sha": HEAD}})
-    fake.respond("api -X", "")
+    fake.fail(f"api repos/{REPO}/git/ref/heads/lz/x", "gh: Not Found (HTTP 404)")
 
     github.pr_for_branch(REPO, "lz/x")
     github.pr_view(REPO, 7)
@@ -102,7 +101,7 @@ def offline_run(argv: list[str], tmp_path: Path, call: dict | None = None) -> st
 def test_contract_capture_covers_all_github_operations(captured_argv: list[dict]) -> None:
     calls = [call["argv"] for call in captured_argv]
     assert {tuple(argv[:2]) for argv in calls} >= {
-        ("pr", "ready"), ("pr", "merge"), ("api", "graphql"), ("api", "-X"),
+        ("pr", "ready"), ("pr", "merge"), ("api", "graphql"),
         ("api", f"repos/{REPO}/pulls"), ("api", f"repos/{REPO}/pulls/7"),
     }
     assert not any(argv[:2] in (["pr", "list"], ["pr", "view"], ["pr", "create"])
