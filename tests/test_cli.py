@@ -1891,6 +1891,30 @@ def test_late_check_keeps_current_passing_receipt(wt, gh, capsys, monkeypatch):
     assert "receipt accepted:" in out
 
 
+def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch):
+    run_checks = cli.sandbox.run_checks
+    old_head = head_of(wt)
+    receipt = wt / ".loopzero/checks.json"
+    refreshed = []
+    monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
+    assert run(capsys, "check")[0] == 0
+    original_receipt = receipt.read_bytes()
+
+    def advance_after_checks(*args, **kwargs):
+        report = run_checks(*args, **kwargs)
+        assert report.ok
+        git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
+        return report
+
+    monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
+    code, out, err = run(capsys, "check")
+    assert code == 1
+    assert "PASS" not in out
+    assert "discarded" in err and old_head in err and head_of(wt) in err
+    assert receipt.read_bytes() == original_receipt
+    assert refreshed == [old_head]
+
+
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=[])
     arm_check_runs(gh, head, [{
