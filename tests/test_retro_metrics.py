@@ -110,7 +110,33 @@ def test_record_replay_and_weekly_window(sources, capsys):
     assert len(report["trend_4_weeks"]) == 4
     assert report["trend_4_weeks"][0]["since"] == "2026-05-01T00:00:00Z"
     assert report["previous_7_days"]["until"] == report["last_7_days"]["since"]
+    assert report["weekly_sample"]["items"] == [
+        {"kind": "merged_control", "number": 1},
+        {"kind": "slowest_accepted", "number": 8},
+    ]
     assert "Previous 7d" in live.err
+
+
+def test_weekly_sample_reserves_controls_and_deduplicates_stalled_order():
+    start, end = map(retro_metrics.timestamp, (SINCE, END))
+    pulls = [{"number": number, "merged_at": SINCE} for number in range(10, 15)]
+    orders = [
+        issue(1, "2026-05-21T00:00:00Z"),
+        issue(2, "2026-05-22T00:00:00Z"),
+        issue(3, "2026-05-23T00:00:00Z"),
+        issue(4, "2026-05-24T00:00:00Z"),
+        issue(5, "2026-05-25T00:00:00Z"),
+        issue(6, "2026-05-26T00:00:00Z", SINCE, "completed"),
+        issue(7, "2026-05-25T00:00:00Z", SINCE, "completed"),
+        issue(8, "2026-05-24T00:00:00Z", SINCE, "completed"),
+    ]
+    alerts = [{"kind": "stalled_p0", "issue": 1, "hours": 48}]
+    sample = retro_metrics.weekly_sample(REPO, start, end, pulls, orders, alerts)
+    assert sample == retro_metrics.weekly_sample(
+        REPO, start, end, pulls[::-1], orders[::-1], alerts)
+    assert len(sample["items"]) == 8
+    assert all(item["kind"] == "merged_control" for item in sample["items"][:2])
+    assert [item["number"] for item in sample["items"][2:]] == [8, 7, 1, 2, 3, 4]
 
 
 def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):

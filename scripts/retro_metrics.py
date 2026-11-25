@@ -27,6 +27,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import random
 import re
 import shlex
 import statistics
@@ -231,6 +232,41 @@ def open_at(issues, end):
             (not i.get("closed_at") or timestamp(i["closed_at"]) >= end)]
 
 
+def weekly_sample(repo, start, end, pulls, orders, alerts):
+    orders = orders or []
+    oldest = sorted(open_at(orders, end), key=lambda row: (
+        timestamp(row["created_at"]), row["number"]))
+    accepted = sorted(
+        (row for row in orders if row.get("state_reason") == "completed"
+         and row.get("closed_at") and start <= timestamp(row["closed_at"]) < end),
+        key=lambda row: (timestamp(row["created_at"]) - timestamp(row["closed_at"]),
+                         row["number"]),
+    )
+    stalled = sorted((alert for alert in alerts if alert["kind"] == "stalled_p0"),
+                     key=lambda alert: (-alert["hours"], alert["issue"]))
+    merged = sorted({row["number"] for row in pulls or []
+                     if row.get("merged_at") and start <= timestamp(row["merged_at"]) < end})
+    seed = f"{repo}@{stamp(end)}"
+    sample = [{"kind": "merged_control", "number": number}
+              for number in random.Random(seed).sample(merged, min(2, len(merged)))]
+    seen = {item["number"] for item in sample}
+
+    for kind, numbers, limit in (
+        ("slowest_accepted", (row["number"] for row in accepted), 2),
+        ("stalled_p0", (alert["issue"] for alert in stalled), 1),
+        ("oldest_open_order", (row["number"] for row in oldest), 4),
+    ):
+        picked = 0
+        for number in numbers:
+            if picked == limit or len(sample) == 8:
+                break
+            if number not in seen:
+                sample.append({"kind": kind, "number": number})
+                seen.add(number)
+                picked += 1
+    return {"seed": seed, "items": sample}
+
+
 def host_fields(data, name):
     values = data.get(name)
     if not isinstance(values, dict):
@@ -423,7 +459,7 @@ def main(argv=None):
                 inputs.alert(f"{name}/{key}", "no data or no observations")
         metrics[name] = row
     selected = metrics.get("custom_window", metrics["last_7_days"])
-    if args.alerts:
+    if args.alerts or args.stall_hours is not None:
         find_alerts(inputs, args, selected, p0, host, end)
     inputs.save()
     if args.alerts:
@@ -434,6 +470,7 @@ def main(argv=None):
         "repo": args.repo, "last_7_days": trend[-1], "previous_7_days": trend[-2],
         "trend_4_weeks": trend, "custom_window": metrics.get("custom_window"),
         "alerts": inputs.alerts,
+        "weekly_sample": weekly_sample(args.repo, weekly[-1][0], end, pulls, orders, inputs.alerts),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     print_table(trend)
