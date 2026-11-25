@@ -70,7 +70,8 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         assert calls == ['echo one']
     _save_report(git_repo, report)
     assert _load_report(git_repo) == report
-    assert set(json.loads((git_repo / '.loopzero/checks.json').read_text())) == {'head', 'dirty', 'results'}
+    receipt = json.loads((git_repo / '.loopzero/checks.json').read_text())
+    assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
 
 
 @pytest.mark.parametrize('dirty', [True, False])
