@@ -2547,6 +2547,25 @@ def test_second_merge_retries_remote_branch_cleanup(
     assert len(deletes) == 2
 
 
+def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    workflow = git_repo / "workflow.toml"
+    workflow.write_text('[repo]\nname = "example/repo"\n[checks]\ncommands = false\n')
+    git(git_repo, "add", "workflow.toml")
+    git(git_repo, "commit", "-qm", "invalid base workflow")
+    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    workflow.write_text(workflow.read_text().replace("false", '["true"]'))
+
+    code, _, err = run(capsys, "status")
+    assert code == 1
+    assert "origin/main:workflow.toml: checks.commands must be a list" in err
+
+    workflow.write_text(workflow.read_text().replace('"example/repo"', "false"))
+    code, _, err = run(capsys, "status")
+    assert code == 1
+    assert f"{workflow}: repo.name must be a str" in err
+
+
 def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):
     monkeypatch.chdir(git_repo)
     bad_config = git_repo / "bad.toml"
