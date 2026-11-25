@@ -1106,6 +1106,16 @@ def _poll_until(started: float, timeout: float) -> Iterator[None]:
         delay = min(120.0, delay * 2)
 
 
+def _verify_wait_config(
+    args: argparse.Namespace | None, wt: Path, config: Config, head: str,
+) -> None:
+    if args is None or (latest := _load_config(args, wt, pin_checks=True)) == config:
+        return
+    if _current_check_report(wt, latest, head) is None:
+        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
+    raise CliError("workflow settings changed while waiting; retry with the current settings")
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, args: argparse.Namespace | None = None,
@@ -1120,12 +1130,7 @@ def _wait_for_checks(
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
-        if args is not None:
-            latest_config = _load_config(args, wt, pin_checks=True)
-            if latest_config != config:
-                if _current_check_report(wt, latest_config, pr.head_sha) is None:
-                    raise CliError("workflow settings changed while waiting; run loopzero check and retry")
-                raise CliError("workflow settings changed while waiting; retry with the current settings")
+        _verify_wait_config(args, wt, config, pr.head_sha)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         waiting = () if kicked else _draft_checks_waiting(config, current, readiness)
         pending = _pending_checks(config, current, readiness, kicked)
