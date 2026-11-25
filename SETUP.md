@@ -92,6 +92,11 @@ not change it.
 
 ## Configure
 
+`loopzero start` fetches the base branch from a Git remote named `origin`.
+Point it at the GitHub repository you set in `[repo] name`. Use
+`git remote add origin <url>` to add it or `git remote rename <name> origin`
+if you already configured it under a different name.
+
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
 repository root and set `[repo] name`. `loopzero check` uses the base branch's
 `[checks]` when present: edited commands take effect after merging; `--config`
