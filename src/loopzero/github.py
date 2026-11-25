@@ -254,9 +254,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     if diagnostic_api and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
-    scope = _read_scope.get() if _read_only(args) else None
+    read_only = _read_only(args)
+    resolves_thread = args[:4] == ("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}")
+    scope = _read_scope.get() if read_only else None
     selected = token if token is not None else (
-        scope[1] if scope else (app_token() if _read_only(args) else ""))
+        scope[1] if scope else (app_token() if read_only else ""))
     deadline = scope[0] if scope else None
     for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
         if deadline is not None:
@@ -270,7 +272,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         except ToolMissing as exc:
             raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout:
-            if delay is None or not _read_only(args):
+            if delay is None or not (read_only or resolves_thread):
                 raise
             _retry_sleep(delay)
             continue
@@ -286,7 +288,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                               "GitHub's reset or Retry-After; no automatic retry.")
             raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
                           "No automatic retry.")
-        if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
+        if done.exit_code == 0 or delay is None or not (read_only or resolves_thread):
+            break
+        if not (TRANSIENT_RE.search(tail) or (
+            resolves_thread and "something went wrong while executing your query" in tail.lower()
+        )):
             break
         _retry_sleep(delay)
     if done.exit_code != 0:
@@ -789,7 +795,15 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
                 posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
-            _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}")
+            try:
+                _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}")
+            except (GhError, ProcTimeout) as exc:
+                raise GhError(
+                    ("resolve", finding_id),
+                    f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
+                    f"Resolve any open thread on PR #{number} and do not rerun loopzero resolve "
+                    f"(it could post the reply again).\n{exc}",
+                ) from exc
             return finding
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
