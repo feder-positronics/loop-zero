@@ -11,6 +11,7 @@ import re
 import resource
 import shutil
 import signal
+import stat
 import tempfile
 import threading
 import time
@@ -250,9 +251,27 @@ def _input_key(config: Config, worktree: Path, command: str, base: str) -> str |
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
-    blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
-                 "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    payload = [command, __version__, _execution_settings(config, base), blobs]
+    blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+                 "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+    contents = []
+    root = worktree.resolve()
+    try:
+        for entry in blobs.split("\n"):
+            if not entry:
+                continue
+            metadata, name = entry.split("\t", 1)
+            if name.startswith('"'):
+                name = os.fsdecode(ast.literal_eval("b" + name))
+            path = root / name
+            if (metadata.split()[1] not in {"100644", "100755"}
+                    or path.resolve(strict=True) != path
+                    or not stat.S_ISREG(path.lstat().st_mode)):
+                return None
+            with path.open("rb") as stream:
+                contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
+    except (OSError, ValueError, SyntaxError, RuntimeError):
+        return None
+    payload = [command, __version__, _execution_settings(config, base), blobs, contents]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 

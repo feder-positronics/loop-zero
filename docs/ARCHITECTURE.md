@@ -467,8 +467,10 @@ must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
-Keys bind committed paths/blob IDs, command, version, sandbox configuration and
-the resolved base SHA. The receipt fingerprint also binds that SHA when reuse
+Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
+command, version, sandbox configuration and the resolved base SHA. A stage runs
+fresh when a matched path cannot be identified as a readable regular file.
+The receipt fingerprint also binds the base SHA when reuse
 is configured, so advancing the base invalidates a pass at the same task head.
 If the remote ref is absent, checks use the task's recorded base. Without
 either base, local stages run fresh.
