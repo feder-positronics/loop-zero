@@ -55,7 +55,7 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
-Merged native review receipts and their sidecars are handed off to `~/.local/state/loopzero/receipts/<owner>-<repo>/<pr>-<head>/`, append-only: existing directories are accepted only when all files are byte-identical, never overwritten.
+Private review receipts and sidecars live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.
@@ -215,10 +215,10 @@ cannot backfill a missing launch record.
 Chunk merge pads missing request entries and preserves their native-call order.
 Legacy model/effort fields retain their historical adapter meanings for loading;
 qualified summaries never use them as execution evidence. Eligibility still checks
-core native provenance, independently of optional reporting. Recovery considers the
-exact historical renderer only when the saved artifact lacks requested_settings;
-present malformed metadata cannot activate it. New publication/repost uses qualified
-wording, while publisher/head/findings/session/publication checks remain unchanged.
+core native provenance. Exact read-back tries legacy summaries when requested settings
+are absent and the pre-#344 Claude requested/reported layout when requested settings
+exist without configured settings. It still verifies exact published evidence.
+New publication and reposting use the current layout.
 
 <a id="codex-review-runner-evidence"></a>
 
