@@ -549,6 +549,37 @@ def test_gh_error_tail_joins_stderr_and_stdout(gh: FakeGh) -> None:
     assert info.value.tail == 'gh: HTTP 422\n\n{"message": "detail on stdout"}'
 
 
+@pytest.mark.parametrize(("failure", "remedy"), [
+    ("not logged in", github.GH_AUTH_REMEDY),
+    ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After"),
+])
+def test_gh_errors_keep_remediation_after_redaction(gh: FakeGh, failure: str, remedy: str) -> None:
+    token = "ghs_FAKE000"
+    gh.fail("api user", f"{failure}: {token}")
+
+    with pytest.raises(github.GhError) as info:
+        github._gh("api", "user", "-f", f"value={token}", token=token)
+
+    assert remedy in str(info.value)
+    assert token not in str(info.value)
+    assert token not in info.value.tail
+    assert all(token not in arg for arg in info.value.command)
+
+
+def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
+    token = "ghs_FAKE000"
+
+    def timeout(*args, **kwargs):
+        raise github.ProcTimeout(f"gh timed out: {token}", token, stderr=token)
+
+    monkeypatch.setattr(github, "run", timeout)
+    with pytest.raises(github.ProcTimeout, match="gh timed out: \\[REDACTED\\]") as info:
+        github._gh("api", "user", "--method", "POST", token=token)
+
+    assert info.value.stdout == info.value.stderr == "[REDACTED]"
+    assert info.value.__suppress_context__
+
+
 @pytest.mark.parametrize("verdict", ["approve", "request_changes"])
 def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str) -> None:
     arm_review(gh, author="bot-user")
