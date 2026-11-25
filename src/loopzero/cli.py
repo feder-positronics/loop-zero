@@ -718,7 +718,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     try:
         github.post_review(
-            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token
+            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
+            publisher=publisher,
         )
     except (github.GhError, _proc.ProcTimeout) as exc:
         path = _review_file(wt, head, kind)
