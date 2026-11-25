@@ -10,7 +10,9 @@ own delivery state; `.loopzero/` holds task text and local receipts.
    problem, context, acceptance, base SHA. Write the PR, like any issue or
    design doc you write, for the project owner under [Reporting](#reporting).
 2. Implement, commit, then `loopzero check`: run `workflow.toml`
-   `[checks].commands` in the sandbox. Its exit code is the verdict.
+   `[checks].commands` in the sandbox. Its exit code is the verdict. For a long
+   check under a [provider-portable handoff](../docs/DELEGATION.md#provider-portable-handoff),
+   open the draft in step 3 before starting the check.
 3. `loopzero pr` pushes and opens a **draft** PR from the task text plus
    generated Validation checks. Later calls sync narrative, preserving live
    Validation, Review and extra sections; `check` refreshes only its checks

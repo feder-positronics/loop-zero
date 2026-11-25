@@ -59,9 +59,9 @@ and report cleanup to the owner. Successful `loopzero merge` already performs it
 own cleanup under the delivery contract.
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
-[review budget](../../CONTRACT.md#review-budget) for each pushed head. Check the
-clean committed head before pushing. Suggestions must not expand scope. Follow
-the contract's owner queue route and merge authority.
+[review budget](../../CONTRACT.md#review-budget) for each pushed head.
+Suggestions must not expand scope. Follow the contract's owner queue route and
+merge authority.
 Rebase your own commits onto origin/main before the primary review.
 Leave base merges out of a branch awaiting its delta.
 After an approved primary or a delta, merge main into the existing branch when the base or its check scripts change.
