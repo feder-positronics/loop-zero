@@ -82,6 +82,9 @@ def test_accepted_publication_recovers_saved_verdict(
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
     writes = [c for c in gh.calls if "--input" in c]
     assert len(writes) == 1, "confirmed recovery must not write again, including the PR body"
+    if verdict == 5:
+        files = ["api", f"repos/{REPO}/pulls/7/files"]
+        assert sum(call["argv"][:2] == files for call in gh.calls) == 2
 
 
 @pytest.mark.parametrize("change", ["body", "comment", "location", "publisher", "pending",
@@ -272,6 +275,12 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
     assert len([c for c in gh.calls if "--input" in c]) == 1
     if metadata == "legacy":
+        mixed = body.partition("\n\n<details>")[0] + (
+            "\n\nNative Claude output is retained in the restricted local review receipt."
+        )
+        gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": mixed,
+                                   "state": "COMMENTED", "user": {"login": LOGIN}}])
+        assert run(capsys, "review", "--repost")[0] == 1
         gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body + "changed",
                                    "state": "COMMENTED", "user": {"login": LOGIN}}])
         assert run(capsys, "review", "--repost")[0] == 1
