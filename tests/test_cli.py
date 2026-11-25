@@ -60,7 +60,7 @@ reviewers = ["claude", "codex"]
 
 @pytest.fixture(scope="session")
 def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Prepare the checkout and bare origin that each case copies."""
+    """Prepare the clean and task checkouts and their bare origin."""
     seed = tmp_path_factory.mktemp("git-seed")
     checkout = init_git_repo(seed / "repo")
     (checkout / "workflow.toml").write_text(WORKFLOW)
@@ -70,16 +70,31 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
     git(checkout, "remote", "add", "origin", str(origin))
     git(checkout, "push", "-q", "origin", "main")
+    prepared = seed / "prepared"
+    shutil.copytree(checkout, prepared)
+    path = cli.worktree.start(prepared, "t1", "main")
+    (path / "feature.py").write_text("print('hi')\n")
+    task = cli.worktree.task_file(path)
+    for field, value in (
+        ("Goal", "The feature prints its greeting."),
+        ("Problem", "The feature is missing."),
+        ("Context", "The feature module is part of the sample application."),
+    ):
+        task.write_text(re.sub(rf"(?m)^(- \*\*{field}:\*\* )<.*>$", rf"\g<1>{value}", task.read_text()))
+    shutil.move(task.parent, seed / ".loopzero")
+    git(path, "add", "feature.py")
+    git(path, "commit", "-q", "-m", "add feature")
+    git(prepared, "worktree", "remove", str(path))
     return seed
 
 
 @pytest.fixture
-def repo(git_seed: Path, tmp_path: Path, fake_tool) -> Path:
+def repo(git_seed: Path, tmp_path: Path, fake_tool, request: pytest.FixtureRequest) -> Path:
     """A private copy of both Git repositories and a per-case fake bwrap."""
     checkout = tmp_path / "repo"
-    origin = tmp_path / "origin.git"
-    shutil.copytree(git_seed / "repo", checkout)
-    shutil.copytree(git_seed / "origin.git", origin)
+    seed_checkout = "prepared" if "wt" in request.fixturenames else "repo"
+    shutil.copytree(git_seed / seed_checkout, checkout)
+    origin = shutil.copytree(git_seed / "origin.git", tmp_path / "origin.git")
     git(checkout, "remote", "set-url", "origin", str(origin))
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
     return checkout
@@ -120,7 +135,7 @@ def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, li
 
 @pytest.fixture
 def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replay only GitHub CLI requests in-process for the polling cases."""
+    """Replay GitHub CLI requests in-process while keeping real Git commands."""
     run_process = github.run
 
     def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
@@ -135,25 +150,10 @@ def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
-    """A started worktree with one commit on top of base; cwd is inside it."""
-    monkeypatch.chdir(repo)
-    assert cli.main(["start", "t1"]) == 0
-    path = Path(capsys.readouterr().out.strip())
-    assert path == repo / ".worktrees" / "t1"
-    (path / "feature.py").write_text("print('hi')\n")
-    task = path / ".loopzero" / "task.md"
-    task.write_text(
-        task.read_text()
-        .replace(
-            "<plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>",
-            "The feature module is part of the sample application.",
-        )
-        .replace("<one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>", "The feature is missing.")
-        .replace("<one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>", "The feature prints its greeting.")
-    )
-    git(path, "add", "feature.py")
-    git(path, "commit", "-q", "-m", "add feature")
+def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = cli.worktree.worktree_dir(repo, "t1")
+    git(repo, "worktree", "add", "-q", str(path), "lz/t1")
+    shutil.copytree(git_seed / ".loopzero", cli.worktree.task_file(path).parent)
     monkeypatch.chdir(path)
     return path
 
@@ -1795,7 +1795,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
     ("APPROVED", "approve", "ahead", False, False, "clean"),
 ])
 def test_ready_after_primary_reviewed_head(
-    wt, gh, capsys, monkeypatch, fake_tool, state, verdict, comparison, resolved, ready, history, reposted,
+    wt, gh, capsys, monkeypatch, fake_tool, replay_gh, state, verdict, comparison, resolved, ready, history, reposted,
 ):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
