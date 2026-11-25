@@ -54,10 +54,12 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 
 
 class GhError(Exception):
-    def __init__(self, command: tuple[str, ...], tail: str) -> None:
-        self.command = command
-        self.tail = tail
-        super().__init__(f"{' '.join(command)} failed: {tail.strip()[-600:]}")
+    def __init__(self, command: tuple[str, ...], tail: str, *,
+                 token: str = "", guidance: str = "") -> None:
+        self.command = tuple(_redact_tokens(arg, token) for arg in command)
+        self.tail = _redact_tokens(tail, token) + guidance
+        command_text = _redact_tokens(" ".join(command), token)
+        super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
 
 class GhMissing(GhError):
@@ -176,13 +178,14 @@ def _redact_tokens(value: str, token: str = "") -> str:
                    os.environ.get("GITHUB_TOKEN", "")):
         if secret:
             value = value.replace(secret, "[REDACTED]")
+    value = re.sub(r"(?i)\b(authorization)\s*[:=]\s*"
+                   r"(?:(?:basic|bearer|token)\s+)?[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
     value = _GITHUB_TOKEN_RE.sub("[REDACTED]", value)
-    value = re.sub(r"(?i)\b(access_token|auth_token|token|authorization)\s*[:=]\s*"
+    value = re.sub(r"(?i)\b(access_token|auth_token|token)\s*[:=]\s*"
                    r"[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)(https?://[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
-    value = re.sub(r"(?<!\S)(/[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
-    return re.sub(r"\s+", " ", value).strip()
+    return re.sub(r"(?<!\S)(/[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
 
 
 def _api_error_detail(args: tuple[str, ...], stdout: str, stderr: str,
@@ -210,7 +213,8 @@ def _api_error_detail(args: tuple[str, ...], stdout: str, stderr: str,
                 )
     if not message:
         message = body.strip() or stderr.strip().removeprefix("gh:").strip()
-    message = _redact_tokens(message if message_tail is None else message_tail, token)[:400] or "no response message"
+    message = " ".join(_redact_tokens(message if message_tail is None else message_tail, token).split())
+    message = message[:400] or "no response message"
     return _redact_tokens(
         f"method={_api_method(args)} endpoint={_api_path(args)} status={status} "
         f"request_id={request_id} message={message}", token
@@ -272,30 +276,31 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise GhError(argv, "publication read-back deadline exceeded")
+                raise GhError(argv, "publication read-back deadline exceeded", token=selected)
             timeout = min(timeout, remaining)
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
         except ToolMissing as exc:
-            raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
-        except ProcTimeout:
+            raise GhMissing(argv, str(exc), token=selected,
+                            guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
+        except ProcTimeout as exc:
             if delay is None or not retryable:
-                raise
+                raise ProcTimeout(
+                    _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
+                    stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
+                ) from None
             _retry_sleep(delay)
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
             reset = _graphql_reset(args, tail, cwd, selected)
+            guidance = reset + "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
-                if reset:
-                    detail = _redact_tokens(f"{detail} {reset}", selected)
-                raise GhError(("GitHub API request",), detail + "; Rate limited: retry after "
-                              "GitHub's reset or Retry-After; no automatic retry.")
-            raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
-                          "No automatic retry.")
+                raise GhError(("GitHub API request",), detail, token=selected, guidance=guidance)
+            raise GhError(argv, tail, token=selected, guidance=guidance)
         if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
         _retry_sleep(delay)
@@ -305,8 +310,8 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                                         message_tail=None if diagnostic_api else tail)
                       if diagnostic_api or patch_error else tail)
         if "gh auth login" in tail or "not logged in" in tail.lower():
-            raise GhAuth(error_command, f"{error_tail.rstrip()}\n{GH_AUTH_REMEDY}")
-        raise GhError(error_command, error_tail)
+            raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
+        raise GhError(error_command, error_tail, token=selected)
     return _included_response(done.stdout)[2] if diagnostic_api else done.stdout
 
 
@@ -355,7 +360,8 @@ def _gh_json(*args: str, token: str | None = None) -> object:
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
-        raise GhError(("gh", *args), f"invalid JSON from gh: {out[-600:]}") from exc
+        raise GhError(("gh", *args), f"invalid JSON from gh at line {exc.lineno}, column {exc.colno}",
+                      token=token or "") from None
 
 
 def _paged(endpoint: str, key: str = "check_runs") -> list:
