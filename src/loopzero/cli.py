@@ -934,7 +934,8 @@ def _run_review(
         print(runtime_source)
     fallback = ""
     reasons: list[str] = []  # published; runner detail stays in local stderr and failures
-    for family in candidates + excluded:
+    attempts = candidates + excluded
+    for index, family in enumerate(attempts):
         if family in unusable:
             failures.append(unusable[family])
             continue
@@ -957,28 +958,34 @@ def _run_review(
                 result = runners.merge_reviews(chunk_results)
                 break
         except RUNNER_FAILURES as exc:
-            reason = str(exc).splitlines()[0]
-            detail = "\n".join(str(exc).splitlines()[:3])
-            if isinstance(exc, runners.RunnerAuthFailed):
-                login = "claude auth login" if family == "claude" else "codex login"
-                detail += f"\nFix: run `{login}`."
-            elif isinstance(exc, runners.RunnerUsageLimit):
-                detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
-            elif isinstance(exc, runners.RunnerMissing):
-                package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-                detail += f"\nFix: install it with `npm install -g {package}`."
+            reason, detail, fallback_reason = _review_failure(family, exc)
             failures.append(detail)
-            reasons.append(f"{family}: " + (
-                _FALLBACK_REASONS[0] if isinstance(exc, runners.RunnerAuthFailed)
-                else _FALLBACK_REASONS[1] if isinstance(exc, runners.RunnerUsageLimit)
-                else _FALLBACK_REASONS[2] if isinstance(exc, runners.RunnerMissing)
-                else _FALLBACK_REASONS[3]))
-            print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
+            reasons.append(f"{family}: {fallback_reason}")
+            if any(next_family in selected for next_family in attempts[index + 1:]):
+                print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
             _independence_message(authors, excluded, failures)
         )
     return dataclasses.replace(result, fallback=fallback)
+
+
+def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
+    lines = str(exc).splitlines()
+    detail = "\n".join(lines[:3])
+    fallback_reason = _FALLBACK_REASONS[3]
+    if isinstance(exc, runners.RunnerAuthFailed):
+        login = "claude auth login" if family == "claude" else "codex login"
+        detail += f"\nFix: run `{login}`."
+        fallback_reason = _FALLBACK_REASONS[0]
+    elif isinstance(exc, runners.RunnerUsageLimit):
+        detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
+        fallback_reason = _FALLBACK_REASONS[1]
+    elif isinstance(exc, runners.RunnerMissing):
+        package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
+        detail += f"\nFix: install it with `npm install -g {package}`."
+        fallback_reason = _FALLBACK_REASONS[2]
+    return lines[0], detail, fallback_reason
 
 
 def _independence_message(
