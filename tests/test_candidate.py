@@ -274,8 +274,12 @@ def tree_candidate(tmp_path, monkeypatch):
             assert "https://github.com/owner/repo.git" in argv
             assert "secret-token" not in " ".join(argv)
             assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+            assert kwargs["env"]["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+            assert kwargs["env"]["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
             argv = [str(remote) if arg == "https://github.com/owner/repo.git" else arg
                     for arg in argv]
+        elif argv[0] == "prlimit":
+            assert not {"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} & kwargs["env"].keys()
         return popen(argv, **kwargs)
 
     monkeypatch.setenv("GH_TOKEN", "secret-token")
