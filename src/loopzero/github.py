@@ -95,7 +95,8 @@ class Readiness:
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
-                          r"connection reset|no server is currently", re.IGNORECASE)
+                          r"connection reset|no server is currently|error connecting to api\.github\.com|"
+                          r"unexpected end of JSON input|Something went wrong while executing your query", re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str] | None] = ContextVar("github_reads", default=None)

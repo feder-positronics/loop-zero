@@ -1220,6 +1220,9 @@ def test_merge_rejects_unknown_strategy(gh: FakeGh) -> None:
     (("api", "repos/acme/widgets/pulls/1"), 2, ""),
     (("api", "repos/acme/widgets/commits/x/check-runs", "--method", "GET", "-F", "per_page=100"), 2, "dial tcp 140.82.121.5:443: i/o timeout"),
     (("api", "graphql", "-f", "query=query { viewer { login } }"), 2, "net/http: TLS handshake timeout"),
+    (("api", "repos/acme/widgets/pulls/7"), 2, "error connecting to api.github.com"),
+    (("api", "repos/acme/widgets/pulls/7/reviews"), 2, "unexpected end of JSON input"),
+    (("api", "graphql", "-f", "query=query { viewer { login } }"), 2, "gh: Something went wrong while executing your query"),
     (("api", "repos/acme/widgets/issues/1/comments", "-f", "body=x"), 1, "HTTP 503"),
     (("api", "graphql", "-f", "query=mutation { resolve }"), 1, "HTTP 503"),
 ])
