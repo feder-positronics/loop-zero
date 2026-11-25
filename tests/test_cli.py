@@ -247,8 +247,13 @@ def run(capsys, *argv: str) -> tuple[int, str, str]:
 # --- start / check --------------------------------------------------------------------
 
 
-def test_start_prints_only_worktree_path(repo: Path, monkeypatch, capsys) -> None:
-    monkeypatch.chdir(repo)
+@pytest.mark.parametrize("detached", [False, True])
+def test_start_prints_only_worktree_path(repo: Path, monkeypatch, capsys, detached: bool) -> None:
+    if detached:
+        git(repo, "switch", "-q", "--detach")
+    subdir = repo / "subdir"
+    subdir.mkdir()
+    monkeypatch.chdir(subdir)
     code, out, err = run(capsys, "start", "hello")
     assert (code, err) == (0, "")
     assert out == f"{repo / '.worktrees' / 'hello'}\n"
@@ -3490,10 +3495,16 @@ def test_unexpected_and_interrupt_exit_codes(wt: Path, capsys, monkeypatch) -> N
     assert run(capsys, "status")[0] == 130
 
 
-def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, capsys) -> None:
+@pytest.mark.parametrize("detached", [False, True])
+def test_start_refuses_inside_task_worktree(wt: Path, repo: Path, monkeypatch, capsys, detached: bool) -> None:
+    if detached:
+        git(wt, "switch", "-q", "--detach")
+    monkeypatch.chdir(wt / ".loopzero")
     code, out, err = run(capsys, "start", "nested")
     assert code == 1 and out == "" and "already inside task worktree" in err
+    assert "run start from the main checkout" in err
     assert not (repo / ".worktrees" / "nested").exists()
+    assert not (wt / ".worktrees" / "nested").exists()
     assert "lz/nested" not in git(repo, "branch", "--list", "lz/nested")
 
 

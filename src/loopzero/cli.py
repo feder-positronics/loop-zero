@@ -549,7 +549,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     root = _toplevel()
     argv = ["git", "symbolic-ref", "--quiet", "--short", "HEAD"]
     current = _proc.run(argv, cwd=root, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
-    if current.stdout.strip().startswith("lz/"):
+    if current.stdout.strip().startswith("lz/") or (
+        current.exit_code == 1 and worktree.is_linked_checkout(root)
+    ):
         raise CliError(f"already inside task worktree {root}; run start from the main checkout")
     config = _load_config(args, root)
     print(worktree.start(root, args.slug, config.base_branch))
