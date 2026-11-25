@@ -39,7 +39,7 @@ _TREE_BYTES = 256 * 1024 * 1024
 _TREE_OUTPUT = 8 * 1024 * 1024
 _TREE_OBJECTS = 100_000
 _TREE_DEPTH = 200  # IntelFlo main at depth 200: ~16k objects, 29 MiB (full: 147k)
-_PASS_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
+_FETCH_TRANSPORT_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
 
 JsonObject = dict[str, Any]
 JsonValue = JsonObject | list[Any]
@@ -289,7 +289,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
     _require(bool(token), "GitHub fetch authentication unavailable")
     with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
         root = Path(directory)
-        env = {name: os.environ[name] for name in _PASS_ENV if name in os.environ} | {
+        env = {
             "PATH": os.environ.get("PATH", os.defpath), "HOME": directory,
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_ATTR_NOSYSTEM": "1",
@@ -297,7 +297,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
             "GIT_AUTHOR_NAME": "loopzero", "GIT_AUTHOR_EMAIL": "loopzero@localhost",
             "GIT_COMMITTER_NAME": "loopzero", "GIT_COMMITTER_EMAIL": "loopzero@localhost",
         }
-        fetch_env = env | {
+        fetch_env = env | {name: os.environ[name] for name in _FETCH_TRANSPORT_ENV if name in os.environ} | {
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
             "GIT_CONFIG_VALUE_0": "Authorization: Basic " + base64.b64encode(
                 f"x-access-token:{token}".encode()).decode(),

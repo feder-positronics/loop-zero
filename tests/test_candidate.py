@@ -8,6 +8,8 @@ the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.
 
 from __future__ import annotations
 
+import base64
+import subprocess
 from copy import deepcopy
 from importlib import import_module
 from itertools import cycle
@@ -234,8 +236,6 @@ def test_same_head_still_obeys_source_policy() -> None:
 
 @pytest.fixture
 def tree_candidate(tmp_path, monkeypatch):
-    import subprocess
-
     remote = tmp_path / "remote"
     remote.mkdir()
 
@@ -274,12 +274,8 @@ def tree_candidate(tmp_path, monkeypatch):
             assert "https://github.com/owner/repo.git" in argv
             assert "secret-token" not in " ".join(argv)
             assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
-            assert kwargs["env"]["GIT_CONFIG_KEY_0"] == "http.extraHeader"
-            assert kwargs["env"]["GIT_CONFIG_VALUE_0"].startswith("Authorization: Basic ")
             argv = [str(remote) if arg == "https://github.com/owner/repo.git" else arg
                     for arg in argv]
-        elif argv[0] == "prlimit":
-            assert not {"GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} & kwargs["env"].keys()
         return popen(argv, **kwargs)
 
     monkeypatch.setenv("GH_TOKEN", "secret-token")
@@ -346,6 +342,29 @@ def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate):
     seen = []
     assert attest(policy=lambda n, _: seen.append(n)) == [{"number": 102, "head_sha": source}]
     assert seen == [102]
+
+
+def test_candidate_transport_configuration_is_scoped_to_fetch(tree_candidate, monkeypatch):
+    attest, _, _, _, _, source, _ = tree_candidate
+    popen = subprocess.Popen
+    proxy = "http://proxy.invalid:8080"
+    monkeypatch.setenv("HTTPS_PROXY", proxy)
+
+    def check_environment(argv, **kwargs):
+        if argv[0] == "prlimit":
+            env = kwargs["env"]
+            if "fetch" in argv:
+                assert env["HTTPS_PROXY"] == proxy
+                assert env["GIT_CONFIG_COUNT"] == "1"
+                assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
+                header = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+                assert base64.b64decode(header) == b"x-access-token:secret-token"
+            else:
+                assert not {"HTTPS_PROXY", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} & env.keys()
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", check_environment)
+    assert attest() == [{"number": 102, "head_sha": source}]
 
 
 @pytest.mark.parametrize("mutation", ["replaced", "withdrawn", "extra", "tampered", "missing"])
