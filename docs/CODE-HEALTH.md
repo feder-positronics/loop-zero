@@ -80,12 +80,17 @@ repository instead of adding prompt prose—respecting the
 copying raw PR findings into files or backlogs. Prefer one maintained, pinned
 tool per job inside `[checks].commands`: for Python, Ruff
 (`UP/B/SIM/PIE/PERF/RUF/RET/ERA/ARG/PGH003/PGH004`, `ARG` off in tests), a
-per-function complexity ratchet, `tach` for module boundaries, and one type
-checker (`ty` or `basedpyright`); for TypeScript, `tsc --noEmit`, Oxlint with
-`@cloudflare/oxlint-config`, and `knip` for dead files, exports and
-dependencies. Dependency hygiene (`deptry`) is a consumer choice where packages
-grow; heuristic detectors (`vulture`, duplicate finders such as `jscpd`) belong
-in audit collectors, not blocking gates. Pin exact versions, keep checks
+per-function complexity ratchet, `tach` for declared module boundaries, and one
+type checker (`ty` or `basedpyright`); for TypeScript, `tsc --noEmit` and Oxlint
+with `@cloudflare/oxlint-config` (plus restricted-import rules or
+`dependency-cruiser` when a consumer needs graph-wide layer rules). Entry-point
+graph checks (`knip` for dead files, exports and dependencies; `deptry` for
+Python dependency hygiene) start in the consumer's audit collector and graduate
+to `[checks].commands` per finding class once an advisory trial demonstrates
+reliable results for that repository's entry points and declarations (for
+example promoting missing or unlisted dependencies before unused exports or
+packages). Heuristic detectors (`vulture`, duplicate finders such as `jscpd`)
+stay in audit collectors, never blocking gates. Pin exact versions, keep checks
 runnable offline, and fix findings rather than suppress them (any suppression
 carries its reason). When introducing a new check to a consuming repository,
 trial it advisory-first on historical and live PRs in one repository to measure
