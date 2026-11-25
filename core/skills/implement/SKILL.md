@@ -26,10 +26,9 @@ authorization, locking/concurrency or policy logic, list edge cases in Acceptanc
 and map each to a test or recorded evidence. Observe required UI/runtime behavior within actual permissions; include visual
 proof for UI changes per [Reporting](../../CONTRACT.md#reporting). Required
 acceptance that remains unobserved stays open
-with a next-action owner. Record tested revisions, observations, commands,
-results, trade-offs and limits in Notes or human Validation; evidence from an
-earlier head cannot establish a current gate verdict.
-Apply [local gate receipt reuse](../../CONTRACT.md#gate-execution-and-delivery-priority).
+with a next-action owner. Record the tested revision, observations, trade-offs
+and limits in Notes or human Validation. Follow the contract's
+[gate receipt fields and reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 Run commands expected to take more than about two minutes detached as in
 [Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
