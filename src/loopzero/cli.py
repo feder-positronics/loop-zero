@@ -276,7 +276,6 @@ def _readiness(
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(reviews, head, publishers, repo=config.repo, number=pr.number)
     review_at = review.get("submitted_at") if review else None
-    # GitHub's UTC submission time predates this process; monotonic time cannot date it.
     review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
                   .replace(tzinfo=UTC).timestamp()) if review_at else None
     result = github.readiness(
@@ -285,8 +284,9 @@ def _readiness(
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
+        # GitHub timestamps establish stale verdicts even if the local clock lags.
         stale_verdict_grace=(
-            workflow_wait and review_age is not None and 0 <= review_age < STALE_VERDICT_GRACE
+            workflow_wait and review_age is not None and review_age < STALE_VERDICT_GRACE
         ),
     )
     report = _current_check_report(wt, config, head)
