@@ -194,8 +194,8 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> 
                  "loopzero-alternate", alternate],
                 cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT,
             )
-        except _proc.ProcTimeout as exc:
-            raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from exc
+        except _proc.ProcTimeout:
+            raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from None
         if result.exit_code != 0:
             raise SandboxUnavailable(remedy)
 

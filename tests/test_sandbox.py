@@ -6,6 +6,7 @@ import resource
 import shutil
 import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 
 import pytest
@@ -284,6 +285,20 @@ def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
 
     assert str(info.value) == f"bwrap namespace creation timed out after {sandbox.GIT_TIMEOUT:g}s"
     assert info.value.__suppress_context__
+
+
+def test_alternate_probe_timeout_traceback_omits_process_diagnostics(git_repo, monkeypatch):
+    def timed_out(*args, **kwargs):
+        raise sandbox._proc.ProcTimeout("private alternate probe diagnostic")
+
+    monkeypatch.setattr(sandbox, "_git", lambda *_: "alternate: /tmp/objects\n")
+    monkeypatch.setattr(sandbox._proc, "run", timed_out)
+    with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
+        sandbox._preflight_alternates(make_config(), git_repo, ["bwrap", "--"])
+
+    rendered = "".join(traceback.format_exception(info.value))
+    assert "private alternate probe diagnostic" not in rendered
+    assert "Create a standalone clone" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
