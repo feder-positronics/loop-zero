@@ -796,7 +796,7 @@ def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettin
         formats.append(("current", True))
         if old_settings:
             formats.append(("summary", True))
-    if result.family == "claude" and not old_settings:
+    if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
     if result.family == "codex" and old_settings:
         formats.append(("summary", False))
@@ -827,8 +827,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
-            raise CliError("conflicting or ambiguous review publication; for a publication format mismatch, "
-                           "use the publishing CLI revision or upgrade the recovery CLI")
+            hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
+                    if expected is None else "")
+            raise CliError(f"conflicting or ambiguous review publication{hint}")
         comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id

@@ -346,7 +346,8 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
 def test_repost_confirms_pre_configured_claude_settings(wt, gh, fake_bin, monkeypatch, capsys):
     head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
     assert run(capsys, "review")[0] == 130
-    saved = json.loads((wt / ".loopzero" / f"review-{head[:12]}-primary.json").read_text())
+    path = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    saved = json.loads(path.read_text())
     requested = saved["provenance"]["requested_settings"][0]
     body = (
         f'{support.marker(head, "primary", "model")}\n'
@@ -360,6 +361,10 @@ def test_repost_confirms_pre_configured_claude_settings(wt, gh, fake_bin, monkey
     )
     row = {"id": 17, "commit_id": head, "body": body, "state": "COMMENTED", "user": {"login": LOGIN}}
     gh.respond(reviews_key(), [row])
+    assert "configured_settings" in saved["provenance"]
+    assert run(capsys, "review", "--repost")[0] == 1
+    saved["provenance"].pop("configured_settings")
+    path.write_text(json.dumps(saved))
     code, _out, err = run(capsys, "review", "--repost")
     assert code == 0, err
     gh.respond(reviews_key(), [{**row, "body": body + "changed"}])
