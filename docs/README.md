@@ -21,6 +21,8 @@ and setup.
   describe September 24, not the current backlog.
 - [design/2026-10-07-deterministic-delivery-design-assumptions.md](design/2026-10-07-deterministic-delivery-design-assumptions.md) —
   design rationale, dated reviewer evidence and native compatibility limits.
+- [design/2026-10-12-contributor-review-exception.md](design/2026-10-12-contributor-review-exception.md) —
+  bounded `#264` owner-approved contributor-review exception mechanics.
 - [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
   and verification through the delivery contract.
 - [WORKFLOW.md](WORKFLOW.md) — plain-language diagrams: idea to merged, review

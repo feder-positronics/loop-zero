@@ -237,7 +237,7 @@ def test_scratch_rejects_symlink_parent_before_mkdir(git_repo, bwrap_log, tmp_pa
 
 @pytest.mark.parametrize("entry", [".", ".git", ".git/cache"])
 def test_scratch_rejects_worktree_and_git_metadata(git_repo, bwrap_log, entry):
-    with pytest.raises(sandbox.SandboxUnavailable, match="unsafe|Git metadata"):
+    with pytest.raises(sandbox.SandboxUnavailable, match=r"unsafe|Git metadata"):
         sandbox.run_checks(make_config(scratch=(entry,)), git_repo)
 
 
@@ -565,11 +565,13 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     else:
         data = json.loads(receipt.read_text())
         if change == 'failed':
-            for row in data['results']: row['exit_code'] = 1
+            for row in data['results']:
+                row['exit_code'] = 1
         elif change == 'dirty_receipt':
             data['dirty'] = True
         else:
-            for row in data['results']: row.pop('input_key')
+            for row in data['results']:
+                row.pop('input_key')
         receipt.write_text(json.dumps(data))
     report = sandbox.run_checks(cfg, git_repo, status=(messages := []).append)
     assert [r.command for r in report.results] == list(cfg.checks)

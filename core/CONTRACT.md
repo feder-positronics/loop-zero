@@ -214,8 +214,7 @@ Loop-zero serves internal projects only and does not target tamper resistance fo
 Freeze new work on evidence projections, receipt archives, attempt reservations and reviewer version pins, simplifying or deleting them when they break or obstruct delivery.
 
 The Codex runner records the CLI version observed at launch in the review receipt.
-All PRs use the ordinary review budget and eligibility rules. The retired startup
-incident adjudication is retained as historical evidence.
+All PRs use the ordinary review budget and eligibility rules.
 
 - One primary and at most one delta per PR. The delta reads only
   changes since the primary; unresolved primary findings still count under
@@ -259,39 +258,18 @@ parseable verdict. It consumes no new budget and must not be published, merged
 with chunks or replayed from a saved result. Quoted diagnostic text and absence
 of tool calls alone do not invalidate a review.
 
-For named Codex review recoveries, HOLD when required evidence is missing or
-unknown. Retain the restricted Codex review receipt and writer clone until
-completion.
-
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 
 ### Owner-approved contributor-review exception
 
-Only the mixed-authoring route confirmed by the owner's
-[#264 ruling](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6025584110)
-and [scope confirmation](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6031084292)
-permits genuine native review by the less-writing family, with reduced
-assurance rather than independence.
-
-The squash commit uses a truthful `Co-Authored-By` trailer for the main
-contributing model. Disclose every minority writing model and its work in
-the commit body and a PR comment; label the PR narrative and comment
-**owner-approved contributor-review exception**. Only this route permits
-minority prose disclosure instead of trailers. Determine contributors from
-actual work, without calculated percentages or numerical minority thresholds;
-never manipulate attribution, invent a main author, silently discard credit
-or assume an automatic waiver.
-
-Before the first primary, this route may squash/rewrite, preserve truthful
-main attribution and full minority disclosure, then push for review.
-Merge-time squash cannot establish it. After primary review, the delta
-requires that exact primary as an ancestor: only unreviewed repairs may be
-rewritten where this disclosure route and truthful authorship permit; never
-credit someone else's repair to the main contributor.
-
-The selector, budget and all exact-head runner review, checks, findings,
-readiness and merge gates remain unchanged. Prose proves no permission.
-Outside the confirmed scope, retain all-writer trailers.
+Only the confirmed mixed-authoring route
+([#264 ruling](../docs/design/2026-10-12-contributor-review-exception.md)) permits
+genuine native review by a less-writing family, with reduced assurance rather
+than independence. Use truthful main-contributor trailers, disclose every
+minority writing model in the commit body and PR comment labelled
+**owner-approved contributor-review exception**, and never rewrite past an
+existing primary review; selector, budget and readiness gates stay unchanged.
+Outside that confirmed scope, retain all-writer trailers.
 
 ## Sandbox rules for checks
 

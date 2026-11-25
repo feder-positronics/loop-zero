@@ -10,8 +10,13 @@ relevant code. Use [delegation guidance](../../../docs/DELEGATION.md) for execut
 
 Before slicing, restate the ask in one precise sentence and check it against the
 issue or request. Choose a coherent, reviewable acceptance slice. Split or
-sequence when coupling, uncertainty or ownership makes integration hard. When a
-cheap observation on real data or the real environment could change the design
+sequence when coupling, uncertainty or ownership makes integration hard. Scale
+planning depth to the cost of reversing a choice later: spend planning on
+persisted state, CLI or config interfaces, trust boundaries, public APIs and
+shared abstractions—asking "if this assumption changes after merge, what
+existing state or callers must still work?" (use a compact state table when
+transitions matter)—and settle cheap, reversible choices during implementation.
+When a cheap observation on real data or the real environment could change the design
 or its target, sequence that observation first and derive targets from it. Give
 each task an objective, observable acceptance, affected paths, owners, governing
 constraints and proving `workflow.toml` checks. Add checks only when existing

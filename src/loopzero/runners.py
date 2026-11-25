@@ -6,6 +6,7 @@ Host authentication is bound read-write into the sandbox HOME so OAuth refreshes
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -146,6 +147,10 @@ def _review_policy(kind: str) -> str:
             + 'breaks acceptance; "suggestion" is a non-blocking remark. Report only what you can justify.',
             "Be skeptical: treat the task's claims and passing tests as hypotheses; trace changed logic "
             + "through callers, edge cases and failure paths, and flag inconsistencies.",
+            "Also judge maintainability: flag workarounds that leave the underlying defect in place "
+            + "or structural erosion (duplicating existing logic, adding unnecessary shims, or "
+            + "inflating already complex functions) as important when it creates ongoing defect or "
+            + "divergence risk, and as a suggestion otherwise; prefer subtractive fixes.",
             "Make each finding precise and constructive: its failure condition, impact and smallest fix.",
             "When a finding is one instance of a defect class (a missed caller, reader, state "
             + "transition or retry path), name every other instance in this diff in the same review.",
@@ -274,10 +279,8 @@ def _run(
         combined = f"{done.stdout}\n{done.stderr}"
         envelope = None
         if family == "claude":
-            try:
+            with contextlib.suppress(json.JSONDecodeError, ValueError):
                 envelope = _extract_json_object(done.stdout)
-            except (json.JSONDecodeError, ValueError):
-                pass
         if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
             raise RunnerAuthFailed(f"{family}: CLI is not authenticated\n{_tail(combined)}")
         if _subscription_exhausted(combined, envelope):

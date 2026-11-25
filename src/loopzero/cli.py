@@ -301,7 +301,7 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         digest = hashlib.sha256(commands.encode()).hexdigest()
         print(f"receipt {action}: head={report.head} content={content} "
               f"config=commands-sha256:{digest} environment=unknown")
-    except Exception:  # noqa: BLE001 — output must never affect the verdict
+    except Exception:  # output must never affect the verdict
         return
 
 
@@ -1091,6 +1091,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
+    return None
 
 
 def _landed(config: Config, pr: github.PR, closed: list[github.GhError]) -> str | None:
@@ -1123,6 +1124,7 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
             raise CliError(f"PR #{pr.number} left the merge queue unmerged")
     if closed:
         raise closed[0]
+    return None
 
 
 def _wait_for_mergify(
@@ -1158,6 +1160,7 @@ def _wait_for_mergify(
                            f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
     if closed:
         raise closed[0]
+    return None
 
 
 class _AdmissionDeadline(Exception):

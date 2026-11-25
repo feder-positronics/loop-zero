@@ -419,8 +419,8 @@ def _pr_from_rest(data: object) -> PR:
         merge_state = data["mergeable_state"]
         if (type(number) is not int or number < 1 or state not in {"open", "closed"}
                 or type(merged) is not bool or type(draft) is not bool
-                or mergeable is not None and type(mergeable) is not bool
-                or merge_state is not None and not isinstance(merge_state, str)
+                or (mergeable is not None and type(mergeable) is not bool)
+                or (merge_state is not None and not isinstance(merge_state, str))
                 or (merged and state != "closed")
                 or not isinstance(url, str) or not url.startswith("https://")
                 or not isinstance(base_ref, str) or not base_ref
@@ -568,7 +568,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         evidence = (runners.codex_evidence(result) if result.provenance
                     else runners._codex_evidence(result))
     if evidence is not None:
-        if legacy_display or publication and (evidence["repo"], evidence["pr"]) != publication:
+        if legacy_display or (publication and (evidence["repo"], evidence["pr"]) != publication):
             raise runners.RunnerBadOutput("codex: publication context mismatch")
         first, separator, rest = prefix.partition("\n")
         marker = runners.REVIEW_MARKER_RE.fullmatch(first)
@@ -714,7 +714,7 @@ def post_review(
     """
     author = (pr or pr_view(repo, number)).author
     token = app_token() if token is None else token  # "" means the operator identity
-    if token or author and author == login(token=token):
+    if token or (author and author == login(token=token)):
         event = "COMMENT"
     else:
         event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"

@@ -337,8 +337,8 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
             changed = git("commit-tree", git("rev-parse", f"{changed}^{{tree}}"),
                           "-p", parents[0], "-p", parents[1], "-m", "forged merge")
         kwargs["head"] = changed
-    with pytest.raises(CandidateError, match="Missing Mergify parent batches parent:.*"
-                       "(tree mismatch|objects unavailable)"):
+    with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*"
+                       r"(tree mismatch|objects unavailable)"):
         attest(**kwargs)
 
 
@@ -346,7 +346,7 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
     from loopzero import candidate
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
-    with pytest.raises(CandidateError, match="Missing Mergify parent batches parent:.*bound"):
+    with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*bound"):
         tree_candidate[0]()
 
 
@@ -380,7 +380,7 @@ def test_vanished_parent_orders_live_sources_by_topology(tree_candidate):
 def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
     attest, _, commit, *_ = tree_candidate
     main = commit("source", "conflicting main content\n")
-    with pytest.raises(CandidateError, match="parent:.*integration conflict"):
+    with pytest.raises(CandidateError, match=r"parent:.*integration conflict"):
         attest(main_head=main)
 
 
@@ -589,7 +589,11 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         settled = status()
         if stop == "changed" and len(reads) >= 6:
             settled["batches"][1]["sub_batches"][0]["id"] = "replacement"
-        return settled if (second and len(reads) == 1 or stop == "settled" and len(reads) > 1 + second or stop == "changed" and len(reads) >= 6) else ambiguous
+        return settled if (
+            (second and len(reads) == 1)
+            or (stop == "settled" and len(reads) > 1 + second)
+            or (stop == "changed" and len(reads) >= 6)
+        ) else ambiguous
     monkeypatch.setattr(candidate, "_retry_clock", lambda: clock[0])
     monkeypatch.setattr(candidate, "_retry_sleep", sleep)
     def run():

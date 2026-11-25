@@ -100,6 +100,7 @@ def api_get(repo: str, suffix: str) -> object | None:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
         _retry_sleep(delay)
+    return None
 
 
 def membership(repo: str, number: int, queue: str) -> Membership | None:
@@ -153,8 +154,8 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
         rules = document["queue_rules"] if isinstance(document["queue_rules"], list) else []
         matched = [r for r in rules if isinstance(r, dict) and r.get("name") == queue]
         if (mode.get("mode") != "serial" or type(parallel) is not int or parallel < 1
-                or len(matched) != 1 or parallel == 1  # one lone check rewrites heads in place
-                and (type(batch := matched[0].get("batch_size")) is not int or batch <= 1)):
+                or len(matched) != 1 or (parallel == 1  # one lone check rewrites heads in place
+                and (type(batch := matched[0].get("batch_size")) is not int or batch <= 1))):
             return False
     except (KeyError, TypeError, ValueError, yaml.YAMLError, RecursionError):
         return False

@@ -20,6 +20,10 @@ concurrent, failure, and retry cases. Check:
 - Each acceptance criterion has proof; tests exercise the claimed behavior.
 - Named tests and checks exist in the diff or tree.
 - Callers, data shapes, permissions, builds, docs, and contract remain consistent.
+- Maintainability: flag workarounds that leave the real defect in place, duplicated
+  decision logic, unnecessary shims/layers, or added code where simplifying or
+  deleting would do (`important` when it creates ongoing defect or divergence risk;
+  `suggestion` otherwise).
 
 Audit sibling callers, readers, transitions, and retries when a defect reveals
 a class; report its instances together. Distinguish unavailable proof from
