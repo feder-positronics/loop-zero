@@ -44,7 +44,7 @@ jobs:
         run: uv run --python 3.14 --locked --group dev pytest -q
       - name: Wheel builds and CLI runs
         run: |
-          uv build --python 3.14 --build-constraints build-constraints.txt --wheel -q
+          uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel -q
           smoke_env="$(mktemp -d)"
           uv venv --python 3.14 "$smoke_env"
           uv export --locked --no-dev --no-emit-project -o "$smoke_env/runtime.txt"

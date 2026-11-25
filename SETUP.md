@@ -40,12 +40,12 @@ uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha
 ```
 
 For a verified CI install, check out the full commit SHA and run these commands
-from its repository root. The build constraint verifies the Hatchling wheel.
+from its repository root. The build constraints verify Hatchling and its build dependencies.
 The lock export supplies the hashes for the runtime dependencies.
 
 ```sh
 install_dir=$(mktemp -d)
-uv build --python 3.14 --build-constraints build-constraints.txt --wheel --out-dir "$install_dir"
+uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel --out-dir "$install_dir"
 uv export --locked --no-dev --no-emit-project -o "$install_dir/runtime.txt"
 uv venv --python 3.14 "$install_dir/venv"
 python="$install_dir/venv/bin/python"
