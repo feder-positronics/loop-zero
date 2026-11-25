@@ -545,6 +545,24 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
     assert not (fake_bin / "claude.stdin").exists()
 
 
+@pytest.mark.parametrize("options", [(), ("--repost",)])
+def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
+    monkeypatch.setattr(github, "app_token", lambda: "app-token")
+    endpoint = f"repos/{REPO}/pulls/7"
+    gh.respond(pr_list_key(), [{"number": 7}])
+    gh.fail(f"api {endpoint}", "gh: Not Found (HTTP 404)")
+
+    code, out, err = run(capsys, "review", *options)
+
+    assert (code, out) == (1, "")
+    assert "PR #7" in err and endpoint in err and "HTTP 404" in err
+    assert "branch" in err and "lz/t1" in err
+    assert "rerun `" + " ".join(("loopzero", "review", *options)) + "`" in err
+    assert [call["argv"] for call in gh.calls] == [
+        pr_list_key().split(), ["api", endpoint],
+    ]
+
+
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
