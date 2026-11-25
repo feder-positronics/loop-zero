@@ -65,6 +65,7 @@ def run(
     merge_output: bool = False,
     input: str | None = None,
     encoding: str | None = None,
+    pass_fds: tuple[int, ...] = (),
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
@@ -86,6 +87,7 @@ def run(
             text=True,
             encoding=encoding,
             errors="replace",
+            pass_fds=pass_fds,
             start_new_session=os.name == "posix",
         ) as proc:
             try:

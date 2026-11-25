@@ -15,7 +15,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from os.path import commonpath
@@ -317,10 +317,11 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> 
                   "Create a standalone clone without --shared/--reference, then run "
                   "loopzero start there and rerun loopzero check.")
         try:
-            result = _proc.run(
-                [*prefix, "/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"',
-                 "loopzero-alternate", alternate],
-                cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT,
+            result = _run_bwrap(
+                config, worktree, prefix,
+                ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"',
+                 "loopzero-alternate", alternate),
+                timeout=GIT_TIMEOUT,
             )
         except _proc.ProcTimeout:
             raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from None
@@ -395,13 +396,12 @@ def _run_one(
 ) -> CheckResult:
     try:
         limits = config.limits
-        done = _proc.run(
-            [*prefix, "prlimit",
+        done = _run_bwrap(
+            config, worktree, prefix,
+            ("prlimit",
              f"--as={_cap_limit(limits.memory_mb * 1024 * 1024, resource.RLIMIT_AS)}",
              f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
-             "--", "/bin/sh", "-c", command],
-            cwd=worktree,
-            env_allowlist=config.env_allowlist,
+             "--", "/bin/sh", "-c", command),
             timeout=timeout,
             merge_output=True,
         )
@@ -414,9 +414,7 @@ def _run_one(
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
     """Raise `SandboxUnavailable` unless bwrap can build the exact sandbox we will use."""
     try:
-        probe = _proc.run(
-            [*prefix, "true"], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
-        )
+        probe = _run_bwrap(config, worktree, prefix, ("true",), timeout=GIT_TIMEOUT)
     except _proc.ToolMissing as exc:
         raise SandboxUnavailable(
             f"bwrap binary missing while starting the namespace probe: {exc}\n"
@@ -441,6 +439,26 @@ def _sandbox_environment(config: Config) -> dict[str, str]:
     }
 
 
+def _run_bwrap(
+    config: Config, worktree: Path, prefix: list[str], command: Sequence[str],
+    *, timeout: float, merge_output: bool = False,
+) -> _proc.Completed:
+    # Let bwrap apply settings after clearing its environment. Only PATH is
+    # needed to locate the launcher. The option stream is private to the child.
+    with tempfile.TemporaryFile() as options:
+        for name, value in _sandbox_environment(config).items():
+            if "\0" in value:
+                raise ValueError("embedded null byte in check environment")
+            options.write(os.fsencode(f"--setenv\0{name}\0{value}\0"))
+        options.seek(0)
+        fd = options.fileno()
+        return _proc.run(
+            [*prefix[:-1], "--args", str(fd), "--", *command],
+            cwd=worktree, env_allowlist=("PATH",) if "PATH" in config.env_allowlist else (),
+            timeout=timeout, merge_output=merge_output, pass_fds=(fd,),
+        )
+
+
 def bwrap_argv(
     config: Config,
     worktree: Path,
@@ -454,8 +472,9 @@ def bwrap_argv(
 ) -> list[str]:
     """Build the bwrap command line up to and including the `--` separator.
 
-    With ``clearenv=False`` the caller's (already filtered) environment is inherited
-    instead of cleared, so secrets never appear as ``--setenv`` arguments.
+    Checks clear the environment and supply their settings through a file
+    descriptor. With ``clearenv=False`` the reviewer inherits its filtered
+    process environment and applies its sandbox defaults.
     ``writable_binds`` overlays specific paths inside the otherwise private HOME.
     """
     argv = [
@@ -496,10 +515,10 @@ def bwrap_argv(
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
-    for key, value in _sandbox_environment(config).items():
-        if key != "HOME":
+    if not clearenv:
+        for key, value in _sandbox_environment(config).items():
             argv += ["--setenv", key, value]
-    argv += ["--setenv", "HOME", SANDBOX_HOME, "--"]
+    argv.append("--")
     return argv
 
 
