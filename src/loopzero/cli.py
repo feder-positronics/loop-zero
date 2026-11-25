@@ -282,9 +282,8 @@ def _readiness(
             workflow_wait and review_age is not None and 0 <= review_age < STALE_VERDICT_GRACE
         ),
     )
-    report = _load_report(wt)
-    if (report is None or report.head != head or report.dirty or not report.ok
-            or tuple(result.command for result in report.results) != config.checks):
+    report = _current_check_report(wt, config, head)
+    if report is None:
         result = github.Readiness(
             ready=False,
             reasons=(*result.reasons, "run loopzero check at this head"),
@@ -314,6 +313,16 @@ def _readiness(
 # --------------------------------------------------------------------------- checks report
 
 
+def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
+    report = _load_report(wt)
+    if (report is None or report.head != head or report.dirty or not report.ok
+            or tuple(result.command for result in report.results) != config.checks
+            or report.settings_sha256 is None
+            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
+        return None
+    return report
+
+
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
     """Best-effort transcript identity; never authority or environment attestation."""
     try:
@@ -336,6 +345,8 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
+    if report.settings_sha256 is not None:
+        payload["settings_sha256"] = report.settings_sha256
     _write_json_atomically(path, payload)
 
 
@@ -366,7 +377,8 @@ def _load_report(wt: Path) -> CheckReport | None:
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
-        return CheckReport(head=str(data["head"]), dirty=dirty, results=results)
+        return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
+                           settings_sha256=data.get("settings_sha256"))
     except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
@@ -567,11 +579,15 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "that cache.",
                     file=sys.stderr,
                 )
-    if report.head == worktree.head(wt):
-        _save_report(wt, report)
-        if report.ok and not report.dirty:
-            _print_receipt(wt, report, "produced")
-        _refresh_pr_checks(wt, config)
+    current_head = worktree.head(wt)
+    if report.head != current_head:
+        print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
+              file=sys.stderr)
+        return 1
+    _save_report(wt, report)
+    if report.ok and not report.dirty:
+        _print_receipt(wt, report, "produced")
+    _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
 
@@ -799,15 +815,17 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
 
-def _review_formats(result: ReviewResult) -> list[tuple[str, bool, bool]]:
+def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettingsLayout, bool]]:
     old_settings = "requested_settings" not in result.provenance
-    formats = [(False, False)]
+    formats: list[tuple[github.ReviewSettingsLayout, bool]] = [("current", False)]
     if runners.codex_evidence(result) is None:
-        formats.append((False, True))
+        formats.append(("current", True))
         if old_settings:
-            formats.append((True, True))
+            formats.append(("summary", True))
+    if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
+        formats.append(("requested-reported", True))
     if result.family == "codex" and old_settings:
-        formats.append((True, False))
+        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
@@ -835,7 +853,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
-            raise CliError("conflicting or ambiguous review publication")
+            hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
+                    if expected is None else "")
+            raise CliError(f"conflicting or ambiguous review publication{hint}")
         comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
@@ -922,7 +942,8 @@ def _run_review(
         print(runtime_source)
     fallback = ""
     reasons: list[str] = []  # published; runner detail stays in local stderr and failures
-    for family in candidates + excluded:
+    attempts = candidates + excluded
+    for index, family in enumerate(attempts):
         if family in unusable:
             failures.append(unusable[family])
             continue
@@ -945,28 +966,34 @@ def _run_review(
                 result = runners.merge_reviews(chunk_results)
                 break
         except RUNNER_FAILURES as exc:
-            reason = str(exc).splitlines()[0]
-            detail = "\n".join(str(exc).splitlines()[:3])
-            if isinstance(exc, runners.RunnerAuthFailed):
-                login = "claude auth login" if family == "claude" else "codex login"
-                detail += f"\nFix: run `{login}`."
-            elif isinstance(exc, runners.RunnerUsageLimit):
-                detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
-            elif isinstance(exc, runners.RunnerMissing):
-                package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-                detail += f"\nFix: install it with `npm install -g {package}`."
+            reason, detail, fallback_reason = _review_failure(family, exc)
             failures.append(detail)
-            reasons.append(f"{family}: " + (
-                _FALLBACK_REASONS[0] if isinstance(exc, runners.RunnerAuthFailed)
-                else _FALLBACK_REASONS[1] if isinstance(exc, runners.RunnerUsageLimit)
-                else _FALLBACK_REASONS[2] if isinstance(exc, runners.RunnerMissing)
-                else _FALLBACK_REASONS[3]))
-            print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
+            reasons.append(f"{family}: {fallback_reason}")
+            if any(next_family in selected for next_family in attempts[index + 1:]):
+                print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
             _independence_message(authors, excluded, failures)
         )
     return dataclasses.replace(result, fallback=fallback)
+
+
+def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
+    lines = str(exc).splitlines()
+    detail = "\n".join(lines[:3])
+    fallback_reason = _FALLBACK_REASONS[3]
+    if isinstance(exc, runners.RunnerAuthFailed):
+        login = "claude auth login" if family == "claude" else "codex login"
+        detail += f"\nFix: run `{login}`."
+        fallback_reason = _FALLBACK_REASONS[0]
+    elif isinstance(exc, runners.RunnerUsageLimit):
+        detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
+        fallback_reason = _FALLBACK_REASONS[1]
+    elif isinstance(exc, runners.RunnerMissing):
+        package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
+        detail += f"\nFix: install it with `npm install -g {package}`."
+        fallback_reason = _FALLBACK_REASONS[2]
+    return lines[0], detail, fallback_reason
 
 
 def _independence_message(
@@ -1076,14 +1103,15 @@ def cmd_ready(args: argparse.Namespace) -> int:
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                     shown=readiness.reasons if kicked else ())
+                                     shown=readiness.reasons if kicked else (), args=args)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
-            waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started)
+            waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
+                                         args=args)
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
@@ -1159,11 +1187,12 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None, shown: tuple[str, ...] = (),
+    started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
-        return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started, shown=shown)
+        return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
+                                shown=shown, args=args)
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1172,7 +1201,7 @@ def _wait_with_deadline(
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, bounded=True)
+                                      shown=shown, args=args, bounded=True)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1188,9 +1217,20 @@ def _print_check_wait_timeout(pr: github.PR) -> None:
         print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
 
 
+def _verify_wait_config(
+    args: argparse.Namespace | None, wt: Path, config: Config, head: str,
+) -> None:
+    if args is None or (latest := _load_config(args, wt, pin_checks=True)) == config:
+        return
+    if _current_check_report(wt, latest, head) is None:
+        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
+    raise CliError("workflow settings changed while waiting; retry with the current settings")
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None, shown: tuple[str, ...] = (), bounded: bool = False,
+    started: float | None = None, shown: tuple[str, ...] = (),
+    args: argparse.Namespace | None = None, bounded: bool = False,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
@@ -1203,12 +1243,13 @@ def _wait_for_checks(
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
+        _verify_wait_config(args, wt, config, pr.head_sha)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons, bounded=bounded)
+                                    shown=readiness.reasons, args=args, bounded=bounded)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
@@ -1299,6 +1340,15 @@ MERGIFY_DEQUEUE_HINT = (
 )
 
 
+def _mergify_departure(
+    config: Config, pr: github.PR, queue: str, closed: list[github.GhError],
+) -> str | None:
+    sha = _landed(config, pr, closed)
+    if not sha and not closed:
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    return sha
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1308,6 +1358,7 @@ def _wait_for_mergify(
     queue = config.mergify_queue
     assert queue is not None
     state = None
+    deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = _landed(config, pr, closed)
@@ -1316,20 +1367,19 @@ def _wait_for_mergify(
         if not mergify.configured(config.repo, config.base_branch, queue):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
-        sha = _landed(config, pr, closed)
-        if sha:
+        deferred_landing_read = confirmed and state is not None and not closed
+        if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            sha = _landed(config, pr, closed)
-            if sha:
+            if sha := _mergify_departure(config, pr, queue, closed):
                 return sha
-            if closed:
-                continue
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    # A queued, open PR normally gets its next landing read on the next tick.
+    if deferred_landing_read and (sha := _landed(config, pr, closed)):
+        return sha
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
@@ -1410,7 +1460,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started)
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started,
+                                  args=args)
         if waited is None:
             return 3
         pr, readiness, _ = waited
