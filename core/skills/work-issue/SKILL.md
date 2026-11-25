@@ -7,18 +7,15 @@ description: Deliver one live GitHub issue through verified merge and closure or
 
 Use [the contract](../../CONTRACT.md); the issue owns intake context, the PR owns
 delivery evidence. Read live issue acceptance, comments, artifacts and linked
-work. Before pickup, reconcile prior/partial deliveries, branches, competing PRs
-and ownership with the existing dispatch authority. Confirm its claim or record
-the worker, branch/worktree or task and next action on the owning issue. Comments
-record a claim but cannot stop a second worker, so do not launch work that
-overlaps; reconcile its ownership first. Verify remote identity before mutation
+work. Before pickup, reconcile prior and partial deliveries with the issue's
+[dispatch authority](../../../docs/DELEGATION.md#team-roles).
+Verify remote identity before mutation
 and connected environment before relying on production claims. Apply
 [inherited-work guidance](reference.md#inherited-work) to continuations.
 
 Retain an inherited task worktree or use `loopzero start` for a new delivery.
 Record observable acceptance and the issue link. Deliver through
 [implement](../implement/SKILL.md), using applicable [safeguards](reference.md).
-As an unattended worker, follow [the worker role's blocker route](../../../docs/DELEGATION.md#team-roles).
 Recheck collisions before publication and again before merge, rereading live
 acceptance, prior delivery and ownership. Reconcile changed state before proceeding.
 Follow the contract's owner queue route and merge authority.
