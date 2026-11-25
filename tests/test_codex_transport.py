@@ -462,7 +462,9 @@ def test_large_publication_confirmation_and_hosted_agreement(
     gitdir = native[2] / ".git/info/exclude"
     gitdir.write_text(gitdir.read_text() + "\n.loopzero/\n")
     cli._save_review(native[2], result)
-    cli._save_report(native[2], CheckReport(head, False, ()))
+    cli._save_report(
+        native[2], CheckReport(head, False, (), cli.sandbox.settings_fingerprint(cfg, native[2]))
+    )
     pr = github.pr_view(repo, 7)
     assert (
         cli._readiness(native[2], cfg, pr, head, [review]).ready

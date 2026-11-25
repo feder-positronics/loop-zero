@@ -67,6 +67,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
     base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
+    settings_sha256 = settings_fingerprint(config, worktree, base=base)
     previous = _previous(config, worktree) if config.inputs and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
@@ -126,7 +127,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     f"dirty before: {dirty}; dirty after: {final_dirty}"
         )))
         dirty = True
-    return CheckReport(head=head, dirty=dirty, results=tuple(results))
+    return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
 def _previous(config: Config, worktree: Path) -> dict:
@@ -141,6 +142,23 @@ def _previous(config: Config, worktree: Path) -> dict:
         return {}
 
 
+def _execution_settings(config: Config, base: str) -> dict:
+    settings = {k: v for k, v in asdict(config).items() if k in {
+        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    if config.check_runner:
+        settings["base"] = base
+    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
+    return settings
+
+
+def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str:
+    """Bind a receipt to its check execution and stage reuse settings."""
+    if base is None and config.check_runner:
+        base = config_mod.base_revision(worktree, config.base_branch)
+    payload = [_execution_settings(config, base or ""), config.inputs]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
     if command not in config.inputs and "." not in config.inputs.get("*", ()):
         return None
@@ -149,12 +167,7 @@ def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> 
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    settings = {k: v for k, v in asdict(config).items() if k in {
-        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
-    if config.check_runner:
-        settings["base"] = base
-    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
-    payload = [command, __version__, settings, blobs]
+    payload = [command, __version__, _execution_settings(config, base), blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 

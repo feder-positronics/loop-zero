@@ -91,7 +91,11 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings,
-   target branch and required CI. Ancestor coverage includes outdated unresolved threads
+   target branch and required CI. The receipt must record a clean passing run
+   at that head with the current commands and check settings digest. A settings
+   change or an older receipt without the digest requires a fresh check. The
+   digest covers the execution and stage reuse settings without recording raw
+   environment values. Ancestor coverage includes outdated unresolved threads
    when checking for blocking findings and requires GitHub to report the current head as ahead.
    This comparison establishes ancestry for both merge commits and ordinary commits.
    An approved primary or eligible delta can carry forward on that ancestry check. A

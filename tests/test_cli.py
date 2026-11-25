@@ -183,9 +183,10 @@ def arm_readiness(
         {"name": "checks", "status": "completed", "conclusion": conclusion}])
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
     if local_exit is not None:
+        config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
+        results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
         cli._save_report(
-            wt, CheckReport(head, dirty, tuple(
-                CheckResult(command, local_exit, 0.1, "") for command in ("echo ok", "test -f README.md")))
+            wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config, wt))
         )
 
 
@@ -2183,7 +2184,7 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands"])
+@pytest.mark.parametrize("condition", ["missing", "wrong-head", "failed", "dirty", "wrong-commands", "legacy"])
 def test_ready_requires_clean_successful_local_report_at_head(
     wt: Path, gh: FakeGh, capsys, condition: str, head
 ) -> None:
@@ -2191,16 +2192,37 @@ def test_ready_requires_clean_successful_local_report_at_head(
     report_path = wt / ".loopzero" / "checks.json"
     if condition == "missing":
         report_path.unlink()
-    elif condition in {"wrong-head", "wrong-commands"}:
+    elif condition in {"wrong-head", "wrong-commands", "legacy"}:
         report = json.loads(report_path.read_text())
         if condition == "wrong-head":
             report["head"] = "0" * 40
-        else:
+        elif condition == "wrong-commands":
             report["results"][0]["command"] = "true"
+        else:
+            del report["settings_sha256"]
         report_path.write_text(json.dumps(report))
     code, out, _ = run(capsys, "ready")
     assert code == 1
     assert out.endswith("not ready: run loopzero check at this head\n")
+
+
+def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, head, tmp_path):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    config_path = tmp_path / "check-policy.toml"
+    command = 'test "$CHECK_POLICY" = old'
+    config = WORKFLOW.replace('"echo ok"', json.dumps(command))
+    config = config.replace("[checks]", '[checks]\nenv = { CHECK_POLICY = "old" }')
+    config_path.write_text(config)
+    args = ("--config", str(config_path))
+
+    assert run(capsys, *args, "check")[0] == 0
+    assert run(capsys, *args, "ready")[0] == 0
+
+    config_path.write_text(config.replace('CHECK_POLICY = "old"', 'CHECK_POLICY = "new"'))
+    code, out, _ = run(capsys, *args, "ready")
+    assert code == 1
+    assert out.endswith("not ready: run loopzero check at this head\n")
+    assert run(capsys, *args, "check")[0] == 1
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:

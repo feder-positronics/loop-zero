@@ -274,7 +274,9 @@ def _readiness(
     )
     report = _load_report(wt)
     if (report is None or report.head != head or report.dirty or not report.ok
-            or tuple(result.command for result in report.results) != config.checks):
+            or tuple(result.command for result in report.results) != config.checks
+            or report.settings_sha256 is None
+            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
         result = github.Readiness(
             ready=False,
             reasons=(*result.reasons, "run loopzero check at this head"),
@@ -326,6 +328,8 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
+    if report.settings_sha256 is not None:
+        payload["settings_sha256"] = report.settings_sha256
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
     ) as stream:
@@ -350,7 +354,8 @@ def _load_report(wt: Path) -> CheckReport | None:
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
-        return CheckReport(head=str(data["head"]), dirty=dirty, results=results)
+        return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
+                           settings_sha256=data.get("settings_sha256"))
     except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
