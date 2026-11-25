@@ -48,9 +48,11 @@ two days running or independent incidents repeat.
    a review date, a revert action and an install marker. Record direct owner
    and OD workflow orders the same way, without delaying the work.
 
-Lean commissions a short read-only cross-family check from the `review`
-profile for structural changes, reverts or safeguard removals. Adopt when
-both agree or defer with the disputed fact.
+Lean commissions a short read-only cross-family check for structural changes,
+reverts or safeguard removals. Follow [model resolution](../../../docs/DELEGATION.md#resolve-the-model-before-delegation)
+to select a configured `deep` route from a different family than the analyst's.
+For the default OpenAI analyst, explicitly select the Anthropic alternative.
+Adopt when both agree or defer with the disputed fact.
 
 Send one screen to Marcin in “Since you were away” using Warsaw dates and
 plain language. Put any owner decisions first under a visible heading, with
