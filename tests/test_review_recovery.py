@@ -341,3 +341,28 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
     else:
         assert code == 1 and "not in the published form" in err
     assert len([c for c in gh.calls if "--input" in c]) == 1
+
+
+def test_repost_confirms_pre_configured_claude_settings(wt, gh, fake_bin, monkeypatch, capsys):
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
+    assert run(capsys, "review")[0] == 130
+    saved = json.loads((wt / ".loopzero" / f"review-{head[:12]}-primary.json").read_text())
+    requested = saved["provenance"]["requested_settings"][0]
+    body = (
+        f'{support.marker(head, "primary", "model")}\n'
+        f"loopzero primary review by claude on `{head}`, {saved['duration_s']:.1f}s: "
+        "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
+        "Settings per native call (CLI claims, not backend attestation):\n"
+        f"- Call 1: requested model {requested['model'] or 'unknown'} "
+        f"(effort {requested['effort'] or 'unknown'}); "
+        f"CLI-reported model {saved['model'] or 'unknown'} (effort {saved['effort'] or 'unknown'})\n\n"
+        f"<details><summary>Raw reviewer output</summary>\n\n```\n{saved['raw']}\n```\n</details>"
+    )
+    row = {"id": 17, "commit_id": head, "body": body, "state": "COMMENTED", "user": {"login": LOGIN}}
+    gh.respond(reviews_key(), [row])
+    code, _out, err = run(capsys, "review", "--repost")
+    assert code == 0, err
+    gh.respond(reviews_key(), [{**row, "body": body + "changed"}])
+    assert run(capsys, "review", "--repost")[0] == 1
+    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+    assert len([c for c in gh.calls if "--input" in c]) == 1
