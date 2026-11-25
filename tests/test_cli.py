@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import re
 import shutil
@@ -92,6 +93,29 @@ def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     fake.respond(f"api repos/{REPO}/pulls/7/files",
                  [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
     return fake
+
+
+@pytest.mark.parametrize("link_error", [errno.EOPNOTSUPP, errno.EPERM, errno.EEXIST])
+def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, link_error):
+    monkeypatch.chdir(repo)
+    task = repo / ".worktrees" / "t1" / ".loopzero" / "task.md"
+
+    def fail_link(path, source):
+        if link_error == errno.EEXIST:
+            path.write_text("existing handoff")
+        raise OSError(link_error, "link failed")
+
+    monkeypatch.setattr(Path, "hardlink_to", fail_link)
+    assert cli.main(["start", "t1"]) == 1
+    error = capsys.readouterr().err
+    assert str(task) in error
+    if link_error == errno.EEXIST:
+        assert "task file already exists" in error
+        assert task.read_text() == "existing handoff"
+    else:
+        assert "from a checkout on a filesystem that supports hard links" in error
+        assert not task.exists()
+    assert not list(task.parent.glob(".task.md-*"))
 
 
 @pytest.fixture
