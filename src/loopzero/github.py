@@ -33,6 +33,7 @@ MARKER_RE = re.compile(
 )
 PAGE = 100
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
+RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -63,6 +64,10 @@ class GhError(Exception):
         self.tail = _redact_tokens(tail, token) + guidance
         command_text = _redact_tokens(" ".join(command), token)
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
+
+
+class ReadDeadline(GhError):
+    """A shared GitHub read deadline elapsed."""
 
 
 class GhMissing(GhError):
@@ -105,7 +110,7 @@ TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeo
                           r"unexpected end of JSON input|Something went wrong while executing your query", re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
-_read_scope: ContextVar[tuple[float, str] | None] = ContextVar("github_reads", default=None)
+_read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _GITHUB_TOKEN_RE = re.compile(
@@ -114,18 +119,26 @@ _GITHUB_TOKEN_RE = re.compile(
 
 
 @contextmanager
-def bounded_reads(seconds: float, token: str = ""):
-    """Share one deadline across a reconciliation's reads; never retry these reads."""
+def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False):
+    """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
-    deadline = time.monotonic() + seconds
     deadline = min(previous[0], deadline) if previous else deadline
-    scope = _read_scope.set((deadline, token))
+    scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        if time.monotonic() >= deadline:
-            raise GhError(("gh", "api"), "publication read-back deadline exceeded")
+        _read_timeout(0)
     finally:
         _read_scope.reset(scope)
+
+
+def _read_timeout(limit: float) -> float:
+    scope = _read_scope.get()
+    if scope is None:
+        return limit
+    remaining = scope[0] - time.monotonic()
+    if remaining <= 0:
+        raise ReadDeadline(("gh",), "GitHub read deadline exceeded")
+    return min(limit, remaining)
 
 
 @contextmanager
@@ -245,8 +258,8 @@ def app_token() -> str:
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=10)
-    except (ToolMissing, ProcTimeout, OSError):
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
+    except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
@@ -272,42 +285,45 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
+    rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
     patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
     request_args = args
-    if diagnostic_api and not {"--include", "-i"} & set(args):
+    if (rest_api or diagnostic_api) and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
     cwd = cwd or Path("/")
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (
-        scope[1] if scope else (app_token() if read_only else ""))
-    deadline = scope[0] if scope else None
-    for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise GhError(argv, "publication read-back deadline exceeded", token=selected)
-            timeout = min(timeout, remaining)
+    selected = token if token is not None else (scope[1] if scope else None)
+    if selected is None:
+        selected = app_token() if read_only else ""
+    delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
+    for delay in delays:
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
-                       extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
+                       extra_env={"GH_TOKEN": selected} if selected else None,
+                       timeout=_read_timeout(timeout) if scope else timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
+            if scope and scope[2]:
+                _read_timeout(timeout)
             if delay is None or not retryable:
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
                 ) from None
-            _retry_sleep(delay)
+            _retry_sleep(_read_timeout(delay) if scope else delay)
             continue
-        tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
-        if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
-            reset = _graphql_reset(args, tail, cwd, selected)
-            guidance = reset + "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
+        status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
+                                 else (None, {}, done.stdout))
+        tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
+        if done.exit_code and ((rest_api and status == "429")
+                               or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
+            guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
+                        else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
@@ -315,7 +331,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhError(argv, tail, token=selected, guidance=guidance)
         if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
-        _retry_sleep(delay)
+        _retry_sleep(_read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
         error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
@@ -325,7 +341,40 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
         raise GhError(error_command, error_tail, token=selected, guidance=guidance)
-    return _included_response(done.stdout)[2] if diagnostic_api else done.stdout
+    return body
+
+
+def _rest_rate_limit(headers: dict[str, str]) -> str:
+    resource = headers.get("x-ratelimit-resource", "")
+    remaining_value = headers.get("x-ratelimit-remaining", "")
+    remaining = int(remaining_value) if re.fullmatch(r"[0-9]{1,18}", remaining_value) else None
+    retry_after = headers.get("retry-after", "")
+    retry_seconds = re.fullmatch(r"[0-9]{1,18}", retry_after)
+    retry_date = re.fullmatch(
+        r"[A-Za-z]{3}, [0-9]{2} [A-Za-z]{3} [0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2} GMT", retry_after,
+    )
+    reset = ""
+    try:
+        if epoch := headers.get("x-ratelimit-reset"):
+            reset = datetime.fromtimestamp(int(epoch), UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        pass
+    evidence = []
+    if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]{0,63}", resource):
+        evidence.append(f"X-RateLimit-Resource: {resource}")
+    if remaining is not None:
+        evidence.append(f"X-RateLimit-Remaining: {remaining}")
+    if reset:
+        evidence.append(f"X-RateLimit-Reset: {reset}")
+    if retry_seconds or retry_date:
+        evidence.append(f"Retry-After: {retry_after}")
+    guidance = RATE_LIMIT_GUIDANCE
+    if remaining == 0:
+        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
+    elif remaining is not None or retry_seconds or retry_date:
+        delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
+        guidance = f"\nRate limited: short-window limit: retry after {delay}; No automatic retry."
+    return "".join(f"\n{line}" for line in evidence) + guidance
 
 
 def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "") -> str:
@@ -350,7 +399,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
-                     timeout=10)
+                     timeout=_read_timeout(10))
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -363,7 +412,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         if (type(limit["remaining"]) is int and limit["remaining"] == 0
                 and stamp.tzinfo is not None and stamp.timestamp() > time.time()):
             return f"\nGraphQL quota resets at {stamp.isoformat()} (diagnostic query)."
-    except (ToolMissing, ProcTimeout, KeyError, TypeError, ValueError, OverflowError, OSError):
+    except (ToolMissing, ProcTimeout, ReadDeadline, KeyError, TypeError, ValueError, OverflowError, OSError):
         pass
     return ""
 
