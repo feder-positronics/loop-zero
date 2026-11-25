@@ -18,8 +18,10 @@ outputs, transitions and effects; mock calls, snapshots, internal steps or copie
 implementation calculations alone are insufficient.
 
 Cover material success, denial/isolation, validation, transitions and failures.
-Follow repository conventions with minimal, deterministic, isolated fixtures;
-avoid shared mutable state, timing tolerance and duplicate cases. For bug fixes,
+Follow repository conventions with minimal, deterministic, isolated fixtures,
+using the real producer where cheap and otherwise matching the consumed fields
+and behavior of its public interface while avoiding shared mutable state,
+timing tolerance and duplicate cases. For bug fixes,
 observe the regression test fail on pre-fix code; only when that is impossible,
 explain the oracle and its limits. Infrastructure failures do not demonstrate
 regression detection.
