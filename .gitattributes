@@ -1,0 +1,4 @@
+/scripts/size_budget.sh text eol=lf
+/scripts/record_gh.py text eol=lf
+/scripts/retro_metrics.py text eol=lf
+/scripts/ai-accounts/ai-accounts text eol=lf
