@@ -9,6 +9,7 @@ import importlib.metadata
 import io
 import json
 import os
+import shlex
 import random
 import re
 import sys
@@ -1385,7 +1386,20 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         raise CliError("a reply saying what changed (or why it does not apply) is required")
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
     print(f"resolved {args.finding}: {finding.title}")
-    if not github.open_blocking_findings(config.repo, pr.number):
+    try:
+        with github.api_error_diagnostics():
+            remaining = github.open_blocking_findings(config.repo, pr.number)
+    except (github.GhError, _proc.ProcTimeout, OSError) as exc:
+        retry = shlex.join(("gh", *github.eligibility_dispatch_args(
+            config.repo, pr.number, config.base_branch,
+        )))
+        raise CliError(
+            f"Resolved finding {args.finding} on PR #{pr.number}, but could not refresh "
+            f"Loop-zero Eligibility. {exc}\n"
+            "To check remaining findings, run `loopzero resolve` with no arguments. "
+            f"Then, if no findings remain, run `{retry}`."
+        ) from exc
+    if not remaining:
         github.refresh_eligibility(config.repo, pr.number, config.base_branch)
         print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0
