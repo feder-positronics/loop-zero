@@ -32,6 +32,7 @@ MARKER_RE = re.compile(
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
 PAGE = 100
+PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
 CHECK_SUITE_LIMIT = 1_000
@@ -748,11 +749,28 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     return lines, first_added
 
 
-def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]:
+def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
+                                findings: tuple[Finding, ...]) -> None:
+    paths = {entry["filename"] for entry in entries}
+    missing = next((finding.path for finding in findings if finding.path and finding.path not in paths), None)
+    if missing is None:
+        return
+    pr, detail = _pr_detail(repo, number)
+    if pr.head_sha != head_sha or detail.get("changed_files") != len(paths):
+        raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
+                      f"cannot place finding on PR #{number} at {missing!r}: "
+                      f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
+
+
+def _diff_map(repo: str, number: int, head_sha: str,
+              findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
     """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
+    entries = _paged(f"repos/{repo}/pulls/{number}/files")
+    if len(entries) >= PR_FILE_LIMIT:
+        _require_complete_file_list(repo, number, head_sha, entries, findings)
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    for entry in _paged(f"repos/{repo}/pulls/{number}/files"):
+    for entry in entries:
         lines, first_added = _right_lines(entry.get("patch") or "")
         if not lines:
             continue
@@ -772,7 +790,8 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
                     formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
-    commentable, anchor = _diff_map(repo, number) if result.findings else ({}, None)
+    commentable, anchor = (_diff_map(repo, number, head_sha, result.findings)
+                           if result.findings else ({}, None))
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:

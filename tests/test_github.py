@@ -1433,3 +1433,26 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
         f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"
         if capped else f"required check 'required-ci' missing on {HEAD[:12]}",
     )
+
+
+@pytest.mark.parametrize("changed_files,path,anchor", [
+    (3001, "file-3001", None),
+    (3000, "file-3000", "file-3000"),
+    (3000, "outside-diff", "file-0001"),
+])
+def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, anchor: str | None) -> None:
+    files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
+             for i in range(1, changed_files + 1)][:3000]
+    gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
+    detail_key = f"api repos/{REPO}/pulls/7"
+    gh.respond(detail_key, rest_pr_json(pr_json()) | {"changed_files": changed_files})
+    result = review(findings=(Finding("important", path, 1, "Incorrect", "Fix this"),))
+
+    if anchor is None:
+        with pytest.raises(github.GhError, match=rf"PR #7.*{path}.*3,000"):
+            github.review_payload(REPO, 7, HEAD, result, "")
+    else:
+        payload = github.review_payload(REPO, 7, HEAD, result, "")
+        (comment,) = payload["comments"]
+        assert (comment["path"], comment["line"]) == (anchor, 1)
+    assert len(calls_for(gh, detail_key)) == int(path != "file-3000")
