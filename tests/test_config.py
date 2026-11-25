@@ -169,7 +169,30 @@ def test_ro_paths_accept_explicit_subpaths(tmp_path, path):
 
 
 def test_check_inputs(tmp_path):
-    cfg = config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"echo ok" = ["src/**"]\n"*" = ["lock"]\n'))
-    assert cfg.inputs == {"echo ok": ("src/**",), "*": ("lock",)}
+    cfg = config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"uv run pytest -q" = ["src/**"]\n"*" = ["lock"]\n'))
+    assert cfg.inputs == {"uv run pytest -q": ("src/**",), "*": ("lock",)}
     with pytest.raises(config.ConfigError):
-        config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"echo ok" = "src"\n'))
+        config.load(write(tmp_path, FULL + '\n[checks.inputs]\n"uv run pytest -q" = "src"\n'))
+
+
+def test_check_inputs_reject_unmatched_command(tmp_path):
+    text = '[repo]\nname = "o/n"\n[checks]\ncommands = ["echo ok"]\n'
+    text += '[checks.inputs]\n"echo okay" = ["."]\n'
+    with pytest.raises(config.ConfigError, match=r'checks\.inputs\."echo okay".*exact'):
+        config.load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("strategy", ["", 'merge = "squash"\n', 'merge = "queue"\n'])
+def test_mergify_queue_rejects_other_strategies(tmp_path, strategy):
+    selected = "queue" if "queue" in strategy else "squash"
+    text = '[repo]\nname = "o/n"\n[delivery]\n' + strategy + 'mergify_queue = "main"\n'
+    with pytest.raises(config.ConfigError, match=rf"delivery\.mergify_queue.*delivery\.merge.*{selected}"):
+        config.load(write(tmp_path, text))
+
+
+@pytest.mark.parametrize("limit", ["file_mb", "memory_mb"])
+def test_delegated_runner_rejects_local_limit_overrides(tmp_path, limit):
+    text = '[repo]\nname = "o/n"\n[checks]\nrunner = ["runner"]\ncommands = ["true"]\n'
+    text += f"[checks.limits]\n{limit} = 1\n"
+    with pytest.raises(config.ConfigError, match=rf"checks\.limits\.{limit}.*local"):
+        config.load(write(tmp_path, text))
