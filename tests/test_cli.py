@@ -2731,23 +2731,29 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     assert "bare" in git(primary, "worktree", "list", "--porcelain")
 
 
+@pytest.mark.parametrize("already_landed", [False, True])
 def test_merge_wait_waits_out_a_pending_check_then_merges(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, head
+    wt: Path, gh: FakeGh, capsys, monkeypatch, head, already_landed
 ) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
     arm_check_runs(gh, head, *([{"name": "checks", "status": "in_progress"}],) * 2,
                    [{"name": "checks", "status": "completed", "conclusion": "success"}])
     gh.respond("pr merge", "")
     open_pr = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
-    gh.append(f"api repos/{REPO}/pulls/7", open_pr, open_pr, open_pr,
-              merge_json(state="MERGED", head=head, sha="c" * 40))
+    landed = merge_json(state="MERGED", head=head, sha="c" * 40)
+    polls = ({**open_pr, **landed, "head": open_pr["head"]}, landed) if already_landed else (open_pr, open_pr, open_pr, landed)
+    gh.append(f"api repos/{REPO}/pulls/7", *polls)
     gh.respond("api -X", "")
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
 
     code, out, err = run(capsys, "merge", "--wait")
 
     assert (code, err) == (0, "")
-    assert "waiting: required check 'checks' is pending" in out
+    if already_landed:
+        assert "was already merged" in out
+        assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+    else:
+        assert "waiting: required check 'checks' is pending" in out
     assert out.splitlines()[-1] == "c" * 40 and not wt.exists()
 
 
