@@ -752,12 +752,19 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
 def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
                                 findings: tuple[Finding, ...]) -> None:
     paths = {entry["filename"] for entry in entries}
-    missing = next((finding.path for finding in findings if finding.path and finding.path not in paths), None)
+    missing = next(
+        (finding.path for finding in findings
+         if finding.severity in BLOCKING and finding.path and finding.path not in paths),
+        None,
+    )
     if missing is None:
         return
     pr, detail = _pr_detail(repo, number)
-    if pr.head_sha != head_sha or detail.get("changed_files") != len(paths):
-        raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}/files"),
+    request = ("gh", "api", f"repos/{repo}/pulls/{number}/files")
+    if pr.head_sha != head_sha:
+        raise GhError(request, f"PR #{number} head moved from {head_sha[:12]} to {pr.head_sha[:12]}; rerun review")
+    if detail.get("changed_files") != len(paths):
+        raise GhError(request,
                       f"cannot place finding on PR #{number} at {missing!r}: "
                       f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
 

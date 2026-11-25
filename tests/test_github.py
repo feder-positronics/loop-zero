@@ -1435,24 +1435,31 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
     )
 
 
-@pytest.mark.parametrize("changed_files,path,anchor", [
-    (3001, "file-3001", None),
-    (3000, "file-3000", "file-3000"),
-    (3000, "outside-diff", "file-0001"),
+@pytest.mark.parametrize("changed_files,path,severity,live_head,anchor", [
+    (3001, "file-3001", "important", HEAD, None),
+    (3000, "file-3000", "important", HEAD, "file-3000"),
+    (3000, "outside-diff", "important", HEAD, "file-0001"),
+    (3001, "file-3001", "suggestion", HEAD, None),
+    (3000, "outside-diff", "important", "b" * 40, None),
 ])
-def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, anchor: str | None) -> None:
+def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
+                           live_head: str, anchor: str | None) -> None:
     files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
              for i in range(1, changed_files + 1)][:3000]
     gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
     detail_key = f"api repos/{REPO}/pulls/7"
-    gh.respond(detail_key, rest_pr_json(pr_json()) | {"changed_files": changed_files})
-    result = review(findings=(Finding("important", path, 1, "Incorrect", "Fix this"),))
+    gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=live_head)) | {"changed_files": changed_files})
+    result = review(findings=(Finding(severity, path, 1, "Incorrect", "Fix this"),))
 
-    if anchor is None:
-        with pytest.raises(github.GhError, match=rf"PR #7.*{path}.*3,000"):
+    if severity == "suggestion":
+        payload = github.review_payload(REPO, 7, HEAD, result, "")
+        assert payload["comments"] == [] and "Incorrect" in payload["body"]
+    elif anchor is None:
+        message = rf"PR #7.*{path}.*3,000" if live_head == HEAD else "PR #7 head moved"
+        with pytest.raises(github.GhError, match=message):
             github.review_payload(REPO, 7, HEAD, result, "")
     else:
         payload = github.review_payload(REPO, 7, HEAD, result, "")
         (comment,) = payload["comments"]
         assert (comment["path"], comment["line"]) == (anchor, 1)
-    assert len(calls_for(gh, detail_key)) == int(path != "file-3000")
+    assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")
