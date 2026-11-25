@@ -31,6 +31,8 @@ class Membership:
     queue: str
     queued_at: str
     position: int
+    candidate_number: int | None = None
+    checks: dict[str, str] | None = None
 
 
 def _credential(path: Path | None = None) -> str:
@@ -116,7 +118,23 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
         if (not isinstance(data["queued_at"], str) or not data["queued_at"]
                 or type(data["position"]) is not int or data["position"] < 0):
             raise ValueError("invalid queue position or admission time")
-        return Membership(actual, data["queued_at"], data["position"])
+        check = data.get("mergeability_check")
+        if not isinstance(check, dict):
+            return Membership(actual, data["queued_at"], data["position"])
+        candidate = check.get("queue_pull_request_number")
+        raw_checks = check.get("checks")
+        checks = None
+        if isinstance(raw_checks, list):
+            checks = {
+                item["name"]: item["state"] for item in raw_checks
+                if isinstance(item, dict) and isinstance(item.get("name"), str)
+                and isinstance(item.get("state"), str)
+            }
+        return Membership(
+            actual, data["queued_at"], data["position"],
+            candidate if type(candidate) is int and candidate > 0 else None,
+            checks,
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
 
