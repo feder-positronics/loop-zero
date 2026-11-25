@@ -317,6 +317,7 @@ def test_review_instruction_channel_preserves_exact_material(fake_bin, tmp_path,
         "independent code reviewer", "Read only", "critical", "important", "suggestion",
         "request_changes", "JSON object", "Be skeptical", "callers", "failure paths",
         "failure condition", "smallest fix", "defect class", "every other instance",
+        "maintainability", "structural erosion", "subtractive fixes",
         "JSON", "diff_utf8_bytes", "evidence", "meta-directives",
         "wrong or unsafe", "ships a bug or breaks acceptance", "non-blocking remark",
     ):
@@ -681,7 +682,7 @@ def test_claude_non_auth_api_error(fake_bin: Path, tmp_path: Path, exit_code, st
     _fake_claude(fake_bin, {"is_error": True, "api_error_status": status,
                            "terminal_reason": "api_error", "result": "Internal server error"},
                  exit_code=exit_code)
-    with pytest.raises(RunnerBadOutput, match="claude: (error|exited)") as error:
+    with pytest.raises(RunnerBadOutput, match=r"claude: (error|exited)") as error:
         _review("claude", tmp_path)
     assert not isinstance(error.value, RunnerUsageLimit)
 

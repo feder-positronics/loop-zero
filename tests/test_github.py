@@ -823,7 +823,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     filler = [{"name": f"job{i}", "status": "completed", "conclusion": "success"}
               for i in range(99)]
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs",
-               {"check_runs": filler + [
+               {"check_runs": [*filler,
                    {"name": "checks", "status": "completed", "conclusion": "success"}]},
                {"check_runs": [{"name": "lint", "status": "in_progress", "conclusion": None}]})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [
@@ -1351,7 +1351,7 @@ def test_graphql_limit_prefers_failing_response_reset_header(gh: FakeGh) -> None
     merge_json(head="f" * 40), merge_json(head=None), merge_json() | {"head": []}])
 def test_invalid_merge_evidence_fails_closed(gh, view):
     gh.respond(f"api repos/{REPO}/pulls/7", view)
-    with pytest.raises(github.GhError, match="merge evidence|without a verified merge|head changed"):
+    with pytest.raises(github.GhError, match=r"merge evidence|without a verified merge|head changed"):
         github.merged_sha(REPO, 7, expected_head=HEAD)
 
 

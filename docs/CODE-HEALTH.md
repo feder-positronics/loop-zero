@@ -70,6 +70,20 @@ worked example: `make health` is its collector and a nightly read-only audit
 keeps its reports outside the repository. loop-zero's own collector is
 `loopzero check`.
 
+### Anti-slop checks and Rule of Two
+
+When `loopzero review` catches the same mechanically detectable defect or
+structural-erosion pattern in two independent PRs, promote it into a
+deterministic linter rule, type check, complexity ratchet or test in the owning
+repository instead of adding prompt prose—respecting the
+[findings rule](../core/CONTRACT.md#findings) by encoding the defect class, never
+copying raw PR findings into files or backlogs. Prefer language-native anti-slop
+lint sets inside `[checks].commands` (for example Ruff `UP/B/SIM/PIE/PERF/RUF/RET`
+plus a per-function complexity ratchet for Python, or Oxlint / anti-slop ESLint
+rules for TypeScript). When introducing a new check to a consuming repository,
+trial it advisory-first on historical and live PRs in one repository to measure
+true catches against false alarms before making it blocking.
+
 ## Delivery retrospectives
 
 Use existing consumer audit outputs; these are reporting conventions, not delivery

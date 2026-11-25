@@ -44,7 +44,7 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
                       "state": "COMMENTED", "user": {"login": LOGIN}}
             comments = [{**c, "commit_id": head, "user": {"login": LOGIN},
                          "pull_request_review_id": 17} for c in payload["comments"]]
-            rows = history + [review]
+            rows = [*history, review]
             if mutate:
                 mutate(rows, comments)
             gh.respond(reviews_key(), rows)
