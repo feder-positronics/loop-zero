@@ -98,6 +98,7 @@ class PR:
     author: str = ""  # login of the PR author
     merge_state: str = "UNKNOWN"  # GitHub mergeStateStatus, e.g. "BEHIND" | "CLEAN"
     body: str = ""
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -526,6 +527,7 @@ def _pr_from_rest(data: object) -> PR:
             merge_state=merge_state.upper() if merge_state else "UNKNOWN",
             author=str((data.get("user") or {}).get("login") or ""),
             body=str(data.get("body") or ""),
+            labels=tuple(label["name"] for label in data.get("labels", [])),
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"

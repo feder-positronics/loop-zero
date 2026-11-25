@@ -1085,6 +1085,11 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
     return result
 
 
+def _require_no_merge_hold(pr: github.PR) -> None:
+    if "hold" in pr.labels:
+        raise CliError(f"PR #{pr.number} has a merge-authority hold; ask the decisions owner to release it")
+
+
 def _pr_readiness(
     wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False
 ) -> tuple[github.PR, github.Readiness | None]:
@@ -1095,6 +1100,7 @@ def _pr_readiness(
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
+    _require_no_merge_hold(pr)
     return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait,
                           announce_receipt=True)
 
@@ -1276,6 +1282,7 @@ def _wait_for_checks(
         _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
         if allow_merged and current.state == "MERGED":
             return current, None, kicked
+        _require_no_merge_hold(current)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
@@ -1458,6 +1465,7 @@ def _merge_with_mergify(
             return sha
         raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if not confirmed and not requested:
+        _require_no_merge_hold(current)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
