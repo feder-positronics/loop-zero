@@ -316,6 +316,20 @@ def _git_dir(cwd: Path, flag: str, env_allowlist: tuple[str, ...]) -> Path:
     return (raw if raw.is_absolute() else cwd / raw).resolve()
 
 
+def _git_dirs(cwd: Path, env_allowlist: tuple[str, ...]) -> tuple[Path, Path]:
+    done = _proc.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--git-dir"],
+        cwd=cwd, env_allowlist=env_allowlist, timeout=30,
+    )
+    paths = done.stdout.removesuffix("\n").split("\n")
+    if done.exit_code == 0 and len(paths) == 2:
+        common_dir, git_dir = map(Path, paths)
+        if common_dir.is_absolute() and git_dir.is_absolute():
+            return common_dir.resolve(), git_dir.resolve()
+    # A path may contain a newline, which makes the combined output ambiguous.
+    return _git_dir(cwd, "--git-common-dir", env_allowlist), _git_dir(cwd, "--git-dir", env_allowlist)
+
+
 def _review_binary(family: str) -> Path:
     """Bypass ai-accounts shims while retaining versioned CLI symlinks."""
     for directory in os.get_exec_path():
@@ -352,8 +366,7 @@ def _sandbox_prefix(
         config = replace(config, sandbox_ro=tuple(str(path) for path in files))
     if shutil.which("bwrap") is None:
         raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
-    common_dir = _git_dir(cwd, "--git-common-dir", config.env_allowlist)
-    git_dir = _git_dir(cwd, "--git-dir", config.env_allowlist)
+    common_dir, git_dir = _git_dirs(cwd, config.env_allowlist)
     prefix = sandbox.bwrap_argv(
         config,
         cwd,
