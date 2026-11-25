@@ -3071,6 +3071,27 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
             assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
 
 
+def test_resolve_reports_recovery_when_followup_read_fails(wt, gh, capsys, head):
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+    listing = threads_json(_finding_thread("0b9b59e7", head))
+    gh.respond("api graphql", listing, posted, {"data": {}},
+               {"stdout": "", "stderr": "gh: Forbidden (HTTP 403)", "exit_code": 1})
+
+    code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed the loop bound.")
+
+    assert code == 1 and "resolved 0b9b59e7" in out
+    assert "Resolved finding 0b9b59e7 on PR #7" in err
+    assert "could not refresh Loop-zero Eligibility" in err and "HTTP 403" in err
+    assert "run `loopzero resolve`" in err and "if no findings remain" in err
+    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
+    assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
+
+    gh.respond("api graphql", threads_json())
+    assert run(capsys, "resolve") == (0, "", "")
+    assert not any(endpoint in call["argv"] for call in gh.calls)
+
+
 @pytest.mark.parametrize("recovers", [True, False])
 def test_resolve_retries_only_thread_resolution(wt: Path, gh: FakeGh, capsys, monkeypatch, head, recovers) -> None:
     gh.respond_pr_list([pr_json(headRefOid=head)])
