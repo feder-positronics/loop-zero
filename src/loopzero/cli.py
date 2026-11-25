@@ -1266,6 +1266,15 @@ MERGIFY_DEQUEUE_HINT = (
 )
 
 
+def _mergify_departure(
+    config: Config, pr: github.PR, queue: str, closed: list[github.GhError],
+) -> str | None:
+    sha = _landed(config, pr, closed)
+    if not sha and not closed:
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    return sha
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1275,6 +1284,7 @@ def _wait_for_mergify(
     queue = config.mergify_queue
     assert queue is not None
     state = None
+    deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = _landed(config, pr, closed)
@@ -1283,20 +1293,19 @@ def _wait_for_mergify(
         if not mergify.configured(config.repo, config.base_branch, queue):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
-        sha = _landed(config, pr, closed)
-        if sha:
+        deferred_landing_read = confirmed and state is not None and not closed
+        if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            sha = _landed(config, pr, closed)
-            if sha:
+            if sha := _mergify_departure(config, pr, queue, closed):
                 return sha
-            if closed:
-                continue
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    # A queued, open PR normally gets its next landing read on the next tick.
+    if deferred_landing_read and (sha := _landed(config, pr, closed)):
+        return sha
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
