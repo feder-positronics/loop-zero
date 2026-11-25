@@ -237,22 +237,31 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _cached_app_token() -> str:
+    # Installation tokens expire one hour after minting by wall clock, suspend included.
+    token, minted = _app_token_cache
+    return token if token and 0 <= time.time() - minted < 3000 else ""
+
+
 def app_token() -> str:
     global _app_token_cache
-    token, expires = _app_token_cache
-    if token and time.monotonic() < expires:
+    if token := _cached_app_token():
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
+    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=10)
     except (ToolMissing, ProcTimeout, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    token = result.stdout.strip()
-    _app_token_cache = (token, time.monotonic() + 3000)
-    return token
+    _app_token_cache = (result.stdout.strip(), minted)
+    return _cached_app_token()
+
+
+def _select_token(token: str | None, scope: tuple[float, str] | None, read_only: bool) -> str:
+    return token if token is not None else (scope[1] if scope else (app_token() if read_only else ""))
 
 
 def _transient_error(tail: str, retry_idempotent: bool) -> bool:
@@ -281,10 +290,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (
-        scope[1] if scope else (app_token() if read_only else ""))
     deadline = scope[0] if scope else None
     for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
+        selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
