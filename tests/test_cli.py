@@ -684,7 +684,8 @@ def test_pr_explains_how_to_create_missing_task_file(wt: Path, gh: FakeGh, capsy
     assert run(capsys, "pr") == (
         1, "",
         f"loopzero pr: missing {task}. Run `loopzero start <slug>` for a new task worktree, "
-        "or create the file with '- **Context:**', '- **Problem:**' and '- **Goal:**' lines.\n",
+        "or recreate the file using the handoff template at "
+        "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md\n",
     )
     assert gh.calls == []
 
