@@ -17,14 +17,6 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: "0.11.28"
-      - name: Install bubblewrap for the sandbox test
-        run: |
-          for i in 1 2 3; do
-            command -v bwrap >/dev/null && break
-            sudo apt-get update -q && sudo apt-get install -y -q bubblewrap || sleep 30
-          done
-          command -v bwrap >/dev/null
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Lint
         run: |
           uv run --python 3.14 --group dev ruff check src tests
@@ -40,6 +32,14 @@ jobs:
             python3 scripts/check_architecture_docs.py "$BASE_SHA"
           fi
           scripts/size_budget.sh "$BASE_SHA"
+      - name: Install bubblewrap for the sandbox test
+        run: |
+          for i in 1 2 3; do
+            command -v bwrap >/dev/null && break
+            sudo apt-get update -q && sudo apt-get install -y -q bubblewrap || sleep 30
+          done
+          command -v bwrap >/dev/null
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Tests
         run: uv run --python 3.14 --group dev pytest -q
       - name: Wheel builds and CLI runs
