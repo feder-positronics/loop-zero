@@ -90,11 +90,14 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    [owner-approved contributor-review exception](../core/CONTRACT.md#owner-approved-contributor-review-exception),
    which changes neither the selector nor the budget.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
-   head or an ancestor with an approved primary or eligible delta review, blocking findings,
+   head or an eligible review covering an ancestor, blocking findings,
    target branch and required CI. Ancestor coverage includes outdated unresolved threads
    when checking for blocking findings and requires GitHub to report the current head as ahead.
    This comparison establishes ancestry for both merge commits and ordinary commits.
-   Primary inheritance requires an approval verdict in an approved or commented review.
+   An approved primary or eligible delta can carry forward on that ancestry check. A
+   primary that requested changes also requires resolved blocking findings at the reviewed
+   head and a first-parent chain of verified merges from the PR base. Readiness
+   reconstructs each merge in an isolated Git repository and checks its tree.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede

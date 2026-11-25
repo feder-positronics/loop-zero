@@ -130,7 +130,8 @@ holds also block the owner queue route below.
   outdated and its marker names another head. When relying on an ancestor review,
   every unresolved blocking thread counts, including outdated threads.
 - Missing eligible review of the current head or an ancestor covered by an
-  approved primary or eligible delta review.
+  approved primary, an eligible delta review, or a request_changes primary
+  whose blocking findings are resolved and followed only by clean base merges.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
   source-preserving. It validates a separate integration candidate,
@@ -238,7 +239,9 @@ incident adjudication is retained as historical evidence.
   with reasons and readiness passes, or splits the PR. No escalation is required.
 - After an approved primary or a delta review, take base changes by merging the
   base into the existing branch. Readiness can inherit that review when GitHub
-  reports the new head is ahead of the reviewed commit. A rebase that rewrites
+  reports the new head is ahead of the reviewed commit. A request_changes
+  primary whose blocking findings are all resolved carries only across clean
+  merges of the base; an own commit or a conflicted merge needs a delta. A rebase that rewrites
   the reviewed commit breaks ancestry even if it preserves the patch.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible

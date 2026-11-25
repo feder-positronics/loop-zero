@@ -1449,24 +1449,37 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 
 
 @pytest.mark.parametrize("reposted", [False, True], ids=["published", "reposted"])
-@pytest.mark.parametrize("state,verdict,comparison,resolved,ready", [
-    ("APPROVED", "approve", "ahead", True, True),
-    ("COMMENTED", "approve", "ahead", True, True),
-    ("CHANGES_REQUESTED", "request_changes", "ahead", True, False),
-    ("CHANGES_REQUESTED", "approve", "ahead", True, False),
-    ("COMMENTED", "request_changes", "ahead", True, False),
-    ("APPROVED", "request_changes", "ahead", True, False),
-    ("COMMENTED", "unknown", "ahead", True, False),
-    ("APPROVED", "approve", "diverged", True, False),
-    ("APPROVED", "approve", "ahead", False, False),
+@pytest.mark.parametrize("state,verdict,comparison,resolved,ready,history", [
+    ("APPROVED", "approve", "ahead", True, True, "clean"),
+    ("COMMENTED", "approve", "ahead", True, True, "clean"),
+    ("CHANGES_REQUESTED", "request_changes", "ahead", True, True, "clean"),
+    ("CHANGES_REQUESTED", "approve", "ahead", True, False, "clean"),
+    ("COMMENTED", "request_changes", "ahead", True, True, "clean"),
+    ("COMMENTED", "request_changes", "ahead", False, False, "clean"),
+    ("COMMENTED", "request_changes", "ahead", True, False, "own commit"),
+    ("COMMENTED", "request_changes", "ahead", True, False, "altered merge"),
+    ("APPROVED", "request_changes", "ahead", True, False, "clean"),
+    ("COMMENTED", "unknown", "ahead", True, False, "clean"),
+    ("APPROVED", "approve", "diverged", True, False, "clean"),
+    ("APPROVED", "approve", "ahead", False, False, "clean"),
 ])
-def test_ready_after_primary_reviewed_head(wt, gh, capsys, state, verdict, comparison, resolved, ready, reposted):
+def test_ready_after_primary_reviewed_head(
+    wt, gh, capsys, monkeypatch, state, verdict, comparison, resolved, ready, history, reposted,
+):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
-    git(wt, "commit", "--allow-empty", "-m", "update base")
+    (wt / "base.txt").write_text("new base content\n")
+    git(wt, "add", "base.txt")
+    git(wt, "commit", "-m", "update base")
+    base = head_of(wt)
     git(wt, "switch", "-")
     if comparison == "ahead":
         git(wt, "merge", "--no-edit", "updated-base")
+        if history == "own commit":
+            git(wt, "commit", "--allow-empty", "-m", "own change")
+        elif history == "altered merge":
+            (wt / "base.txt").write_text("manual merge resolution\n")
+            git(wt, "commit", "--amend", "-am", "merge updated base with edits")
     else:
         git(wt, "rebase", "updated-base")
     head = head_of(wt)
@@ -1480,11 +1493,26 @@ def test_ready_after_primary_reviewed_head(wt, gh, capsys, state, verdict, compa
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[review],
                                       readiness={"threads": (thread,)}, isDraft=False)
     gh.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": comparison})
+    detail = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
+    detail["base"]["sha"] = base
+    gh.respond(f"api repos/{REPO}/pulls/7", detail)
+    popen = subprocess.Popen
+
+    def isolated_fetch(argv, **kwargs):
+        if argv[0] == "prlimit" and "fetch" in argv:
+            argv = [wt.as_uri() if arg == f"https://github.com/{REPO}.git" else arg for arg in argv]
+        return popen(argv, **kwargs)
+
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    monkeypatch.setattr(subprocess, "Popen", isolated_fetch)
     code, out, _ = run(capsys, "ready")
     assert code == (0 if ready else 1)
     if not resolved:
-        assert "open important finding" in out and "no review recorded" not in out
-    gh.respond_pr_view(pr_json(headRefOid=head))
+        assert ("no review recorded" in out) is (verdict == "request_changes")
+        if verdict == "approve":
+            assert "open important finding" in out
+    if history != "clean":
+        assert "no review recorded" in out
     assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
 
 

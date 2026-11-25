@@ -15,7 +15,7 @@ import signal
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -275,18 +275,18 @@ def _attest_source(
     return source_sha
 
 
-def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> None:
-    """Reconstruct only first-parent, two-parent integrations; never execute objects."""
+@contextlib.contextmanager
+def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
+    """Run bounded Git commands on fetched objects in an isolated bare repository."""
     from loopzero import github
 
-    _require(len(sources) <= 32 and len(set(sources)) == len(sources),
-             "ambiguous or oversized source set")
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         try:
             token = github.auth_token()
         except github.GhError:
             raise CandidateError("GitHub fetch authentication unavailable") from None
+    _require(bool(token), "GitHub fetch authentication unavailable")
     with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
         root = Path(directory)
         env = {name: os.environ[name] for name in _PASS_ENV if name in os.environ} | {
@@ -338,12 +338,19 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
                     process.wait()
 
         git("init", "--bare", "--template=", ".")
-        heads = [main, candidate, *sources]
         git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
             f"--depth={_TREE_DEPTH}",
             f"https://github.com/{repo}.git", *heads)
         objects = git("rev-list", "--objects", "--no-object-names", *heads).splitlines()
         _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
+        yield git
+
+
+def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> None:
+    """Reconstruct only first-parent, two-parent integrations; never execute objects."""
+    _require(len(sources) <= 32 and len(set(sources)) == len(sources),
+             "ambiguous or oversized source set")
+    with fetched_git(repo, [main, candidate, *sources]) as git:
         graph = {row[0]: row[1:] for line in git(
             "rev-list", "--parents", candidate).splitlines() if (row := line.split())}
         pending, reverse_order = set(sources), []

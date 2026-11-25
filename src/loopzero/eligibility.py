@@ -10,7 +10,7 @@ import json
 import re
 from pathlib import Path
 
-from loopzero import config, github, runners
+from loopzero import candidate, config, github, runners
 from loopzero.types import LoopZeroError
 
 REVIEW_MARKER_RE = runners.REVIEW_MARKER_RE
@@ -86,9 +86,38 @@ def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...],
     return latest if verdict else None
 
 
+def _clean_base_merges(repo: str, number: int, reviewed: str, head: str) -> bool:
+    """Prove each intervening first-parent commit is an unmodified merge from the base."""
+    try:
+        pr = github.api_get(f"repos/{repo}/pulls/{number}")
+        base = pr["base"]["sha"]
+        if pr["head"]["sha"] != head or not re.fullmatch(r"[0-9a-f]{40}", base):
+            return False
+        with candidate.fetched_git(repo, [reviewed, head, base]) as git:
+            history = git("rev-list", "--first-parent", "--parents", f"{reviewed}..{head}")
+            cursor = head
+            for row in history.splitlines():
+                commits = row.split()
+                if len(commits) != 3 or commits[0] != cursor:
+                    return False
+                merge, first, second = commits
+                git("merge-base", "--is-ancestor", second, base)
+                merge_bases = git("merge-base", "--all", first, second).splitlines()
+                # A shallow root outside the known merge bases could hide another base.
+                if git("rev-list", "--max-parents=0", first, second, "--not", *merge_bases):
+                    return False
+                tree = git("merge-tree", "--write-tree", first, second)
+                if tree != git("rev-parse", f"{merge}^{{tree}}"):
+                    return False
+                cursor = first
+            return cursor == reviewed
+    except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
+        return False
+
+
 def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                      repo: str, number: int) -> dict | None:
-    """An exact-head review or an eligible ancestor delta or approved primary."""
+    """An eligible review at the current head or an ancestor that covers it."""
     trusted = {login.casefold() for login in publishers}
     marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
               and "loopzero:review" in (r.get("body") or "")]
@@ -101,20 +130,30 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
     reviewed = marker[1]
     if eligible_review(marked, reviewed, publishers, repo=repo, number=number) is not latest:
         return None
+    resolved_primary = False
     if marker[2] == "primary":
-        if latest.get("state") not in {"APPROVED", "COMMENTED"}:
-            return None
         _, machine_block = runners.leading_review_block(latest["body"])
         # App reviews use COMMENTED for either verdict. Read the publisher's
         # summary before model prose, which can quote either verdict.
         summary, _, rest = latest["body"][len(machine_block):].lstrip().partition("\n")
         if summary.startswith(("Reposted from runner session: ", "Reposted from runner sessions: ")):
             summary = rest.partition("\n")[0]
-        if (not summary.startswith("loopzero primary review by ")
-                or not summary.partition(": **")[2].startswith("approve** (")):
+        if not summary.startswith("loopzero primary review by "):
+            return None
+        verdict = summary.partition(": **")[2]
+        state = latest.get("state")
+        if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
+            if github.open_blocking_findings(repo, number, reviewed):
+                return None
+            resolved_primary = True
+        elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
     comparison = github.api_get(f"repos/{repo}/compare/{reviewed}...{head}")
-    return latest if isinstance(comparison, dict) and comparison.get("status") == "ahead" else None
+    if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
+        return None
+    if resolved_primary and not _clean_base_merges(repo, number, reviewed, head):
+        return None
+    return latest
 
 
 def evaluate(repo: str, number: int, head: str, base: str,
