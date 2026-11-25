@@ -1780,22 +1780,32 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
 
 
 @pytest.mark.parametrize("reposted", [False, True], ids=["published", "reposted"])
-@pytest.mark.parametrize("state,verdict,comparison,resolved,ready,history", [
-    ("APPROVED", "approve", "ahead", True, True, "clean"),
-    ("COMMENTED", "approve", "ahead", True, True, "clean"),
-    ("CHANGES_REQUESTED", "request_changes", "ahead", True, True, "clean"),
-    ("CHANGES_REQUESTED", "approve", "ahead", True, False, "clean"),
-    ("COMMENTED", "request_changes", "ahead", True, True, "clean"),
-    ("COMMENTED", "request_changes", "ahead", False, False, "clean"),
-    ("COMMENTED", "request_changes", "ahead", True, False, "own commit"),
-    ("COMMENTED", "request_changes", "ahead", True, False, "altered merge"),
-    ("APPROVED", "request_changes", "ahead", True, False, "clean"),
-    ("COMMENTED", "unknown", "ahead", True, False, "clean"),
-    ("APPROVED", "approve", "diverged", True, False, "clean"),
-    ("APPROVED", "approve", "ahead", False, False, "clean"),
+@pytest.mark.parametrize("kind,state,verdict,comparison,resolved,ready,history", [
+    ("primary", "APPROVED", "approve", "ahead", True, True, "clean"),
+    ("primary", "COMMENTED", "approve", "ahead", True, True, "clean"),
+    ("primary", "APPROVED", "approve", "ahead", True, False, "own commit"),
+    ("primary", "APPROVED", "approve", "ahead", True, False, "altered merge"),
+    ("primary", "APPROVED", "approve", "ahead", True, False, "missing history"),
+    ("primary", "CHANGES_REQUESTED", "request_changes", "ahead", True, True, "clean"),
+    ("primary", "CHANGES_REQUESTED", "approve", "ahead", True, False, "clean"),
+    ("primary", "COMMENTED", "request_changes", "ahead", True, True, "clean"),
+    ("primary", "COMMENTED", "request_changes", "ahead", False, False, "clean"),
+    ("primary", "COMMENTED", "request_changes", "ahead", True, False, "own commit"),
+    ("primary", "COMMENTED", "request_changes", "ahead", True, False, "altered merge"),
+    ("primary", "APPROVED", "request_changes", "ahead", True, False, "clean"),
+    ("primary", "COMMENTED", "unknown", "ahead", True, False, "clean"),
+    ("primary", "APPROVED", "approve", "diverged", True, False, "clean"),
+    ("primary", "APPROVED", "approve", "ahead", False, False, "clean"),
+    ("delta", "APPROVED", "approve", "ahead", True, True, "clean"),
+    ("delta", "APPROVED", "approve", "ahead", True, False, "own commit"),
+    ("delta", "APPROVED", "approve", "ahead", True, False, "altered merge"),
+    ("delta", "APPROVED", "approve", "ahead", True, False, "missing history"),
+    ("delta", "APPROVED", "approve", "ahead", False, False, "clean"),
+    ("delta", "APPROVED", "approve", "diverged", True, False, "clean"),
 ])
-def test_ready_after_primary_reviewed_head(
-    wt, gh, capsys, monkeypatch, fake_tool, replay_gh, state, verdict, comparison, resolved, ready, history, reposted,
+def test_ready_after_reviewed_head(
+    wt, gh, capsys, monkeypatch, fake_tool, replay_gh,
+    kind, state, verdict, comparison, resolved, ready, history, reposted,
 ):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
@@ -1814,16 +1824,16 @@ def test_ready_after_primary_reviewed_head(
     else:
         git(wt, "rebase", "updated-base")
     head = head_of(wt)
-    review = rev(reviewed, "primary", state=state, verdict=verdict)
-    result = ReviewResult("claude", reviewed, "primary", verdict, (), "Quoted verdict: **approve**",
+    review = rev(reviewed, kind, state=state, verdict=verdict)
+    result = ReviewResult("claude", reviewed, kind, verdict, (), "Quoted verdict: **approve**",
                           provenance={"session_ids": ["test-session"]})
-    prefix = cli._repost_prefix(result) if reposted else marker(reviewed, "primary")
+    prefix = cli._repost_prefix(result) if reposted else marker(reviewed, kind)
     review["body"] = github.review_payload(REPO, 7, reviewed, result, prefix)["body"]
     thread = {"isResolved": resolved, "isOutdated": True, "path": "feature.py", "line": 1,
               "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=important head={reviewed} -->"}]}}
-    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[review],
+    reviews = [rev("f" * 40, "primary"), review] if kind == "delta" else [review]
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=reviews,
                                       readiness={"threads": (thread,)}, isDraft=False)
-    gh.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": comparison})
     detail = rest_pr_json(pr_json(headRefOid=head, isDraft=False))
     detail["base"]["sha"] = base
     gh.respond(f"api repos/{REPO}/pulls/7", detail)
@@ -1832,6 +1842,8 @@ def test_ready_after_primary_reviewed_head(
 
     def isolated_fetch(argv, **kwargs):
         if "fetch" in argv:
+            if history == "missing history":
+                raise cli.eligibility.candidate.CandidateError("history unavailable")
             argv = [wt.as_uri() if arg == f"https://github.com/{REPO}.git" else arg for arg in argv]
         return popen(argv, **kwargs)
 
@@ -1844,33 +1856,7 @@ def test_ready_after_primary_reviewed_head(
         if verdict == "approve":
             assert "open important finding" in out
     if history != "clean":
-        assert "no review recorded" in out
-    assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
-
-
-@pytest.mark.parametrize("kind,resolved,ancestor,ready", [
-    ("primary", True, True, False), ("delta", True, True, True),
-    ("delta", False, True, False), ("delta", True, False, False),
-])
-def test_ready_after_reviewed_head(wt, gh, capsys, head, kind, resolved, ancestor, ready):
-    reviewed = git(wt, "rev-parse", "HEAD^").strip()
-    history = [rev(reviewed, kind, state="CHANGES_REQUESTED")]
-    if kind == "delta":
-        history.insert(0, rev("f" * 40, "primary"))
-    thread = {"isResolved": resolved, "path": "feature.py", "line": 1,
-              "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=important head={reviewed} -->"}]}}
-    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=history,
-                                      readiness={"threads": (thread,)}, isDraft=False)
-    gh.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead" if ancestor else "diverged"})
-    code, out, _ = run(capsys, "ready")
-    assert code == (0 if ready else 1)
-    if not resolved:
-        assert "open important finding" in out and "no review recorded" not in out
-    if kind == "delta" and not ancestor:
-        assert f"review cap spent (primary + delta) and {head[:12]} has no eligible review" in out
-    else:
-        assert "review cap spent" not in out
-    gh.respond_pr_view(pr_json(headRefOid=head))
+        assert ("no eligible review" if kind == "delta" else "no review recorded") in out
     assert cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready is ready
 
 
