@@ -2166,6 +2166,33 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
                         if command == "merge" and settled == "MERGEABLE" else [])
 
 
+@pytest.mark.parametrize("command,check", [("ready", "success"), ("ready", "skipped"), ("merge", "success")])
+def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(
+        gh, head, wt, check, isDraft=command == "ready", labels=[{"name": "hold"}]
+    )
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    requests = []
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
+
+    code, out, err = run(capsys, command, "--wait=0")
+
+    assert code == 1 and "merge-authority hold" in out + err
+    assert not requests and all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+    arm_approved_pr_with_check_result(gh, head, wt, check, isDraft=command == "ready")
+    gh.respond("pr ready", "")
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+    code, _, _ = run(capsys, command, "--wait=0")
+    assert code == (0 if command == "ready" and check == "success" else 3)
+    assert requests == ([(REPO, 7, head, "main")] if command == "merge" else [])
+    assert any(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == (command == "ready")
+
+
 def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
 
