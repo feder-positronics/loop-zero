@@ -183,13 +183,7 @@ grants, owners act and record the decision on the issue/PR or their own log:
 - Revert their own failed trial to its previously authorized setting under its
   recorded rollback terms.
 
-**Merge authority.** Merge is authorized by default outside the reserved
-classes of auth, public API, destructive migrations, CI/required checks,
-production lease and spending beyond current accounts. A reserved class carries
-a `hold` label plus one issue comment naming the hazard and end condition for
-the decisions owner (or human owner) to resolve. No per-PR merge/ready/queue GO
-or hold renewal ritual.
-See the contract's [merge authority](../core/CONTRACT.md#merge-authority).
+**Merge authority.** See the contract's [merge authority](../core/CONTRACT.md#merge-authority).
 
 **Release plan review.** Before owner approval for a production window, verify
 every named backup/database provider, recovery point, CLI and identity against
@@ -381,15 +375,10 @@ profile. Avoid blind retries or repeating successful work for reassurance.
 
 ## Author lineage and independent review
 
-The contract's [review budget](../core/CONTRACT.md#review-budget) owns
-authorship and reviewer selection. Keep one writing family by default; the other
-can advise read-only. Before committing, record every actual writer in truthful
-`Co-Authored-By` trailers. The parent committing a delegate's patch does not
-replace that author, and applying a supplied patch verbatim is not writing:
-credit the patch's writer, not the applier.
-
-Follow the contract's [review budget](../core/CONTRACT.md#review-budget) and
-[owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception).
+The contract's [review budget](../core/CONTRACT.md#review-budget) and
+[owner-approved exception](../core/CONTRACT.md#owner-approved-contributor-review-exception)
+govern authorship and reviewer selection. When applying a supplied patch
+verbatim, credit the patch's writer.
 Formal delivery review is `loopzero review`.
 
 ## Briefs and ownership
@@ -432,9 +421,8 @@ Return: Tested changes and evidence to parent; parent finishes through readiness
 ```
 
 The source request supplies authority; neither this example nor a finish label
-grants it. An unattended child never uses the ask-the-user or request-input
-tool: send one message with a blocker or question to the parent or current
-decisions owner, then end the turn. The owner decides and continues anything
+grants it. Follow the [Worker role](#team-roles) for blockers.
+The owner decides and continues anything
 within its authority; only a decision reserved to a person goes to the harness
 question tool with the PR/task link, exact decision and recommended option. If
 unavailable or unanswered, continue the work that decision does not block and
@@ -455,19 +443,19 @@ edits, `read-only` for investigation), `--cd`, closed stdin and a log.
 Read the brief through an **absolute path**: relative reads around background
 `cd` can produce an empty prompt.
 
+Run the delegate in the [Long-running jobs](#long-running-jobs) unit:
+
 ```sh
-codex exec --model <resolved-model> -c model_reasoning_effort=<resolved-effort> \
-  --sandbox workspace-write --cd <worktree> \
-  --output-last-message <final-message-file> "$(cat /absolute/path/to/brief)" \
-  </dev/null ><log-file> 2>&1 &
-echo $! ><pid-file>
+systemd-run --user --unit=NAME --working-directory=/abs/worktree \
+  --property=RuntimeMaxSec=LIMIT --collect bash -c '
+  codex exec --model MODEL -c model_reasoning_effort=EFFORT \
+    --sandbox workspace-write --cd /abs/worktree \
+    --output-last-message /abs/final "$(cat /abs/brief)" \
+    </dev/null >/abs/LOG 2>&1; echo $? >/abs/LOG.exit'
 ```
 
-Record `$!`; use `kill <pid>` to cancel, never `pgrep -f` or `pkill -f`:
-patterns also match the waiting shell and can wait forever. Block once with
-`while kill -0 "$(cat <pid-file>)" 2>/dev/null; do sleep 30; done`, using the
-brief's runtime-specific wait above; then read `<final-message-file>` once.
-Never use `t3_thread_read` or `task_status` for liveness.
+Wait and cancel as in [Long-running jobs](#long-running-jobs), then read
+`/abs/final` once if it exists.
 
 App-orchestrated delegates (for example T3 `delegate_task`) launched in an
 approval-requiring mode stall unattended at their first tool call, while task
@@ -477,11 +465,8 @@ narrowest mode within your own authority that runs reads without prompts (T3:
 an instruction boundary, not an OS sandbox; when writes must be impossible,
 use a CLI delegate with `--sandbox read-only`.
 
-Launch independent tasks in small concurrent batches within the host's guards
-(host policy). Retain each child task ID and verify every child's first completed
-tool call and zero pending approvals; verify the batch concurrently, without
-waiting for one child to finish its task before launching the next. An unverified
-child is not proven productive capacity.
+Launch independent tasks in small concurrent batches within host guards. Retain
+each child task ID and verify the batch concurrently.
 
 Running or working status does not prove progress. Before ending the turn
 after a launch, read the delegate's activity: a completed tool call and no
@@ -494,14 +479,12 @@ same authorized routes; a launch-time check is insufficient. Inspect what ran
 before resuming interrupted work. A cancelled or declined tool call counts as
 a human stop only when the run is marked interrupted or Marcin says so;
 otherwise retry it once.
-Since T3 0.1.6 a later successful newest run
-releases held automation messages; held human messages and runs after an
-explicit stop stay held (`queueHeld=true`). Only then save each held message's
-full text, cancel it with `t3_queue cancel`, resend the still-needed messages as
-one fresh message and verify receipt. For a terminal delegated task, launch
-a new task with the prior brief and result rather than queueing another message
-to it. Since 0.1.7 PR watches survive restarts and are rebuilt from persisted
-links; re-watch only a watch that is missing.
+Held automation messages release on the next successful run. For held human
+messages and runs after an explicit stop (`queueHeld=true`), save the full
+text, cancel with `t3_queue cancel`, combine still-needed messages into one
+fresh resend and verify receipt. For a terminal delegated task, launch a new
+task with the prior brief and result. PR watches survive restarts. Re-watch
+only a missing one.
 Before yielding on any delegate or long command, arrange a
 wakeup whose timeout covers the awaited event: a completion notice plus a
 fallback timer, or a bounded blocking wait. Rely on T3 delegate completion
