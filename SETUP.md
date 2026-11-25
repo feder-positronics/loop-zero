@@ -15,7 +15,8 @@
   that accepts the new version. Tools that shape the build (`uv`,
   Python, a consumer's Node and package manager) change only with their pin in
   the repository, for example `uv` in `.github/workflows/checks.yml`.
-- `bwrap` on `PATH` (`loopzero check` refuses to run without it).
+- Linux with `bwrap` on `PATH` for default `loopzero check` and fresh local
+  `loopzero review` runs. Bubblewrap uses Linux kernel namespaces.
 - `claude` or `codex` CLI logged in; both if the reviewer must differ from
   the author.
 - On CI or any unattended host give Claude a non-rotating API key or setup

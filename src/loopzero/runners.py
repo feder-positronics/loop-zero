@@ -14,6 +14,7 @@ import re
 import shlex
 import shutil
 import stat
+import sys
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -341,6 +342,15 @@ def _review_binary(family: str) -> Path:
     raise RunnerMissing(f"{family}: no executable {family!r} on PATH outside ai-accounts shims")
 
 
+def _require_review_sandbox() -> None:
+    if sys.platform != "linux":
+        raise sandbox.SandboxUnavailable(
+            "fresh local reviews use Bubblewrap and require Linux. Run loopzero review on a Linux host"
+        )
+    if shutil.which("bwrap") is None:
+        raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+
+
 def _sandbox_prefix(
     family: str,
     cwd: Path,
@@ -364,8 +374,7 @@ def _sandbox_prefix(
         helper = binary.with_name("codex-code-mode-host")
         files = (binary, helper) if family == "codex" and helper.is_file() else (binary,)
         config = replace(config, sandbox_ro=tuple(str(path) for path in files))
-    if shutil.which("bwrap") is None:
-        raise sandbox.SandboxUnavailable("bwrap not found on PATH (install bubblewrap)")
+    _require_review_sandbox()
     common_dir, git_dir = _git_dirs(cwd, config.env_allowlist)
     prefix = sandbox.bwrap_argv(
         config,
