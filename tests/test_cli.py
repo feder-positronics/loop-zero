@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import re
 import shutil
@@ -92,6 +93,29 @@ def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     fake.respond(f"api repos/{REPO}/pulls/7/files",
                  [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
     return fake
+
+
+@pytest.mark.parametrize("link_error", [errno.EOPNOTSUPP, errno.EPERM, errno.EEXIST])
+def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, link_error):
+    monkeypatch.chdir(repo)
+    task = repo / ".worktrees" / "t1" / ".loopzero" / "task.md"
+
+    def fail_link(path, source):
+        if link_error == errno.EEXIST:
+            path.write_text("existing handoff")
+        raise OSError(link_error, "link failed")
+
+    monkeypatch.setattr(Path, "hardlink_to", fail_link)
+    assert cli.main(["start", "t1"]) == 1
+    error = capsys.readouterr().err
+    assert str(task) in error
+    if link_error == errno.EEXIST:
+        assert "task file already exists" in error
+        assert task.read_text() == "existing handoff"
+    else:
+        assert "from a checkout on a filesystem that supports hard links" in error
+        assert not task.exists()
+    assert not list(task.parent.glob(".task.md-*"))
 
 
 @pytest.fixture
@@ -542,6 +566,30 @@ def test_primary_review_diffs_from_merge_base_not_base_tip(
     assert code == 0 and "upstream = 1" not in prompt
 
 
+def test_primary_review_stops_when_shallow_history_hides_merge_base(
+    wt: Path, repo: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    (repo / "upstream.py").write_text("upstream = 1\n")
+    git(repo, "add", "upstream.py")
+    git(repo, "commit", "-qm", "upstream change")
+    git(repo, "push", "-q", "origin", "main")
+    git(wt, "push", "-q", "origin", "HEAD:refs/heads/lz/t1")
+    shallow = tmp_path / "shallow"
+    origin = tmp_path / "origin.git"
+    git(repo, "clone", "-q", "--depth=1", "--no-single-branch", "--branch", "lz/t1",
+        origin.as_uri(), str(shallow))
+    (shallow / ".git/info/exclude").write_text(".loopzero/\n")
+    shutil.copytree(wt / ".loopzero", shallow / ".loopzero")
+    monkeypatch.chdir(shallow)
+    prepare_review(shallow, gh, fake_bin)
+
+    code, _, err = run(capsys, "review")
+
+    assert code == 1 and "no merge base" in err and "deepen or unshallow" in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert all("--method" not in call["argv"] for call in gh.calls)
+
+
 @pytest.mark.parametrize("workflow, error", [
     ("[checks\n", "invalid TOML"),
     ("checks = []\n", "[checks] must be a table"),
@@ -978,7 +1026,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 16, 2)
+    assert_git_cost(git_calls, 15, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1278,7 +1326,7 @@ def test_repost_refuses_missing_stale_or_hand_written_review(
 
 @pytest.mark.parametrize("chunk_auth", [False, True])
 def test_review_chunks_oversized_diff_with_same_family(
-    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth
+    wt: Path, gh: FakeGh, fake_tool, fake_bin, capsys, chunk_auth, git_calls
 ) -> None:
     workflow = (wt / "workflow.toml").read_text().replace(
         'reviewers = ["claude", "codex"]',
@@ -1306,7 +1354,10 @@ def test_review_chunks_oversized_diff_with_same_family(
         echo '{envelope}'
     """)
 
+    git_calls.clear()
     code, out, err = run(capsys, "review")
+    probes = [cmd for cmd in git_calls if "--git-common-dir" in cmd or "--git-dir" in cmd]
+    assert len(probes) == (3 if chunk_auth else 6), probes
 
     assert code == 0 and f"review by {'codex' if chunk_auth else 'claude'}" in out
     materials, policies, tasks, fragments = [], [], [], []
@@ -3270,7 +3321,7 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
     arm_approved_ready_pr(gh, head, wt, isDraft=False, mergeStateStatus=merge_state)
     monkeypatch.setattr(mergify, "configured", lambda *args: attested)
 
-    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    gh.respond(f"api repos/{REPO}/issues/7/comments", [])
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
     code, out, err = run(capsys, command)
 
@@ -3684,38 +3735,69 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert message in out + err
 
 
-@pytest.mark.parametrize(("check_state", "detail"), [
-    ("pending", "still queued in main at last check, candidate PR #42. "
-                "Required checks are 0 done, 1 pending, 0 failed. Rerun `loopzero merge --wait`."),
-    ("success", "still queued in main at last check, candidate PR #42. "
-                "Required checks are 1 done, 0 pending, 0 failed. Rerun `loopzero merge --wait`."),
-    ("failure", "still queued in main at last check, candidate PR #42. "
-                "Required checks are 0 done, 0 pending, 1 failed. Investigate `checks`."),
-    (None, "not queued in main at last check. Check the Mergify queue request."),
-])
-def test_mergify_landing_timeout_reports_last_membership(wt, gh, capsys, monkeypatch, check_state, detail):
+@pytest.mark.parametrize("report", ["current", "stale", None])
+def test_mergify_reports_admission_wait(wt, gh, capsys, monkeypatch, report):
     commit_mergify_configuration(wt)
     head = head_of(wt)
-    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    comments = [{"user": {"login": LOGIN}, "created_at": "2026-11-25T19:00:00Z",
+                 "body": f"@mergifyio queue\n\n<!-- loopzero:mergify-request head={head} queue=main -->"}]
+    if report:
+        comments.append({
+            "id": 43, "user": {"login": "mergify[bot]"},
+            "updated_at": "2026-11-25T19:01:00Z" if report == "current" else "2026-11-25T18:59:00Z",
+            "body": "### ⏳ Waiting for queue conditions\n\n- [ ] `check-success = Queue Preflight`",
+        })
+    gh.respond(f"api repos/{REPO}/issues/7/comments", comments)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("already requested"))
+
+    for args, expected_code in [(("status",), 0), (("merge", "--wait=0"), 3)]:
+        code, out, err = run(capsys, *args)
+        assert (code, err) == (expected_code, "")
+        assert "waiting for admission" in out
+        assert (f"{URL}#issuecomment-43" in out) is (report == "current")
+
+
+@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None])
+def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
     monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
+    condition = "check-success = Queue Quality Gate"
+    evaluation = None if result is None else {
+        "match": result != "blocking",
+        "label": "all of",
+        "subconditions": [
+            {"match": False, "label": condition, "subconditions": []}
+            if result == "blocking" else
+            {"match": True, "label": "any of", "subconditions": [
+                {"match": False, "label": "check-success = checks", "subconditions": []},
+                {"match": True, "label": f"check-{result} = checks", "subconditions": []},
+            ]},
+        ],
+    }
     payload = {
         "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 1,
         "mergeability_check": {
             "queue_pull_request_number": 42,
-            "checks": [{"name": "checks", "state": check_state},
-                       {"name": "optional", "state": "failure"}],
+            "checks": [{"name": "checks", "state": result if result in ("neutral", "skipped") else "success"}],
+            "conditions_evaluation": evaluation,
         },
     }
-    # Admission can see no membership yet. Report the wait loop's newer observation.
-    responses = iter([None, payload if check_state else None])
+    responses = iter([None, payload])
     monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
 
     code, out, err = run(capsys, "merge", "--wait=0")
 
     assert (code, err) == (3, "")
-    assert f"timed out waiting for Mergify to land PR #7\n{detail}\n" in out
+    assert f"https://github.com/{REPO}/pull/42" in out
+    assert (condition in out) is (result == "blocking")
+    assert "failed" not in out and "check-success = checks" not in out
 
 
 @pytest.mark.parametrize("queue_state", ["unsafe", "error", "safe", "becomes_unsafe"])
