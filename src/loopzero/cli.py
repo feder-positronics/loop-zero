@@ -522,8 +522,6 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
     for result in report.results:
-        print(f"exit {result.exit_code:<3} {result.duration_s:7.1f}s  {result.command}")
-    for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
@@ -544,10 +542,11 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "that cache.",
                     file=sys.stderr,
                 )
-    _save_report(wt, report)
-    if report.ok and not report.dirty:
-        _print_receipt(wt, report, "produced")
-    _refresh_pr_checks(wt, config)
+    if report.head == worktree.head(wt):
+        _save_report(wt, report)
+        if report.ok and not report.dirty:
+            _print_receipt(wt, report, "produced")
+        _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
 
@@ -719,7 +718,8 @@ def cmd_review(args: argparse.Namespace) -> int:
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
     try:
         github.post_review(
-            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token
+            config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
+            publisher=publisher,
         )
     except (github.GhError, _proc.ProcTimeout) as exc:
         path = _review_file(wt, head, kind)
@@ -1001,16 +1001,17 @@ CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree t
 
 
 def _cleanup(wt: Path, pr: github.PR) -> None:
-    _repo_root(wt)
     name = None
     try:
+        _repo_root(wt)
         if worktree.head(wt) != pr.head_sha:
             raise worktree.WorktreeError("local HEAD differs from merged PR head")
         name = worktree.branch(wt)
         worktree.cleanup(wt)
     except (worktree.WorktreeError, OSError) as exc:
-        retry = CLEANUP_RETRY if wt.exists() or name is None else (
-            f"; worktree removed; delete local branch {name!r} if it still points at the merged head")
+        retry = CLEANUP_RETRY if wt.exists() else ""
+        if not retry and name is not None:
+            retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
@@ -1193,6 +1194,13 @@ def _mergify_timeout_detail(
     return f"{queued}. Required checks are {done} done, {pending} pending, {len(failed)} failed. {next_step}"
 
 
+MERGIFY_DEQUEUE_HINT = (
+    'Read Mergify\'s "Left the queue" comment on the PR for the reason. '
+    "Address it before requeueing. To requeue, post `@mergifyio queue` as the whole PR comment "
+    "(same login), then rerun `loopzero merge --wait`."
+)
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1223,8 +1231,7 @@ def _wait_for_mergify(
                 return sha
             if closed:
                 continue
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
-                           f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
+            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
@@ -1267,8 +1274,7 @@ def _merge_with_mergify(
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
-        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
-                       f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if not confirmed and not requested:
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline

@@ -209,7 +209,7 @@ def _build(data: dict[str, Any]) -> Config:
         kwargs["scratch"] = _strings("checks.scratch", checks["scratch"])
         for entry in kwargs["scratch"]:
             parts = Path(entry).parts
-            if entry in ("", ".") or entry.startswith("/") or ".." in parts or parts[0] == ".git":
+            if not parts or entry.startswith("/") or ".." in parts or parts[0] == ".git":
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     if "limits" in checks:
         kwargs["limits"] = _limits(checks["limits"])
