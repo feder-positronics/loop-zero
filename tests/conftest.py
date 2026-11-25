@@ -32,16 +32,19 @@ def git(repo: Path, *args: str) -> str:
     ).stdout
 
 
-@pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
-    """A fresh repository on branch `main` with a single commit of README.md."""
-    repo = tmp_path / "repo"
+def init_git_repo(repo: Path) -> Path:
+    """Initialize branch `main` with a single commit of README.md."""
     repo.mkdir()
     git(repo, "init", "-q", "-b", "main")
     (repo / "README.md").write_text("hello\n")
     git(repo, "add", "README.md")
     git(repo, "commit", "-q", "-m", "init")
     return repo
+
+
+@pytest.fixture
+def git_repo(tmp_path: Path) -> Path:
+    return init_git_repo(tmp_path / "repo")
 
 
 @pytest.fixture
