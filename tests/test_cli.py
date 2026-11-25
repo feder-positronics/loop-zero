@@ -2682,6 +2682,7 @@ def test_mergify_wait_resume_does_not_resubmit_and_reports_ejection(
 
     code, _out, err = run(capsys, "merge", "--wait=1")
 
+    assert 'Read Mergify\'s "Left the queue" comment' in err
     assert code == 1 and "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`" in err
 
 
@@ -2853,7 +2854,7 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
-@pytest.mark.parametrize("outcome", ["merged", "ejected", "head_changed", "timeout", "api_error",
+@pytest.mark.parametrize("outcome", ["merged", "worktree_removed", "ejected", "head_changed", "timeout", "api_error",
     "unsafe_config", "config_error", "merged_head_changed", "ejection_head_changed", "already_merged",
     "already_merged_changed", "unsafe_pending", "requested_head_changed"])
 @pytest.mark.parametrize("jitter", [0.9, 1.0])
@@ -2865,7 +2866,9 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         state="MERGED" if outcome.startswith("already_") else "OPEN",
     )
     gh.respond("api -X", "")
-    landed = outcome in {"merged", "merged_head_changed", "already_merged", "already_merged_changed"}
+    landed = outcome in {
+        "merged", "worktree_removed", "merged_head_changed", "already_merged", "already_merged_changed",
+    }
     if not outcome.startswith("already_"):
         second_head = "f" * 40 if outcome == "head_changed" else head
         gh.append(f"api repos/{REPO}/pulls/7",
@@ -2908,17 +2911,34 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     monkeypatch.setattr(cli.time, "monotonic", lambda: sum(sleeps))
     monkeypatch.setattr(cli.random, "uniform", lambda *_: jitter)
     monkeypatch.setattr(cli, "_sleep", sleeps.append)
-    code, out, err = run(capsys, "merge", "--wait=250" if outcome == "timeout" else "--wait=0")
+    if outcome == "worktree_removed":
+        poll_until = cli._poll_until
+
+        def remove_worktree_then_poll(*args):
+            git(repo, "worktree", "remove", "--force", str(wt))
+            return poll_until(*args)
+
+        monkeypatch.setattr(cli, "_poll_until", remove_worktree_then_poll)
+    try:
+        code, out, err = run(capsys, "merge", "--wait=250" if outcome == "timeout" else "--wait=0")
+    finally:
+        if outcome == "worktree_removed":
+            monkeypatch.chdir(repo)
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 2
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
-    if outcome in {"merged", "already_merged"}:
-        assert code == 0 and "e" * 40 in out and not wt.exists()
+    if outcome in {"merged", "already_merged", "worktree_removed"}:
+        assert code == 0 and "e" * 40 in out and not wt.exists(), err
+        if outcome == "worktree_removed":
+            assert "warning: merged but worktree cleanup failed" in err
+            assert f"working directory {wt} does not exist" in err
     else:
         assert wt.exists() and code == (3 if outcome == "timeout" else 1)
+        if outcome == "ejected":
+            assert err.index('"Left the queue" comment') < err.index("post `@mergifyio queue`")
         message = {"ejected": "post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`", "head_changed": "head changed",
                    "timeout": "timed out", "api_error": "HTTP 503",
                    "unsafe_config": "unsafe or unavailable", "unsafe_pending": "unsafe or unavailable", "config_error": "HTTP 503",

@@ -88,6 +88,8 @@ def run(
             check=False,
         )
     except FileNotFoundError as exc:
+        if exc.filename == str(cwd):
+            raise FileNotFoundError(f"working directory {cwd} does not exist") from exc
         raise ToolMissing(f"{argv[0]}: executable not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout

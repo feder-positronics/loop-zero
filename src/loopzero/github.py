@@ -236,7 +236,7 @@ def app_token() -> str:
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path.cwd(), env_allowlist=GH_ENV, timeout=10)
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path.home(), env_allowlist=GH_ENV, timeout=10)
     except (ToolMissing, ProcTimeout, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -265,7 +265,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                 raise GhError(argv, "publication read-back deadline exceeded")
             timeout = min(timeout, remaining)
         try:
-            done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV,
+            done = run(list(argv), cwd=cwd or Path.home(), env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc

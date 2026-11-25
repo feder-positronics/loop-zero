@@ -974,16 +974,17 @@ CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree t
 
 
 def _cleanup(wt: Path, pr: github.PR) -> None:
-    _repo_root(wt)
     name = None
     try:
+        _repo_root(wt)
         if worktree.head(wt) != pr.head_sha:
             raise worktree.WorktreeError("local HEAD differs from merged PR head")
         name = worktree.branch(wt)
         worktree.cleanup(wt)
     except (worktree.WorktreeError, OSError) as exc:
-        retry = CLEANUP_RETRY if wt.exists() or name is None else (
-            f"; worktree removed; delete local branch {name!r} if it still points at the merged head")
+        retry = CLEANUP_RETRY if wt.exists() else ""
+        if not retry and name is not None:
+            retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
@@ -1166,6 +1167,13 @@ def _mergify_timeout_detail(
     return f"{queued}. Required checks are {done} done, {pending} pending, {len(failed)} failed. {next_step}"
 
 
+MERGIFY_DEQUEUE_HINT = (
+    'Read Mergify\'s "Left the queue" comment on the PR for the reason. '
+    "Address it before requeueing. To requeue, post `@mergifyio queue` as the whole PR comment "
+    "(same login), then rerun `loopzero merge --wait`."
+)
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1196,8 +1204,7 @@ def _wait_for_mergify(
                 return sha
             if closed:
                 continue
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
-                           f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
+            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
@@ -1240,8 +1247,7 @@ def _merge_with_mergify(
         sha = github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha)
         if sha:
             return sha
-        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged; "
-                       f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if not confirmed and not requested:
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
