@@ -255,7 +255,7 @@ def app_token() -> str:
         return ""
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
-    except (ToolMissing, ProcTimeout, OSError):
+    except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
@@ -295,7 +295,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            if scope:
+            if scope and scope[2]:
                 _read_timeout(timeout)
             if delay is None or not retryable:
                 raise ProcTimeout(
@@ -362,7 +362,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         if (type(limit["remaining"]) is int and limit["remaining"] == 0
                 and stamp.tzinfo is not None and stamp.timestamp() > time.time()):
             return f"\nGraphQL quota resets at {stamp.isoformat()} (diagnostic query)."
-    except (ToolMissing, ProcTimeout, KeyError, TypeError, ValueError, OverflowError, OSError):
+    except (ToolMissing, ProcTimeout, ReadDeadline, KeyError, TypeError, ValueError, OverflowError, OSError):
         pass
     return ""
 

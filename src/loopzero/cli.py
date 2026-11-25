@@ -1124,14 +1124,23 @@ def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness
     return ""
 
 
-def _poll_until(started: float, timeout: float) -> Iterator[None]:
+def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Iterator[None]:
     delay = WAIT_INTERVAL
     while True:
-        yield  # Observe immediately, including --wait=0, and once at the deadline.
+        yield  # Observe immediately, including --wait=0.
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             return
-        _sleep(min(remaining, delay * random.uniform(0.9, 1.0)))
+        pause = delay * random.uniform(0.9, 1.0)
+        if bounded and remaining <= pause:
+            # Leave part of the final interval for the last observation to complete.
+            _sleep(remaining / 2)
+            yield
+            remaining = timeout - (time.monotonic() - started)
+            if remaining > 0:
+                _sleep(remaining)
+            return
+        _sleep(min(remaining, pause))
         delay = min(120.0, delay * 2)
 
 
@@ -1147,20 +1156,21 @@ def _wait_with_deadline(
         return None
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
-            return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started, shown=shown)
+            return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
+                                    shown=shown, bounded=True)
     except github.ReadDeadline:
         return None
 
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None, shown: tuple[str, ...] = (),
+    started: float | None = None, shown: tuple[str, ...] = (), bounded: bool = False,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     stale_notice = False
-    for _ in _poll_until(started, timeout):
+    for _ in _poll_until(started, timeout, bounded=bounded):
         current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
             raise CliError(
@@ -1171,7 +1181,9 @@ def _wait_for_checks(
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons)
+                                    shown=readiness.reasons, bounded=bounded)
+        if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
+            return None
         pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked

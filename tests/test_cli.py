@@ -2122,8 +2122,6 @@ def test_ready_wait_tracks_the_replacement_workflow(
     elapsed = 0.0
     monkeypatch.setattr(cli.time, "monotonic", lambda: elapsed)
     if replacement != "pending":
-        monkeypatch.setattr(cli, "WAIT_INTERVAL", 0.5)
-
         def sleep(seconds: float) -> None:
             nonlocal elapsed
             elapsed += seconds
@@ -2179,14 +2177,12 @@ def test_ready_wait_revalidates_its_ready_transition(
     monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
     monkeypatch.setattr(cli, "_sleep", advance)
 
-    code, out, err = run(capsys, "ready", "--wait=40" if replacement == "pending" else "--wait=61")
+    code, out, err = run(capsys, "ready", "--wait=40")
 
     assert (code, err) == (expected, "")
     assert "waiting: required check 'checks' is cancelled" in out
-    if initial_pending or replacement == "pending":
-        assert sleeps == [30.0, 10.0 if replacement == "pending" else 30.0]
-    else:
-        assert sleeps == [30.0]
+    assert sleeps == ([30.0, 5.0, 5.0] if replacement == "pending" else
+                      [30.0, 5.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         "not ready: required check 'checks' is failure\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}\n")
@@ -2229,7 +2225,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     code, out, err = run(capsys, "ready", "--wait=40")
 
     assert code == (1 if after in {"head_move", "blocker", "cancelled"} else 3)
-    assert sleeps == ([30.0, 10.0] if after == "pending" else [30.0])
+    assert sleeps == ([30.0, 5.0, 5.0] if after == "pending" else [30.0])
     assert "ready: https" not in out
     assert ("PR head changed while waiting" in err) == (after == "head_move")
     if after == "cancelled":
@@ -2268,7 +2264,7 @@ def test_ready_transition_missing_run_gets_observation_grace(
 
     assert (code, err) == (0 if run_appears else 3, "")
     assert marked_at == [210.0]
-    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [60.0])
+    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [30.0, 30.0])
     assert out.endswith(f"ready: {URL}\n" if run_appears else
                         f"timed out waiting for required checks on {head[:12]}\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
