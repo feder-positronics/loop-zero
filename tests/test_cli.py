@@ -1350,6 +1350,25 @@ def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, c
     assert "run `loopzero review` before merging main again" in err
 
 
+def test_review_delta_replays_fixes_when_reviewed_head_is_second_parent(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    reviewed = head_of(wt)
+    git(wt, "reset", "--hard", "main")
+    git(wt, "commit", "-q", "--allow-empty", "-m", "independent branch work")
+    git(wt, "merge", "-q", "--no-edit", reviewed)
+    prepare_review(wt, gh, fake_bin, history=[rev(reviewed, "primary", state="CHANGES_REQUESTED")])
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+
+    code, _, err = run(capsys, "review")
+
+    assert code == 1
+    assert f"replay the fixes on the reviewed head {reviewed[:12]}" in err
+    assert "git reset --hard" not in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert not (fake_bin / "codex.stdin").exists()
+
+
 def test_review_delta_refuses_rewritten_primary(wt, gh, fake_bin, capsys):
     reviewed = head_of(wt)
     git(wt, "commit", "--amend", "-q", "-m", "rewritten feature")
