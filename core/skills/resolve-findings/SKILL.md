@@ -1,6 +1,6 @@
 ---
 name: resolve-findings
-description: Decide the response to each existing PR review finding: post factual rejections, hand code fixes to implementation; do not review.
+description: Verify existing PR findings, fix commissioned blockers or hand off repairs, and explain each disposition in-thread.
 ---
 
 # Resolve Findings
