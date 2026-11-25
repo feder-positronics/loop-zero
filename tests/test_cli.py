@@ -488,6 +488,27 @@ def test_check_fails_when_base_workflow_is_malformed(
 # --- pr ------------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("token, status, installation_hint", [
+    ("app-token", 404, True),
+    ("", 404, False),
+    ("app-token", 403, False),
+])
+def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
+                                  token, status, installation_hint):
+    monkeypatch.setattr(github, "app_token", lambda: token)
+    gh.fail(pr_list_key(), f"gh: request failed (HTTP {status})")
+
+    code, _, err = run(capsys, "review")
+
+    assert code == 1
+    assert REPO in err and f"HTTP {status}" in err
+    assert ("GitHub App installation" in err) == installation_hint
+    if installation_hint:
+        assert "rerun `loopzero review`" in err
+    assert [call["token"] or "" for call in gh.calls] == [token]
+    assert not (fake_bin / "claude.stdin").exists()
+
+
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
