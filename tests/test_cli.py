@@ -623,6 +623,33 @@ def test_pr_refuses_missing_context_problem_or_goal(
     assert gh.calls == []
 
 
+def test_pr_reports_all_unfilled_task_lines(wt: Path, gh: FakeGh, capsys) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(
+        "- **Context:**\n"
+        "- **Problem:** <describe the problem>\n"
+    )
+
+    assert run(capsys, "pr") == (
+        1, "",
+        f"loopzero pr: fill '- **Context:**', '- **Problem:**', '- **Goal:**' in {task}"
+        " (Context, Problem and Goal become the PR description)\n",
+    )
+    assert gh.calls == []
+
+
+def test_pr_explains_how_to_create_missing_task_file(wt: Path, gh: FakeGh, capsys) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.unlink()
+
+    assert run(capsys, "pr") == (
+        1, "",
+        f"loopzero pr: missing {task}. Run `loopzero start <slug>` for a new task worktree, "
+        "or create the file with '- **Context:**', '- **Problem:**' and '- **Goal:**' lines.\n",
+    )
+    assert gh.calls == []
+
+
 def test_pr_accepts_angle_brackets_and_sublists_as_filled_text(wt: Path) -> None:
     task = wt / ".loopzero" / "task.md"
     task.write_text(task.read_text().replace("The feature", "\n  - maps <PMID> via `Pick<T>`, then"))

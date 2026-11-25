@@ -430,13 +430,19 @@ _REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
 
 
 def _require_pr_details(wt: Path) -> None:
-    """Refuse an unfilled Context/Problem/Goal line (text or indented sub-list) before push."""
+    """Report every unfilled PR description field before push."""
     task = worktree.task_text(wt)
+    unfilled = []
     for name in _REQUIRED_TASK_LINES:
         match = re.search(rf"^- \*\*{name}:\*\*[ \t]*(.*(?:\n[ \t]+\S.*)*)", task, re.MULTILINE)
         value = match.group(1).strip() if match else ""
         if not value or re.fullmatch(r"<[^<>]*>", value):
-            raise CliError(f"fill '- **{name}:**' in {worktree.task_file(wt)}")
+            unfilled.append(f"'- **{name}:**'")
+    if unfilled:
+        raise CliError(
+            f"fill {', '.join(unfilled)} in {worktree.task_file(wt)}"
+            " (Context, Problem and Goal become the PR description)"
+        )
 
 
 def _append_review(body: str, result: ReviewResult) -> str:
