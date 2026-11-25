@@ -72,8 +72,8 @@ class CheckReport:
 
     @property
     def ok(self) -> bool:
-        """True when every check exited 0."""
-        return all(result.exit_code == 0 for result in self.results)
+        """True when the report has results and every check exited 0."""
+        return bool(self.results) and all(result.exit_code == 0 for result in self.results)
 
 
 @dataclass(frozen=True)
