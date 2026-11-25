@@ -197,14 +197,14 @@ def without_accepted_receipt(out: str) -> str:
 @pytest.fixture
 def git_calls(monkeypatch):
     calls = []
-    original = subprocess.run
+    original = subprocess.Popen
 
     def record(argv, *args, **kwargs):
         if argv[0] == "git":
             calls.append(argv[1:])
         return original(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", record)
+    monkeypatch.setattr(subprocess, "Popen", record)
     return calls
 
 
