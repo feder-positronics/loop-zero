@@ -2378,6 +2378,7 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
     (True, 180, False, True, 0, True),
     (False, 30, False, True, 0, True),
     (False, -30, False, True, 0, True),
+    (False, -3600, False, True, 1, False),
     (False, -30, True, True, 1, False),
     (False, -30, "tie", True, 1, False),
     (True, 30, True, True, 1, True),
