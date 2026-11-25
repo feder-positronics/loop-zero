@@ -24,8 +24,7 @@ security-path downgrades need requester authority. For conflicting findings,
 reconcile their acceptance and impact. New critical evidence requires a separate
 authorized PR review thread rather than silently expanding this batch.
 
-After the delta, the owner fixes or rejects each finding with reasons and merges
-when ready, or splits the PR under the [review budget](../../CONTRACT.md#review-budget).
+After the delta, follow the contract's [round-two rule](../../CONTRACT.md#review-budget).
 Return accepted repairs to delivery: fixing findings does not finish the task
 until the fixed head is delivered.
 
