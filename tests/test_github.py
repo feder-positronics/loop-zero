@@ -745,9 +745,9 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), wall[0] == 1e6 and suspend())[0])
     monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
     monkeypatch.setenv("GH_TOKEN", "operator-token")
-    gh.expect(["api", "repos/acme/widgets"], {})
-    gh.expect(["api", "repos/acme/widgets"], exit=1, stderr="HTTP 502: Bad Gateway")
-    gh.expect(["api", "repos/acme/widgets"], {})
+    gh.expect(["api", "repos/acme/widgets", "--include"], {})
+    gh.expect(["api", "repos/acme/widgets", "--include"], exit=1, stderr="HTTP 502: Bad Gateway")
+    gh.expect(["api", "repos/acme/widgets", "--include"], {})
     github.api_get("repos/acme/widgets")  # mint, then suspend before the token is used
     github.api_get("repos/acme/widgets")  # fails transiently, then suspends in the backoff
     assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
