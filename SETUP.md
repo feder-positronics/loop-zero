@@ -117,9 +117,12 @@ Point it at the GitHub repository you set in `[repo] name`. Use
 if you already configured it under a different name.
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
-repository root and set `[repo] name`. `loopzero check` uses the base branch's
-`[checks]` when present: edited commands take effect after merging; `--config`
-unpins them. Then:
+repository root and set `[repo] name`. Check, review, ready, merge, and status
+read the workflow from the remote-tracking delivery branch. The workflow at
+`origin/HEAD` selects that branch through `[repo] base`. If the default branch
+pointer is missing, fetch and run `git remote set-head origin --auto`.
+Supply `--config <path>` for bootstrap or a deliberate override. Merged
+workflow edits take effect after fetching.
 
 - Run `[checks] commands` as described in the [delivery steps](core/CONTRACT.md#the-six-steps).
   For uv projects, `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
