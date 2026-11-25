@@ -716,12 +716,12 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow
             assert github._review_body(result, [], padded + "\n" + adjudication).startswith(padded)
 
 
-@pytest.mark.parametrize("variant", ["unextended", "extended"])
-def test_hosted_eligibility_accepts_captured_codex_v1(monkeypatch, variant):
-    live = json.loads((Path(__file__).parent / "fixtures" / f"codex-v1-{variant}.json").read_text())
-    head, repo, number = live["commit_id"], "acme/widgets", 7
+@pytest.mark.parametrize("case", ["v1", "extended", "v2", "extra", "bad-settings", "too-long", "untrusted"])
+def test_hosted_eligibility_replays_synthetic_codex_v1(monkeypatch, case):
+    review, ready = json.loads((Path(__file__).parent / "fixtures/codex-v1-hosted-synthetic.json").read_text())[case]
+    head, repo, number = review["commit_id"], "acme/widgets", 7
     pr = github.PR(number, "https://example.invalid", head, "main", False, "OPEN", "MERGEABLE")
     monkeypatch.setattr(github, "pr_view", lambda *_: pr)
-    monkeypatch.setattr(github, "api_get", lambda *_: [live])
+    monkeypatch.setattr(github, "api_get", lambda *_: [review])
     monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
-    assert eligibility.evaluate(repo, number, head, "main", ("bot",)).ready
+    assert eligibility.evaluate(repo, number, head, "main", ("bot",)).ready is ready
