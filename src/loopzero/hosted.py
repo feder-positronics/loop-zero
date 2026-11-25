@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -91,10 +92,15 @@ def _run(cfg: Config) -> int:
         publish(state, message)
         print(message)
         return 0 if ready or state == "pending" else 1
-    except Exception:
+    except Exception as exc:
+        _mark_refresh_failed(publish, exc)
+        raise
+
+
+def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
+    if not isinstance(exc, github.StatusLimitReached):
         with suppress(Exception):
             publish("failure", "Eligibility refresh failed; inspect workflow logs")
-        raise
 
 
 if __name__ == "__main__":
