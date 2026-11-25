@@ -1956,13 +1956,32 @@ def test_ready_skipped_required_check_waits_only_for_a_draft(
     assert (code, err) == (3 if draft else 1, "")
     if draft:
         assert out.splitlines() == [
-            "marked ready; waiting for required checks: checks",
-            "waiting for required checks; next: loopzero ready --wait",
+            "marked ready; waiting for required checks: checks; next: loopzero ready --wait",
         ]
         assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
     else:
         assert out == "not ready: required check 'checks' is skipped\n"
         assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
+def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head):
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
+    skipped = [{"name": "checks", "status": "completed", "conclusion": "skipped"}]
+    pending = [{"name": "checks", "status": "in_progress"}]
+    success = [{"name": "checks", "status": "completed", "conclusion": "success"}]
+    arm_check_runs(gh, head, skipped, skipped, pending, success)
+    gh.respond("pr ready", "")
+    monkeypatch.setattr(cli, "_sleep", lambda _: None)
+
+    code, out, err = run(capsys, "ready", "--wait")
+
+    assert (code, err) == (0, "")
+    assert out.count("receipt accepted:") == 1
+    assert without_accepted_receipt(out).splitlines() == [
+        "marked ready; required check 'checks' is skipped",
+        "waiting: required check 'checks' is pending",
+        f"ready: {URL}",
+    ]
 
 
 @pytest.mark.parametrize("settled", ["success", "skipped"])
