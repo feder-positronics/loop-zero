@@ -119,6 +119,7 @@ def _enter_check_directory(stack: ExitStack, prefix: str) -> Path:
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
+               checkpoint: Callable[[CheckReport], None] | None = None,
                _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
@@ -181,11 +182,14 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                               if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
                 if key:
                     result = replace(result, input_key=key)
+            if index >= len(preparations) or result.exit_code:
+                results.append(result)
+                _checkpoint_success(
+                    checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
+                )
             if status:
                 status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
-            if index >= len(preparations) or result.exit_code:
-                results.append(result)
             if result.exit_code != 0:
                 break
     final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
@@ -197,6 +201,15 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         )))
         dirty = True
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+
+
+def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
+                        report: CheckReport) -> None:
+    stage = report.results[-1]
+    if checkpoint is not None and stage.input_key and stage.exit_code == 0:
+        # Even the last stage leaves a nonpassing receipt until final validation.
+        incomplete = CheckResult("<checks incomplete>", 1, 0.0, "")
+        checkpoint(replace(report, results=(*report.results, incomplete)))
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:

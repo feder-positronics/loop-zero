@@ -461,8 +461,10 @@ equivalent isolation, and must not claim not_started after launch. The coordinat
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. It flushes and syncs a sibling temporary
-file before replacing the receipt atomically. Runners cannot select stages or
-mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
+file before replacing the receipt atomically. Successful keyed stages are
+checkpointed in the same receipt for reuse. The checkpoint cannot satisfy
+readiness before the final worktree validation. Runners cannot select stages
+or mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 

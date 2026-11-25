@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -451,6 +452,49 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
+
+
+@pytest.mark.parametrize("cut", ["second stage", "final validation"])
+def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch, cut):
+    original_context = cli._context
+    calls = []
+    interrupt = True
+
+    def context(*args, **kwargs):
+        path, settings = original_context(*args, **kwargs)
+        return path, replace(settings, check_runner=(sys.executable,),
+                             inputs={command: ("feature.py",) for command in settings.checks})
+
+    def dispatch(_config, _wt, _head, _base, command, _timeout):
+        calls.append(command)
+        if interrupt and cut == "second stage" and len(calls) == 2:
+            raise KeyboardInterrupt
+        return CheckResult(command, 0, 0.0, "")
+
+    original_git = cli.sandbox._git
+
+    def check_git(config, path, *args):
+        if interrupt and cut == "final validation" and len(calls) == 2 and args == ("rev-parse", "HEAD"):
+            raise KeyboardInterrupt
+        return original_git(config, path, *args)
+
+    monkeypatch.setattr(cli, "_context", context)
+    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    monkeypatch.setattr(cli.sandbox, "_git", check_git)
+
+    assert run(capsys, "check")[0] == 130
+    report = cli._load_report(wt)
+    assert report is not None and not report.ok
+    assert [result.command for result in report.results if result.input_key] == (
+        calls[:1] if cut == "second stage" else calls
+    )
+
+    interrupt = False
+    assert run(capsys, "check")[0] == 0
+    assert calls == ["echo ok", "test -f README.md"] + (
+        ["test -f README.md"] if cut == "second stage" else []
+    )
+    assert cli._load_report(wt).ok
 
 
 def advance_checks(repo, commands):
