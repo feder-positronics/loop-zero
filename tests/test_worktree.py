@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
+from loopzero.runners import split_diff
 from tests.conftest import git
 
 
@@ -181,6 +182,42 @@ def test_start_reports_git_failure_with_command(repo: Path) -> None:
         worktree.start(repo, "nobase", "does-not-exist")
     assert info.value.command[:2] == ("git", "fetch")
     assert info.value.tail
+
+
+def test_diff_since_shows_changes_the_reviewed_files_try_to_hide(git_repo: Path) -> None:
+    for name in ("attr.py", "nul.py"):
+        (git_repo / name).write_text("old = 1\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "base")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    (git_repo / ".gitattributes").write_text("attr.py -diff\nnul.py binary\n")
+    (git_repo / "attr.py").write_text("new = 'attr hunk'\n")
+    (git_repo / "nul.py").write_bytes(b"new = 'nul hunk'\x00\n")
+    (git_repo / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\xff\xfe")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "head")
+
+    diff = worktree.diff_since(git_repo, base)
+
+    assert "Binary files" not in diff
+    assert "+new = 'attr hunk'" in diff and "+new = 'nul hunk'\x00" in diff
+    assert "image.png: not UTF-8 text, content not shown (11 bytes at HEAD)" in diff
+
+
+def test_split_diff_summarizes_only_files_git_reports_deleted(git_repo: Path) -> None:
+    for name in ("gone.py", "padded.py"):
+        (git_repo / name).write_text("old = 1\n")
+    git(git_repo, "add", "-A")
+    git(git_repo, "commit", "-q", "-m", "base")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "rm", "-q", "gone.py")
+    (git_repo / "padded.py").write_text("new = 'padded hunk'\n++ /dev/null\n" + "x = 0\n" * 200)
+    git(git_repo, "commit", "-qam", "head")
+
+    joined = "".join(split_diff(worktree.diff_since(git_repo, base), 1_000))
+
+    assert "+++ /dev/null" in joined and "+new = 'padded hunk'" in joined
+    assert "gone.py: deleted, 1 lines" in joined and "padded.py: deleted" not in joined
 
 
 def test_dirty_head_and_diff(repo: Path) -> None:

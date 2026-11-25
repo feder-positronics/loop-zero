@@ -1394,7 +1394,8 @@ def split_diff(diff: str, budget: int) -> list[str]:
 
 
 def _summarize_deleted(block: str) -> str:
-    if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
+    # Judge deletion from git's header only; hunk lines are the PR's own text.
+    if "\ndeleted file mode " not in block.partition("\n@@")[0]:
         return block
     match = re.match(r"diff --git a/(.+?) b/(.+?)\n", block)
     path = match.group(2) if match else "(unknown file)"

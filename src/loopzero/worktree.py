@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import re
 import stat
@@ -244,7 +245,36 @@ def is_dirty(wt: Path) -> bool:
 
 
 def diff_since(wt: Path, sha: str) -> str:
-    return _git(Path(wt), "diff", "--no-color", sha, "HEAD")
+    """The reviewer's diff from ``sha`` to HEAD, which the reviewed files cannot hide.
+
+    Every file is diffed as text, whatever its attributes or NUL bytes, without diff
+    drivers. A file block that is not UTF-8 is replaced by its path and size.
+    """
+    wt = Path(wt)
+    argv = ("git", "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text", sha, "HEAD")
+    # Latin-1 keeps every byte, so each file block can be decoded strictly below.
+    done = run(list(argv), cwd=wt, env_allowlist=GIT_ENV, timeout=120, encoding="latin-1")
+    if done.exit_code != 0:
+        raise GitError(argv, done.stderr or done.stdout)
+    blocks = re.split(r"(?m)^(?=diff --git )", done.stdout.strip())
+    return "".join(_decoded_block(wt, sha, block) for block in blocks)
+
+
+def _decoded_block(wt: Path, sha: str, block: str) -> str:
+    raw = block.encode("latin-1")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    header = raw.partition(b"\n@@")[0].decode("utf-8", "replace").splitlines()
+    new = next((line[6:] for line in header if line.startswith("+++ b/")), None)
+    old = next((line[6:] for line in header if line.startswith("--- a/")), None)
+    path, rev = (new, "HEAD") if new else (old, sha)
+    size = "size unknown"
+    if path:
+        with contextlib.suppress(GitError):
+            size = f"{_git(wt, 'cat-file', '-s', f'{rev}:{path}')} bytes at {rev}"
+    return f"{header[0]}\n{path or '(unknown path)'}: not UTF-8 text, content not shown ({size})\n"
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

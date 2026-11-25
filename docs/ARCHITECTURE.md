@@ -179,7 +179,10 @@ The R3 runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
-that header, a newline and the exact raw diff without trimming task or diff text.
+that header, a newline and the raw diff without trimming task or diff text. Git
+diffs every file as text, ignoring attributes and diff drivers the PR could set;
+a file block that is not UTF-8 is replaced by its path and size. Chunked review
+summarizes only files whose git header reports a deletion.
 The runner probes the selected Codex binary with `--version` and records its
 stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful
