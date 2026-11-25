@@ -467,11 +467,11 @@ def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
     return pr, data
 
 
-def pr_for_branch(repo: str, branch: str) -> PR | None:
-    """Return the open PR for `branch`, else the most recent one, else None."""
+def pr_for_branch(repo: str, branch: str, *, open_only: bool = False) -> PR | None:
+    """Return the open PR, falling back to the most recent closed PR unless open_only."""
     owner = repo.split("/", 1)[0]
     head = quote(f"{owner}:{branch}", safe="")
-    for state in ("open", "closed"):
+    for state in (("open",) if open_only else ("open", "closed")):
         endpoint = (f"repos/{repo}/pulls?state={state}&head={head}"
                     "&sort=created&direction=desc&per_page=1")
         rows = api_get(endpoint)

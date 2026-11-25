@@ -594,7 +594,8 @@ def test_pr_pushes_and_creates_draft(
     wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, branch
 ) -> None:
     git(wt, "branch", "-m", branch)
-    gh.respond(branch_history_key().replace("lz%2Ft1", branch.replace("/", "%2F")), [])
+    history_key = branch_history_key().replace("lz%2Ft1", branch.replace("/", "%2F"))
+    gh.respond(history_key, [])
     run(capsys, "check")
     head = head_of(wt)
     gh.respond_pr_list([], branch=branch)
@@ -609,7 +610,10 @@ exec /usr/bin/git "$@"
     assert pushes.read_text().strip() == f"push -u origin {branch}"
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", branch).strip() == head
-    create = next(c for c in gh.calls if c["argv"][:2] == ["api", f"repos/{REPO}/pulls"])
+    assert [c["argv"][:2] for c in gh.calls] == [
+        history_key.split(), pr_list_key(branch).split(), ["api", f"repos/{REPO}/pulls"],
+    ]
+    create = gh.calls[-1]
     payload = json.loads(create["--input"])
     assert payload["draft"] is True and payload["head"] == branch
     heading = (wt / ".loopzero" / "task.md").read_text().splitlines()[0].lstrip("# ")
