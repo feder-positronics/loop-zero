@@ -234,15 +234,8 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.
-  After a rollback across #732, confirm an already-published Claude review with
-  the publishing CLI revision or a newer compatible one. See
+  See
   [setup and rollback](../SETUP.md#connect-your-agent).
-
-A native structured fatal startup event reporting that Code Mode cannot spawn
-its host invalidates the attempt even if the process exits zero and emits a
-parseable verdict. It consumes no new budget and must not be published, merged
-with chunks or replayed from a saved result. Quoted diagnostic text and absence
-of tool calls alone do not invalidate a review.
 
 [Architecture](../docs/ARCHITECTURE.md#codex-review-runner-evidence) owns startup, evidence capture and public transport.
 

@@ -46,9 +46,7 @@ GitHub; keep acceptance changes in both task.md and the PR by rerunning `pr`.
 
 Review publication records duration and distinguishes requested model/effort from
 CLI-reported claims, which are not backend attestation; saved artifacts preserve
-them for `--repost`. GitHub reviews include at most the last 30,000 UTF-8 bytes of
-raw reviewer output, with a truncation notice. Verdicts and findings remain
-complete. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
+them for `--repost`. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
 `loopzero review --repost` uses it without rerunning the model.
 
 Waits observe immediately, then use 30/60/120-second intervals with up to 10%
