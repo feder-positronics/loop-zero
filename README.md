@@ -68,7 +68,8 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
 
 ## Adopt it in six steps
 
-1. Install from a pinned SHA: `uv tool install git+https://github.com/feder-positronics/loop-zero@<sha>`.
+1. Set `sha` to the pinned commit SHA and run
+   `uv tool install "git+https://github.com/feder-positronics/loop-zero@$sha"`.
 2. Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` at
    your repo root and set `repo.name`, `checks.commands` and `required_ci`.
    Commit and push `workflow.toml` to the configured remote base
@@ -86,7 +87,8 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
    [credential setup](SETUP.md#api-keys-for-local-agents). TypeSafe uses
    `TYPESAFE_API_KEY` or `~/.config/typesafe/api-key`; no key is needed for
    loop-zero's ordinary checks.
-6. Run `loopzero start first-task`, make a change, and walk the six commands.
+6. Run `loopzero start first-task` and `cd` into the worktree path it prints.
+   Edit, commit, and run the remaining delivery commands from that worktree.
 
 ## Configuration
 
