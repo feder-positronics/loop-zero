@@ -1189,15 +1189,22 @@ def merge_pending(repo: str, number: int) -> bool:
     """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     owner, name = repo.split("/", 1)
-    data = _gh_json(
+    argv = (
         "api", "graphql", "-f", f"query={_QUEUE_QUERY}", "-F", f"owner={owner}",
         "-F", f"name={name}", "-F", f"number={number}",
     )
     try:
+        data = _gh_json(*argv)
         pr = data["data"]["repository"]["pullRequest"]
-        return bool(pr["isInMergeQueue"] or pr.get("autoMergeRequest"))
-    except (KeyError, TypeError):
-        return False
+        queued = pr["isInMergeQueue"]
+        auto = pr.get("autoMergeRequest")
+        if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
+            raise ValueError("invalid queue fields")
+    except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+        raise MergeFailed(("gh", "api", "graphql"),
+                          f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
+                          f"Check the PR's queue or merge state before retrying.\n{str(exc)[-300:]}") from exc
+    return queued or bool(auto)
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
@@ -1220,12 +1227,18 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
-    if merge_pending(repo, number):
-        return None
+    queue_error = None
+    try:
+        if merge_pending(repo, number):
+            return None
+    except MergeFailed as exc:
+        queue_error = exc
     # The queue may have landed the PR between the two reads; look once more.
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
+    if queue_error:
+        raise queue_error
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
