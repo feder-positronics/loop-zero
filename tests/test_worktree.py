@@ -140,6 +140,19 @@ def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
         worktree.branch_name(repo, "has~tilde")
 
 
+@pytest.mark.parametrize("change", [("remove", "origin"), ("rename", "origin", "upstream")])
+def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> None:
+    git(repo, "remote", *change)
+
+    with pytest.raises(worktree.WorktreeError, match="no Git remote named 'origin'") as info:
+        worktree.start(repo, "my-task", "main")
+
+    assert "git remote add origin <url>" in str(info.value)
+    assert "git remote rename <name> origin" in str(info.value)
+    assert git(repo, "branch", "--list", "lz/my-task") == ""
+    assert not worktree.worktree_dir(repo, "my-task").exists()
+
+
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
     with pytest.raises(worktree.GitError) as info:
         worktree.start(repo, "nobase", "does-not-exist")
