@@ -282,9 +282,8 @@ def _readiness(
             workflow_wait and review_age is not None and 0 <= review_age < STALE_VERDICT_GRACE
         ),
     )
-    report = _load_report(wt)
-    if (report is None or report.head != head or report.dirty or not report.ok
-            or tuple(result.command for result in report.results) != config.checks):
+    report = _current_check_report(wt, config, head)
+    if report is None:
         result = github.Readiness(
             ready=False,
             reasons=(*result.reasons, "run loopzero check at this head"),
@@ -314,6 +313,16 @@ def _readiness(
 # --------------------------------------------------------------------------- checks report
 
 
+def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
+    report = _load_report(wt)
+    if (report is None or report.head != head or report.dirty or not report.ok
+            or tuple(result.command for result in report.results) != config.checks
+            or report.settings_sha256 is None
+            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
+        return None
+    return report
+
+
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
     """Best-effort transcript identity; never authority or environment attestation."""
     try:
@@ -336,6 +345,8 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
+    if report.settings_sha256 is not None:
+        payload["settings_sha256"] = report.settings_sha256
     _write_json_atomically(path, payload)
 
 
@@ -366,7 +377,8 @@ def _load_report(wt: Path) -> CheckReport | None:
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
-        return CheckReport(head=str(data["head"]), dirty=dirty, results=results)
+        return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
+                           settings_sha256=data.get("settings_sha256"))
     except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
@@ -1084,14 +1096,15 @@ def cmd_ready(args: argparse.Namespace) -> int:
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                  shown=readiness.reasons if kicked else ())
+                                  shown=readiness.reasons if kicked else (), args=args)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
-            waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started)
+            waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started,
+                                      args=args)
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
@@ -1156,9 +1169,20 @@ def _poll_until(started: float, timeout: float) -> Iterator[None]:
         delay = min(120.0, delay * 2)
 
 
+def _verify_wait_config(
+    args: argparse.Namespace | None, wt: Path, config: Config, head: str,
+) -> None:
+    if args is None or (latest := _load_config(args, wt, pin_checks=True)) == config:
+        return
+    if _current_check_report(wt, latest, head) is None:
+        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
+    raise CliError("workflow settings changed while waiting; retry with the current settings")
+
+
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
+    args: argparse.Namespace | None = None,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
@@ -1171,12 +1195,13 @@ def _wait_for_checks(
             raise CliError(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
+        _verify_wait_config(args, wt, config, pr.head_sha)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons)
+                                    shown=readiness.reasons, args=args)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
@@ -1390,7 +1415,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started)
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started,
+                                  args=args)
         if waited is None:
             return 3
         pr, readiness, _ = waited

@@ -68,6 +68,7 @@ class CheckReport:
     head: str
     dirty: bool
     results: tuple[CheckResult, ...]
+    settings_sha256: str | None = None
 
     @property
     def ok(self) -> bool:
