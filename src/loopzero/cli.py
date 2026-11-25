@@ -347,6 +347,8 @@ def _load_report(wt: Path) -> CheckReport | None:
     try:
         data = json.loads(path.read_text())
         results = tuple(CheckResult(**item) for item in data["results"])
+        if any(type(result.exit_code) is not int for result in results):
+            raise TypeError("exit_code must be an integer")
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
