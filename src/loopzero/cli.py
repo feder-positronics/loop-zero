@@ -1202,11 +1202,12 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
+    allow_merged: bool = False,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args)
+                                shown=shown, args=args, allow_merged=allow_merged)
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1215,7 +1216,7 @@ def _wait_with_deadline(
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True)
+                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1479,8 +1480,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started,
-                                  args=args, allow_merged=True)
+        waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
+                                     args=args, allow_merged=True)
         if waited is None:
             return 3
         pr, readiness, _ = waited
@@ -1558,8 +1559,6 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number):
             print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
         return 0
-    if not args.reply.strip():
-        raise CliError("a reply saying what changed (or why it does not apply) is required")
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
     print(f"resolved {args.finding}: {finding.title}")
     try:
@@ -1662,8 +1661,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument(
         "--repost", action="store_true", help="post the saved review for HEAD without a model"
     )
-    review.add_argument("--model", help="reviewer model override for this run")
-    review.add_argument("--effort", help="reviewer effort override for this run")
+    review.add_argument("--model", help="reviewer model override for a fresh review")
+    review.add_argument("--effort", help="reviewer effort override for a fresh review")
     review.set_defaults(func=cmd_review)
     ready = sub.add_parser(
         "ready", help="compute readiness and mark the PR ready; --wait polls required checks"
@@ -1681,7 +1680,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ready.set_defaults(func=cmd_ready)
     merge.set_defaults(func=cmd_merge)
-    resolve = sub.add_parser("resolve", help="list open findings, or reply to one and resolve it")
+    resolve = sub.add_parser(
+        "resolve", usage='%(prog)s [<finding-id> "<reply>"]',
+        help="list open findings, or reply to one and resolve it",
+    )
     resolve.add_argument("finding", nargs="?", help="finding id from the list (8 hex digits)")
     resolve.add_argument("reply", nargs="?", default="", help="what changed, e.g. the fix commit")
     resolve.set_defaults(func=cmd_resolve)
@@ -1704,7 +1706,14 @@ def main(argv: list[str] | None = None) -> int:
     # Progress lines must precede the stderr verdict when both go to one file.
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(line_buffering=True)
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "resolve" and args.finding is not None and not args.reply.strip():
+        parser.error('expected resolve [<finding-id> "<reply>"] with a nonblank reply for a finding')
+    if args.command == "review" and args.repost:
+        conflicts = [f"--{name}" for name in ("model", "effort") if getattr(args, name) is not None]
+        if conflicts:
+            parser.error(f"review --repost cannot be combined with {' or '.join(conflicts)}")
     try:
         return args.func(args)
     except IndependentReviewerUnavailable as exc:
