@@ -274,7 +274,9 @@ def _readiness(
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)
-    review = eligibility.readiness_review(reviews, head, publishers, repo=config.repo, number=pr.number)
+    review = eligibility.readiness_review(
+        reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
+    )
     review_at = review.get("submitted_at") if review else None
     # GitHub's UTC submission time predates this process; monotonic time cannot date it.
     review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
