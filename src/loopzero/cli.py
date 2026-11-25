@@ -97,17 +97,17 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
     config = config_mod.load(path, checks={})
-    base_checks = config_mod.load_base(root, config.base_branch)
-    if base_checks is None:
+    base, revision = config_mod.load_base(root, config.base_branch)
+    if base is None:
         return config_mod.load(path)
+    base_checks = config_mod.base_section(base, config.base_branch, "checks")
     config = config_mod.load(
         path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
     )
-    delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
+    delivery = config_mod.base_section(base, config.base_branch, "delivery")
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
-        revision = config_mod.base_revision(root, config.base_branch)
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
     return config
 
@@ -125,10 +125,11 @@ def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) ->
         revision = _git(wt, "rev-parse", "--verify", f"refs/remotes/origin/{config.base_branch}")
     except CliError as exc:
         raise CliError("native review needs a remote base; fetch it or supply --config") from exc
-    checks = config_mod.load_base(wt, config.base_branch, revision=revision)
-    if checks is None:
+    base, _ = config_mod.load_base(wt, config.base_branch, revision=revision)
+    if base is None:
         raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
-    delivery = config_mod.load_base(wt, config.base_branch, "delivery", revision=revision) or {}
+    checks = config_mod.base_section(base, config.base_branch, "checks")
+    delivery = config_mod.base_section(base, config.base_branch, "delivery")
     pinned = dataclasses.replace(
         config_mod.load(
             wt / "workflow.toml", checks=checks,
