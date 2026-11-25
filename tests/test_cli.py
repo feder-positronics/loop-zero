@@ -506,6 +506,19 @@ def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys) -> None:
     assert out.startswith("checks are unpinned because --config was provided\n")
 
 
+@pytest.mark.parametrize("explicit_config", [False, True])
+def test_invalid_workflow_utf8_names_file(wt, capsys, explicit_config):
+    filename = "broken-workflow.toml" if explicit_config else "workflow.toml"
+    (wt / filename).write_bytes(bytes([255]))
+    args = ["--config", filename, "status"] if explicit_config else ["status"]
+
+    code, _, err = run(capsys, *args)
+
+    assert code == 1
+    assert filename in err and "utf-8" in err.lower() and "position 0" in err
+    assert "Traceback" not in err
+
+
 def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
     code, out, err = run(capsys, "check")
@@ -1206,6 +1219,19 @@ def test_review_refuses_when_reviewer_dirties_worktree(
     assert code == 1 and out.startswith("reviewer paths pinned") and "worktree changed during review" in err
     assert err.count(head) == 2 and not saved.exists()
     assert all(call["argv"][:2] != ["api", post_key().split(" ")[1]] for call in gh.calls)
+
+
+@pytest.mark.parametrize("option", ["--model", "--effort"])
+@pytest.mark.parametrize("repost_first", [True, False])
+def test_review_repost_rejects_reviewer_overrides(monkeypatch, capsys, option, repost_first):
+    monkeypatch.setattr(cli, "_context", lambda *_, **_kw: pytest.fail("loaded context for invalid review"))
+    override = [option, "override"]
+    options = ["--repost", *override] if repost_first else [*override, "--repost"]
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["review", *options])
+
+    assert stop.value.code == 2
+    assert f"--repost cannot be combined with {option}" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("padding", ["", "x" * 574_264], ids=["short", "long"])
@@ -2780,9 +2806,37 @@ def test_merge_wait_times_out_on_pending_checks_with_exit_three(
     assert wt.exists() and all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
+def test_merge_wait_bounds_slow_source_check_read(wt, gh, capsys, monkeypatch, head):
+    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = [1000.0]
+    budgets = []
+    initial_check_seen = False
+    run_gh = github.run
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+
+    def slow_check(argv, *, timeout, **kwargs):
+        nonlocal initial_check_seen
+        if len(argv) > 2 and argv[2].endswith("/check-runs"):
+            if initial_check_seen:
+                budgets.append(timeout)
+                clock[0] += timeout
+                raise cli._proc.ProcTimeout("gh api timed out", "")
+            initial_check_seen = True
+        return run_gh(argv, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(github, "run", slow_check)
+    code, out, err = run(capsys, "merge", "--wait=0.05")
+
+    assert (code, err) == (3, "")
+    assert budgets == pytest.approx([0.05])
+    assert f"timed out waiting for required checks on {head[:12]}" in out
+    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
+
+
 @pytest.mark.parametrize("strategy", ["squash", "mergify"])
 @pytest.mark.parametrize("ready", [True, False], ids=["green", "terminal-failure"])
-def test_merge_wait_preserves_deadline_and_terminal_failure(wt, gh, capsys, monkeypatch, strategy, ready):
+def test_merge_wait_rejects_verdicts_after_deadline(wt, gh, capsys, monkeypatch, strategy, ready):
     if strategy == "mergify":
         commit_mergify_configuration(wt)
         monkeypatch.setattr(mergify, "configured", lambda *_: True)
@@ -2802,12 +2856,9 @@ def test_merge_wait_preserves_deadline_and_terminal_failure(wt, gh, capsys, monk
     monkeypatch.setattr(cli, "_wait_for_checks", check_after_deadline)
     code, out, err = run(capsys, "merge", "--wait=10")
     assert wt.exists()
-    if ready:
-        assert (code, err) == (3, "")
-        assert "timed out before " in out
-        assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
-    else:
-        assert code == 1 and failed in err
+    assert (code, err) == (3, "")
+    assert "timed out waiting for required checks" in out
+    assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
 @pytest.mark.parametrize("wait", [False, True])
@@ -3512,12 +3563,28 @@ def test_resolve_leaves_the_thread_open_when_the_reply_was_not_posted(
     assert not any("resolveReviewThread" in a for c in gh.calls for a in c["argv"])
 
 
-def test_resolve_refuses_silent_or_unknown(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("reply", [(), ("  ",)])
+def test_resolve_requires_reply_before_context(monkeypatch, capsys, reply):
+    monkeypatch.setattr(cli, "_context", lambda *_: pytest.fail("loaded context for invalid resolve"))
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["resolve", "0b9b59e7", *reply])
+
+    assert stop.value.code == 2
+    assert 'resolve [<finding-id> "<reply>"]' in capsys.readouterr().err
+
+
+def test_resolve_help_groups_arguments(capsys):
+    with pytest.raises(SystemExit) as stop:
+        cli.main(["resolve", "--help"])
+
+    assert stop.value.code == 0
+    assert 'resolve [<finding-id> "<reply>"]' in capsys.readouterr().out
+
+
+def test_resolve_refuses_unknown(wt: Path, gh: FakeGh, capsys, head) -> None:
     gh.respond_pr_list([pr_json(headRefOid=head)])
     gh.respond("api graphql", threads_json(_finding_thread("0b9b59e7", head)))
 
-    code, _out, err = run(capsys, "resolve", "0b9b59e7", "  ")
-    assert code == 1 and "a reply saying what changed" in err
     code, _out, err = run(capsys, "resolve", "deadbeef", "Fixed.")
     assert code == 1 and "no open blocking finding deadbeef" in err
     assert not any("resolveReviewThread" in a for c in gh.calls for a in c["argv"])

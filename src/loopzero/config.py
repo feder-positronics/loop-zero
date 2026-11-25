@@ -67,6 +67,8 @@ def load(
             "(https://github.com/feder-positronics/loop-zero/blob/main/SETUP.md#configure), "
             "or follow this repository's review process if it has one."
         ) from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: {exc}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     if checks is not None:
