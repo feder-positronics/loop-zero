@@ -19,9 +19,8 @@ sessions, secrets or trust boundaries, record a short design pass in Notes
 before the first code edit: threats, invariants and chosen approach.
 
 Implement that bounded acceptance with behavior proof; use
-[write-tests](../write-tests/SKILL.md) for test design. For a bug fix, watch the
-regression test fail on pre-fix code and record where in Notes; a test that passes
-without the fix proves nothing. For migrations,
+[write-tests](../write-tests/SKILL.md) for test design and regression evidence.
+For migrations,
 authorization, locking/concurrency or policy logic, list edge cases in Acceptance
 and map each to a test or recorded evidence. Observe required UI/runtime behavior within actual permissions; include visual
 proof for UI changes per [Reporting](../../CONTRACT.md#reporting). Required
