@@ -7,8 +7,8 @@ description: Deliver one live GitHub issue through verified merge and closure or
 
 Use [the contract](../../CONTRACT.md); the issue owns intake context, the PR owns
 delivery evidence. Read live issue acceptance, comments, artifacts and linked
-work. Before pickup, reconcile prior and partial deliveries with the issue's
-[dispatch authority](../../../docs/DELEGATION.md#team-roles).
+work. Before pickup, reconcile prior and partial deliveries, branches and
+competing PRs with the issue's [dispatch authority](../../../docs/DELEGATION.md#team-roles).
 Verify remote identity before mutation
 and connected environment before relying on production claims. Apply
 [inherited-work guidance](reference.md#inherited-work) to continuations.
