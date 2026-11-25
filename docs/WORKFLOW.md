@@ -27,8 +27,6 @@ See the contract's [Blockers](../core/CONTRACT.md#blockers) for review coverage,
 head movement and readiness, and the [review budget](../core/CONTRACT.md#review-budget)
 for when another review is available.
 
-Work stops at "ready" unless merging has been authorized.
-
 Summarizes [The six steps](../core/CONTRACT.md#the-six-steps) and
 [Blockers](../core/CONTRACT.md#blockers); the queue is described in
 [MERGIFY.md](MERGIFY.md).

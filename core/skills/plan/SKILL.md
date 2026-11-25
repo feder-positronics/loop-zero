@@ -1,6 +1,6 @@
 ---
 name: plan
-description: Bound an unclear change into PR-sized tasks with observable acceptance, ownership, paths and checks; do not implement.
+description: Plan PR-sized tasks with observable acceptance, ownership, paths and checks. File authorized slices from active goals or planned blueprints.
 ---
 
 # Plan

@@ -708,7 +708,8 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     clock = [0.0]
-    monkeypatch.setattr(github.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(github.time, "time", lambda: clock[0])
+    monkeypatch.setattr(github.time, "monotonic", lambda: 100.0)  # stopped during host suspend
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
@@ -727,9 +728,29 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
         "operator-token", "operator-token", "operator-token",
     ]
     assert counter.read_text().splitlines() == ["called"]
-    clock[0] = 3001.0
+    clock[0] = 3601.0
     github.api_get("repos/acme/widgets")
     assert counter.read_text().splitlines() == ["called", "called"]
+
+
+def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    wall, real_run = [1_000_000.0], github.run
+    suspend = lambda: wall.append(wall.pop() + 3601)  # noqa: E731
+    monkeypatch.setattr(github.time, "time", lambda: wall[0])
+    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), wall[0] == 1e6 and suspend())[0])
+    monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    gh.expect(["api", "repos/acme/widgets", "--include"], {})
+    gh.expect(["api", "repos/acme/widgets", "--include"], exit=1, stderr="HTTP 502: Bad Gateway")
+    gh.expect(["api", "repos/acme/widgets", "--include"], {})
+    github.api_get("repos/acme/widgets")  # mint, then suspend before the token is used
+    github.api_get("repos/acme/widgets")  # fails transiently, then suspends in the backoff
+    assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
 
 
 def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
@@ -818,7 +839,7 @@ def test_gh_api_reads_with_fields_use_method_get(gh: FakeGh) -> None:
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": []})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    github.check_runs(REPO, HEAD)
+    github._check_signals(REPO, HEAD)
     reads = [c["argv"] for c in gh.calls if c["argv"][0] == "api" and "-F" in c["argv"]]
     assert len(reads) == 3, "files, check-runs and status all pass -F"
     for argv in reads:
@@ -836,7 +857,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
         {"context": "ci/legacy", "state": "failure"},
         {"context": "checks", "state": "pending"},
     ])
-    runs = github.check_runs(REPO, HEAD)
+    runs = github._check_signals(REPO, HEAD)[0]
     assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
         "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
     pages = [c["argv"][-2] for c in gh.calls if "check-runs" in c["argv"][1]]
@@ -866,7 +887,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
 def test_check_runs_ordering(gh: FakeGh, runs: list[dict], expected: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/check-runs", {"check_runs": runs})
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
-    assert github.check_runs(REPO, HEAD) == expected
+    assert github._check_signals(REPO, HEAD)[0] == expected
 
 
 @pytest.mark.parametrize("page", [{"total_count": 1}, {"check_runs": 1}, {"check_runs": []}])
@@ -876,10 +897,10 @@ def test_check_runs_validates_check_page_shape(gh: FakeGh, page: dict) -> None:
     gh.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [])
 
     if page.get("check_runs") == []:
-        assert github.check_runs(REPO, HEAD) == {}
+        assert github._check_signals(REPO, HEAD)[0] == {}
     else:
         with pytest.raises(github.GhError, match=endpoint):
-            github.check_runs(REPO, HEAD)
+            github._check_signals(REPO, HEAD)
 
 
 def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> None:
@@ -892,7 +913,7 @@ def test_check_runs_paginates_statuses_and_keeps_latest_context(gh: FakeGh) -> N
         [{"context": "required-page-two", "state": "success"},
          {"context": "duplicate", "state": "success"}],
     )
-    runs = github.check_runs(REPO, HEAD)
+    runs = github._check_signals(REPO, HEAD)[0]
     assert runs["required-page-two"] == "success"
     assert runs["duplicate"] == "failure", "the first (latest) status wins"
 
@@ -1180,12 +1201,15 @@ def _queue_json(queued: bool) -> dict:
     return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
 
 
-def test_merge_unverified(gh: FakeGh) -> None:
+@pytest.mark.parametrize("missing", [False, True])
+def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
     unmerged = merge_json(state='OPEN', head=HEAD, sha=None)
     gh.respond("pr merge", "")
     gh.respond(f"api repos/{REPO}/pulls/7", unmerged, unmerged)
-    gh.respond("api graphql", _queue_json(False))
-    with pytest.raises(github.MergeFailed, match="neither merged nor queued"):
+    response = {"data": {"repository": {"pullRequest": None}}} if missing else _queue_json(False)
+    gh.respond("api graphql", response)
+    message = "GitHub queue lookup for PR #7: queue status could not be verified" if missing else "neither merged nor queued"
+    with pytest.raises(github.MergeFailed, match=message):
         github.merge(REPO, 7, "merge", HEAD)
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
 
@@ -1403,14 +1427,14 @@ def test_merged_branch_history_requires_terminal_page(gh: FakeGh) -> None:
     assert len(gh.calls) == 2
 
 
-def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> None:
+def test_merged_branch_history_fails_at_page_limit(monkeypatch) -> None:
     monkeypatch.setattr(github, "PAGE", 1)
-    for page in range(1, 101):
-        key = branch_history_key(page).replace("per_page=100", "per_page=1")
-        gh.respond(key, [closed_history_row(pr_json(number=page, state="CLOSED"))])
-
+    pages = ({branch_history_key(page).removeprefix("api ").replace("per_page=100", "per_page=1"):
+              [closed_history_row(pr_json(number=page, state="CLOSED"))]} for page in range(1, 101))
+    monkeypatch.setattr(github, "api_get", lambda endpoint: next(pages)[endpoint])
     with pytest.raises(github.GhError, match="exceeds 100-page publication limit"):
         github.merged_pr_for_branch(REPO, "lz/t1")
+    assert next(pages, None) is None
 
 
 @pytest.mark.parametrize("capped", [False, True])
@@ -1433,3 +1457,33 @@ def test_readiness_distinguishes_capped_check_suites_from_missing_check(gh: Fake
         f"cannot determine required check 'required-ci' on {HEAD[:12]}: GitHub's 1,000-suite limit"
         if capped else f"required check 'required-ci' missing on {HEAD[:12]}",
     )
+
+
+@pytest.mark.parametrize("changed_files,path,severity,live_head,anchor", [
+    (3001, "file-3001", "important", HEAD, None),
+    (3000, "file-3000", "important", HEAD, "file-3000"),
+    (3000, "outside-diff", "important", HEAD, "file-0001"),
+    (3001, "file-3001", "suggestion", HEAD, None),
+    (3000, "outside-diff", "important", "b" * 40, None),
+])
+def test_review_file_limit(gh: FakeGh, changed_files: int, path: str, severity: str,
+                           live_head: str, anchor: str | None) -> None:
+    files = [{"filename": f"file-{i:04d}", "patch": "@@ -1 +1 @@\n-before\n+after"}
+             for i in range(1, changed_files + 1)][:3000]
+    gh.respond(FILES_KEY, *(files[i:i + 100] for i in range(0, 3001, 100)))
+    detail_key = f"api repos/{REPO}/pulls/7"
+    gh.respond(detail_key, rest_pr_json(pr_json(headRefOid=live_head)) | {"changed_files": changed_files})
+    result = review(findings=(Finding(severity, path, 1, "Incorrect", "Fix this"),))
+
+    if severity == "suggestion":
+        payload = github.review_payload(REPO, 7, HEAD, result, "")
+        assert payload["comments"] == [] and "Incorrect" in payload["body"]
+    elif anchor is None:
+        message = rf"PR #7.*{path}.*3,000" if live_head == HEAD else "PR #7 head moved"
+        with pytest.raises(github.GhError, match=message):
+            github.review_payload(REPO, 7, HEAD, result, "")
+    else:
+        payload = github.review_payload(REPO, 7, HEAD, result, "")
+        (comment,) = payload["comments"]
+        assert (comment["path"], comment["line"]) == (anchor, 1)
+    assert len(calls_for(gh, detail_key)) == int(severity == "important" and path != "file-3000")

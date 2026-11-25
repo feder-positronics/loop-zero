@@ -46,9 +46,7 @@ GitHub; keep acceptance changes in both task.md and the PR by rerunning `pr`.
 
 Review publication records duration and distinguishes requested model/effort from
 CLI-reported claims, which are not backend attestation; saved artifacts preserve
-them for `--repost`. GitHub reviews include at most the last 30,000 UTF-8 bytes of
-raw reviewer output, with a truncation notice. Verdicts and findings remain
-complete. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
+them for `--repost`. The full transcript stays in `.loopzero/review-<head>-<kind>.json`;
 `loopzero review --repost` uses it without rerunning the model.
 
 Waits observe immediately, then use 30/60/120-second intervals with up to 10%
@@ -105,7 +103,7 @@ Settings and semantics the example does not spell out:
 | --- | --- |
 | `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
-| `checks.limits` | Per-check resource limits applied with `prlimit`, capped at the inherited hard limits: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size); overrides must be positive integers. |
+| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers and require local execution without `checks.runner`. |
 | `checks.env_allowlist` | Host environment variables passed into the sandbox. To forward a launcher-provided variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. An explicit list replaces the defaults (`PATH HOME LANG LC_ALL TERM`). |
 | `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
 

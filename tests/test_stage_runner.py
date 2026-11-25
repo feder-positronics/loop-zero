@@ -163,7 +163,8 @@ def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, change):  # n
     from dataclasses import replace
 
     (git_repo / '.git/info/exclude').write_text('.loopzero/\n')
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+    base = git(git_repo, 'rev-parse', 'HEAD').strip()
+    git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     command = 'echo stage-ran; exit 7' if change == 'fallback' else 'echo one'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
     body = ('import json,sys;r=json.load(sys.stdin);r.pop("env");'
@@ -172,7 +173,7 @@ def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, change):  # n
     if change == 'fallback':
         passing = sandbox.run_checks(replace(cfg, checks=('echo seed',)), git_repo)
         result = replace(passing.results[0], command=command,
-                         input_key=sandbox._input_key(cfg, git_repo, command))
+                         input_key=sandbox._input_key(cfg, git_repo, command, base))
         _save_report(git_repo, replace(passing, results=(result,)))
     else:
         cfg = replace(cfg, check_runner=runner)
