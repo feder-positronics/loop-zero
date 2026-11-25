@@ -1189,7 +1189,8 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
     try:
         _api(endpoint, {"state": state, "context": context, "description": description})
     except GhError as exc:
-        if re.search(r"\bHTTP 422\b", exc.tail) and _status_limit_reached(repo, head, context):
+        validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
+        if validation_error and _status_limit_reached(repo, head, context):
             raise StatusLimitReached(
                 exc.command, f"{head} context {context!r} reached GitHub's 1,000-status limit. "
                 "Push a fresh head and obtain review evidence for it before refreshing eligibility."
