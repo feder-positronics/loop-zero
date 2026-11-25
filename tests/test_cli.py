@@ -1069,6 +1069,31 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 
 
+def test_repost_refuses_retired_paired_review(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    head = prepare_review(wt, gh, fake_bin)
+    code, _, err = run(capsys, "review")
+    assert (code, err) == (0, "")
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    data = json.loads(saved.read_text())
+    data["members"] = [{"family": "claude"}]
+    saved.write_text(json.dumps(data))
+    (fake_bin / "claude.stdin").unlink()
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+    prior_calls = len(gh.calls)
+
+    code, _, err = run(capsys, "review", "--repost")
+
+    assert code == 1
+    assert "invalid saved review" in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert not (fake_bin / "codex.stdin").exists()
+    assert not any(
+        call["argv"][:2] == post_key().split() for call in gh.calls[prior_calls:]
+    )
+
+
 @pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written"])
 def test_repost_refuses_missing_stale_or_hand_written_review(
     wt: Path, gh: FakeGh, capsys, saved_state: str, head
