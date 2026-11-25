@@ -271,7 +271,7 @@ def test_generic_failure_carries_command_and_tail(gh: FakeGh) -> None:
 def test_pr_for_branch_none_when_empty(gh: FakeGh) -> None:
     gh.respond_pr_list([], branch="lz/x")
     assert github.pr_for_branch(REPO, "lz/x") is None
-    assert gh.argv(0) == pr_list_key("lz/x").split(" ", 1)
+    assert gh.argv(0) == [*pr_list_key("lz/x").split(" ", 1), "--include"]
     assert gh.argv(1)[1].startswith(f"repos/{REPO}/pulls?state=closed")
 
 
@@ -300,7 +300,7 @@ def test_pr_for_branch_encodes_qualified_unicode_head(gh: FakeGh) -> None:
     gh.respond_pr_list([pr_json()], branch=branch)
 
     assert github.pr_for_branch(REPO, branch) is not None
-    assert gh.argv(0) == pr_list_key(branch).split(" ", 1)
+    assert gh.argv(0) == [*pr_list_key(branch).split(" ", 1), "--include"]
 
 
 @pytest.mark.parametrize("head_change", [
@@ -385,7 +385,7 @@ def test_update_body(gh: FakeGh, error: str, stdout: str, status: str) -> None:
         github.update_body(REPO, 7, "new body")
     assert gh.argv(0)[:4] == ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH"]
     assert json.loads(gh.calls[0]["--input"]) == {"body": "new body"} and len(gh.calls) == 1
-    assert "--include" not in gh.argv(0)
+    assert "--include" in gh.argv(0)
 # --- reviews ---------------------------------------------------------------------------
 def review(verdict: str = "request_changes", findings: tuple[Finding, ...] = ()) -> ReviewResult:
     return ReviewResult(family="codex", head=HEAD, kind="primary", verdict=verdict,
@@ -412,7 +412,7 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     result = replace(review(findings=(*FINDINGS, loose)), raw=raw, family=family)
     github.post_review(REPO, 7, HEAD, result, body_prefix=prefix)
     assert calls_for(gh, FILES_KEY)[0]["argv"] == [
-        "api", FILES_KEY.split(" ", 1)[1], "--method", "GET", "-F", "per_page=100", "-F", "page=1"]
+        "api", FILES_KEY.split(" ", 1)[1], "--method", "GET", "-F", "per_page=100", "-F", "page=1", "--include"]
     (call,) = calls_for(gh, REVIEWS_KEY)
     assert call["argv"][:5] == ["api", f"repos/{REPO}/pulls/7/reviews", "--method", "POST",
                                 "--input"]
@@ -506,7 +506,7 @@ def test_post_review_paginates_files(gh: FakeGh) -> None:
     arm_review(gh)
     gh.respond(FILES_KEY, page1, PR_FILES)
     github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
-    assert [c["argv"][-1] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
+    assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
     assert comments_posted(gh)[0]["path"] == "src/a.py"
 
 
@@ -615,7 +615,7 @@ def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str)
     assert payload["event"] == "COMMENT"
     assert [c["argv"][:2] for c in gh.calls[:2]] == [["api", f"repos/{REPO}/pulls/7"],
                                                ["api", "graphql"]]
-    assert gh.argv(0) == ["api", f"repos/{REPO}/pulls/7"]
+    assert gh.argv(0) == ["api", f"repos/{REPO}/pulls/7", "--include"]
 
 
 def test_post_review_uses_given_pr_without_lookup(gh: FakeGh) -> None:
@@ -694,7 +694,7 @@ def test_api_get_and_login_helpers(gh: FakeGh) -> None:
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "bot-user"}}})
     gh.respond("api repos/acme/widgets", {"default_branch": "main"})
     assert github.api_get("repos/acme/widgets") == {"default_branch": "main"}
-    assert gh.argv(0) == ["api", "repos/acme/widgets"]
+    assert gh.argv(0) == ["api", "repos/acme/widgets", "--include"]
     assert github.login() == "bot-user"
     gh.respond("api graphql viewer", {"data": {"viewer": {}}})
     with pytest.raises(github.GhError, match="no login"):
@@ -839,7 +839,7 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
     runs = github.check_runs(REPO, HEAD)
     assert {k: v for k, v in runs.items() if not k.startswith("job")} == {
         "checks": "pending", "lint": "pending", "ci/legacy": "failure"}
-    pages = [c["argv"][-1] for c in gh.calls if "check-runs" in c["argv"][1]]
+    pages = [c["argv"][-2] for c in gh.calls if "check-runs" in c["argv"][1]]
     assert pages == ["page=1", "page=2"]
 
 
@@ -1127,7 +1127,7 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
                               workflow_wait=True)
 
     assert result.waitable_failures == result.reasons
-    pages = [c["argv"][-1] for c in gh.calls if "actions/runs" in c["argv"][1]]
+    pages = [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]]
     assert pages == ["page=1", "page=2"]
 
 
@@ -1199,12 +1199,12 @@ def test_merge_success_verifies_rest_landing(
     gh.expect(
         ["pr", "merge", "7", "--repo", REPO, "--squash", "--match-head-commit", HEAD]
     )
-    gh.expect(["api", f"repos/{REPO}/pulls/7"], merge_json("MERGED", sha="c" * 40))
+    gh.expect(["api", f"repos/{REPO}/pulls/7", "--include"], merge_json("MERGED", sha="c" * 40))
     assert github.merge(REPO, 7, "squash", HEAD) == "c" * 40
     assert gh.argv(0) == ["pr", "merge", "7", "--repo", REPO, "--squash",
                           "--match-head-commit", HEAD]
     assert "--delete-branch" not in gh.argv(0)
-    assert gh.argv(1) == ["api", f"repos/{REPO}/pulls/7"]
+    assert gh.argv(1) == ["api", f"repos/{REPO}/pulls/7", "--include"]
     gh.assert_complete()
 
 
@@ -1233,10 +1233,10 @@ def test_delete_remote_branch_checks_encoded_ref(gh: FakeGh, remote_head: str | 
     gh.respond("api -X", "")
     result = github.delete_remote_branch(REPO, "lz/fix#516?x%", HEAD)
     assert result is (remote_head in (HEAD, None))
-    assert gh.argv(0) == get.split()
+    assert gh.argv(0) == [*get.split(), "--include"]
     assert len(gh.calls) == (2 if remote_head == HEAD else 1)
     if remote_head == HEAD:
-        assert gh.argv(1) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/{ref}"]
+        assert gh.argv(1) == ["api", "-X", "DELETE", f"repos/{REPO}/git/refs/{ref}", "--include"]
 
 
 def _queue_json(queued: bool) -> dict:
@@ -1302,7 +1302,7 @@ def test_gh_retries_only_transient_reads(monkeypatch, args, attempts, error):
     def run(argv, **_):
         seen.append(argv)
         failed = len(seen) == 1
-        if failed and "pulls/1" in argv[-1]:
+        if failed and "pulls/1" in argv[2]:
             raise github.ProcTimeout("gh api timed out")
         return type("Done", (), {"exit_code": int(failed), "stdout": "ok", "stderr": error * failed})
     monkeypatch.setattr(github, "run", run)
@@ -1329,6 +1329,41 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
         with pytest.raises(github.GhError, match="Rate limited"):
             github.pr_for_branch(REPO, "lz/x")
     assert len(gh.calls) == 1
+
+
+@pytest.mark.parametrize(("remaining", "retry_after", "hint"), [
+    ("0", "", "hourly quota exhausted: retry after 2026-11-25T21:03:14+00:00"),
+    ("4676", "90", "short-window limit: retry after 90 s"),
+    ("4676", "", "short-window limit: retry after ~60 s"),
+    ("", "90", "short-window limit: retry after 90 s"),
+    ("", "Wed, 25 Nov 2026 21:03:14 GMT", "short-window limit: retry after Wed, 25 Nov 2026 21:03:14 GMT"),
+    ("", "", "Rate limited: retry after GitHub's reset or Retry-After; No automatic retry."),
+])
+def test_rest_rate_limit_uses_failed_response_headers(gh, remaining, retry_after, hint):
+    headers = "HTTP/2.0 403 Forbidden\r\nX-Unrelated: never print this\r\n"
+    if remaining:
+        headers += (
+            f"X-RateLimit-Resource: core\r\nX-RateLimit-Remaining: {remaining}\r\n"
+            "X-RateLimit-Reset: 1795640594\r\n"
+        )
+    if retry_after:
+        headers += f"Retry-After: {retry_after}\r\n"
+    gh.respond(pr_list_key("lz/x"), headers + '\r\n{"message":"API rate limit exceeded"}',
+               exit=1, stderr="gh: API rate limit exceeded for installation ID 123 (HTTP 403)")
+
+    with pytest.raises(github.GhError) as info:
+        github.pr_for_branch(REPO, "lz/x")
+
+    error = str(info.value)
+    assert hint in error
+    if remaining:
+        assert "X-RateLimit-Resource: core" in error
+        assert f"X-RateLimit-Remaining: {remaining}" in error
+        assert "X-RateLimit-Reset: 2026-11-25T21:03:14+00:00" in error
+    if retry_after:
+        assert f"Retry-After: {retry_after}" in error
+    assert "never print this" not in error
+    assert len(gh.calls) == 1 and gh.argv(0)[-1] == "--include"
 
 
 def test_graphql_limit_reports_verified_reset_from_one_diagnostic(gh: FakeGh) -> None:
