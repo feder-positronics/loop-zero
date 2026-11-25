@@ -157,20 +157,25 @@ candidate and landed trees unknown until there is evidence for each.
 Consumer proof/replacement remains with [IntelFlo Lane P](https://github.com/feder-positronics/intelflo/issues/10948)
 and [disabled-heavy coverage work](https://github.com/feder-positronics/intelflo/issues/10842).
 
-Use measured packet wall time to validate final-QA cost estimates. Include setup,
-partial, failed, retried and cancelled packets and other paid work in actual spend.
-Flag paid nonfinal tests and reconcile daily UTC spend against allocated costs
-plus the unattributed remainder. Incomplete allocation leaves cost unknown.
-Report batch hold separately and within first-entry-to-merge latency. See the
+Include setup, partial, failed, retried and cancelled packets and other paid work
+in actual spend. Flag paid nonfinal tests and reconcile daily UTC spend against
+allocated costs plus the unattributed remainder. Keep incomplete allocations
+unknown and charge the known spend. Report batch hold separately and within
+first-entry-to-merge latency. The consumer's cost and queue owner validates
+packing, packet runtime and repository-wide budget compliance in the existing
+experiment. These reporting conventions add no spending gate or scheduler. See the
 [IntelFlo final-QA budget study](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/code-health.md#final-qa-packet-and-queue-cost)
 for the packet assumptions and hold estimates.
 
 Keep failures, cancellations, starvation, timeouts and successes separate.
 Record queued, start and end timestamps. Admission wait is start minus queued,
-wall time is end minus start and CPU time is user plus system time. Missing
-timestamps leave the corresponding durations unknown. Report executed tests
-separately from collection and record the source SHA, candidate tree, landed
-tree, scope, environment and evidence for each stage. See [IntelFlo's timing
+wall time is end minus start and CPU time is user plus system time, excluding
+Docker. Missing timestamps leave the corresponding durations unknown. Failed
+or interrupted work can consume unavoidable CPU time. Report executed tests
+separately from collection. Distinguish stable platform failures from changing
+test failures and require separate evidence of intrinsic flakiness. Record the
+source SHA, candidate tree and landed tree separately and require evidence for
+each. Include scope, environment and an evidence link on each stage row. See [IntelFlo's timing
 and outcome sample](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/code-health.md#local-timing-and-outcomes).
 
 Read generic SSH-pool connection, capability and capacity from consumer config;
@@ -182,10 +187,9 @@ script, otherwise its lock files), not from another repository's tooling. Pool
 hosts run jobs under the repository-pinned interpreter (for example a user-level
 `uv` with the pinned Python), never the host's system Python, and receive no jobs
 while their reported toolchain differs from the pin. Install that interpreter with
-umask 022: a group- or world-writable install fails consumers' interpreter checks. See [IntelFlo's local test admission handoff](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/local-heavy-checks.md#local-protection-sample-from-2026-11-07)
-for consumer-owned proof and adapters.
+umask 022: a group- or world-writable install fails consumers' interpreter checks. The [consumer local-test handoff](https://github.com/feder-positronics/intelflo/pull/11373)
+owns admission proof. Lane P owns candidate and environment adapters outside core.
 
-Frozen examples come from `test-research-20261107/metrics.md` section 4 drafts
-1–3 and its section 1 M14/M16, `scorecard.md`, `p1e-gapfill.md` and
-`p1f-local-timing.md` in the consumer's established research cache. These dated
-figures are examples, not live health claims or new authoritative state.
+The linked IntelFlo samples draw on `test-research-20261107/metrics.md` section 4
+drafts 1–3 and its section 1 M14/M16, `scorecard.md`, `p1e-gapfill.md` and
+`p1f-local-timing.md` in the consumer's historical research cache.
