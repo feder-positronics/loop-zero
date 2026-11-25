@@ -1468,3 +1468,15 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, comp
 
     assert pr is not None and pr.number == 7 and pr.state == state
     assert [call["argv"] for call in gh.calls] == [["api", path] for path in (ref, commits, detail)]
+
+
+def test_closed_commit_pr_does_not_mask_unindexed_open_pr(gh: FakeGh) -> None:
+    closed = closed_history_row(pr_json(number=6, state="CLOSED"))
+    closed["created_at"] = "2026-10-06T00:00:00Z"
+    gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [closed])
+    gh.respond_pr_list([pr_json()])
+
+    pr = github.pr_for_branch(REPO, "lz/t1")
+
+    assert pr is not None and pr.number == 7 and pr.state == "OPEN"

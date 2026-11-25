@@ -83,7 +83,7 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
 3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
    endpoint. It matches the source branch and repository, then re-reads PR
    detail. Other commands prefer open PRs, then the newest closed PR, with
-   pull-list fallback when the branch or a matching PR is absent. Before pushing
+   pull-list fallback when the branch or a matching open PR is absent. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the

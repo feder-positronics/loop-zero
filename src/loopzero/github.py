@@ -537,12 +537,12 @@ def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state
 def pr_for_branch(repo: str, branch: str, *, open_only: bool = False) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
     endpoint, matches = _commit_branch_prs(repo, branch)
-    for state in (("open",) if open_only else ("open", "closed")):
-        candidates = [row for row in matches if row["state"] == state]
-        if candidates:
-            newest = max(candidates, key=lambda row: (row["created_at"], row["number"]))
-            return _confirm_branch_pr(repo, branch, endpoint, newest["number"], state.upper())
+    open_matches = [row for row in matches if row["state"] == "open"]
+    if open_matches:
+        newest = max(open_matches, key=lambda row: (row["created_at"], row["number"]))
+        return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
 
+    # A closed association cannot rule out an open PR or newer closed history.
     owner = repo.split("/", 1)[0]
     head = quote(f"{owner}:{branch}", safe="")
     for state in (("open",) if open_only else ("open", "closed")):
