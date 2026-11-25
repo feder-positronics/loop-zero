@@ -234,9 +234,10 @@ def _read_only(args: tuple[str, ...]) -> bool:
 
 
 def app_token() -> str:
+    # Installation tokens expire one hour after minting by wall clock, suspend included.
     global _app_token_cache
-    token, expires = _app_token_cache
-    if token and time.monotonic() < expires:
+    token, minted = _app_token_cache
+    if token and 0 <= time.time() - minted < 3000:
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
@@ -247,7 +248,7 @@ def app_token() -> str:
     if result.exit_code or not result.stdout.strip():
         return ""
     token = result.stdout.strip()
-    _app_token_cache = (token, time.monotonic() + 3000)
+    _app_token_cache = (token, time.time())
     return token
 
 

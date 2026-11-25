@@ -708,7 +708,7 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     clock = [0.0]
-    monkeypatch.setattr(github.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(github.time, "time", lambda: clock[0])
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
@@ -730,6 +730,25 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     clock[0] = 3001.0
     github.api_get("repos/acme/widgets")
     assert counter.read_text().splitlines() == ["called", "called"]
+
+
+def test_app_token_expiring_during_suspend_is_reminted(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    monotonic, wall = [100.0], [1_000_000.0]
+    monkeypatch.setattr(github.time, "monotonic", lambda: monotonic[0])
+    monkeypatch.setattr(github.time, "time", lambda: wall[0])
+    gh.respond("api repos/acme/widgets", {}, {}, {})
+    github.api_get("repos/acme/widgets")
+    monotonic[0], wall[0] = 101.0, 1_000_000.0 + 2999
+    github.api_get("repos/acme/widgets")
+    monotonic[0], wall[0] = 300.0, 1_000_000.0 + 3601
+    github.api_get("repos/acme/widgets")
+    assert [c["token"] for c in gh.calls] == ["synthetic-token-1", "synthetic-token-1", "synthetic-token-2"]
+    assert len(counter.read_text().splitlines()) == 2
 
 
 def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
