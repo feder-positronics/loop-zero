@@ -1284,22 +1284,26 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
 
 
 def _mergify_timeout_detail(
-    queue: str, state: mergify.Membership | None, required_ci: tuple[str, ...]
+    config: Config, pr: github.PR, queue: str, state: mergify.Membership | None,
 ) -> str:
     if state is None:
-        return f"not queued in {queue} at last check. Check the Mergify queue request."
-    queued = f"still queued in {queue} at last check"
-    if state.candidate_number is not None:
-        queued += f", candidate PR #{state.candidate_number}"
-    retry = "Rerun `loopzero merge --wait`."
-    if state.checks is None:
-        return f"{queued}. Candidate check status unavailable. {retry}"
-    required = {name: state.checks.get(name, "pending") for name in required_ci}
-    done = sum(result == "success" for result in required.values())
-    failed = [f"`{name}`" for name, result in required.items() if result not in {"success", "pending"}]
-    pending = len(required) - done - len(failed)
-    next_step = f"Investigate {', '.join(failed)}." if failed else retry
-    return f"{queued}. Required checks are {done} done, {pending} pending, {len(failed)} failed. {next_step}"
+        try:
+            _, _, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+        except github.GhError:
+            report = None
+        return f"waiting for admission to Mergify queue {queue}. " + (
+            f"Mergify report: {report}" if report else "Check the PR for Mergify's admission report."
+        )
+    location = (
+        f"https://github.com/{config.repo}/pull/{state.candidate_number}"
+        if state.candidate_number is not None else
+        f"https://dashboard.mergify.com/orgs/{config.repo.replace('/', '/repos/', 1)}/queues/status"
+        f"?branch={config.base_branch}&pull={pr.number}"
+    )
+    detail = f"still queued in {queue}. {location}"
+    if state.unmet_conditions:
+        detail += ". Unmet candidate conditions: " + "; ".join(state.unmet_conditions)
+    return detail
 
 
 MERGIFY_DEQUEUE_HINT = (
@@ -1352,7 +1356,7 @@ def _wait_for_mergify(
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
-    print(_mergify_timeout_detail(queue, state, config.required_ci))
+    print(_mergify_timeout_detail(config, pr, queue, state))
     return None
 
 
@@ -1557,13 +1561,26 @@ def cmd_status(args: argparse.Namespace) -> int:
     for reason in readiness.reasons:
         print(f"  - {reason}")
     if config.merge_strategy == "mergify" and pr.state == "OPEN" and pr.head_sha == head:
-        queue = config.mergify_queue
-        assert queue is not None
-        requested, confirmed = mergify.markers(config.repo, pr.number, head, queue)
-        state = mergify.membership(config.repo, pr.number, queue)
-        label = "confirmed" if state else "ejected" if confirmed else "requested" if requested else "none"
-        print(f"mergify:  {label} ({queue})")
+        _print_mergify_status(config, pr, readiness)
     return 0
+
+
+def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readiness) -> None:
+    queue = config.mergify_queue
+    assert queue is not None
+    requested, confirmed, report = mergify.request_status(config.repo, pr.number, pr.head_sha, queue)
+    state = mergify.membership(config.repo, pr.number, queue)
+    if state:
+        label = "confirmed"
+    elif confirmed:
+        label = "ejected"
+    elif requested or (readiness.ready and report):
+        label = "waiting for admission"
+    else:
+        label = "not admitted"
+    print(f"mergify:  {label} ({queue})")
+    if label == "waiting for admission" and report:
+        print(f"  Mergify report: {report}")
 
 
 # --------------------------------------------------------------------------- entry point
