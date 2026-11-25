@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import resource
 import shutil
@@ -555,7 +556,6 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'dirty_receipt', 'keyless', 'dirty_tree'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
-    import json
     from dataclasses import replace
 
     from loopzero.cli import _save_report
@@ -602,6 +602,28 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     assert all(bool(r.reused_from) == (change == 'other') for r in report.results)
     assert any('reused ' in m for m in messages) == (change == 'other')
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
+
+
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
+    from loopzero.cli import _save_report
+
+    marker = "CHECK_INTEGRATION_SHARD []"
+    command = f"echo '{marker}'"
+    config = make_config(checks=(command,), inputs={command: ("README.md",)})
+    with (git_repo / ".git/info/exclude").open("a") as stream:
+        stream.write("\n.loopzero/\n")
+    original = sandbox.run_checks(config, git_repo)
+    assert original.ok
+    _save_report(git_repo, original)
+
+    git(git_repo, "commit", "--allow-empty", "-m", "advance head")
+    _save_report(git_repo, sandbox.run_checks(config, git_repo))
+
+    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
+    [result] = receipt["results"]
+    assert result["reused_from"] == original.head
+    assert marker in result["tail"].splitlines()
 
 
 @pytest.mark.parametrize('symlink', [False, True])
