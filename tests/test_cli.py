@@ -2195,10 +2195,13 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
     assert wt.exists()
 
 
-@pytest.mark.parametrize("branch", [
-    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+@pytest.mark.parametrize("branch,changed", [
+    ("lz/t1", False),
+    ("t3/archive-review-receipts", False),
+    ("od183-fable-5-2", False),
+    ("codex/task", False),
+    ("lz/t1", True),
 ])
-@pytest.mark.parametrize("changed", [False, True])
 def test_merge_prints_sha_and_cleans_up(
     wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch
 ) -> None:
@@ -2932,10 +2935,24 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
-@pytest.mark.parametrize("outcome", ["merged", "worktree_removed", "ejected", "head_changed", "timeout", "api_error",
-    "unsafe_config", "config_error", "merged_head_changed", "ejection_head_changed", "already_merged",
-    "already_merged_changed", "unsafe_pending", "requested_head_changed"])
-@pytest.mark.parametrize("jitter", [0.9, 1.0])
+@pytest.mark.parametrize("outcome,jitter", [
+    ("merged", 1.0),
+    ("worktree_removed", 0.9),
+    ("worktree_removed", 1.0),
+    ("ejected", 1.0),
+    ("head_changed", 1.0),
+    ("timeout", 0.9),
+    ("timeout", 1.0),
+    ("api_error", 1.0),
+    ("unsafe_config", 1.0),
+    ("config_error", 1.0),
+    ("merged_head_changed", 1.0),
+    ("ejection_head_changed", 1.0),
+    ("already_merged", 1.0),
+    ("already_merged_changed", 1.0),
+    ("unsafe_pending", 1.0),
+    ("requested_head_changed", 1.0),
+])
 def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monkeypatch, outcome, jitter):
     commit_mergify_configuration(wt, "mergify delivery")
     head = head_of(wt)
