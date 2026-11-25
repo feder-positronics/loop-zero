@@ -121,6 +121,11 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
+        if not config.checks:
+            raise config_mod.ConfigError(
+                f"origin/{config.base_branch}:workflow.toml: checks.commands must list "
+                "at least one command to run checks"
+            )
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
     return config
 
@@ -574,6 +579,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    if not config.checks:
+        raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
