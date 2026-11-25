@@ -7,8 +7,8 @@ description: Implement a bounded change through behavior proof and the contract'
 
 Read [the contract](../../CONTRACT.md), `.loopzero/task.md`, repository guidance
 and affected interfaces. Confirm the task worktree and branch. Follow
-[credential conventions](../../CREDENTIALS.md) and
-[delegation guidance](../../../docs/DELEGATION.md).
+[credential conventions](../../CREDENTIALS.md) before API-key integration and
+[delegation guidance](../../../docs/DELEGATION.md) before launching subagents.
 
 As an unattended worker, follow [the worker role's blocker route](../../../docs/DELEGATION.md#team-roles).
 
