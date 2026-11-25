@@ -3127,7 +3127,8 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
     posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
     listing = threads_json(_finding_thread("0b9b59e7", head))
     remaining = listing if outcome == "remaining" else threads_json()
-    gh.respond("api graphql", listing, listing, posted, {"data": {}}, remaining)
+    resolved = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
+    gh.respond("api graphql", listing, listing, posted, resolved, remaining)
     gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
 
     code, out, err = run(capsys, "resolve")
@@ -3153,11 +3154,33 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
             assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
 
 
+@pytest.mark.parametrize("response", [
+    {"data": {"resolveReviewThread": {"thread": {"isResolved": False}}}},
+    {"data": {"resolveReviewThread": {"thread": {}}}},
+    "invalid JSON",
+])
+def test_resolve_requires_confirmation_from_github(wt: Path, gh: FakeGh, capsys, head, response) -> None:
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+    listing = threads_json(_finding_thread("0b9b59e7", head))
+    gh.respond("api graphql", listing, posted, response, listing)
+
+    code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed the loop bound.")
+
+    assert (code, out) == (1, "")
+    assert "reply posted to finding 0b9b59e7" in err and "PR #7" in err
+    assert "resolve it there" in err and "Do not rerun loopzero resolve" in err
+    assert not any("eligibility.yml/dispatches" in " ".join(call["argv"]) for call in gh.calls)
+    assert sum("addPullRequestReviewThreadReply" in " ".join(call["argv"]) for call in gh.calls) == 1
+    assert run(capsys, "resolve") == (0, "0b9b59e7  important  src/a.py:3  Off by one\n", "")
+
+
 def test_resolve_reports_recovery_when_followup_read_fails(wt, gh, capsys, head):
     gh.respond_pr_list([pr_json(headRefOid=head)])
     posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
     listing = threads_json(_finding_thread("0b9b59e7", head))
-    gh.respond("api graphql", listing, posted, {"data": {}},
+    resolved = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
+    gh.respond("api graphql", listing, posted, resolved,
                {"stdout": "", "stderr": "gh: Forbidden (HTTP 403)", "exit_code": 1})
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed the loop bound.")
