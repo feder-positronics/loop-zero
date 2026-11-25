@@ -496,16 +496,30 @@ def test_silent_stage_reports_live_metadata_then_completion(
     git_repo, bwrap_log, monkeypatch, exit_code
 ):
     import re
-    import time
+    import threading
 
     monkeypatch.setattr(sandbox, "FIRST_HEARTBEAT_DELAY", 0.03)
-    events = []
+    observed, events, reporters = threading.Event(), [], set()
     monkeypatch.setenv("LZ_KEEP", "credential-value")
-    command = f'sleep 0.3; echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
+    command = f'echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
     cfg = make_config(checks=(command, "echo next"))
-    report = sandbox.run_checks(
-        cfg, git_repo, progress=lambda command: events.append(command), status=events.append
-    )
+    run_one = sandbox._run_one
+
+    def run_stage(config, worktree, prefix, stage_command, timeout):
+        if stage_command == command:
+            assert observed.wait(5), "no running heartbeat for first stage"
+        return run_one(config, worktree, prefix, stage_command, timeout)
+
+    def status(event):
+        events.append(event)
+        if "running" in event:
+            reporters.add(threading.current_thread())
+            observed.set()
+        else:
+            assert all(not reporter.is_alive() for reporter in reporters)
+
+    monkeypatch.setattr(sandbox, "_run_one", run_stage)
+    report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
     assert report.results[0].tail == "credential-value\nprivate-stderr"
     statuses = [event for event in events if event not in cfg.checks]
@@ -525,9 +539,6 @@ def test_silent_stage_reports_live_metadata_then_completion(
     else:
         assert events.index(completion) < events.index("echo next")
         assert statuses[-1].startswith("stage 2/2: exit 0")
-    stopped = list(events)
-    time.sleep(0.1)
-    assert events == stopped
 
 
 def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log, monkeypatch):
