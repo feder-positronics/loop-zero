@@ -3334,6 +3334,40 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
+def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    config = cli.config_mod.load(wt / "workflow.toml")
+    pr = github.PR(7, URL, head, "main", False, "OPEN", "MERGEABLE")
+    detail = ["api", f"repos/{REPO}/pulls/7"]
+    gh.respond(" ".join(detail), merge_json(state="OPEN", head=head))
+    sleeps = []
+    reads_at_membership = []
+    configurations = []
+
+    def membership(*_):
+        reads_at_membership.append(len(gh.calls))
+        if sum(sleeps) == 60:
+            gh.respond(" ".join(detail), merge_json(state="MERGED", head=head, sha="e" * 40))
+        return mergify.Membership()
+
+    def configured(*args):
+        configurations.append(args)
+        return True
+
+    monkeypatch.setattr(mergify, "configured", configured)
+    monkeypatch.setattr(mergify, "membership", membership)
+    monkeypatch.setattr(cli.time, "monotonic", lambda: sum(sleeps))
+    monkeypatch.setattr(cli.random, "uniform", lambda *_: 1.0)
+    monkeypatch.setattr(cli, "_sleep", sleeps.append)
+
+    assert cli._wait_for_mergify(config, pr, 60, confirmed=True) == "e" * 40
+    assert sleeps == [30, 30]
+    assert configurations == [(REPO, "main", "main")] * 3
+    assert reads_at_membership == [1, 2, 3]
+    assert [c["argv"][:2] for c in gh.calls] == [detail] * 4
+
+
 @pytest.mark.parametrize("outcome,jitter", [
     ("merged", 1.0),
     ("worktree_removed", 0.9),
