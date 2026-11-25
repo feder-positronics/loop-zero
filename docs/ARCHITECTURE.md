@@ -435,7 +435,7 @@ from a fresh temporary directory outside the task worktree. Delegation does not
 require local bwrap. Its executable must
 be an absolute path or a bare PATH command; later arguments may be relative.
 Execute the configured path (or PATH lookup result) without resolving symlinks.
-For containment only, resolve the executable, absolute arguments, joined short
+For runner containment, resolve the executable, absolute arguments, joined short
 option paths, `--opt=/path` values and colon-separated path lists: none may
 reference task-tree files, including through symlinks. Relative parent traversal
 must remain inside the fresh runner directory. The runner program and its argv
@@ -478,4 +478,7 @@ Consumers own complete input declarations.
 Only this worktree's clean passing keyed receipt is eligible; dirty trees run
 fresh. A tracked receipt is never eligible for reuse.
 Receipts that use saved stage results bind the current head and check settings.
+For delegated checks, both the receipt and the stage key bind the runner's launch
+path, resolved executable path and executable bytes. Unavailable runner identity
+prevents receipt reuse.
 CI and merge-queue candidates run fresh without a local worktree receipt.

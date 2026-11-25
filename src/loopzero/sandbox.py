@@ -138,7 +138,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                                                    "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config, worktree, base=base)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -196,6 +196,11 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     f"dirty before: {dirty}; dirty after: {final_dirty}"
         )))
         dirty = True
+    # A runner upgrade during execution makes the resulting receipt unverified.
+    settings_sha256 = (
+        settings_sha256 if not config.check_runner
+        or settings_sha256 == settings_fingerprint(config, worktree, base=base) else None
+    )
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
@@ -223,24 +228,38 @@ def _check_base(config: Config, worktree: Path) -> str:
     return ""
 
 
-def _execution_settings(config: Config, base: str) -> dict:
+def _execution_settings(config: Config, base: str) -> dict | None:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
     if config.check_runner or config.inputs:
         settings["base"] = base
     if config.check_runner:
-        settings["runner_executable"] = _runner_executable(config)
+        executable = _runner_executable(config)
+        if executable is None:
+            return None
+        try:
+            target = Path(executable).resolve(strict=True)
+            if not target.is_file():
+                return None
+            with target.open("rb") as source:
+                digest = hashlib.file_digest(source, "sha256").hexdigest()
+        except OSError:
+            return None
+        settings["runner_executable"] = (executable, str(target), digest)
         settings["environment"] = _proc.build_env(config.env_allowlist)
     else:
         settings["environment"] = _sandbox_environment(config)
     return settings
 
 
-def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str:
+def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str | None:
     """Bind a receipt to its check execution and stage reuse settings."""
     if base is None:
         base = _check_base(config, worktree)
-    payload = [_execution_settings(config, base), config.inputs]
+    settings = _execution_settings(config, base)
+    if settings is None:
+        return None
+    payload = [settings, config.inputs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -252,7 +271,10 @@ def _input_key(config: Config, worktree: Path, command: str, base: str) -> str |
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    payload = [command, __version__, _execution_settings(config, base), blobs]
+    settings = _execution_settings(config, base)
+    if settings is None:
+        return None
+    payload = [command, __version__, settings, blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
