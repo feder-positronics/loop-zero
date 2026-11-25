@@ -115,12 +115,16 @@ def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
     exclude = repo / ".git" / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text("*.log")  # no trailing newline on purpose
+    old_inode = exclude.stat().st_ino
     wt = worktree.start(repo, "t1", "main")
+    assert exclude.stat().st_ino != old_inode
     lines = exclude.read_text().splitlines()
     assert lines == ["*.log", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
+    installed = exclude.stat()
     worktree.start(repo, "t2", "main")
+    assert (exclude.stat().st_ino, exclude.stat().st_mtime_ns) == (installed.st_ino, installed.st_mtime_ns)
     assert exclude.read_text().count(".worktrees/") == 1
 
 
