@@ -58,6 +58,13 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
+after GitHub may have accepted a Claude review, run `loopzero review --repost`
+with the publishing CLI revision or a newer compatible revision. The rollback
+CLI predating #732 expects a transcript where the newer publication has a
+retention notice. Keep the original local receipt and confirm the existing
+publication before resuming the rollback.
+
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
 SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
