@@ -50,12 +50,9 @@ PR or issue, or in the durable scratch your repository's instructions name. Make
 task checkouts as worktrees of an existing clone, not new clones. At task finish,
 hand leftover worktrees and generated files to the periodic retention job named
 in host or repository instructions (such as `scratch-retention`), without waiting
-or scheduling wakeups. The job must confirm a pushed branch, merged or closed PR,
-retention of any evidence required by the delivery contract, clean tracked/untracked
-Git state, an empty shared stash, inactivity, no unarchived T3 thread binding
-where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
-floor. Honor host execution approval rules; use dry run until execution is
-authorized. If no job is named or any condition is unproved, preserve the leftovers
+or scheduling wakeups. When verifying or operating that job, follow
+[Leftover cleanup](../../../docs/DELEGATION.md#leftover-cleanup).
+If no job is named or any condition is unproved, preserve the leftovers
 and report cleanup to the owner. Successful `loopzero merge` already performs its
 own cleanup under the delivery contract. For a confirmed-abandoned task outside
 the job's scope, give the owner the

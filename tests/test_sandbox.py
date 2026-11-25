@@ -200,16 +200,16 @@ def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
 
 
 def inject_check_timeout(monkeypatch, output, before_timeout=None):
-    run = subprocess.run
+    communicate = subprocess.Popen.communicate
 
-    def run_with_timeout(argv, **kwargs):
-        if argv[-3:-1] == ["/bin/sh", "-c"]:
+    def communicate_with_timeout(process, input=None, timeout=None):
+        if process.args[-3:-1] == ["/bin/sh", "-c"]:
             if before_timeout is not None:
                 before_timeout()
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=output)
-        return run(argv, **kwargs)
+            raise subprocess.TimeoutExpired(process.args, timeout, output=output)
+        return communicate(process, input, timeout)
 
-    monkeypatch.setattr(subprocess, "run", run_with_timeout)
+    monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
 
 
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
@@ -582,7 +582,8 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
-                                    'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless', 'dirty_tree'])
+                                    'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
+                                    'dirty_tree', 'legacy'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     from dataclasses import replace
 
@@ -621,6 +622,8 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
                 row['exit_code'] = False if change == 'boolean_exit_code' else 1
         elif change == 'dirty_receipt':
             data['dirty'] = True
+        elif change == 'legacy':
+            data.pop('settings_sha256', None)
         else:
             for row in data['results']:
                 row.pop('input_key')
@@ -664,7 +667,9 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink)
     key = sandbox._input_key(cfg, git_repo, command)
     _save_report(git_repo, CheckReport(
         git(git_repo, 'rev-parse', 'HEAD').strip(), False,
-        (CheckResult(command, 0, 0.0, 'forged pass', key),)))
+        (CheckResult(command, 0, 0.0, 'forged pass', key),),
+        sandbox.settings_fingerprint(cfg, git_repo),
+    ))
     if symlink:
         (git_repo / '.loopzero').rename(git_repo / 'forged')
         (git_repo / '.loopzero').symlink_to('forged', target_is_directory=True)
@@ -698,3 +703,11 @@ def test_input_key_distinguishes_runners(git_repo):
     }
     assert None not in keys
     assert len(keys) == 3
+
+
+def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch):
+    cfg = make_config(check_runner=("runner",), env_allowlist=())
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/first/runner")
+    original = sandbox.settings_fingerprint(cfg, git_repo, base="base")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/second/runner")
+    assert sandbox.settings_fingerprint(cfg, git_repo, base="base") != original

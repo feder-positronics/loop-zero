@@ -60,8 +60,8 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
 
 
-@pytest.mark.parametrize("dirty", [False, True])
-def test_start_retries_after_git_creates_worktree(repo, monkeypatch, dirty):
+@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
+def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
     run_git = worktree._git
@@ -79,10 +79,20 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, dirty):
     task = worktree.task_file(wt)
     assert worktree.branch(wt) == "lz/my-task" and worktree.head(wt) == base
     assert not task.exists()
-    if dirty:
+    if state == "dirty":
         (wt / "untracked").write_text("work in progress")
-        with pytest.raises(worktree.WorktreeError):
+        with pytest.raises(worktree.WorktreeError, match="worktree directory already exists"):
             worktree.start(repo, "my-task", "main")
+        assert not task.exists()
+        return
+    if state == "moved-base":
+        current_base = commit_on_origin(repo, "next-base")
+        with pytest.raises(worktree.WorktreeError) as error:
+            worktree.start(repo, "my-task", "main")
+        for detail in (base, "origin/main", current_base, "new slug"):
+            assert detail in str(error.value)
+        assert worktree.branch(wt) == "lz/my-task"
+        assert worktree.head(wt) == base
         assert not task.exists()
         return
 
@@ -138,6 +148,19 @@ def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
     assert worktree.branch_name(repo, "ok-1.2_x") == "lz/ok-1.2_x"
     with pytest.raises(worktree.WorktreeError):
         worktree.branch_name(repo, "has~tilde")
+
+
+@pytest.mark.parametrize("change", [("remove", "origin"), ("rename", "origin", "upstream")])
+def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> None:
+    git(repo, "remote", *change)
+
+    with pytest.raises(worktree.WorktreeError, match="no Git remote named 'origin'") as info:
+        worktree.start(repo, "my-task", "main")
+
+    assert "git remote add origin <url>" in str(info.value)
+    assert "git remote rename <name> origin" in str(info.value)
+    assert git(repo, "branch", "--list", "lz/my-task") == ""
+    assert not worktree.worktree_dir(repo, "my-task").exists()
 
 
 def test_start_reports_git_failure_with_command(repo: Path) -> None:

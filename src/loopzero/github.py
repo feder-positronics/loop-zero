@@ -14,6 +14,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from urllib.parse import quote
 
 from loopzero import runners
@@ -31,6 +32,7 @@ MARKER_RE = re.compile(
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
 PAGE = 100
+PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -94,6 +96,7 @@ class Readiness:
     reasons: tuple[str, ...]
     waitable_failures: tuple[str, ...] = ()
     stale_verdicts: tuple[str, ...] = ()
+    has_pending_checks: bool = False
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
@@ -257,6 +260,14 @@ def _transient_error(tail: str, retry_idempotent: bool) -> bool:
     )
 
 
+def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
+    if (using_app and len(args) > 1 and args[0] == "api"
+            and re.fullmatch(r"repos/[^/]+/[^/]+/pulls\?.+", args[1])
+            and "(HTTP 404)" in stderr):
+        return f"\n{PR_APP_INSTALLATION_HINT}"
+    return ""
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
@@ -311,7 +322,8 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                       if diagnostic_api or patch_error else tail)
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
-        raise GhError(error_command, error_tail, token=selected)
+        guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
+        raise GhError(error_command, error_tail, token=selected, guidance=guidance)
     return _included_response(done.stdout)[2] if diagnostic_api else done.stdout
 
 
@@ -576,8 +588,11 @@ def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
     return text
 
 
+ReviewSettingsLayout = Literal["current", "requested-reported", "summary"]
+
+
 def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = "", *,
-                 legacy_settings: bool = False, legacy_display: bool = False,
+                 settings_layout: ReviewSettingsLayout = "current", legacy_display: bool = False,
                  publication: tuple[str, int] | None = None) -> str:
     evidence = None
     if result.family == "codex":
@@ -600,7 +615,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
     summary = ", ".join(f"{n} {s}" for s, n in counts.items())
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
     settings = ""
-    if legacy_settings:  # Exact historical rendering, for recovery only.
+    if settings_layout == "summary":
         effort = f" (effort {result.effort})" if result.effort else ""
         settings = f"model {result.model or 'unknown'}{effort}, "
     lines = [prefix.rstrip("\n")] if prefix else []
@@ -615,24 +630,31 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
         lines.append(f"\nReviewed in {result.chunk_count} chunks with the same model family.")
-    if not legacy_settings:
-        lines.append("\nSettings per native call (launch configuration and CLI claims, not backend attestation):")
-        for index, call in enumerate(review_settings(result), 1):
-            request, reported = call["requested"], call["reported"]
-            if result.family == "codex":
-                request, reported = ({key: value if runners._identifier(value, 128 if key == "model" else 32) else None
-                                      for key, value in settings.items()} for settings in (request, reported))
-            lines.append(f"- Call {index}: requested model {request['model'] or 'unknown'} "
-                         f"(effort {request['effort'] or 'unknown'}); "
-                         f"CLI-reported model {reported['model'] or 'unknown'} "
-                         f"(effort {reported['effort'] or 'unknown'})")
-            configured = call["configured"]
-            lines[-1] += (f"; configured model {configured['model'] or 'unknown'} "
-                          f"(effort {configured['effort'] or 'unknown'})")
+    if settings_layout != "summary":
+        lines.extend(_review_settings_lines(result, include_configured=settings_layout == "current"))
     if unplaced:
         lines.append("\nFindings without a file location:\n")
         lines += [f"- **{f.severity}**: {f.title} — {f.body}".rstrip(" —") for f in unplaced]
     return "\n".join(lines) + _review_transcript(result, legacy_display)
+
+
+def _review_settings_lines(result: ReviewResult, *, include_configured: bool) -> list[str]:
+    claims = "launch configuration and CLI claims" if include_configured else "CLI claims"
+    lines = [f"\nSettings per native call ({claims}, not backend attestation):"]
+    for index, call in enumerate(review_settings(result), 1):
+        request, reported = call["requested"], call["reported"]
+        if result.family == "codex":
+            request, reported = ({key: value if runners._identifier(value, 128 if key == "model" else 32) else None
+                                  for key, value in settings.items()} for settings in (request, reported))
+        lines.append(f"- Call {index}: requested model {request['model'] or 'unknown'} "
+                     f"(effort {request['effort'] or 'unknown'}); "
+                     f"CLI-reported model {reported['model'] or 'unknown'} "
+                     f"(effort {reported['effort'] or 'unknown'})")
+        if include_configured:
+            configured = call["configured"]
+            lines[-1] += (f"; configured model {configured['model'] or 'unknown'} "
+                          f"(effort {configured['effort'] or 'unknown'})")
+    return lines
 
 
 def _review_transcript(result: ReviewResult, legacy_display: bool) -> str:
@@ -690,11 +712,11 @@ def _diff_map(repo: str, number: int) -> tuple[dict[str, set[int]], dict | None]
 def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
                    body_prefix: str) -> dict:
     """Regenerate the publication content from the runner result and current PR diff."""
-    return review_payloads(repo, number, head_sha, result, [(body_prefix, False, False)])[0]
+    return review_payloads(repo, number, head_sha, result, [(body_prefix, "current", False)])[0]
 
 
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
-                    formats: list[tuple[str, bool, bool]]) -> list[dict]:
+                    formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
     commentable, anchor = _diff_map(repo, number) if result.findings else ({}, None)
     comments: list[dict] = []
@@ -713,10 +735,10 @@ def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
             comments.append({**anchor, "body": _comment_body(f, head_sha, prefix=note)})
     return [{
         "commit_id": head_sha,
-        "body": _review_body(result, loose, body_prefix, legacy_settings=legacy_settings,
+        "body": _review_body(result, loose, body_prefix, settings_layout=settings_layout,
                              legacy_display=legacy_display, publication=(repo, number)),
         "comments": comments,
-    } for body_prefix, legacy_settings, legacy_display in formats]
+    } for body_prefix, settings_layout, legacy_display in formats]
 
 
 def post_review(
@@ -817,9 +839,12 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
             try:
-                _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}",
-                    retry_idempotent=True)
-            except (GhError, ProcTimeout) as exc:
+                response = _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}",
+                               "-F", f"thread={thread_id}", retry_idempotent=True)
+                thread = json.loads(response)["data"]["resolveReviewThread"]["thread"]
+                if thread["isResolved"] is not True:
+                    raise ValueError("GitHub did not return isResolved=true")
+            except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
                 raise GhError(
                     ("resolve", finding_id),
                     f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
@@ -1044,6 +1069,7 @@ def readiness(
             )
         ),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),
+        has_pending_checks="pending" in checks.values(),
     )
 
 

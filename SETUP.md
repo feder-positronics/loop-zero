@@ -62,7 +62,18 @@ skills in a repository: both would load.
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
 SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
 mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
-ln -sfn "$CHECKOUT" "$SRC.new" && mv -T "$SRC.new" "$SRC"
+python3 - "$CHECKOUT" "$SRC" <<'PYTHON' &&
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+checkout, source = map(Path, sys.argv[1:])
+with TemporaryDirectory(dir=source.parent) as staging:
+    link = Path(staging) / source.name
+    link.symlink_to(checkout.resolve(strict=True), target_is_directory=True)
+    os.replace(link, source)
+PYTHON
 for d in "$SRC"/core/skills/*/; do
   n=$(basename "$d")
   ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
@@ -91,6 +102,11 @@ instructions at the shared [delegation guidance](docs/DELEGATION.md). Formal
 not change it.
 
 ## Configure
+
+`loopzero start` fetches the base branch from a Git remote named `origin`.
+Point it at the GitHub repository you set in `[repo] name`. Use
+`git remote add origin <url>` to add it or `git remote rename <name> origin`
+if you already configured it under a different name.
 
 Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` in the
 repository root and set `[repo] name`. `loopzero check` uses the base branch's
@@ -264,6 +280,10 @@ the two systemd units to `~/.config/systemd/user/`, then
   may restart its provider and interrupt running sessions.
 
 ## First run
+
+Commit and push `workflow.toml` to the configured remote base
+(`origin/main` by default) before your first task. `loopzero start` fetches
+that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path

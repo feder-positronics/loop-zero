@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import re
 import tempfile
 from pathlib import Path
@@ -116,10 +117,27 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
-    _git(repo_root, "fetch", "--quiet", "origin", base_branch)
-    base = _git(repo_root, "rev-parse", f"origin/{base_branch}")
-    if existing and not _can_resume_start(repo_root, wt, branch, base):
-        raise WorktreeError(refusal)
+    try:
+        _git(repo_root, "fetch", "--quiet", "origin", base_branch)
+    except GitError:
+        if "origin" not in _git(repo_root, "remote").splitlines():
+            raise WorktreeError(
+                "no Git remote named 'origin'. Add it with `git remote add origin <url>` "
+                "using the URL for the repository in `[repo] name`, or rename that remote "
+                "with `git remote rename <name> origin`."
+            ) from None
+        raise
+    base_ref = f"origin/{base_branch}"
+    base = _git(repo_root, "rev-parse", base_ref)
+    if existing:
+        existing_head = _resumable_head(repo_root, wt, branch)
+        if existing_head is None:
+            raise WorktreeError(refusal)
+        if existing_head != base:
+            raise WorktreeError(
+                f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
+                f"{base_ref} at {base}; run loopzero start with a new slug"
+            )
     _ensure_excludes(repo_root)
     if not existing:
         wt.parent.mkdir(parents=True, exist_ok=True)
@@ -129,18 +147,21 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     return wt
 
 
-def _can_resume_start(repo_root: Path, wt: Path, expected_branch: str, base: str) -> bool:
+def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
     registered = _git(repo_root, "worktree", "list", "--porcelain", "-z").split("\0\0")
-    expected = f"worktree {wt.resolve()}\0HEAD {base}\0branch refs/heads/{expected_branch}"
-    if expected not in registered or not (wt / ".git").is_file():
-        return False
+    path_field = f"worktree {wt.resolve()}"
+    entry = next((item for item in registered if item.startswith(f"{path_field}\0")), "")
+    fields = entry.split("\0")
+    if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
+            or not (wt / ".git").is_file()):
+        return None
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    return (
-        _git(wt, *common_dir) == _git(repo_root, *common_dir)
-        and branch(wt) == expected_branch
-        and head(wt) == base
-        and not is_dirty(wt)
-    )
+    if _git(wt, *common_dir) != _git(repo_root, *common_dir) or branch(wt) != expected_branch:
+        return None
+    current_head = head(wt)
+    if fields[1] != f"HEAD {current_head}" or is_dirty(wt):
+        return None
+    return current_head
 
 
 def _initialize_task(task: Path, text: str) -> None:
@@ -155,9 +176,17 @@ def _initialize_task(task: Path, text: str) -> None:
             stream.write(text)
             stream.close()
             # Publish the complete file without replacing an existing handoff.
-            task.hardlink_to(temp)
-        except FileExistsError as exc:
-            raise WorktreeError(f"task file already exists: {task}") from exc
+            try:
+                task.hardlink_to(temp)
+            except FileExistsError as exc:
+                raise WorktreeError(f"task file already exists: {task}") from exc
+            except OSError as exc:
+                if exc.errno not in (errno.EOPNOTSUPP, errno.ENOTSUP, errno.ENOSYS, errno.EPERM):
+                    raise
+                raise WorktreeError(
+                    f"cannot publish task file {task} ({exc.strerror}): hard links are required; "
+                    "run loopzero start from a checkout on a filesystem that supports hard links"
+                ) from exc
         finally:
             temp.unlink(missing_ok=True)
 
@@ -167,9 +196,9 @@ def head(wt: Path) -> str:
 
 
 def branch(wt: Path) -> str:
-    name = _git(Path(wt), "symbolic-ref", "--quiet", "--short", "HEAD")
+    name = _git(Path(wt), "branch", "--show-current")
     if not name:
-        raise WorktreeError(f"detached HEAD in {wt}")
+        raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
     return name
 
 
