@@ -483,19 +483,43 @@ def test_post_review_fails_loud_when_nothing_to_anchor(gh: FakeGh) -> None:
     assert calls_for(gh, REVIEWS_KEY) == []
 
 
-def test_post_review_paginates_files(gh: FakeGh) -> None:
-    page1 = [{"filename": f"f{i}.py", "patch": f"@@ -1 +1 @@\n+l{i}"} for i in range(100)]
+@pytest.mark.parametrize("location", ["first-page", "second-page", "missing"])
+def test_post_review_reads_only_pages_needed_for_placement(gh: FakeGh, location: str) -> None:
+    unrelated = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n+new"} for i in range(100)]
+    file = PR_FILES[0]
+    page1, page2 = ([file, *unrelated[:99]], unrelated[99:]) if location == "first-page" else (
+        unrelated, [file]
+    )
+    finding = FINDINGS[0] if location != "missing" else replace(FINDINGS[0], path="missing.py")
     arm_review(gh)
-    gh.respond(FILES_KEY, page1, PR_FILES)
-    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
+    gh.respond(FILES_KEY, page1, page2)
+    github.post_review(REPO, 7, HEAD, review(findings=(finding,)))
+    pages = ["page=1"] if location == "first-page" else ["page=1", "page=2"]
+    assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == pages
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"], comment["side"]) == (
+        ("f0.py", 1, "RIGHT") if location == "missing" else ("src/a.py", 10, "RIGHT")
+    )
+    assert ("anchored here" in comment["body"]) == (location == "missing")
+
+
+def test_post_review_searches_later_pages_for_fallback_hunk(gh: FakeGh) -> None:
+    page1 = [{"filename": f"image{i}.png"} for i in range(100)]
+    arm_review(gh)
+    gh.respond(FILES_KEY, page1, PR_FILES[:1])
+    result = review(findings=(Finding("important", None, None, "Global concern", ""),))
+    github.post_review(REPO, 7, HEAD, result)
+
     assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
-    assert comments_posted(gh)[0]["path"] == "src/a.py"
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"]) == ("src/a.py", 11)
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
     arm_review(gh)
     result = ReviewResult("codex", HEAD, "primary", "approve", (), "RAW", duration_s=0.25)
     github.post_review(REPO, 7, HEAD, result)
+    assert calls_for(gh, FILES_KEY) == []
     payload = review_payloads(gh)[0]
     assert payload["event"] == "APPROVE" and payload["comments"] == []
     assert "0.2s: **approve**" in payload["body"]
