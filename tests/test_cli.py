@@ -3713,3 +3713,39 @@ def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypat
     assert not wt.exists()
     assert not git(repo, "branch", "--list", "lz/t1")
     assert not any(call["argv"][:2] == ["api", "-X"] for call in gh.calls)
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+@pytest.mark.parametrize("create", [True, False])
+def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
+    monkeypatch.setattr(cli, "_validation_section", lambda *_: "Recorded validation")
+    suffix = ("\n\n## Validation\n<!-- loopzero:checks:start -->\n"
+              "Recorded validation\n<!-- loopzero:checks:end -->\n")
+    task = wt / ".loopzero/task.md"
+    prefix = task.read_text().split("## Validation")[0] if create else ""
+    prose = prefix + "x" * (65536 + extra - len(prefix) - len(suffix))
+    head = head_of(wt)
+    if create:
+        task.write_text(prose)
+        gh.respond(branch_history_key(), [])
+        gh.respond_pr_list([])
+        gh.respond_pr_create(pr_json(headRefOid=head))
+        code, _, err = run(capsys, "pr")
+        assert code == int(bool(extra))
+        if extra:
+            assert not git(wt, "ls-remote", "origin", "refs/heads/lz/t1").strip()
+    else:
+        git(wt, "push", "-q", "-u", "origin", "lz/t1")
+        gh.respond_pr_list([pr_json(headRefOid=head, body=prose)])
+        gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+        code, out, err = run(capsys, "check")
+        assert code == 0 and out.endswith("PASS\n")
+
+    writes = [call for call in gh.calls if "--input" in call]
+    if extra:
+        assert "65537" in err and "65536" in err
+        assert not writes
+    else:
+        assert err == ""
+        assert len(writes) == 1
+        assert json.loads(writes[0]["--input"])["body"] == prose + suffix
