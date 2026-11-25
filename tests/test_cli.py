@@ -2193,26 +2193,30 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check
     assert any(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == (command == "ready")
 
 
-def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("wait,elapsed,conclusion,expected", [
+    (0, 0, None, 3), (1, 0, "failure", 1), (1, 0.5, "success", 0), (1, 6, "success", 3),
+])
+def test_ready_wait_verdict(wt, gh, capsys, monkeypatch, head, wait, elapsed, conclusion, expected):
     arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
+    clock = 0.0
+    pr_view = github.pr_view
 
-    code, out, err = run(capsys, "ready", "--wait=0")
+    def observe(repo, number):
+        nonlocal clock
+        clock += elapsed
+        if conclusion:
+            arm_check_runs(gh, head, [{"name": "checks", "conclusion": conclusion}])
+        return pr_view(repo, number)
 
-    assert (code, err) == (3, "")
-    assert f"timed out waiting for required checks on {head[:12]}" in out
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(github, "pr_view", observe)
+    code, out, err = run(capsys, "ready", f"--wait={wait}")
 
-
-def test_ready_wait_stops_on_failed_check(wt: Path, gh: FakeGh, capsys, head) -> None:
-    arm_approved_pr_with_check_result(gh, head, wt, "pending", isDraft=False)
-    arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}],
-               [{"name": "checks", "status": "completed",
-                                  "conclusion": "failure"}])
-
-    code, out, err = run(capsys, "ready", "--wait")
-
-    out = without_accepted_receipt(out)
-    assert (code, err) == (1, "")
-    assert out == "not ready: required check 'checks' is failure\n"
+    assert (code, err) == (expected, "")
+    assert out.endswith({
+        0: f"ready: {URL}\n", 1: "not ready: required check 'checks' is failure\n",
+        3: f"timed out waiting for required checks on {head[:12]}\n",
+    }[expected])
 
 
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
@@ -2292,7 +2296,8 @@ def test_ready_wait_revalidates_its_ready_transition(
 
     assert (code, err) == (expected, "")
     assert "waiting: required check 'checks' is cancelled" in out
-    assert sleeps == ([30.0, 10.0] if initial_pending or replacement == "pending" else [30.0])
+    assert sleeps == ([30.0, 5.0, 5.0] if replacement == "pending" else
+                      [30.0, 5.0] if initial_pending else [30.0])
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         "not ready: required check 'checks' is failure\n" if expected == 1 else
                         f"timed out waiting for required checks on {head[:12]}\n")
@@ -2335,7 +2340,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     code, out, err = run(capsys, "ready", "--wait=40")
 
     assert code == (1 if after in {"head_move", "blocker", "cancelled"} else 3)
-    assert sleeps == ([30.0, 10.0] if after == "pending" else [30.0])
+    assert sleeps == ([30.0, 5.0, 5.0] if after == "pending" else [30.0])
     assert "ready: https" not in out
     assert ("PR head changed while waiting" in err) == (after == "head_move")
     if after == "cancelled":
@@ -2374,7 +2379,7 @@ def test_ready_transition_missing_run_gets_observation_grace(
 
     assert (code, err) == (0 if run_appears else 3, "")
     assert marked_at == [210.0]
-    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [60.0])
+    assert sleeps == [30.0, 60.0, 120.0, 30.0] + ([] if run_appears else [30.0, 30.0])
     assert out.endswith(f"ready: {URL}\n" if run_appears else
                         f"timed out waiting for required checks on {head[:12]}\n")
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
