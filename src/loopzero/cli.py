@@ -1351,20 +1351,37 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "next: loopzero merge --wait follows the queue, verifies and cleans up"
             )
             return 0
-    _delete_remote_branch(config, branch, pr.head_sha)
+    if _delete_remote_branch(config, branch, pr.head_sha):
+        _delete_tracking_ref(wt, branch, pr.head_sha)
     _cleanup(wt, pr)
     print(sha)
     return 0
 
 
-def _delete_remote_branch(config: Config, branch: str, expected_head: str) -> None:
+def _delete_remote_branch(config: Config, branch: str, expected_head: str) -> bool:
     try:
-        if not github.delete_remote_branch(config.repo, branch, expected_head):
-            print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
-                  "skipping deletion", file=sys.stderr)
+        if github.delete_remote_branch(config.repo, branch, expected_head):
+            return True
+        print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
+              "skipping deletion", file=sys.stderr)
     except (github.GhError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
               f"delete {branch!r} in {config.repo} if it still points at the merged head", file=sys.stderr)
+
+    return False
+
+
+def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
+    if not branch.startswith("lz/") or branch.count("/") != 1:
+        return
+    ref = f"refs/remotes/origin/{branch}"
+    try:
+        _repo_root(wt)
+        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref)
+        if current == f"{expected_head} {ref}":
+            _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
+    except (CliError, OSError, _proc.ProcTimeout) as exc:
+        print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:

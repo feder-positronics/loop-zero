@@ -2491,6 +2491,46 @@ def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
         "delete 'lz/fix$version' in acme/widgets if it still points at the merged head")
 
 
+@pytest.mark.parametrize("remote", ["deleted", "absent", "moved", "failed"])
+@pytest.mark.parametrize("tracking_matches", [True, False])
+def test_merge_cleans_only_stale_task_tracking_ref(
+    wt, repo, gh, capsys, head, remote, tracking_matches
+):
+    branch = "lz/t1"
+    tracking = f"refs/remotes/origin/{branch}"
+    git(wt, "push", "-u", "origin", branch)
+    other = git(repo, "rev-parse", "origin/main").strip()
+    if not tracking_matches:
+        git(repo, "update-ref", tracking, other)
+    reflog = repo / ".git" / "logs" / tracking
+    assert reflog.is_file()
+
+    arm_pr(gh, head, state="MERGED", isDraft=False)
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="e" * 40))
+    ref = f"api repos/{REPO}/git/ref/heads/{branch}"
+    if remote == "absent":
+        git(repo, "push", "--delete", "origin", branch)
+        git(repo, "update-ref", "--create-reflog", tracking, head if tracking_matches else other)
+        gh.fail(ref, "gh: Not Found (HTTP 404)")
+    else:
+        gh.respond(ref, {"object": {"sha": other if remote == "moved" else head}})
+        if remote == "failed":
+            gh.fail("api -X", "gh: Forbidden (HTTP 403)")
+        else:
+            gh.respond("api -X", "")
+
+    code, _, _ = run(capsys, "merge")
+
+    assert code == 0
+    if remote in {"deleted", "absent"} and tracking_matches:
+        assert not git(repo, "for-each-ref", tracking)
+        assert not reflog.exists()
+    else:
+        assert git(repo, "rev-parse", tracking).strip() == (head if tracking_matches else other)
+        assert reflog.is_file()
+    assert git(repo, "rev-parse", "origin/main").strip() == other
+
+
 def test_merge_warns_when_remote_branch_moves(wt: Path, gh: FakeGh, capsys, head) -> None:
     landed_sha = "e" * 40
     remote_ref = f"repos/{REPO}/git/ref/heads/lz/t1"
