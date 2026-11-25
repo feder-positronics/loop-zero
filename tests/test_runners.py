@@ -1038,7 +1038,7 @@ def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch:
 def test_bwrap_probe_failure_fails_closed(fake_bin: Path, tmp_path: Path, fake_tool) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     fake_tool("bwrap", "echo 'namespace denied' >&2\nexit 1\n")
-    with pytest.raises(SandboxUnavailable, match="namespace denied"):
+    with pytest.raises(SandboxUnavailable, match="namespace creation failed: exit 1"):
         _review("claude", tmp_path)
     assert not (fake_bin / "claude.stdin").exists()
 
