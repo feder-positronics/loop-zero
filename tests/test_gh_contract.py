@@ -156,7 +156,7 @@ def test_strict_fake_rejects_exhausted_calls(
 ) -> None:
     fake = FakeGh(fake_bin, tmp_path)
     fake.expect(
-        ["api", f"repos/{REPO}/pulls/7"], rest_pr_json(pr_json()),
+        ["api", f"repos/{REPO}/pulls/7", "--include"], rest_pr_json(pr_json()),
     )
     assert github.pr_view(REPO, 7).number == 7
     fake.assert_complete()
@@ -174,7 +174,7 @@ def test_strict_fake_rejects_unexpected_argv(fake_bin: Path, tmp_path: Path) -> 
 def test_strict_fake_matches_input_contents(fake_bin: Path, tmp_path: Path) -> None:
     fake = FakeGh(fake_bin, tmp_path)
     fake.expect(
-        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>"],
+        ["api", f"repos/{REPO}/pulls/7", "--method", "PATCH", "--input", "<temp-file>", "--include"],
         {},
         input_files={"--input": json.dumps({"body": "new body"})},
     )
