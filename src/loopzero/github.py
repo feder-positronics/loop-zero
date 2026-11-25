@@ -230,7 +230,7 @@ def _read_only(args: tuple[str, ...]) -> bool:
         if methods:
             return all(method.upper() == "GET" for method in methods)
         return not {"-f", "-F", "--field", "--raw-field", "--input"} & set(args)
-    return args[:2] in {("pr", "view"), ("pr", "list"), ("pr", "checks")}
+    return False
 
 
 def app_token() -> str:
@@ -241,7 +241,7 @@ def app_token() -> str:
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path.cwd(), env_allowlist=GH_ENV, timeout=10)
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=10)
     except (ToolMissing, ProcTimeout, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -265,6 +265,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     if diagnostic_api and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
+    cwd = cwd or Path("/")
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
@@ -278,7 +279,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                 raise GhError(argv, "publication read-back deadline exceeded", token=selected)
             timeout = min(timeout, remaining)
         try:
-            done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV,
+            done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
@@ -293,7 +294,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
-            reset = _graphql_reset(args, tail, cwd or Path.cwd(), selected)
+            reset = _graphql_reset(args, tail, cwd, selected)
             guidance = reset + "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
@@ -687,7 +688,7 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
                    body_prefix: str, *, legacy_settings: bool = False,
                    legacy_display: bool = False) -> dict:
     """Regenerate the publication content from the runner result and current PR diff."""
-    commentable, anchor = _diff_map(repo, number)
+    commentable, anchor = _diff_map(repo, number) if result.findings else ({}, None)
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
@@ -718,6 +719,8 @@ def post_review(
     body_prefix: str = "",
     pr: PR | None = None,
     token: str | None = None,
+    *,
+    publisher: str | None = None,
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
@@ -727,10 +730,11 @@ def post_review(
 
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk, so every blocking finding creates a review thread.
+    A supplied publisher is the login already checked for the supplied token.
     """
     author = (pr or pr_view(repo, number)).author
     token = app_token() if token is None else token  # "" means the operator identity
-    if token or (author and author == login(token=token)):
+    if token or (author and author == (publisher or login(token=token))):
         event = "COMMENT"
     else:
         event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"

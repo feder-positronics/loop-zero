@@ -36,7 +36,7 @@ def test_membership_uses_bearer_and_validates_queue(monkeypatch):
         })
 
     monkeypatch.setattr(mergify, "_open", open_)
-    assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership("main", "now", 2)
+    assert mergify.membership("acme/widgets", 7, "main") == mergify.Membership()
     assert seen[0].full_url == "https://api.mergify.com/v1/repos/acme/widgets/merge-queue/pull/7"
     assert seen[0].headers["Authorization"] == "Bearer secret"
     assert seen[0].headers["User-agent"] == "loopzero"

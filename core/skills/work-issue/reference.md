@@ -40,11 +40,9 @@ head under the existing rules. A series comparison is not behavior proof.
 For CI, review, ready and merge waits, follow the blocking wait and producer
 output limits in [implement](../implement/SKILL.md); read completion once.
 
-- Without a base merge queue, defer a merely-behind branch's rebase during
-  implementation/repairs. Rebase once when otherwise finished, then check and
-  request exact-head review; an earlier review is wasted. Update the base by
-  rebase, never a base merge: `loopzero review` refuses a delta across a merge
-  commit. Serialize parallel tasks' final integration.
+- Without a base merge queue, defer base updates while implementing or repairing
+  a merely-behind branch. Follow the contract's [review budget](../../CONTRACT.md#review-budget)
+  when updating the base. Serialize parallel tasks' final integration.
 - Treat the issue as singly owned; perform the checks before editing,
   publication and merge in [Work Issue](SKILL.md). Stop and reconcile
   competing deliveries.
