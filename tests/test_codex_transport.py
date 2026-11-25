@@ -446,7 +446,9 @@ def test_large_publication_confirmation_and_hosted_agreement(
         expected_comment = {"path": "large.txt", "line": 1, "side": "RIGHT", "body": "Finding body"}
         listed_comment = dict(expected_comment, line=None, side=None, commit_id=head,
                               pull_request_review_id=100, user={"login": "bot"})
-        monkeypatch.setattr(github, "review_payload", lambda *_a, **_k: {"body": rendered, "comments": [expected_comment]})
+        monkeypatch.setattr(github, "review_payloads", lambda *_a, **_k: [
+            {"body": rendered, "comments": [expected_comment]},
+        ])
     if kind == "tampered_digest":
         line = rendered.splitlines()[1]
         value = runners.decode_codex_evidence(line)
