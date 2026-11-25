@@ -2660,20 +2660,36 @@ def _finding_thread(marker_id: str, head: str) -> dict:
             "line": 3, "comments": {"nodes": [{"body": body}]}}
 
 
-def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeGh, capsys, head, outcome) -> None:
     gh.respond_pr_list([pr_json(headRefOid=head)])
     posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
     listing = threads_json(_finding_thread("0b9b59e7", head))
-    gh.respond("api graphql", listing, listing, posted, {"data": {}})
+    remaining = listing if outcome == "remaining" else threads_json()
+    gh.respond("api graphql", listing, listing, posted, {"data": {}}, remaining)
+    gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
 
     code, out, err = run(capsys, "resolve")
     assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
+    assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
-    assert (code, err) == (0, "") and out == "resolved 0b9b59e7: Off by one\n"
+    assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
     calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
+    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
+    dispatches = [c["argv"] for c in gh.calls if endpoint in c["argv"]]
+    if outcome == "remaining":
+        assert (code, err, dispatches) == (0, "", [])
+        assert len(out.splitlines()) == 1
+    else:
+        assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7"]]
+        if outcome == "refreshed":
+            assert (code, err) == (0, "") and out.splitlines()[-1] == "refreshed Loop-zero Eligibility for PR #7"
+        else:
+            assert code == 1 and "HTTP 403" in err
+            assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
 
 
 def test_resolve_leaves_the_thread_open_when_the_reply_was_not_posted(
