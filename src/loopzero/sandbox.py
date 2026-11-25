@@ -135,7 +135,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     if config.check_runner and dirty:
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
-    base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
+    base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config, worktree, base=base)
     previous = _previous(config, worktree, settings_sha256) if config.inputs and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
@@ -212,11 +212,18 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
         return {}
 
 
+def _check_base(config: Config, worktree: Path) -> str:
+    if config.check_runner or config.inputs:
+        return config_mod.base_revision(worktree, config.base_branch)
+    return ""
+
+
 def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
-    if config.check_runner:
+    if base:
         settings["base"] = base
+    if config.check_runner:
         settings["runner_executable"] = _runner_executable(config)
         settings["environment"] = _proc.build_env(config.env_allowlist)
     else:
@@ -226,15 +233,17 @@ def _execution_settings(config: Config, base: str) -> dict:
 
 def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str:
     """Bind a receipt to its check execution and stage reuse settings."""
-    if base is None and config.check_runner:
-        base = config_mod.base_revision(worktree, config.base_branch)
-    payload = [_execution_settings(config, base or ""), config.inputs]
+    if base is None:
+        base = _check_base(config, worktree)
+    payload = [_execution_settings(config, base), config.inputs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
+def _input_key(config: Config, worktree: Path, command: str, base: str | None = None) -> str | None:
     if command not in config.inputs and "." not in config.inputs.get("*", ()):
         return None
+    if base is None:
+        base = _check_base(config, worktree)
     paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
     # Empty pathspecs must not accidentally mean the whole tree.
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()

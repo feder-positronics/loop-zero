@@ -18,7 +18,7 @@ from select import select
 import pytest
 
 from loopzero import sandbox
-from loopzero.cli import _save_report
+from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
 from .conftest import git
@@ -681,10 +681,15 @@ _save_report(repo, report)
         assert concurrent.wait(timeout=5) == -signal.SIGTERM
 
 
+@pytest.fixture
+def fetched_base(git_repo):
+    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
-def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
+def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
@@ -732,7 +737,31 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
+@pytest.mark.parametrize("recorded_base", [False, True])
+def test_local_check_reuse_tracks_base_at_same_head(git_repo, bwrap_log, recorded_base):
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    head = git(git_repo, "rev-parse", "HEAD").strip()
+    base_ref = "refs/remotes/origin/main"
+    if recorded_base:
+        (git_repo / ".loopzero").mkdir()
+        (git_repo / ".loopzero/task.md").write_text(f"Base: {head}\n")
+    else:
+        git(git_repo, "update-ref", base_ref, head)
+
+    config = make_config(inputs={"*": (".",)})
+    _save_report(git_repo, sandbox.run_checks(config, git_repo))
+    assert _current_check_report(git_repo, config, head) is not None
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == head
+
+    tree = git(git_repo, "rev-parse", "HEAD^{tree}").strip()
+    new_base = git(git_repo, "commit-tree", tree, "-p", head, "-m", "advance base").strip()
+    git(git_repo, "update-ref", base_ref, new_base)
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok and report.head == head and not report.dirty
+    assert (report.results[0].reused_from, _current_check_report(git_repo, config, head)) == (None, None)
+
+
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fetched_base):
     marker = "CHECK_INTEGRATION_SHARD []"
     command = f"echo '{marker}'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
@@ -755,7 +784,7 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
 
 
 @pytest.mark.parametrize('symlink', [False, True])
-def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink):
+def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_base, symlink):
     from loopzero.types import CheckReport, CheckResult
 
     command = 'echo stage-ran; exit 7'
@@ -788,7 +817,7 @@ def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
     assert set(row) == {'command', 'exit_code', 'duration_s', 'tail'}
 
 
-def test_input_key_distinguishes_runners(git_repo):
+def test_input_key_distinguishes_runners(git_repo, fetched_base):
     keys = {
         sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
                            git_repo, 'echo one')
