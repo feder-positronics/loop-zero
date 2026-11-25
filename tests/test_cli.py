@@ -462,7 +462,9 @@ def test_check_offline_cache_preflight(wt, repo, fake_tool, capsys, uv, failed):
 def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> None:
     fake_tool("bwrap", "echo 'bwrap: No permissions' >&2\nexit 1\n")
     code, out, err = run(capsys, "check")
-    assert code == 2 and out.startswith("checks pinned to origin/main@") and "No permissions" in err
+    assert code == 2 and out.startswith("checks pinned to origin/main@")
+    assert "namespace creation failed: exit 1" in err
+    assert "kernel.apparmor_restrict_unprivileged_userns=0" in err
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
@@ -938,6 +940,39 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
 
 
+@pytest.mark.parametrize("refresh_fails", [False, True])
+def test_review_summary_uses_body_edited_during_review(wt, gh, fake_bin, capsys, monkeypatch, refresh_fails):
+    head = prepare_review(wt, gh, fake_bin)
+    detail_key = f"api repos/{REPO}/pulls/7"
+    live = "# T1\n\n## Notes\nEdited during review\n\n## Validation\nNew check results\n"
+    run_review = cli._run_review
+
+    def change_body_during_review(*args, **kwargs):
+        result = run_review(*args, **kwargs)
+        if refresh_fails:
+            gh.respond(detail_key, {}, exit=1, stderr="body read failed")
+        else:
+            detail = rest_pr_json({**pr_json(headRefOid=head), "body": live})
+            gh.respond(detail_key, detail)
+        return result
+
+    monkeypatch.setattr(cli, "_run_review", change_body_during_review)
+    code, out, err = run(capsys, "review")
+    assert code == 0 and f"primary review by claude on {head[:12]}: approve" in out
+    posted_review(gh)
+    post_index = next(i for i, call in enumerate(gh.calls) if call["argv"][:2] == post_key().split())
+    assert gh.calls[post_index + 1]["argv"] == detail_key.split()
+    patches = [call for call in gh.calls if "PATCH" in call["argv"]]
+    if refresh_fails:
+        assert not patches
+        assert "could not append PR review summary" in err and "body read failed" in err
+    else:
+        assert len(patches) == 1 and not err
+        assert json.loads(patches[0]["--input"])["body"] == (
+            f"{live}\n## Review\n- primary, claude, {head[:12]}, approve\n"
+        )
+
+
 @pytest.mark.parametrize("source", ["task", "base", "override", "missing_ref", "bootstrap"])
 def test_review_runtime_paths_use_only_verified_base(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, tmp_path: Path, source: str,
@@ -1096,6 +1131,31 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert saved.read_bytes() == saved_bytes
     assert "model claude-sonnet-4-6" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
+
+
+def test_repost_refuses_retired_paired_review(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    head = prepare_review(wt, gh, fake_bin)
+    code, _, err = run(capsys, "review")
+    assert (code, err) == (0, "")
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    data = json.loads(saved.read_text())
+    data["members"] = [{"family": "claude"}]
+    saved.write_text(json.dumps(data))
+    (fake_bin / "claude.stdin").unlink()
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+    prior_calls = len(gh.calls)
+
+    code, _, err = run(capsys, "review", "--repost")
+
+    assert code == 1
+    assert "invalid saved review" in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert not (fake_bin / "codex.stdin").exists()
+    assert not any(
+        call["argv"][:2] == post_key().split() for call in gh.calls[prior_calls:]
+    )
 
 
 @pytest.mark.parametrize("saved_state", ["missing", "stale", "hand-written"])
@@ -1396,7 +1456,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
     assert run(capsys, "review")[0] == 0
-    assert len(gh.calls) == 6
+    assert len(gh.calls) == 7  # Includes the body refresh after review publication.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
     assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
@@ -2263,10 +2323,13 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
     assert wt.exists()
 
 
-@pytest.mark.parametrize("branch", [
-    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+@pytest.mark.parametrize("branch,changed", [
+    ("lz/t1", False),
+    ("t3/archive-review-receipts", False),
+    ("od183-fable-5-2", False),
+    ("codex/task", False),
+    ("lz/t1", True),
 ])
-@pytest.mark.parametrize("changed", [False, True])
 def test_merge_prints_sha_and_cleans_up(
     wt: Path, repo: Path, gh: FakeGh, capsys, changed, head, branch
 ) -> None:
@@ -2582,6 +2645,25 @@ def test_second_merge_retries_remote_branch_cleanup(
     assert second[0] == 0 and second[2] == ""
     deletes = [call for call in gh.calls if call["argv"][:2] == ["api", "-X"]]
     assert len(deletes) == 2
+
+
+def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    workflow = git_repo / "workflow.toml"
+    workflow.write_text('[repo]\nname = "example/repo"\n[checks]\ncommands = false\n')
+    git(git_repo, "add", "workflow.toml")
+    git(git_repo, "commit", "-qm", "invalid base workflow")
+    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    workflow.write_text(workflow.read_text().replace("false", '["true"]'))
+
+    code, _, err = run(capsys, "status")
+    assert code == 1
+    assert "origin/main:workflow.toml: checks.commands must be a list" in err
+
+    workflow.write_text(workflow.read_text().replace('"example/repo"', "false"))
+    code, _, err = run(capsys, "status")
+    assert code == 1
+    assert f"{workflow}: repo.name must be a str" in err
 
 
 def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):
@@ -3015,10 +3097,24 @@ def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
 
 
-@pytest.mark.parametrize("outcome", ["merged", "worktree_removed", "ejected", "head_changed", "timeout", "api_error",
-    "unsafe_config", "config_error", "merged_head_changed", "ejection_head_changed", "already_merged",
-    "already_merged_changed", "unsafe_pending", "requested_head_changed"])
-@pytest.mark.parametrize("jitter", [0.9, 1.0])
+@pytest.mark.parametrize("outcome,jitter", [
+    ("merged", 1.0),
+    ("worktree_removed", 0.9),
+    ("worktree_removed", 1.0),
+    ("ejected", 1.0),
+    ("head_changed", 1.0),
+    ("timeout", 0.9),
+    ("timeout", 1.0),
+    ("api_error", 1.0),
+    ("unsafe_config", 1.0),
+    ("config_error", 1.0),
+    ("merged_head_changed", 1.0),
+    ("ejection_head_changed", 1.0),
+    ("already_merged", 1.0),
+    ("already_merged_changed", 1.0),
+    ("unsafe_pending", 1.0),
+    ("requested_head_changed", 1.0),
+])
 def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monkeypatch, outcome, jitter):
     commit_mergify_configuration(wt, "mergify delivery")
     head = head_of(wt)

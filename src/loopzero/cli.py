@@ -101,7 +101,9 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     if base is None:
         return config_mod.load(path)
     base_checks = config_mod.base_section(base, config.base_branch, "checks")
-    config = config_mod.load(path, checks=base_checks)
+    config = config_mod.load(
+        path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
+    )
     delivery = config_mod.base_section(base, config.base_branch, "delivery")
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
@@ -129,7 +131,10 @@ def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) ->
     checks = config_mod.base_section(base, config.base_branch, "checks")
     delivery = config_mod.base_section(base, config.base_branch, "delivery")
     pinned = dataclasses.replace(
-        config_mod.load(wt / "workflow.toml", checks=checks),
+        config_mod.load(
+            wt / "workflow.toml", checks=checks,
+            validation_source=f"origin/{config.base_branch}:workflow.toml",
+        ),
         review_publishers=config_mod._strings(
             "delivery.review_publishers", delivery.get("review_publishers", [])),
         reviewer_ro_paths=config_mod._host_paths(
@@ -735,8 +740,9 @@ def cmd_review(args: argparse.Namespace) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        github.update_body(config.repo, pr.number, _append_review(pr.body or _pr_body(wt, head), result))
-    except (github.GhError, OSError, ValueError) as exc:
+        live = github.pr_view(config.repo, pr.number)
+        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+    except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
