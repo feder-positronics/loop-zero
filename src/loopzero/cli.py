@@ -1449,16 +1449,12 @@ def _merge_with_mergify(
     config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
-    """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
-    behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
-    blockers = tuple(reason for reason in readiness.reasons if reason != behind)
-    if blockers:
+    """Request Mergify after readiness verifies the source gates and queue configuration."""
+    if not readiness.ready:
         hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
+        raise CliError("not ready to request Mergify: " + "; ".join(readiness.reasons) + hint)
     queue = config.mergify_queue
     assert queue is not None
-    if not mergify.configured(config.repo, config.base_branch, queue):
-        raise CliError("Mergify queue configuration is unverified or permits in-place head updates")
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )

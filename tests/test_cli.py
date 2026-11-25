@@ -2942,6 +2942,51 @@ def test_merge_wait_rejects_verdicts_after_deadline(wt, gh, capsys, monkeypatch,
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("safe", [False, True])
+def test_merge_uses_one_queue_proof_for_admission(
+    wt, gh, capsys, monkeypatch, source_queue_api, pending, safe,
+):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending" if pending else "success", isDraft=False)
+    repo, config_path, vendor_calls = source_queue_api
+    requests = []
+    clock = 0.0
+    before_final = 0
+
+    def set_unsafe():
+        gh.respond(f"api {config_path}", {"type": "symlink"})
+
+    def sleep(delay):
+        nonlocal clock, before_final
+        clock += delay
+        before_final = len(gh.calls)
+        vendor_calls.clear()
+        arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        if not safe:
+            set_unsafe()
+
+    if not pending and not safe:
+        set_unsafe()
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(cli, "_sleep", sleep)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+
+    code, out, err = run(capsys, "merge", "--wait=90")
+
+    assert (clock > 0) == pending
+    assert requests == ([(REPO, 7, head, "main")] if safe else [])
+    assert code == (3 if safe else 1), out + err
+    assert ("Mergify queue configuration is unverified" in err) == (not safe)
+    paths = [call["argv"][1] for call in gh.calls[before_final:]]
+    assert paths.count(repo) == paths.count(config_path) == (2 if safe else 1)
+    assert vendor_calls == ["/merge-queue/status?branch=main", "/queues/configuration"]
+
+
 @pytest.mark.parametrize("wait", [False, True])
 @pytest.mark.parametrize("outcome", ["open", "changed", "closed", "invalid", "merged"])
 def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeypatch, wait, outcome):
@@ -3886,7 +3931,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     configurations = []
     def configured(*_):
         configurations.append(True)
-        if len(configurations) > 2:
+        if len(configurations) > 1:
             if outcome == "config_error":
                 raise mergify.MergifyError("configuration HTTP 503")
             if outcome in {"unsafe_config", "unsafe_pending"}:
