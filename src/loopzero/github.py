@@ -31,6 +31,7 @@ MARKER_RE = re.compile(
     r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
 )
 PAGE = 100
+PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -258,6 +259,14 @@ def _transient_error(tail: str, retry_idempotent: bool) -> bool:
     )
 
 
+def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
+    if (using_app and len(args) > 1 and args[0] == "api"
+            and re.fullmatch(r"repos/[^/]+/[^/]+/pulls\?.+", args[1])
+            and "(HTTP 404)" in stderr):
+        return f"\n{PR_APP_INSTALLATION_HINT}"
+    return ""
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
@@ -312,7 +321,8 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                       if diagnostic_api or patch_error else tail)
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
-        raise GhError(error_command, error_tail, token=selected)
+        guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
+        raise GhError(error_command, error_tail, token=selected, guidance=guidance)
     return _included_response(done.stdout)[2] if diagnostic_api else done.stdout
 
 
