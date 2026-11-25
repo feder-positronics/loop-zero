@@ -83,7 +83,7 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path):
             try:
                 try:
                     state = stat.read_text().rsplit(")", 1)[1].split()[0]
-                except FileNotFoundError:
+                except (FileNotFoundError, ProcessLookupError):
                     state = "gone"
                 assert state in {"gone", "Z", "X"}
                 assert raised.value.stderr == "parent stderr\n"
