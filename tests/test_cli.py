@@ -1367,6 +1367,10 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
     assert run(capsys, "review")[0] == 0
+    assert len(gh.calls) == 6
+    assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
+    assert not any("/files" in c["argv"][1] for c in gh.calls)
+    assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
     assert [c["token"] or "" for c in gh.calls if "/reviews" in " ".join(c["argv"])
             and "POST" in c["argv"]] == ["" if publisher == LOGIN else "app"]
 
