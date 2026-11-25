@@ -9,7 +9,7 @@ import re
 import shlex
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -68,6 +68,10 @@ class GhError(Exception):
 
 class ReadDeadline(GhError):
     """A shared GitHub read deadline elapsed."""
+
+
+class StatusLimitReached(GhError):
+    """GitHub has no status slots left for this commit and context."""
 
 
 class GhMissing(GhError):
@@ -251,22 +255,32 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _cached_app_token() -> str:
+    # Installation tokens expire one hour after minting by wall clock, suspend included.
+    token, minted = _app_token_cache
+    return token if token and 0 <= time.time() - minted < 3000 else ""
+
+
 def app_token() -> str:
     global _app_token_cache
-    token, expires = _app_token_cache
-    if token and time.monotonic() < expires:
+    if token := _cached_app_token():
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
+    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    token = result.stdout.strip()
-    _app_token_cache = (token, time.monotonic() + 3000)
-    return token
+    _app_token_cache = (result.stdout.strip(), minted)
+    return _cached_app_token()
+
+
+def _select_token(token: str | None, scope: tuple[float, str | None, bool] | None, read_only: bool) -> str:
+    selected = token if token is not None else (scope[1] if scope else None)
+    return selected if selected is not None else (app_token() if read_only else "")
 
 
 def _transient_error(tail: str, retry_idempotent: bool) -> bool:
@@ -296,11 +310,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (scope[1] if scope else None)
-    if selected is None:
-        selected = app_token() if read_only else ""
     delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
     for delay in delays:
+        selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
@@ -485,6 +497,13 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
+MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+
+
+def _pr_labels(data: dict) -> tuple[str, ...]:
+    return tuple(label["name"] for label in data.get("labels", []))
+
+
 def _pr_from_rest(data: object) -> PR:
     """Normalize one REST pull detail without treating absent merge evidence as clean."""
     try:
@@ -515,7 +534,7 @@ def _pr_from_rest(data: object) -> PR:
             merge_state=merge_state.upper() if merge_state else "UNKNOWN",
             author=str((data.get("user") or {}).get("login") or ""),
             body=str(data.get("body") or ""),
-            labels=tuple(label["name"] for label in data.get("labels", [])),
+            labels=_pr_labels(data),
         )
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         number = data.get("number", "?") if isinstance(data, dict) else "?"
@@ -1155,8 +1174,10 @@ class ClosedUnmerged(GhError):
     """A PR read as closed but not merged; right after a queue merge this can be transient."""
 
 
-def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> str | None:
-    """The merge commit of PR `number` once GitHub reports it MERGED, else None."""
+def merged_sha(
+    repo: str, number: int, *, expected_head: str | None = None, check_hold: bool = False,
+) -> str | None:
+    """The verified merge commit, or None while open. Admission may check the hold label."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
     view = api_get(argv[2])
     if not isinstance(view, dict) or type(view.get("merged")) is not bool:
@@ -1169,6 +1190,8 @@ def merged_sha(repo: str, number: int, *, expected_head: str | None = None) -> s
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
+        if check_hold and "hold" in _pr_labels(view):
+            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
@@ -1179,15 +1202,22 @@ def merge_pending(repo: str, number: int) -> bool:
     """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     owner, name = repo.split("/", 1)
-    data = _gh_json(
+    argv = (
         "api", "graphql", "-f", f"query={_QUEUE_QUERY}", "-F", f"owner={owner}",
         "-F", f"name={name}", "-F", f"number={number}",
     )
     try:
+        data = _gh_json(*argv)
         pr = data["data"]["repository"]["pullRequest"]
-        return bool(pr["isInMergeQueue"] or pr.get("autoMergeRequest"))
-    except (KeyError, TypeError):
-        return False
+        queued = pr["isInMergeQueue"]
+        auto = pr.get("autoMergeRequest")
+        if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
+            raise ValueError("invalid queue fields")
+    except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+        raise MergeFailed(("gh", "api", "graphql"),
+                          f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
+                          f"Check the PR's queue or merge state before retrying.\n{str(exc)[-300:]}") from exc
+    return queued or bool(auto)
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
@@ -1210,12 +1240,18 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
-    if merge_pending(repo, number):
-        return None
+    queue_error = None
+    try:
+        if merge_pending(repo, number):
+            return None
+    except MergeFailed as exc:
+        queue_error = exc
     # The queue may have landed the PR between the two reads; look once more.
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
+    if queue_error:
+        raise queue_error
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
@@ -1249,5 +1285,24 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
 
 def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
-    _api(f"repos/{repo}/statuses/{head}",
-         {"state": state, "context": context, "description": description})
+    endpoint = f"repos/{repo}/statuses/{head}"
+    try:
+        _api(endpoint, {"state": state, "context": context, "description": description})
+    except GhError as exc:
+        validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
+        if validation_error and _status_limit_reached(repo, head, context):
+            raise StatusLimitReached(
+                exc.command, f"{head} context {context!r} reached GitHub's 1,000-status limit. "
+                "Push a fresh head and obtain review evidence for it before refreshing eligibility."
+            ) from exc
+        raise
+
+
+def _status_limit_reached(repo: str, head: str, context: str) -> bool:
+    # A validation error alone does not prove exhaustion.
+    with suppress(GhError, ProcTimeout, OSError):
+        return sum(
+            str(status.get("context", "")).casefold() == context.casefold()
+            for status in _paged(f"repos/{repo}/commits/{head}/statuses")
+        ) >= 1_000
+    return False

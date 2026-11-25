@@ -8,6 +8,7 @@ import hashlib
 import importlib.metadata
 import io
 import json
+import math
 import os
 import shlex
 import random
@@ -35,7 +36,7 @@ PAGE = 100
 # missing before GitHub is assumed to have dropped the event for this head.
 # Each poll costs several GitHub API calls from a quota shared by every session.
 WAIT_INTERVAL, WAIT_TIMEOUT, MISSING_RUN_GRACE = 30.0, 1800.0, 120.0
-STALE_VERDICT_GRACE = 900.0
+STALE_VERDICT_GRACE, MAX_REVIEW_CLOCK_SKEW = 900.0, 30.0
 PUSH_TIMEOUT = 600.0  # consumer pre-push hooks (lint, tests) routinely exceed GIT_TIMEOUT
 NEXT_WAIT = "next: loopzero ready --wait"  # named at the moment of need; agents hand-roll polls otherwise
 _sleep = time.sleep
@@ -72,6 +73,17 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
     if done.exit_code != 0:
         raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
     return done.stdout.strip()
+
+
+def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
+    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
+                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    if done.exit_code != 0:
+        detail = _proc.tail(done.stderr)[-2000:]
+        if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
+                               for line in done.stdout.splitlines()):
+            detail += "\nremote moved since PR lookup; fetch and retry"
+        raise CliError(f"git {' '.join(args)} failed: {detail.strip()}")
 
 
 def _toplevel() -> Path:
@@ -276,7 +288,7 @@ def _readiness(
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(reviews, head, publishers, repo=config.repo, number=pr.number)
     review_at = review.get("submitted_at") if review else None
-    # GitHub's UTC submission time predates this process; monotonic time cannot date it.
+    # GitHub's review timestamp is in UTC and predates this process.
     review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
                   .replace(tzinfo=UTC).timestamp()) if review_at else None
     result = github.readiness(
@@ -285,8 +297,10 @@ def _readiness(
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
+        # Allow skew only for verdicts GitHub timestamps establish are stale.
         stale_verdict_grace=(
-            workflow_wait and review_age is not None and 0 <= review_age < STALE_VERDICT_GRACE
+            workflow_wait and review_age is not None
+            and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
         ),
     )
     report = _current_check_report(wt, config, head)
@@ -627,14 +641,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        push.append(f"--force-with-lease={branch}:{pr.head_sha}")
+        push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
-    try:
-        _git(wt, *push, timeout=PUSH_TIMEOUT)
-    except CliError as exc:
-        if force_lease:
-            raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
-        raise
+    _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
         if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
@@ -776,6 +785,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         prefix = _repost_prefix(result)
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
+    token = _refresh_publisher_token(token, publisher)
     try:
         github.post_review(
             config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -800,6 +810,16 @@ def cmd_review(args: argparse.Namespace) -> int:
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
+
+
+def _refresh_publisher_token(token: str, publisher: str) -> str:
+    """The review may outlive the app token: re-mint it, but only for the same publisher."""
+    if not token or (fresh := github.app_token()) == token:
+        return token
+    if not fresh or github.login(token=fresh).casefold() != publisher.casefold():
+        raise CliError(f"could not refresh the app token for review publisher {publisher}; the review "
+                       "is saved: fix the app token helper, then run `loopzero review --repost`")
+    return fresh
 
 
 def _review_verdict(result: ReviewResult) -> int:
@@ -905,8 +925,8 @@ def _run_review(
         raise CliError(
             f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
             "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
-            "`git reset --hard <original-tip>` and replay any later fixes. Push the restored head "
-            f"and run `loopzero review` before merging {config.base_branch}, or open a new PR "
+            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
+            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
             "from the current branch"
         )
     if kind == "delta" and (merges := worktree.merges_since(wt, since)):
@@ -914,7 +934,8 @@ def _run_review(
         raise CliError(
             f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
             f"merged-in changes in the delta material. To recover, {recovery}. "
-            f"Push the recovered head and run `loopzero review` before merging {config.base_branch} again"
+            f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
+            f"before merging {config.base_branch} again"
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
@@ -1066,7 +1087,7 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
 
 def _require_no_merge_hold(pr: github.PR) -> None:
     if "hold" in pr.labels:
-        raise CliError(f"PR #{pr.number} has a merge-authority hold; ask the decisions owner to release it")
+        raise CliError(f"PR #{pr.number} {github.MERGE_HOLD_MESSAGE}")
 
 
 def _pr_readiness(
@@ -1415,7 +1436,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    config: Config, branch: str, pr: github.PR,
+    config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
@@ -1432,11 +1453,10 @@ def _merge_with_mergify(
         config.repo, pr.number, pr.head_sha, queue
     )
     state = mergify.membership(config.repo, pr.number, queue)
-    current = _require_pr(config, branch, allow_merged=True)
-    if current.head_sha != pr.head_sha:
-        raise CliError(
-            f"PR head changed during Mergify lookup: {pr.head_sha[:12]} to {current.head_sha[:12]}"
-        )
+    if sha := github.merged_sha(
+        config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+    ):
+        return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
@@ -1447,7 +1467,6 @@ def _merge_with_mergify(
             return sha
         raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
     if not confirmed and not requested:
-        _require_no_merge_hold(current)
         if admit_by is not None and time.monotonic() > admit_by:
             raise _AdmissionDeadline
         mergify.request(config.repo, pr.number, pr.head_sha, queue)
@@ -1499,7 +1518,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, branch, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
@@ -1637,6 +1656,16 @@ def _print_mergify_status(config: Config, pr: github.PR, readiness: github.Readi
 # --------------------------------------------------------------------------- entry point
 
 
+def _wait_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError("expected a finite, nonnegative number of seconds")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="loopzero", description="One task, one branch, one draft PR, one review, one merge."
@@ -1668,7 +1697,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for waiter, what in ((ready, "required checks on this head"), (merge, "required checks and the landed merge")):
         waiter.add_argument(
-            "--wait", nargs="?", const=WAIT_TIMEOUT, type=float, metavar="SECONDS",
+            "--wait", nargs="?", const=WAIT_TIMEOUT, type=_wait_seconds, metavar="SECONDS",
             help=f"wait for {what} (default {WAIT_TIMEOUT:.0f}s); exit 3 on timeout",
         )
     merge.add_argument(
