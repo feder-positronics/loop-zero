@@ -123,6 +123,15 @@ def test_receipt_bounds_a_single_oversized_line(git_repo, bwrap_log):
     assert tail.endswith(" Ω end")
 
 
+def test_receipt_bounds_missing_file_preflight_diagnostic(git_repo, bwrap_log):
+    command = "./" * 8_200 + "absent/file"
+    (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
+
+    assert result.exit_code == 1
+    assert len(result.tail.encode("utf-8")) == 16 * 1024
+    assert result.tail.endswith("otherwise restore the required file.")
+
+
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
@@ -227,7 +236,7 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
     monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
 
 
-@pytest.mark.parametrize("prefix", [b"", b"x" * 20_000])
+@pytest.mark.parametrize("prefix", [b"", b"x" * 20_000], ids=["small", "oversized"])
 def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch, prefix):
     inject_check_timeout(monkeypatch, prefix + b"partial\n")
     report = sandbox.run_checks(
