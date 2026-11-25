@@ -2433,6 +2433,22 @@ def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
         "delete 'lz/fix$version' in acme/widgets if it still points at the merged head")
 
 
+def test_merge_warns_when_remote_branch_moves(wt: Path, gh: FakeGh, capsys, head) -> None:
+    landed_sha = "e" * 40
+    remote_ref = f"repos/{REPO}/git/ref/heads/lz/t1"
+    arm_pr(gh, head, state="MERGED", isDraft=False)
+    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha=landed_sha))
+    gh.respond(f"api {remote_ref}", {"object": {"sha": "f" * 40}})
+
+    code, out, err = run(capsys, "merge")
+
+    assert code == 0
+    assert out.splitlines()[-1] == landed_sha
+    assert f"warning: merged; remote branch lz/t1 moved from {head[:12]}; skipping deletion" in err
+    assert any(call["argv"] == ["api", remote_ref] for call in gh.calls)
+    assert not any(call["argv"][:3] == ["api", "-X", "DELETE"] for call in gh.calls)
+
+
 def test_merge_warns_when_remote_cleanup_times_out(
     wt: Path, gh: FakeGh, capsys, monkeypatch, head
 ) -> None:
