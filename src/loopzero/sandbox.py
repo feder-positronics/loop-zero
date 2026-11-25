@@ -67,7 +67,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
     base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
-    previous = _previous(config, worktree) if config.inputs and not dirty else {}
+    settings_sha256 = settings_fingerprint(config, worktree, base=base)
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -127,19 +128,40 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     f"dirty before: {dirty}; dirty after: {final_dirty}"
         )))
         dirty = True
-    return CheckReport(head=head, dirty=dirty, results=tuple(results))
+    return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
-def _previous(config: Config, worktree: Path) -> dict:
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
     if _git(config, worktree, "ls-files", "--", ".loopzero"):
         return {}
     try:
         data = json.loads((worktree / ".loopzero/checks.json").read_text())
-        if data["dirty"] is not False or not isinstance(data["head"], str):
+        if (data["dirty"] is not False or not isinstance(data["head"], str)
+                or data.get("settings_sha256") != settings_sha256):
             return {}
         return {r["command"]: dict(r, head=data["head"]) for r in data["results"]}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
+
+
+def _execution_settings(config: Config, base: str) -> dict:
+    settings = {k: v for k, v in asdict(config).items() if k in {
+        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    if config.check_runner:
+        settings["base"] = base
+        settings["runner_executable"] = _runner_executable(config)
+        settings["environment"] = _proc.build_env(config.env_allowlist)
+    else:
+        settings["environment"] = _sandbox_environment(config)
+    return settings
+
+
+def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str:
+    """Bind a receipt to its check execution and stage reuse settings."""
+    if base is None and config.check_runner:
+        base = config_mod.base_revision(worktree, config.base_branch)
+    payload = [_execution_settings(config, base or ""), config.inputs]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
@@ -150,12 +172,7 @@ def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> 
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    settings = {k: v for k, v in asdict(config).items() if k in {
-        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
-    if config.check_runner:
-        settings["base"] = base
-    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
-    payload = [command, __version__, settings, blobs]
+    payload = [command, __version__, _execution_settings(config, base), blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -296,6 +313,15 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
 
 
+def _sandbox_environment(config: Config) -> dict[str, str]:
+    return {
+        **SANDBOX_ENV,
+        **_proc.build_env(config.env_allowlist),
+        **dict(config.env),
+        "HOME": SANDBOX_HOME,
+    }
+
+
 def bwrap_argv(
     config: Config,
     worktree: Path,
@@ -351,8 +377,7 @@ def bwrap_argv(
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
-    env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist), **dict(config.env)}
-    for key, value in env.items():
+    for key, value in _sandbox_environment(config).items():
         if key != "HOME":
             argv += ["--setenv", key, value]
     argv += ["--setenv", "HOME", SANDBOX_HOME, "--"]
@@ -387,6 +412,11 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return obj
 
 
+def _runner_executable(config: Config) -> str | None:
+    executable = config.check_runner[0]
+    return executable if Path(executable).is_absolute() else shutil.which(executable)
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -397,8 +427,7 @@ def _dispatch_one(
     try:
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed before stage")
-        executable = (config.check_runner[0] if Path(config.check_runner[0]).is_absolute()
-                      else shutil.which(config.check_runner[0]))
+        executable = _runner_executable(config)
         if not executable:
             raise ValueError("Stage runner executable missing")
         argv = (executable, *config.check_runner[1:])
