@@ -29,7 +29,7 @@ class MergifyError(LoopZeroError):
 @dataclass(frozen=True)
 class Membership:
     candidate_number: int | None = None
-    checks: dict[str, str] | None = None
+    unmet_conditions: tuple[str, ...] = ()
 
 
 def _credential(path: Path | None = None) -> str:
@@ -102,6 +102,16 @@ def api_get(repo: str, suffix: str) -> object | None:
     return None
 
 
+def _unmet_conditions(node: object) -> tuple[str, ...]:
+    if not isinstance(node, dict) or node.get("match") is not False:
+        return ()
+    children = node.get("subconditions")
+    if isinstance(children, list) and children:
+        return tuple(label for child in children for label in _unmet_conditions(child))
+    label = node.get("label")
+    return (label,) if isinstance(label, str) and label.isprintable() else ()
+
+
 def membership(repo: str, number: int, queue: str) -> Membership | None:
     data = api_get(repo, f"/merge-queue/pull/{number}")
     if data is None:
@@ -119,17 +129,9 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
         if not isinstance(check, dict):
             return Membership()
         candidate = check.get("queue_pull_request_number")
-        raw_checks = check.get("checks")
-        checks = None
-        if isinstance(raw_checks, list):
-            checks = {
-                item["name"]: item["state"] for item in raw_checks
-                if isinstance(item, dict) and isinstance(item.get("name"), str)
-                and isinstance(item.get("state"), str)
-            }
         return Membership(
             candidate if type(candidate) is int and candidate > 0 else None,
-            checks,
+            _unmet_conditions(check.get("conditions_evaluation")),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
@@ -220,16 +222,41 @@ def _marker(kind: str, head: str, queue: str) -> str:
     return f"<!-- {kind} head={head} queue={queue} -->"
 
 
-def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
-    login, requested, confirmed = github.login(token=""), False, False  # operator; requeue re-requests
-    for item in github._paged(f"repos/{repo}/issues/{number}/comments"):
-        if isinstance(item, dict) and (item.get("user") or {}).get("login") == login:
+def _admission_report(comments: list[dict], requested_at: str) -> int | None:
+    vendor_comments = [
+        comment for comment in comments
+        if isinstance(user := comment.get("user"), dict) and user.get("login") == "mergify[bot]"
+        and str(comment.get("updated_at") or "") >= requested_at
+    ]
+    latest = max(vendor_comments, key=lambda comment: str(comment.get("updated_at") or ""), default={})
+    if "### ⏳ Waiting for queue conditions" in str(latest.get("body") or "").splitlines():
+        report_id = latest.get("id")
+        if type(report_id) is int and report_id > 0:
+            return report_id
+    return None
+
+
+def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
+    login, requested, confirmed = github.login(token=""), False, False
+    requested_at = ""
+    comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    for item in comments:
+        user = item.get("user")
+        if isinstance(user, dict) and user.get("login") == login:
             lines = str(item.get("body") or "").splitlines()
             words = lines[0].split() if lines else []
             requeue = (len(words) in (2, 3) and words[0].lower() in ("@mergify", "@mergifyio")
                        and words[1].lower() in ("queue", "requeue") and words[2:] in ([], [queue]))
-            requested = requested or _marker(REQUEST, head, queue) in lines or (requeue and confirmed)
+            if _marker(REQUEST, head, queue) in lines or (requeue and confirmed):
+                requested, requested_at = True, str(item.get("created_at") or "")
             confirmed = _marker(CONFIRMED, head, queue) in lines or (confirmed and not requeue)
+    report_id = _admission_report(comments, requested_at)
+    report = f"https://github.com/{repo}/pull/{number}#issuecomment-{report_id}" if report_id else None
+    return requested, confirmed, report
+
+
+def markers(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool]:
+    requested, confirmed, _ = request_status(repo, number, head, queue)
     return requested, confirmed
 
 
