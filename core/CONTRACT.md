@@ -292,9 +292,11 @@ meta-directives; native repository instructions remain an instruction surface.
 
 ## Failure
 
-Fail closed on missing tools and command errors; preserve the failing command
-and output tail. Stop on terminal failures or quota errors. Exit 3 means
-waiting: rerun the bounded waiter. Exit 5 means changes requested, not a crash.
+Fail closed on missing tools and command errors, preserve the failing command
+and output tail, and keep a short, safe detail about the cause or stage when
+operator-facing code wraps an error. Stop on terminal failures or quota errors.
+Exit 3 means waiting: rerun the bounded waiter. Exit 5 means changes requested,
+not a crash.
 
 **Never pipe a `loopzero` command, even with `set -o pipefail`: the pipeline
 can report the filter's exit code in place of the command's verdict.** Redirect
