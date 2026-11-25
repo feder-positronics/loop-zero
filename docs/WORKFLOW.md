@@ -17,14 +17,15 @@ flowchart TD
     F -->|changes requested| G["Fix the findings and push"]
     G --> C
     F -->|approved| H["Check it is ready: no open findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
-    H -->|version changed since review| F
+    H -->|review coverage lost and budget allows another review| F
     H -->|ready| I["Merge<br/><sub>loopzero merge --wait</sub>"]
     I --> J["Mergify queue lands it<br/>where one is configured"]
     J --> K["Clean up: delete branch and worktree"]
 ```
 
 See the contract's [Blockers](../core/CONTRACT.md#blockers) for review coverage,
-head movement and readiness.
+head movement and readiness, and the [review budget](../core/CONTRACT.md#review-budget)
+for when another review is available.
 
 Work stops at "ready" unless merging has been authorized.
 
