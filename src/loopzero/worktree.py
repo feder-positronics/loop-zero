@@ -51,12 +51,16 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120) -> str:
+def _git(cwd: Path, *args: str, timeout: float = 120, preserve_newlines: bool = False) -> str:
     argv = ("git", *args)
-    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
+    try:
+        done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+                   preserve_newlines=preserve_newlines)
+    except UnicodeDecodeError as exc:
+        raise GitError(argv, "output is not valid UTF-8") from exc
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    return done.stdout.strip()
+    return done.stdout if preserve_newlines else done.stdout.strip()
 
 
 def branch_name(repo_root: Path, slug: str) -> str:
@@ -244,7 +248,7 @@ def is_dirty(wt: Path) -> bool:
 
 
 def diff_since(wt: Path, sha: str) -> str:
-    return _git(Path(wt), "diff", "--no-color", sha, "HEAD")
+    return _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

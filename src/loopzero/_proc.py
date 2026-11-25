@@ -65,16 +65,21 @@ def run(
     merge_output: bool = False,
     input: str | None = None,
     encoding: str | None = None,
+    preserve_newlines: bool = False,
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
     `merge_output=True` sends stderr into stdout so interleaving is preserved.
     `input` is written to the child's stdin; without it stdin is /dev/null.
     `encoding` overrides the parent locale for text I/O; None retains subprocess defaults.
+    With `preserve_newlines`, decode stdout strictly without newline translation
+    (UTF-8 by default).
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
     argv = [str(part) for part in argv]
     started = time.monotonic()
+    raw_encoding = encoding or "utf-8"
+    stdin = input.encode(raw_encoding) if preserve_newlines and input is not None else input
     try:
         with subprocess.Popen(
             argv,
@@ -83,13 +88,13 @@ def run(
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
-            text=True,
-            encoding=encoding,
-            errors="replace",
+            text=not preserve_newlines,
+            encoding=None if preserve_newlines else encoding,
+            errors=None if preserve_newlines else "replace",
             start_new_session=os.name == "posix",
         ) as proc:
             try:
-                stdout, stderr = proc.communicate(input, timeout=timeout)
+                stdout, stderr = proc.communicate(stdin, timeout=timeout)
             except BaseException:
                 if os.name == "posix":
                     with suppress(ProcessLookupError):
@@ -112,6 +117,10 @@ def run(
             stderr=err or "",
             duration_s=elapsed,
         ) from exc
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(raw_encoding)
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(raw_encoding, errors="replace")
     return Completed(
         exit_code=proc.returncode,
         stdout=stdout or "",

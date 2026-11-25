@@ -250,6 +250,39 @@ def repo(tmp_path):
 # ----------------------------------------------------------------- prompt
 
 
+def test_committed_crlf_diff_matches_native_evidence(git_repo):
+    import subprocess
+
+    from loopzero import runners, worktree
+
+    from .conftest import git
+
+    git(git_repo, "config", "core.autocrlf", "false")
+    base = worktree.head(git_repo)
+    (git_repo / "README.md").write_bytes(b"hello\r\n")
+    git(git_repo, "commit", "-am", "change line endings")
+    head = worktree.head(git_repo)
+    native = subprocess.check_output(["git", "diff", "--no-color", base, head], cwd=git_repo)
+    assert b"-hello\n+hello\r\n" in native
+
+    diff = worktree.diff_since(git_repo, base)
+    prompt = runners.build_prompt(kind="primary", head=head, task_text="", diff=diff)
+    assert prompt.split("\n", 1)[1].encode() == native
+    context = {
+        "cwd": str(git_repo), "head": head, "base": base,
+        "diff_sha256": hashlib.sha256(diff.encode()).hexdigest(), "diff_bytes": len(diff.encode()),
+    }
+    command = f"git -C {git_repo} rev-parse HEAD && git -C {git_repo} diff --no-color {base} {head}"
+    item = {"type": "command_execution", "id": "read-1", "command": command}
+    output = head + "\n" + native.decode()
+    events = [
+        {"type": "item.started", "item": item},
+        {"type": "item.completed",
+         "item": dict(item, status="completed", exit_code=0, aggregated_output=output)},
+    ]
+    assert runners._native_inspection({"events": events}, context)["diff_event"]["end"] == len(output)
+
+
 def test_prompt_frames_exact_task_and_raw_diff() -> None:
     prompt = build_prompt(kind="delta", head="deadbeef", task_text=" Objective ", diff="+line\n")
     header, diff = prompt.split("\n", 1)
