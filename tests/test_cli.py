@@ -584,6 +584,29 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
     assert not (fake_bin / "claude.stdin").exists()
 
 
+@pytest.mark.parametrize("command, key", [("pr", branch_history_key()), ("status", pr_list_key())])
+@pytest.mark.parametrize("use_app", [True, False])
+def test_pr_list_404_explains_app_installation(
+    wt, repo, gh, fake_tool, monkeypatch, capsys, command, key, use_app,
+):
+    helper = fake_tool("app-token", "echo app-token") if use_app else wt / "missing-token"
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    monkeypatch.setenv("GH_TOKEN", "personal-token")
+    gh.respond(key, {"message": "Not Found"}, exit=1, stderr="gh: Not Found (HTTP 404)")
+    run(capsys, "check")
+
+    code, _, err = run(capsys, command)
+
+    assert code == 1
+    assert key.removeprefix("api ") in err and "gh: Not Found (HTTP 404)" in err
+    assert '"message": "Not Found"' in err
+    assert ("Check that the GitHub App installation includes this repository" in err) == use_app
+    assert [(call["argv"], call["token"]) for call in gh.calls] == [
+        (key.split(), "app-token" if use_app else "personal-token"),
+    ]
+    assert git(repo.parent / "origin.git", "branch", "--list", "lz/t1").strip() == ""
+
+
 @pytest.mark.parametrize("options", [(), ("--repost",)])
 def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
     monkeypatch.setattr(github, "app_token", lambda: "app-token")
@@ -1939,7 +1962,7 @@ def test_pending_required_check_names_the_wait(wt: Path, gh: FakeGh, capsys, hea
     assert (code, err) == (1, "")
     assert out.splitlines() == [
         "not ready: required check 'checks' is pending",
-        "not ready: required checks pending or missing; next: loopzero ready --wait",
+        "next: loopzero ready --wait",
     ]
 
     arm_pr(gh, head, isDraft=False)
@@ -2023,6 +2046,46 @@ def test_ready_waits_for_checks_on_original_head(
     assert "required check 'a' is pending" in out
     assert all("f" * 40 not in " ".join(c["argv"]) for c in gh.calls)
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+
+
+@pytest.mark.parametrize("wait", [False, True])
+def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", mergeable="UNKNOWN")
+    gh.respond("pr ready", "")
+
+    code, out, err = run(capsys, "ready", *(["--wait=0"] if wait else []))
+
+    assert (code, err) == (3, "")
+    assert "marked ready;" in out and "checks" in out
+    assert "GitHub is computing mergeability" in out
+    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+
+
+@pytest.mark.parametrize("command", ["ready", "merge"])
+@pytest.mark.parametrize("settled", ["CONFLICTING", "MERGEABLE", "UNKNOWN"])
+def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, mergeable="UNKNOWN", isDraft=False)
+    gh.respond_pr_view(pr_json(headRefOid=head, mergeable=settled, isDraft=False,
+                               mergeStateStatus="BEHIND"))
+    requests = []
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+
+    code, out, err = run(capsys, command, "--wait=0")
+
+    if settled == "CONFLICTING":
+        assert code == 1 and "has merge conflicts" in out + err
+    elif settled == "UNKNOWN":
+        assert code == 3 and "timed out waiting for GitHub to compute mergeability" in out
+    else:
+        assert code == (0 if command == "ready" else 3)
+    assert requests == ([(REPO, 7, head, "main")]
+                        if command == "merge" and settled == "MERGEABLE" else [])
 
 
 def test_ready_wait_timeout_is_exit_three(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -3817,3 +3880,39 @@ def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypat
     assert not wt.exists()
     assert not git(repo, "branch", "--list", "lz/t1")
     assert not any(call["argv"][:2] == ["api", "-X"] for call in gh.calls)
+
+
+@pytest.mark.parametrize("extra", [0, 1])
+@pytest.mark.parametrize("create", [True, False])
+def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
+    monkeypatch.setattr(cli, "_validation_section", lambda *_: "Recorded validation")
+    suffix = ("\n\n## Validation\n<!-- loopzero:checks:start -->\n"
+              "Recorded validation\n<!-- loopzero:checks:end -->\n")
+    task = wt / ".loopzero/task.md"
+    prefix = task.read_text().split("## Validation")[0] if create else ""
+    prose = prefix + "x" * (65536 + extra - len(prefix) - len(suffix))
+    head = head_of(wt)
+    if create:
+        task.write_text(prose)
+        gh.respond(branch_history_key(), [])
+        gh.respond_pr_list([])
+        gh.respond_pr_create(pr_json(headRefOid=head))
+        code, _, err = run(capsys, "pr")
+        assert code == int(bool(extra))
+        if extra:
+            assert not git(wt, "ls-remote", "origin", "refs/heads/lz/t1").strip()
+    else:
+        git(wt, "push", "-q", "-u", "origin", "lz/t1")
+        gh.respond_pr_list([pr_json(headRefOid=head, body=prose)])
+        gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+        code, out, err = run(capsys, "check")
+        assert code == 0 and out.endswith("PASS\n")
+
+    writes = [call for call in gh.calls if "--input" in call]
+    if extra:
+        assert "65537" in err and "65536" in err
+        assert not writes
+    else:
+        assert err == ""
+        assert len(writes) == 1
+        assert json.loads(writes[0]["--input"])["body"] == prose + suffix
