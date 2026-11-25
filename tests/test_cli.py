@@ -387,6 +387,20 @@ def test_check_does_not_rewrite_when_only_duration_changes(wt: Path, gh: FakeGh,
     assert [c["argv"][:2] for c in gh.calls[before:]] == LOOKUP_CALLS
 
 
+@pytest.mark.parametrize("history", [None, "CLOSED", "MERGED"])
+def test_check_with_upstream_only_looks_for_open_prs(wt, gh, capsys, head, history):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    gh.respond_pr_list([])
+    gh.respond(pr_list_key(state="closed"), [{"number": 7}] if history else [])
+    if history:
+        gh.respond_pr_view(pr_json(headRefOid=head, state=history))
+
+    code, out, err = run(capsys, "check")
+
+    assert (code, err) == (0, "") and out.endswith("PASS\n")
+    assert [c["argv"][:2] for c in gh.calls] == LOOKUP_CALLS[:1]
+
+
 @pytest.mark.parametrize("body", [
     "# PR\n\n## Evidence\nRetained browser proof.\n",
     "# PR\n\n## Validation\nHuman evidence.\n\n## Review\nApproved.\n",
@@ -434,20 +448,6 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
 def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None:
     assert run(capsys, "check")[0] == 0
     assert gh.calls == []
-
-
-@pytest.mark.parametrize("history", [None, "CLOSED", "MERGED"])
-def test_check_with_upstream_only_looks_for_open_prs(wt, gh, capsys, head, history):
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
-    gh.respond_pr_list([])
-    gh.respond(pr_list_key(state="closed"), [{"number": 7}] if history else [])
-    if history:
-        gh.respond_pr_view(pr_json(headRefOid=head, state=history))
-
-    code, out, err = run(capsys, "check")
-
-    assert (code, err) == (0, "") and out.endswith("PASS\n")
-    assert [c["argv"][:2] for c in gh.calls] == LOOKUP_CALLS[:1]
 
 
 @pytest.mark.parametrize("command,exit_code,tail", [
