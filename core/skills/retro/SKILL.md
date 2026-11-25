@@ -23,10 +23,10 @@ two days running or independent incidents repeat.
 - Use `weekly_sample.items`. The script reserves two seeded merged controls,
   two slowest orders accepted that week and the longest stalled p0 when
   available, then takes up to four oldest open orders from the order input
-  up to eight distinct cases total. Use `--since` to extend the order input
-  lookback when the commissioning brief calls for older orders. The seed
-  derives from the repository and report end. Replay with the same end and
-  frozen inputs. If fewer than six qualify, report the shortfall.
+  up to eight distinct cases total. The seed derives from the repository and
+  report end. Replay with the same end and frozen inputs. Use the pool sizes
+  and shortfall to explain when the category limits or available cases leave
+  fewer than six.
 - For each case, identify where it waited, who could move it and the first
   real consumer use or its missing proof. Test the apparent constraint
   against a contrary case. Route defects to the owning issue through
