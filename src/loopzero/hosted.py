@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from contextlib import suppress
 from pathlib import Path
 
 from loopzero import candidate as candidate_mod
 from loopzero import config, eligibility, github, mergify
-from loopzero.types import LoopZeroError
+from loopzero.types import Config, LoopZeroError
 
 
 def event_number(event: dict) -> int:
@@ -28,13 +29,17 @@ def event_number(event: dict) -> int:
 
 
 def main() -> int:
-    with github.api_error_diagnostics():
-        return _run()
-
-
-def _run() -> int:
     # The workflow checks out its trusted default branch, without persisted credentials.
-    cfg = config.load("workflow.toml")
+    try:
+        cfg = config.load("workflow.toml")
+    except config.ConfigError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    with github.api_error_diagnostics():
+        return _run(cfg)
+
+
+def _run(cfg: Config) -> int:
     if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())

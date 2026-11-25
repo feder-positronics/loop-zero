@@ -9,6 +9,7 @@ import importlib.metadata
 import io
 import json
 import os
+import shlex
 import random
 import re
 import sys
@@ -21,7 +22,7 @@ from pathlib import Path
 
 from loopzero import _proc, eligibility, github, mergify, runners, sandbox, worktree
 from loopzero import config as config_mod
-from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult
+from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroError, ReviewResult, is_check_exit_code
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
@@ -97,15 +98,17 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
     config = config_mod.load(path, checks={})
-    base_checks = config_mod.load_base(root, config.base_branch)
-    if base_checks is None:
+    base, revision = config_mod.load_base(root, config.base_branch)
+    if base is None:
         return config_mod.load(path)
-    config = config_mod.load(path, checks=base_checks)
-    delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
+    base_checks = config_mod.base_section(base, config.base_branch, "checks")
+    config = config_mod.load(
+        path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
+    )
+    delivery = config_mod.base_section(base, config.base_branch, "delivery")
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
-        revision = config_mod.base_revision(root, config.base_branch)
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
     return config
 
@@ -123,12 +126,16 @@ def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) ->
         revision = _git(wt, "rev-parse", "--verify", f"refs/remotes/origin/{config.base_branch}")
     except CliError as exc:
         raise CliError("native review needs a remote base; fetch it or supply --config") from exc
-    checks = config_mod.load_base(wt, config.base_branch, revision=revision)
-    if checks is None:
+    base, _ = config_mod.load_base(wt, config.base_branch, revision=revision)
+    if base is None:
         raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
-    delivery = config_mod.load_base(wt, config.base_branch, "delivery", revision=revision) or {}
+    checks = config_mod.base_section(base, config.base_branch, "checks")
+    delivery = config_mod.base_section(base, config.base_branch, "delivery")
     pinned = dataclasses.replace(
-        config_mod.load(wt / "workflow.toml", checks=checks),
+        config_mod.load(
+            wt / "workflow.toml", checks=checks,
+            validation_source=f"origin/{config.base_branch}:workflow.toml",
+        ),
         review_publishers=config_mod._strings(
             "delivery.review_publishers", delivery.get("review_publishers", [])),
         reviewer_ro_paths=config_mod._host_paths(
@@ -331,6 +338,10 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
+    _write_json_atomically(path, payload)
+
+
+def _write_json_atomically(path: Path, payload: dict) -> None:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
     ) as stream:
@@ -352,6 +363,8 @@ def _load_report(wt: Path) -> CheckReport | None:
     try:
         data = json.loads(path.read_text())
         results = tuple(CheckResult(**item) for item in data["results"])
+        if any(not is_check_exit_code(result.exit_code) for result in results):
+            raise TypeError("exit_code must be an integer")
         dirty = data.get("dirty", True)
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
@@ -612,15 +625,26 @@ def _published_fallback(note: str, candidates: list[str], excluded: list[str]) -
             and all(reason in _FALLBACK_REASONS for _family, _sep, reason in parts))
 
 
-def _require_review_pr(config: Config, branch: str) -> github.PR:
+def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.PR:
     try:
         return _require_pr(config, branch)
     except github.GhError as exc:
-        if "HTTP 404" in exc.tail and github.app_token():
+        if "HTTP 404" not in exc.tail or exc.command[:2] != ("gh", "api"):
+            raise
+        endpoint = exc.command[2]
+        pulls = f"repos/{config.repo}/pulls"
+        retry = "loopzero review --repost" if repost else "loopzero review"
+        number = endpoint.removeprefix(f"{pulls}/")
+        if endpoint.startswith(f"{pulls}/") and number.isdecimal():
+            raise CliError(
+                f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
+                f"then rerun `{retry}`. {exc}"
+            ) from exc
+        if endpoint.startswith(f"{pulls}?") and github.app_token():
             raise CliError(
                 f"GitHub App could not access pull requests for {config.repo} (HTTP 404). "
                 "Check that the GitHub App installation includes this repository, "
-                "then rerun `loopzero review`."
+                f"then rerun `{retry}`."
             ) from exc
         raise
 
@@ -630,7 +654,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
-    pr = _require_review_pr(config, branch)
+    pr = _require_review_pr(config, branch, repost=args.repost)
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
@@ -768,6 +792,20 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
 
+def _review_formats(result: ReviewResult) -> list[tuple[str, bool, bool]]:
+    old_settings = "requested_settings" not in result.provenance
+    formats = [(False, False)]
+    if runners.codex_evidence(result) is None:
+        formats.append((False, True))
+        if old_settings:
+            formats.append((True, True))
+    if result.family == "codex" and old_settings:
+        formats.append((True, False))
+    return [(prefix, settings, display)
+            for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
+            for settings, display in formats]
+
+
 def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, reviews: list[dict]) -> bool:
     """Confirm an exact live publication; absence authorizes no automatic write."""
@@ -782,11 +820,7 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     if (publisher.casefold() not in {name.casefold() for name in trusted}
             or eligibility.eligible_review(reviews, result.head, trusted, repo=config.repo, number=pr.number) is None):
         raise CliError("publication is revoked, pending or untrusted")
-    payloads = [github.review_payload(config.repo, pr.number, result.head, result, prefix,
-                                      legacy_settings=legacy, legacy_display=display)
-                for display in ([False, True] if result.family == "codex" and runners.codex_evidence(result) is None else [False])
-                for legacy in ([False, True] if "requested_settings" not in result.provenance else [False])
-                for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))]
+    payloads = github.review_payloads(config.repo, pr.number, result.head, result, _review_formats(result))
     states = {"COMMENTED", "APPROVED" if result.verdict == "approve" else "CHANGES_REQUESTED"}
     for review in evidence:
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
@@ -952,10 +986,9 @@ def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None
     data = dataclasses.asdict(result)
     if publication is not None:
         data["publication"] = publication
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    with os.fdopen(os.open(path, flags, 0o600), "w") as output:
-        os.fchmod(output.fileno(), 0o600)
-        output.write(json.dumps(data, indent=2) + "\n")
+    if path.is_symlink():
+        raise OSError(f"refusing to replace symbolic link: {path}")
+    _write_json_atomically(path, data)
 
 
 def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
@@ -1029,13 +1062,14 @@ def cmd_ready(args: argparse.Namespace) -> int:
     started = time.monotonic()
     if waiting:
         github.mark_ready(config.repo, pr.number)
-        print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
         if args.wait is None:
-            pending = f"{MERGEABILITY_PENDING}\n" if pr.mergeable == "UNKNOWN" else ""
-            print(f"{pending}waiting for required checks; {NEXT_WAIT}")
+            pending = f"; {MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
+            print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
+        print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started)
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
+                                  shown=readiness.reasons if kicked else ())
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1088,6 +1122,14 @@ def _pending_checks(
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
 
+def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness) -> str:
+    if _pending_checks(config, pr, readiness):
+        return "; next: loopzero merge --wait"
+    if _draft_checks_waiting(config, pr, readiness):
+        return "; next: loopzero ready --wait"
+    return ""
+
+
 def _poll_until(started: float, timeout: float) -> Iterator[None]:
     delay = WAIT_INTERVAL
     while True:
@@ -1101,13 +1143,13 @@ def _poll_until(started: float, timeout: float) -> Iterator[None]:
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None,
+    started: float | None = None, shown: tuple[str, ...] = (),
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     current = pr
-    shown, stale_notice = None, False
+    stale_notice = False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
@@ -1115,10 +1157,11 @@ def _wait_for_checks(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
-        if not kicked and (waiting := _draft_checks_waiting(config, current, readiness)):
+        if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
-            print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
-            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started)
+            print("marked ready; " + "; ".join(readiness.reasons))
+            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
+                                    shown=readiness.reasons)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
@@ -1262,7 +1305,7 @@ def _merge_with_mergify(
     behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
     blockers = tuple(reason for reason in readiness.reasons if reason != behind)
     if blockers:
-        hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+        hint = _merge_check_hint(config, pr, readiness)
         raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
     queue = config.mergify_queue
     assert queue is not None
@@ -1345,7 +1388,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             return 3 if args.wait is not None else 0
     else:
         if not readiness.ready:
-            hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
+            hint = _merge_check_hint(config, pr, readiness)
             raise CliError("not ready to merge: " + "; ".join(readiness.reasons) + hint)
         if admit_by is not None and time.monotonic() > admit_by:
             print(f"timed out before merging PR #{pr.number}")
@@ -1362,20 +1405,35 @@ def cmd_merge(args: argparse.Namespace) -> int:
                 "next: loopzero merge --wait follows the queue, verifies and cleans up"
             )
             return 0
-    _delete_remote_branch(config, branch, pr.head_sha)
+    _cleanup_remote_refs(wt, config, branch, pr.head_sha)
     _cleanup(wt, pr)
     print(sha)
     return 0
 
 
-def _delete_remote_branch(config: Config, branch: str, expected_head: str) -> None:
+def _cleanup_remote_refs(wt: Path, config: Config, branch: str, expected_head: str) -> None:
     try:
-        if not github.delete_remote_branch(config.repo, branch, expected_head):
-            print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
-                  "skipping deletion", file=sys.stderr)
+        if github.delete_remote_branch(config.repo, branch, expected_head):
+            _delete_tracking_ref(wt, branch, expected_head)
+            return
+        print(f"warning: merged; remote branch {branch} moved from {expected_head[:12]}; "
+              "skipping deletion", file=sys.stderr)
     except (github.GhError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but remote branch cleanup failed for {branch}: {exc}; "
               f"delete {branch!r} in {config.repo} if it still points at the merged head", file=sys.stderr)
+
+
+def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
+    if not branch.startswith("lz/") or branch.count("/") != 1:
+        return
+    ref = f"refs/remotes/origin/{branch}"
+    try:
+        _repo_root(wt)
+        current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref)
+        if current == f"{expected_head} {ref}":
+            _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
+    except (CliError, OSError, _proc.ProcTimeout) as exc:
+        print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
 def cmd_resolve(args: argparse.Namespace) -> int:
@@ -1390,7 +1448,20 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         raise CliError("a reply saying what changed (or why it does not apply) is required")
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
     print(f"resolved {args.finding}: {finding.title}")
-    if not github.open_blocking_findings(config.repo, pr.number):
+    try:
+        with github.api_error_diagnostics():
+            remaining = github.open_blocking_findings(config.repo, pr.number)
+    except (github.GhError, _proc.ProcTimeout, OSError) as exc:
+        retry = shlex.join(("gh", *github.eligibility_dispatch_args(
+            config.repo, pr.number, config.base_branch,
+        )))
+        raise CliError(
+            f"Resolved finding {args.finding} on PR #{pr.number}, but could not refresh "
+            f"Loop-zero Eligibility. {exc}\n"
+            "To check remaining findings, run `loopzero resolve` with no arguments. "
+            f"Then, if no findings remain, run `{retry}`."
+        ) from exc
+    if not remaining:
         github.refresh_eligibility(config.repo, pr.number, config.base_branch)
         print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0

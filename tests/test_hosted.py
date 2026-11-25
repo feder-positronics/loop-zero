@@ -1,5 +1,7 @@
 """Trusted publisher behavior against GitHub metadata, without candidate execution."""
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,6 +14,22 @@ from tests.test_candidate import event as candidate_event
 from tests.test_candidate import payloads as candidate_payloads
 from tests.test_candidate import status as candidate_status
 from tests.test_github import HEAD, REPO, FakeGh, pr_json, threads_json
+
+
+@pytest.mark.parametrize("module,args", [
+    ("eligibility", ["--config", "workflow.toml", "--pr", "7", "--head", HEAD]),
+    ("hosted", []),
+])
+def test_eligibility_entry_points_report_malformed_config(tmp_path, module, args):
+    (tmp_path / "workflow.toml").write_text("[repo\n")
+    result = subprocess.run(
+        [sys.executable, "-m", f"loopzero.{module}", *args],
+        cwd=tmp_path, capture_output=True, text=True, check=False,
+    )
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr.startswith("workflow.toml: invalid TOML: ")
+    assert "line 1, column 6" in result.stderr
+    assert len(result.stderr.splitlines()) == 1
 
 
 @pytest.mark.parametrize("event,number", [

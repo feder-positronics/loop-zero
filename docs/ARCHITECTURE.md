@@ -66,6 +66,8 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
 [six steps](../core/CONTRACT.md#the-six-steps):
 
 1. `start` creates an isolated worktree and task branch from the configured base.
+   A retry can finish an interrupted initialization if the registered task
+   worktree is clean, still at the remote base, and missing its task file.
 2. Implementation proves the owning behavior at the narrowest public seam;
    focused tests start early. `check` runs deterministic checks in a read-only
    source sandbox. Its simple-command preflight catches missing local scripts,
@@ -233,8 +235,9 @@ produces HOLD without truncation. The projection binds publisher,
 repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
 raw digest/byte count, completeness and per-call requested/reported/configured settings,
 fatal classification and attributable inspection event/range facts. It publishes
-no commands, source contents or private paths. Codex's human transcript display
-is a sanitized retention notice; Claude's existing rendering stays unchanged.
+no commands, source contents or private paths. New reviews show structured
+review fields and a local retention notice for both Codex and Claude.
+Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
@@ -243,6 +246,8 @@ After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
 step, and a moved ref is left in place with a warning. GitHub REST uses separate
 read and delete requests, so the ref can still change between those requests.
+After confirmed remote deletion or absence, cleanup deletes the matching
+`origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
 requires a clean worktree at the merged PR head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
