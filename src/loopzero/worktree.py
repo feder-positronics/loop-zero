@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import re
+import stat
 import tempfile
 from pathlib import Path
 
@@ -95,14 +96,24 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 def _ensure_excludes(repo_root: Path) -> None:
     common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    exclude = common / "info" / "exclude"
+    exclude = (common / "info" / "exclude").resolve()
     exclude.parent.mkdir(parents=True, exist_ok=True)
     existing = exclude.read_text() if exclude.exists() else ""
     lines = set(existing.splitlines())
     missing = [e for e in EXCLUDES if e not in lines]
     if missing:
         sep = "" if not existing or existing.endswith("\n") else "\n"
-        exclude.write_text(existing + sep + "\n".join(missing) + "\n")
+        mode = stat.S_IMODE(exclude.stat().st_mode) if exclude.exists() else None
+        with tempfile.NamedTemporaryFile(mode="w", dir=exclude.parent, delete=False) as stream:
+            temp = Path(stream.name)
+            try:
+                stream.write(existing + sep + "\n".join(missing) + "\n")
+                stream.close()
+                if mode is not None:
+                    temp.chmod(mode)
+                temp.replace(exclude)
+            finally:
+                temp.unlink(missing_ok=True)
 
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
