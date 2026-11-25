@@ -24,7 +24,7 @@ from pathlib import Path
 from . import __version__, _proc
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
-from .worktree import WorktreeError
+from .worktree import WorktreeError, read_local_state
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -211,7 +211,7 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
     if _git(config, worktree, "ls-files", "--", ".loopzero"):
         return {}
     try:
-        data = json.loads((worktree / ".loopzero/checks.json").read_text())
+        data = json.loads(read_local_state(worktree, "checks.json"))
         if (data["dirty"] is not False or not isinstance(data["head"], str)
                 or data.get("settings_sha256") != settings_sha256):
             return {}

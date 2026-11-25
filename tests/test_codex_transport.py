@@ -100,7 +100,7 @@ def packed(value):
     return packed_json(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path):
+def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo):
     result = native[0]()
     assert len(result.raw.encode()) > 30000
     evidence = runners.codex_evidence(result)
@@ -125,10 +125,10 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path
     assert eligibility.eligible_review(
         [row(result)], result.head, ("bot",), repo="acme/widgets", number=7
     )
-    cli._save_review(tmp_path, result)
-    path = tmp_path / evidence["receipt"]
+    cli._save_review(git_repo, result)
+    path = git_repo / evidence["receipt"]
     assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
-    loaded = cli._load_review(tmp_path, result.head, "primary")
+    loaded = cli._load_review(git_repo, result.head, "primary")
     assert loaded.raw == result.raw and body(loaded) == rendered
     assert json.loads(path.read_text())["raw"] == result.raw
 
@@ -473,7 +473,7 @@ def test_strict_projection_types_and_bounds(native, field, value):
         runners.decode_codex_evidence(packed(evidence))
 
 
-def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
+def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     legacy = test_runners._native_codex_result("a" * 40)
     raw = json.loads(legacy.raw)
     raw.pop("review_context")
@@ -484,8 +484,8 @@ def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
     assert eligibility.eligible_review(
         [row(legacy)], legacy.head, ("bot",), repo="acme/widgets", number=7
     )
-    cli._save_review(tmp_path, legacy)
-    assert cli._load_review(tmp_path, legacy.head, "primary").raw == legacy.raw
+    cli._save_review(git_repo, legacy)
+    assert cli._load_review(git_repo, legacy.head, "primary").raw == legacy.raw
 
 
 @pytest.mark.parametrize("change", [
@@ -521,7 +521,7 @@ def test_leading_block_is_anchored_and_schema_complete(native, change):
     assert present is (change != "fence")
 
 
-def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_path):
+def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, git_repo):
     result = native[0]()
     changed = dataclasses.replace(
         result, raw=json.dumps(json.loads(result.raw), ensure_ascii=False, indent=1)
@@ -531,8 +531,8 @@ def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_pat
     assert value["raw_bytes"] == len(changed.raw.encode())
     assert value["raw_sha256"] == hashlib.sha256(changed.raw.encode()).hexdigest()
     assert value["raw_sha256"] != runners.codex_evidence(result)["raw_sha256"]
-    cli._save_review(tmp_path, changed)
-    loaded = cli._load_review(tmp_path, changed.head, changed.kind)
+    cli._save_review(git_repo, changed)
+    loaded = cli._load_review(git_repo, changed.head, changed.kind)
     assert loaded.raw == changed.raw and body(loaded) == body(changed)
 
 
