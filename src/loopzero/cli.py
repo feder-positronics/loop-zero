@@ -326,6 +326,10 @@ def _save_report(wt: Path, report: CheckReport) -> None:
                      if k not in {"input_key", "reused_from"} or v is not None}
                     for result in report.results],
     }
+    _write_json_atomically(path, payload)
+
+
+def _write_json_atomically(path: Path, payload: dict) -> None:
     with tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
     ) as stream:
@@ -948,10 +952,9 @@ def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None
     data = dataclasses.asdict(result)
     if publication is not None:
         data["publication"] = publication
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW
-    with os.fdopen(os.open(path, flags, 0o600), "w") as output:
-        os.fchmod(output.fileno(), 0o600)
-        output.write(json.dumps(data, indent=2) + "\n")
+    if path.is_symlink():
+        raise OSError(f"refusing to replace symbolic link: {path}")
+    _write_json_atomically(path, data)
 
 
 def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
