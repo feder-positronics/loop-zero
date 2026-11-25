@@ -24,6 +24,7 @@ def test_run_captures_output_exit_code_and_duration(tmp_path):
 
 
 def test_run_strips_environment_to_allowlist(tmp_path, monkeypatch):
+    monkeypatch.delenv("LZ_ABSENT", raising=False)
     monkeypatch.setenv("LZ_SECRET", "nope")
     monkeypatch.setenv("LZ_KEEP", "yes")
     done = _proc.run(
