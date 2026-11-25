@@ -620,15 +620,26 @@ def _published_fallback(note: str, candidates: list[str], excluded: list[str]) -
             and all(reason in _FALLBACK_REASONS for _family, _sep, reason in parts))
 
 
-def _require_review_pr(config: Config, branch: str) -> github.PR:
+def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.PR:
     try:
         return _require_pr(config, branch)
     except github.GhError as exc:
-        if "HTTP 404" in exc.tail and github.app_token():
+        if "HTTP 404" not in exc.tail or exc.command[:2] != ("gh", "api"):
+            raise
+        endpoint = exc.command[2]
+        pulls = f"repos/{config.repo}/pulls"
+        retry = "loopzero review --repost" if repost else "loopzero review"
+        number = endpoint.removeprefix(f"{pulls}/")
+        if endpoint.startswith(f"{pulls}/") and number.isdecimal():
+            raise CliError(
+                f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
+                f"then rerun `{retry}`. {exc}"
+            ) from exc
+        if endpoint.startswith(f"{pulls}?") and github.app_token():
             raise CliError(
                 f"GitHub App could not access pull requests for {config.repo} (HTTP 404). "
                 "Check that the GitHub App installation includes this repository, "
-                "then rerun `loopzero review`."
+                f"then rerun `{retry}`."
             ) from exc
         raise
 
@@ -638,7 +649,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
-    pr = _require_review_pr(config, branch)
+    pr = _require_review_pr(config, branch, repost=args.repost)
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
