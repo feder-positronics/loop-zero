@@ -2948,7 +2948,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
                 raise mergify.MergifyError("HTTP 503")
             if outcome in {"ejected", "ejection_head_changed"}:
                 return None
-        return mergify.Membership("main", "2026-09-22T12:00:00Z", 1)
+        return mergify.Membership()
     monkeypatch.setattr(mergify, "membership", membership)
     sleeps = []
     monkeypatch.setattr(cli.time, "monotonic", lambda: sum(sleeps))

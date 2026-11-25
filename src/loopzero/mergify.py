@@ -28,9 +28,6 @@ class MergifyError(LoopZeroError):
 
 @dataclass(frozen=True)
 class Membership:
-    queue: str
-    queued_at: str
-    position: int
     candidate_number: int | None = None
     checks: dict[str, str] | None = None
 
@@ -120,7 +117,7 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
             raise ValueError("invalid queue position or admission time")
         check = data.get("mergeability_check")
         if not isinstance(check, dict):
-            return Membership(actual, data["queued_at"], data["position"])
+            return Membership()
         candidate = check.get("queue_pull_request_number")
         raw_checks = check.get("checks")
         checks = None
@@ -131,7 +128,6 @@ def membership(repo: str, number: int, queue: str) -> Membership | None:
                 and isinstance(item.get("state"), str)
             }
         return Membership(
-            actual, data["queued_at"], data["position"],
             candidate if type(candidate) is int and candidate > 0 else None,
             checks,
         )
