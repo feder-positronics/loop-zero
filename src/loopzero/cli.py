@@ -97,15 +97,15 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
     config = config_mod.load(path, checks={})
-    base_checks = config_mod.load_base(root, config.base_branch)
+    revision = config_mod.base_revision(root, config.base_branch)
+    base_checks = config_mod.load_base(root, config.base_branch, revision=revision)
     if base_checks is None:
         return config_mod.load(path)
     config = config_mod.load(path, checks=base_checks)
-    delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
+    delivery = config_mod.load_base(root, config.base_branch, "delivery", revision=revision) or {}
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
-        revision = config_mod.base_revision(root, config.base_branch)
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
     return config
 
