@@ -16,4 +16,5 @@ queue_rules:
     queue_conditions:
       - base = main
       - -draft
+      - -label = hold
       - check-success = Loop-zero Eligibility
