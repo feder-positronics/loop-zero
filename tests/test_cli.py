@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -36,7 +37,7 @@ from tests.test_runners import (
     _fake_codex,
     _native_codex_result,
 )
-from tests.test_sandbox import FAKE_BWRAP
+from tests.test_sandbox import FAKE_BWRAP, inject_check_timeout
 
 REPO = "acme/widgets"
 URL = f"https://github.com/{REPO}/pull/7"
@@ -272,8 +273,9 @@ def test_start_without_config(git_repo: Path, monkeypatch, capsys) -> None:
     assert code == 1 and "workflow.toml" in err and err.count("\n") == 1
 
 
-def test_check_pass_writes_report(wt: Path, capsys) -> None:
+def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys) -> None:
     code, out, _ = run(capsys, "check")
+    assert gh.calls == []
     lines = out.splitlines()
     assert code == 0 and lines[-1] == "PASS"
     assert lines[0].startswith("checks pinned to origin/main@")
@@ -292,19 +294,32 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert report["results"][0]["tail"] == "ok"
 
 
-@pytest.mark.parametrize("pushed", [False, True])
-def test_check_with_open_pr_patches_only_pushed_head(wt: Path, gh: FakeGh, capsys, pushed) -> None:
+@pytest.mark.parametrize("pushed,refresh_timeout,stage_exit", [
+    (False, False, 0), (True, False, 0), (True, True, 0), (True, True, 124),
+])
+def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, pushed, refresh_timeout, stage_exit):
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     arm_pr(gh, head_of(wt))
     if not pushed:
         git(wt, "commit", "-q", "--allow-empty", "-m", "unpushed change")
-    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    if stage_exit:
+        inject_check_timeout(monkeypatch, b"local check output")
+    endpoint = f"repos/{REPO}/pulls/7"
+    gh.respond(f"api {endpoint} --method PATCH", {})
+    if refresh_timeout:
+        timeout = cli._proc.ProcTimeout(f"PATCH {endpoint} timed out")
+        monkeypatch.setattr(github, "update_body", Mock(side_effect=timeout))
     code, out, err = run(capsys, "check")
-    assert code == 0 and out.endswith("PASS\n") and err == ""
+    assert (code, out.splitlines()[-1]) == ((1, "FAIL") if stage_exit else (0, "PASS"))
     assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS + (
-        [["api", f"repos/{REPO}/pulls/7"]] if pushed else [])
-    assert json.loads((wt / ".loopzero/checks.json").read_text())["head"] == head_of(wt)
-    if pushed:
+        [["api", endpoint]] if pushed and not refresh_timeout else [])
+    report = json.loads((wt / ".loopzero/checks.json").read_text())
+    assert report["head"] == head_of(wt) and report["dirty"] is False
+    assert report["results"][0]["exit_code"] == stage_exit
+    assert bool(err) == refresh_timeout
+    if refresh_timeout:
+        assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
+    if pushed and not refresh_timeout:
         body = json.loads(gh.calls[2]["--input"])["body"]
         assert body.count("## Validation") == 1
         assert f"Recorded for `{head_of(wt)[:12]}`" in body
@@ -358,33 +373,23 @@ def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None
     assert "(no `loopzero check` run recorded)" in body
 
 
-def test_repeated_pr_does_not_rewrite_unchanged_body(wt: Path, gh: FakeGh, capsys) -> None:
-    gh.respond_pr_list([pr_json(headRefOid=head_of(wt))])
+@pytest.mark.parametrize("command", ["pr", "check"])
+def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, capsys, command) -> None:
+    head = head_of(wt)
+    if command == "check":
+        cli._save_report(wt, CheckReport(head, False, (
+            CheckResult("echo ok", 0, 999.0, "ok"),
+            CheckResult("test -f README.md", 0, 999.0, ""),
+        )))
+    gh.respond_pr_list([pr_json(headRefOid=head)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     assert run(capsys, "pr")[0] == 0
     body = json.loads(gh.calls[-1]["--input"])["body"]
-    gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
+    gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
     before = len(gh.calls)
-    assert run(capsys, "pr")[0] == 0
-    assert [c["argv"][:2] for c in gh.calls[before:]] == [
-        ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS]
-
-
-def test_check_does_not_rewrite_when_only_duration_changes(wt: Path, gh: FakeGh, capsys) -> None:
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
-    report = CheckReport(head_of(wt), False, (
-        CheckResult("echo ok", 0, 999.0, "ok"),
-        CheckResult("test -f README.md", 0, 999.0, ""),
-    ))
-    cli._save_report(wt, report)
-    gh.respond_pr_list([pr_json(headRefOid=head_of(wt))])
-    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
-    assert run(capsys, "pr")[0] == 0
-    body = json.loads(gh.calls[-1]["--input"])["body"]
-    gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
-    before = len(gh.calls)
-    assert run(capsys, "check")[0] == 0
-    assert [c["argv"][:2] for c in gh.calls[before:]] == LOOKUP_CALLS
+    assert run(capsys, command)[0] == 0
+    history = [["api", branch_history_key().split(" ", 1)[1]]] if command == "pr" else []
+    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS
 
 
 @pytest.mark.parametrize("body", [
@@ -429,11 +434,6 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     if command == "check":
         assert out.endswith("PASS\n")
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
-
-
-def test_check_without_pr_does_not_call_gh(wt: Path, gh: FakeGh, capsys) -> None:
-    assert run(capsys, "check")[0] == 0
-    assert gh.calls == []
 
 
 @pytest.mark.parametrize("command,exit_code,tail", [
