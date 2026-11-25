@@ -39,7 +39,7 @@ _TREE_BYTES = 256 * 1024 * 1024
 _TREE_OUTPUT = 8 * 1024 * 1024
 _TREE_OBJECTS = 100_000
 _TREE_DEPTH = 200  # IntelFlo main at depth 200: ~16k objects, 29 MiB (full: 147k)
-_PASS_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
+_FETCH_TRANSPORT_ENV = ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "SSL_CERT_FILE", "GIT_SSL_CAINFO")
 
 JsonObject = dict[str, Any]
 JsonValue = JsonObject | list[Any]
@@ -289,25 +289,27 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
     _require(bool(token), "GitHub fetch authentication unavailable")
     with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
         root = Path(directory)
-        env = {name: os.environ[name] for name in _PASS_ENV if name in os.environ} | {
+        env = {
             "PATH": os.environ.get("PATH", os.defpath), "HOME": directory,
             "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_ATTR_NOSYSTEM": "1",
             "GIT_TERMINAL_PROMPT": "0", "GIT_NO_REPLACE_OBJECTS": "1",
             "GIT_AUTHOR_NAME": "loopzero", "GIT_AUTHOR_EMAIL": "loopzero@localhost",
             "GIT_COMMITTER_NAME": "loopzero", "GIT_COMMITTER_EMAIL": "loopzero@localhost",
+        }
+        fetch_env = env | {name: os.environ[name] for name in _FETCH_TRANSPORT_ENV if name in os.environ} | {
             "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
             "GIT_CONFIG_VALUE_0": "Authorization: Basic " + base64.b64encode(
                 f"x-access-token:{token}".encode()).decode(),
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str) -> str:
+        def git(*args: str, command_env: dict[str, str] = env) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
                     ["prlimit", f"--fsize={_TREE_BYTES}", "--",
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
-                     "-c", "maintenance.auto=false", *args], cwd=root, env=env,
+                     "-c", "maintenance.auto=false", *args], cwd=root, env=command_env,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
                     start_new_session=True,
                 )
@@ -340,7 +342,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         git("init", "--bare", "--template=", ".")
         git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
             f"--depth={_TREE_DEPTH}",
-            f"https://github.com/{repo}.git", *heads)
+            f"https://github.com/{repo}.git", *heads, command_env=fetch_env)
         objects = git("rev-list", "--objects", "--no-object-names", *heads).splitlines()
         _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
         yield git
