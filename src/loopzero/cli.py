@@ -1023,12 +1023,13 @@ def cmd_ready(args: argparse.Namespace) -> int:
     started = time.monotonic()
     if waiting:
         github.mark_ready(config.repo, pr.number)
-        print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
         if args.wait is None:
-            print(f"waiting for required checks; {NEXT_WAIT}")
+            print(f"marked ready; waiting for required checks: {', '.join(waiting)}; {NEXT_WAIT}")
             return 3
+        print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started)
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
+                                  shown=readiness.reasons if kicked else ())
         if waited is None:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
@@ -1094,12 +1095,12 @@ def _poll_until(started: float, timeout: float) -> Iterator[None]:
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None,
+    started: float | None = None, shown: tuple[str, ...] = (),
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
-    shown, stale_notice = None, False
+    stale_notice = False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
@@ -1107,10 +1108,11 @@ def _wait_for_checks(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
-        if not kicked and (waiting := _draft_checks_waiting(config, current, readiness)):
+        if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
-            print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
-            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started)
+            print("marked ready; " + "; ".join(readiness.reasons))
+            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
+                                    shown=readiness.reasons)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             return None  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
