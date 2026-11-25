@@ -1049,11 +1049,11 @@ def _save_review_failure_output(
     fragments = {
         family: exc.tail.encode()[-2000:].decode(errors="ignore")
         for family, exc in errors.items()
-        if isinstance(exc, runners.RunnerBadOutput) and exc.tail
+        if isinstance(exc, runners.RunnerMalformedOutput) and exc.tail
     }
     if not fragments:
         return ""
-    path = wt / ".loopzero" / f"review-failure-{head[:12]}-{kind}.json"
+    path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
     try:
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         _write_json_atomically(path, fragments)
@@ -1064,7 +1064,7 @@ def _save_review_failure_output(
 
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = lines[0] if isinstance(exc, runners.RunnerBadOutput) else "\n".join(lines[:3])
+    detail = lines[0] if isinstance(exc, runners.RunnerMalformedOutput) else "\n".join(lines[:3])
     fallback_reason = _FALLBACK_REASONS[3]
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"

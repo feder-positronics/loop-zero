@@ -4332,7 +4332,7 @@ def test_review_malformed_fragments_stay_out_of_terminal(wt, gh, fake_bin, monke
         assert f"{family}: review has unexpected or missing keys" in err
         assert family * 10 not in err
     if save:
-        path = next((wt / ".loopzero").glob("review-failure-*.json"))
+        path = next((wt / ".loopzero").glob("reviewer-output-*.json"))
         assert path.name in err and path.stat().st_mode & 0o777 == 0o600
         assert json.loads(path.read_text()) == {family: raw[-2000:] for family, raw in envelopes.items()}
     else:
