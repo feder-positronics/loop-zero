@@ -1196,17 +1196,21 @@ def test_review_chunks_oversized_diff_with_same_family(
         tasks.append(metadata["task_text"])
         fragments.append(metadata.get("fragment"))
         materials.append(diff)
-    assert len(set(policies)) == 1 and len(set(tasks)) == 1 and len(materials) > 1
+    assert len(set(tasks)) == 1 and len(materials) > 1
+    assert "fragment" not in policies[0] and len(set(policies[1:])) == 1
+    assert "do not judge whether the whole change is complete" in policies[1]
     full_diff, *chunks = materials
     assert all(len(part) <= 4096 for part in chunks)
-    assert fragments[0] is None and "whole change is complete" in policies[0] and all(
-        f.startswith(f"chunk {i} of ") and f.endswith("whole PR is complete from it")
-        for i, f in enumerate(fragments[1:], 1))
+    assert fragments[0] is None
     if chunk_auth:
         assert len(chunks) == 1 and full_diff.startswith(chunks[0])
+        assert re.fullmatch(r"chunk 1 of (?:[2-9]|[1-9][0-9]+)", fragments[1])
         header, fallback_diff = (fake_bin / "codex.stdin").read_bytes().split(b"\n", 1)
-        assert fallback_diff == full_diff and json.loads(header)["task_text"] == tasks[0]
+        fallback = json.loads(header)
+        assert fallback_diff == full_diff and fallback["task_text"] == tasks[0]
+        assert "fragment" not in fallback
     else:
+        assert fragments[1:] == [f"chunk {i} of {len(chunks)}" for i in range(1, len(chunks) + 1)]
         assert b"".join(chunks) == full_diff
     if chunk_auth:
         assert "reviewer claude unavailable:" in err and "CLI is not authenticated" in err
