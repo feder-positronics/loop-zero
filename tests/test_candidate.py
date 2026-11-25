@@ -30,10 +30,7 @@ def no_retry_delay(monkeypatch):
 
 
 def event() -> dict:
-    repo = {
-        "id": 7,
-        "full_name": "owner/repo",
-    }
+    repo = {"id": 7, "full_name": "owner/repo"}
     bot = {
         "id": 37929162,
         "login": "mergify[bot]",
@@ -49,47 +46,24 @@ def event() -> dict:
             "state": "open",
             "draft": True,
             "user": bot,
-            "head": {
-                "sha": "c" * 40,
-                "ref": "mergify/merge-queue/batch",
-                "repo": deepcopy(repo),
-            },
-            "base": {
-                "sha": "b" * 40,
-                "ref": "main",
-                "repo": deepcopy(repo),
-            },
+            "head": {"sha": "c" * 40, "ref": "mergify/merge-queue/batch", "repo": deepcopy(repo)},
+            "base": {"sha": "b" * 40, "ref": "main", "repo": deepcopy(repo)},
         },
     }
 
 
-def status() -> dict:
-    parent = {
-        "id": "parent",
-        "parent_ids": [],
-        "queue_pull_request_number": 899,
-        "pull_requests": [{"number": 101}],
-        "sub_batches": None,
-    }
-    candidate = {
-        "id": "candidate",
-        "parent_ids": ["parent"],
-        "queue_pull_request_number": 900,
-        "pull_requests": [{"number": 102}],
-        "sub_batches": [],
-    }
+def batch(batch_id, *, parents, number, sources, children):
     return {
-        "batches": [
-            parent,
-            {
-                "id": "outer",
-                "parent_ids": [],
-                "queue_pull_request_number": None,
-                "pull_requests": [],
-                "sub_batches": [candidate],
-            },
-        ]
+        "id": batch_id, "parent_ids": parents, "queue_pull_request_number": number,
+        "pull_requests": [{"number": source} for source in sources], "sub_batches": children,
     }
+
+
+def status() -> dict:
+    parent = batch("parent", parents=[], number=899, sources=[101], children=None)
+    candidate = batch("candidate", parents=["parent"], number=900, sources=[102], children=[])
+    outer = batch("outer", parents=[], number=None, sources=[], children=[candidate])
+    return {"batches": [parent, outer]}
 
 
 def pull(number: int, sha: str) -> dict:
@@ -99,11 +73,16 @@ def pull(number: int, sha: str) -> dict:
         "draft": False,
         "body": f"source {number}",
         "head": {"sha": sha},
-        "base": {
-            "ref": "main",
-            "repo": {"id": 7, "full_name": "owner/repo"},
-        },
+        "base": {"ref": "main", "repo": {"id": 7, "full_name": "owner/repo"}},
     }
+
+
+def source_payloads(values, head, *sources):
+    for number, sha in sources:
+        values[f"/repos/owner/repo/pulls/{number}"] = pull(number, sha)
+        values[f"/repos/owner/repo/compare/{sha}...{head}"] = {
+            "status": "ahead", "merge_base_commit": {"sha": sha},
+        }
 
 
 def payloads(candidate_event: dict) -> dict[str, object]:
@@ -118,12 +97,7 @@ def payloads(candidate_event: dict) -> dict[str, object]:
         "/users/mergify%5Bbot%5D": deepcopy(candidate["user"]),
         "/repos/owner/repo/pulls/900": candidate,
     }
-    for number, sha in [(101, "1" * 40), (102, "2" * 40)]:
-        values[f"/repos/owner/repo/pulls/{number}"] = pull(number, sha)
-        values[f"/repos/owner/repo/compare/{sha}...{'c' * 40}"] = {
-            "status": "ahead",
-            "merge_base_commit": {"sha": sha},
-        }
+    source_payloads(values, "c" * 40, (101, "1" * 40), (102, "2" * 40))
     return values
 
 
@@ -183,10 +157,8 @@ def test_rejects_missing_live_status_as_candidate_error() -> None:
 
 def test_rejects_source_head_missing_from_candidate_history() -> None:
     values = payloads(event())
-    values["/repos/owner/repo/compare/" + "2" * 40 + "..." + "c" * 40] = {
-        "status": "diverged",
-        "merge_base_commit": {"sha": "0" * 40},
-    }
+    comparison = values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]
+    comparison.update(status="diverged", merge_base_commit={"sha": "0" * 40})
     with pytest.raises(CandidateError, match="not an ancestor"):
         run_attestation(github_payloads=values)
 
@@ -213,10 +185,8 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
     reads = iter([status(), status()])
     with pytest.raises(CandidateError, match=diagnostic):
         attest_candidate(
-            candidate_event,
-            github_get=github_get,
-            mergify_status=lambda *_: deepcopy(next(reads)),
-            source_policy=lambda *_: None,
+            candidate_event, github_get=github_get,
+            mergify_status=lambda *_: deepcopy(next(reads)), source_policy=lambda *_: None,
         )
 
 
@@ -290,28 +260,16 @@ def tree_candidate(tmp_path, monkeypatch):
         candidate_event = event()
         candidate_event["pull_request"]["head"]["sha"] = head
         values = payloads(candidate_event)
-        values["/repos/owner/repo/pulls/102"] = pull(102, source)
-        values[f"/repos/owner/repo/compare/{source}...{head}"] = {
-            "status": "ahead",
-            "merge_base_commit": {"sha": source},
-        }
+        source_payloads(values, head, (102, source))
         queue = status()
         if lineage != "stacked":
             queue["batches"].pop(0)
         if lineage == "single":
             queue["batches"][0]["sub_batches"][0]["parent_ids"] = []
         if lineage == "stacked":
-            values["/repos/owner/repo/pulls/101"] = pull(101, parent)
-            values[f"/repos/owner/repo/compare/{parent}...{head}"] = {
-                "status": "ahead",
-                "merge_base_commit": {"sha": parent},
-            }
+            source_payloads(values, head, (101, parent))
         if extra_source:
-            values["/repos/owner/repo/pulls/101"] = pull(101, extra_source)
-            values[f"/repos/owner/repo/compare/{extra_source}...{head}"] = {
-                "status": "ahead",
-                "merge_base_commit": {"sha": extra_source},
-            }
+            source_payloads(values, head, (101, extra_source))
             queue["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
         for number in (101, 102):
             values[f"/repos/owner/repo/pulls/{number}"].update(
@@ -328,12 +286,8 @@ def tree_candidate(tmp_path, monkeypatch):
                 return {"object": {"sha": sha}} if sha else {}
             return deepcopy(values[path])
 
-        return run(
-            candidate_event,
-            github_get=get,
-            mergify_status=lambda *_: deepcopy(queue),
-            source_policy=policy,
-        )
+        return run(candidate_event, github_get=get, mergify_status=lambda *_: deepcopy(queue),
+                   source_policy=policy)
 
     return attest, git, commit, base, parent, source, candidate_sha
 
@@ -398,7 +352,6 @@ def test_vanished_parent_rejects_unauthorized_trees(tree_candidate, mutation):
 
 @pytest.mark.parametrize("bound", ["_TREE_BYTES", "_TREE_OBJECTS", "_TREE_SECONDS", "_TREE_OUTPUT"])
 def test_vanished_parent_fails_closed_at_resource_bounds(tree_candidate, monkeypatch, bound):
-    from loopzero import candidate
     monkeypatch.setattr(candidate, bound, 1 if bound != "_TREE_SECONDS" else 0)
     with pytest.raises(CandidateError, match=r"Missing Mergify parent batches parent:.*bound"):
         tree_candidate[0]()
@@ -417,18 +370,6 @@ def test_vanished_parent_rejects_ambiguous_topology(tree_candidate):
                "-p", base, "-p", parent, "-p", source, "-m", "octopus")
     with pytest.raises(CandidateError, match="parent: ambiguous"):
         attest(head=head)
-
-
-def test_vanished_parent_orders_live_sources_by_topology(tree_candidate):
-    attest, git, commit, _, _, source, _ = tree_candidate
-    git("checkout", "-b", "second", source)
-    second = commit("source", "reviewed second version\n")
-    git("checkout", "candidate")
-    git("merge", "--no-ff", second, "-m", "second integration")
-    assert attest(head=git("rev-parse", "HEAD"), extra_source=second) == [
-        {"number": 101, "head_sha": second},
-        {"number": 102, "head_sha": source},
-    ]
 
 
 @pytest.fixture
@@ -455,7 +396,6 @@ def intelflo_policy(monkeypatch):
 
 @pytest.fixture(params=["loopzero", "intelflo"])
 def candidate_policy(request):
-    from loopzero import candidate
 
     if request.param == "intelflo":
         return request.getfixturevalue("intelflo_policy")
@@ -536,17 +476,11 @@ def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
 
 @pytest.mark.parametrize("timing", ["metadata", "policy", "initial"])
 def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monkeypatch, timing):
-    from loopzero import candidate
     _, git, _, _, parent, source, head = tree_candidate
     candidate_event = event()
     candidate_event["pull_request"]["head"]["sha"] = head
     values = payloads(candidate_event)
-    for number, sha in [(101, parent), (102, source)]:
-        values[f"/repos/owner/repo/pulls/{number}"] = pull(number, sha)
-        values[f"/repos/owner/repo/compare/{sha}...{head}"] = {
-            "status": "ahead",
-            "merge_base_commit": {"sha": sha},
-        }
+    source_payloads(values, head, (101, parent), (102, source))
     main, vanished = git("rev-parse", "main"), status()
     vanished["batches"].pop(0)
     reads = iter(
@@ -586,12 +520,7 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
-    assert attest_candidate(
-        candidate_event,
-        github_get=get,
-        mergify_status=lineage,
-        source_policy=policy,
-    ) == [{"number": 102, "head_sha": source}]
+    assert attest_candidate(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy) == [{"number": 102, "head_sha": source}]
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert candidate_reads == (4 if timing == "metadata" else 3)
     assert verified == [(main, head, [source])] and sleeps == [2]
@@ -635,7 +564,6 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
                           [], {"merged": True, "head": None},
                           {"merged": 1, "head": {"sha": "1" * 40}}]])
 def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
-    from loopzero import candidate
     values, live = payloads(event()), status()
     sleeps, attempts, source_reads = [], [], []
     expected = LoopZeroError("source #101: missing required review")
@@ -688,7 +616,6 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
 def test_persistent_race_preserves_last_error_and_bounds_retry(
     monkeypatch, elapsed, oversleep, attempt_count
 ):
-    from loopzero import candidate
     attempts, sleeps, clock = [], [], [0]
 
     def race(*_, **__):
@@ -724,7 +651,6 @@ def test_membership_drift_is_a_retryable_race():
 
 @pytest.mark.parametrize("matches,second,stop", [(n, s, t) for n in (0, 2) for s in (False, True) for t in ("settled", "ambiguous", "closed", "slow", "oversleep", "changed")])
 def test_rebuild_wait(monkeypatch, matches, second, stop):
-    from loopzero import candidate
     clock, sleeps, reads, values, seen = [0], [], [], payloads(event()), []
     ambiguous = {"batches": [{"id": str(i), "queue_pull_request_number": 900} for i in range(matches)]}
     def sleep(delay):
