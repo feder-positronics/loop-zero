@@ -158,7 +158,14 @@ def _primary_base(wt: Path, config: Config) -> str:
         ["git", "merge-base", base, "HEAD"],
         cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT,
     )
-    return done.stdout.strip() if done.exit_code == 0 else base
+    if done.exit_code == 0:
+        return done.stdout.strip()
+    if done.exit_code != 1:
+        raise CliError(f"git merge-base failed: {_proc.tail(done.stderr or done.stdout, 1)}")
+    message = f"no merge base between HEAD and the configured base {config.base_branch!r}"
+    if _git(wt, "rev-parse", "--is-shallow-repository") == "true":
+        message += ". To review, deepen or unshallow the checkout and retry"
+    raise CliError(message)
 
 
 def _require_clean(wt: Path) -> None:
