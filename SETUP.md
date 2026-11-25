@@ -272,7 +272,8 @@ $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptan
 
 Use the [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) to navigate
 the contract's [six steps](core/CONTRACT.md#the-six-steps). Run `loopzero status`
-to see the next step and see [Findings](core/CONTRACT.md#findings) after review.
+to see the next step. See [Blockers](core/CONTRACT.md#blockers) for how to
+resolve review findings.
 
 ## Merging under a merge queue
 

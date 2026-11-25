@@ -26,8 +26,8 @@ authorization, locking/concurrency or policy logic, list edge cases in Acceptanc
 and map each to a test or recorded evidence. Observe required UI/runtime behavior within actual permissions; include visual
 proof for UI changes per [Reporting](../../CONTRACT.md#reporting). Required
 acceptance that remains unobserved stays open
-with a next-action owner. Record observations, trade-offs and limits in Notes
-or human Validation. Follow the contract's
+with a next-action owner. Record the tested revision, observations, trade-offs
+and limits in Notes or human Validation. Follow the contract's
 [gate receipt fields and reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 Run commands expected to take more than about two minutes detached as in
