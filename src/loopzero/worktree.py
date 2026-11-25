@@ -195,6 +195,12 @@ def head(wt: Path) -> str:
     return _git(Path(wt), "rev-parse", "HEAD")
 
 
+def is_linked_checkout(wt: Path) -> bool:
+    git_dir = _git(wt, "rev-parse", "--absolute-git-dir")
+    common_dir = _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return git_dir != common_dir
+
+
 def branch(wt: Path) -> str:
     name = _git(Path(wt), "branch", "--show-current")
     if not name:
