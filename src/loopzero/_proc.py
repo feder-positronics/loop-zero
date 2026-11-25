@@ -19,13 +19,13 @@ class ToolMissing(LoopZeroError):
 
 
 class ProcTimeout(LoopZeroError):
-    """Supervisor timeout with received streams/elapsed; output aliases legacy stdout."""
+    """Supervisor timeout with captured streams and elapsed time."""
 
     def __init__(
-        self, message: str, output: str = "", *, stderr: str = "", duration_s: float | None = None
+        self, message: str, stdout: str = "", *, stderr: str = "", duration_s: float | None = None
     ) -> None:
         super().__init__(message)
-        self.output = self.stdout = output  # compatibility alias, not merged streams
+        self.stdout = stdout
         self.stderr = stderr
         self.duration_s = duration_s
 
