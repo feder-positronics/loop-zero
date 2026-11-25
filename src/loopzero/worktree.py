@@ -138,7 +138,10 @@ def branch(wt: Path) -> str:
 def task_text(wt: Path) -> str:
     task = task_file(wt)
     if not task.exists():
-        raise WorktreeError(f"missing {task}")
+        raise WorktreeError(
+            f"missing {task}. Run `loopzero start <slug>` for a new task worktree, "
+            "or create the file with '- **Context:**', '- **Problem:**' and '- **Goal:**' lines."
+        )
     return task.read_text()
 
 
