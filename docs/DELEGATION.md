@@ -289,6 +289,8 @@ broader audit covers every dimension of the fleet against its sources, rechecks
 whether earlier actions were shipped, used and effective, and names at least one
 mechanism to delete, or why none qualifies.
 
+For the weekly workflow review, use the [retro skill](../core/skills/retro/SKILL.md).
+
 **Goal first.** Each owner holds its commissioned outcome (for example
 "ordinary changes reach users") and treats its plan as replaceable; finishing
 a step, package or subtask never redefines success. Within the human owner's
