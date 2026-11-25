@@ -77,31 +77,26 @@ def load(
         raise ConfigError(f"{validation_source or path}: {exc}") from None
 
 
-def _base_source(worktree: Path, base_branch: str) -> tuple[str, str]:
+def base_revision(worktree: Path, base_branch: str) -> str:
+    """Resolve the remote base, or the task's recorded base when the ref is absent."""
     done = _proc.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base_branch}"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if done.exit_code == 0:
-        return f"origin/{base_branch}", done.stdout.strip()
+        return done.stdout.strip()
     if done.exit_code == 1:
-        revision = worktree_mod.base_sha(worktree)
-        return revision, revision
+        return worktree_mod.base_sha(worktree)
     message = _proc.tail(done.stderr or done.stdout, 1)
     raise ConfigError(f"git rev-parse origin/{base_branch} failed: {message}")
-
-
-def base_revision(worktree: Path, base_branch: str) -> str:
-    """Resolve the remote base, or the task's recorded base when the ref is absent."""
-    return _base_source(worktree, base_branch)[1]
 
 
 def load_base(worktree: Path, base_branch: str, *,
               revision: str | None = None) -> tuple[dict[str, Any] | None, str]:
     """Return the base workflow and revision, with no document if the file is absent."""
-    base, revision = (revision, revision) if revision else _base_source(worktree, base_branch)
+    revision = revision or base_revision(worktree, base_branch)
     shown = _proc.run(
-        ["git", "show", f"{base}:workflow.toml"],
+        ["git", "show", f"{revision}:workflow.toml"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=60,
     )
     if shown.exit_code != 0:
