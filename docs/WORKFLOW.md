@@ -8,7 +8,7 @@ shown in small text beside each step.
 
 ```mermaid
 flowchart TD
-    A["Start a task<br/><sub>loopzero start</sub>"] --> B["Make the change and commit it"]
+    A["Start a task<br/><sub>loopzero start my-task</sub>"] --> B["Make the change and commit it"]
     B --> C["Run checks in a sandbox<br/><sub>loopzero check</sub>"]
     C -->|checks fail| D["Fix the problem"]
     D --> C
