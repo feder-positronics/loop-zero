@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import tempfile
 import time
 from contextlib import contextmanager
@@ -791,6 +792,16 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
             _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}")
             return finding
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
+
+
+def refresh_eligibility(repo: str, number: int, base: str) -> None:
+    args = ("api", "-X", "POST", f"repos/{repo}/actions/workflows/eligibility.yml/dispatches",
+            "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
+    try:
+        _gh(*args)
+    except (GhError, ProcTimeout, OSError) as exc:
+        retry = shlex.join(("gh", *args))
+        raise GhError(("refresh Loop-zero Eligibility",), f"{exc}\nRun manually: {retry}") from exc
 
 
 def open_blocking_findings(
