@@ -1,5 +1,7 @@
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -61,6 +63,50 @@ def test_complexity_ratchet(git_repo, case, expected_rc):
                           capture_output=True, text=True, check=False)
     assert done.returncode == expected_rc, done.stdout + done.stderr
     assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
+
+
+def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
+    src = git_repo / "src/loopzero/mod.py"
+    src.parent.mkdir(parents=True)
+    with_blocks = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
+                          for i in range(11))
+    src.write_text(
+        "import contextlib\n"
+        "def pep758(x):\n"
+        f"{with_blocks}"
+        "    try:\n"
+        "        return int(x) + y\n"
+        "    except KeyError, TypeError:\n"
+        "        return 0\n"
+    )
+    git(git_repo, "add", ".")
+    base = git(git_repo, "write-tree").strip()
+    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
+
+
+def test_complexity_rejects_old_python(git_repo, tmp_path):
+    src = git_repo / "src/loopzero/mod.py"
+    src.parent.mkdir(parents=True)
+    src.write_text("def ok():\n    return 1\n")
+    git(git_repo, "add", ".")
+    base = git(git_repo, "write-tree").strip()
+    fake_py = tmp_path / "old-python"
+    fake_py.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "sys.version_info = (3, 12, 0, 'final', 0)\n"
+        "sys.argv = sys.argv[1:]\n"
+        "exec(compile(sys.stdin.read(), '<size_budget>', 'exec'), {'__name__': '__main__'})\n"
+    )
+    fake_py.chmod(0o755)
+    env = {**os.environ, "PYTHON": str(fake_py)}
+    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo, env=env,
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 1
+    assert "requires Python 3.14+" in done.stderr
 
 
 @pytest.mark.parametrize("path,cap,grew,expected_rc", [

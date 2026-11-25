@@ -24,8 +24,9 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 
 - [Mergify operations](MERGIFY.md): candidate constraints, protection and recovery.
 - [Size budget script](../scripts/size_budget.sh): authoritative source, test,
-  core/delegation Markdown caps and per-function complexity ratchet against
-  base; over-cap line budgets pass only when they do not grow, and over-cap
-  functions pass only when their complexity does not increase.
+  core/delegation Markdown caps and per-function McCabe complexity ratchet
+  against base; over-cap line budgets pass only when they do not grow, and
+  over-cap functions pass only when their complexity does not increase (moved or
+  renamed over-cap functions must come under the cap).
 - [Tests](../tests/): module behavior proofs using temporary Git repositories
   and fake executables, without network or real credentials.
