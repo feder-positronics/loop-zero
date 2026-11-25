@@ -2605,6 +2605,15 @@ def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch,
     assert config.load(bad_config).scratch == ("./.venv",)
 
 
+def test_status_explains_detached_head(wt: Path, capsys) -> None:
+    git(wt, "switch", "--detach")
+
+    code, out, err = run(capsys, "status")
+
+    assert (code, out) == (1, "")
+    assert err == "loopzero status: HEAD is detached. Switch to a branch and retry.\n"
+
+
 def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
