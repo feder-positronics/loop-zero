@@ -241,6 +241,7 @@ def app_token() -> str:
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
+    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=10)
     except (ToolMissing, ProcTimeout, OSError):
@@ -248,8 +249,12 @@ def app_token() -> str:
     if result.exit_code or not result.stdout.strip():
         return ""
     token = result.stdout.strip()
-    _app_token_cache = (token, time.time())
+    _app_token_cache = (token, minted)
     return token
+
+
+def _select_token(token: str | None, scope: tuple[float, str] | None, read_only: bool) -> str:
+    return token if token is not None else (scope[1] if scope else (app_token() if read_only else ""))
 
 
 def _transient_error(tail: str, retry_idempotent: bool) -> bool:
@@ -270,10 +275,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (
-        scope[1] if scope else (app_token() if read_only else ""))
     deadline = scope[0] if scope else None
     for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
+        selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:

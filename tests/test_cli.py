@@ -1524,6 +1524,38 @@ def test_review_publisher_check_uses_app_identity(
         assert "not a configured review publisher" in err
 
 
+@pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]"])
+def test_review_reminted_app_token_keeps_publisher(
+    wt: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys, after_review: str,
+) -> None:
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    wall, run_review = [1_000_000.0], cli._run_review
+    monkeypatch.setattr(github.time, "time", lambda: wall[0])
+
+    def long_review(*args, **kwargs):
+        result = run_review(*args, **kwargs)
+        wall[0] += 3601
+        return result
+
+    monkeypatch.setattr(cli, "_run_review", long_review)
+    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
+    git(wt, "commit", "-qam", "configure publisher")
+    git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+    prepare_review(wt, gh, fake_bin, post_id=3)
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}},
+               {"data": {"viewer": {"login": after_review}}})
+    code, _, err = run(capsys, "review")
+    posts = [c["token"] for c in gh.calls if "/reviews" in " ".join(c["argv"]) and "POST" in c["argv"]]
+    if after_review == "app[bot]":
+        assert code == 0 and posts == ["synthetic-token-2"]
+    else:
+        assert code == 1 and "publisher identity changed" in err and posts == []
+
+
 @pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN), (["app", ""], "app[bot]")])
 def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys, tokens, publisher):
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
