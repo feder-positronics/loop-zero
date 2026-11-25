@@ -681,7 +681,7 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
                    body_prefix: str, *, legacy_settings: bool = False,
                    legacy_display: bool = False) -> dict:
     """Regenerate the publication content from the runner result and current PR diff."""
-    commentable, anchor = _diff_map(repo, number)
+    commentable, anchor = _diff_map(repo, number) if result.findings else ({}, None)
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
@@ -712,6 +712,8 @@ def post_review(
     body_prefix: str = "",
     pr: PR | None = None,
     token: str | None = None,
+    *,
+    publisher: str | None = None,
 ) -> None:
     """Post `result` as a PR review on `head_sha`, one inline comment per finding.
 
@@ -721,10 +723,11 @@ def post_review(
 
     Findings whose location is missing or outside the diff are anchored on the first
     changed file with a hunk, so every blocking finding creates a review thread.
+    A supplied publisher is the login already checked for the supplied token.
     """
     author = (pr or pr_view(repo, number)).author
     token = app_token() if token is None else token  # "" means the operator identity
-    if token or (author and author == login(token=token)):
+    if token or (author and author == (publisher or login(token=token))):
         event = "COMMENT"
     else:
         event = "APPROVE" if result.verdict == "approve" else "REQUEST_CHANGES"
