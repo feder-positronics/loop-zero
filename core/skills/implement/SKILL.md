@@ -1,6 +1,6 @@
 ---
 name: implement
-description: Implement a bounded change through behavior proof and the contract's owner queue route and merge authority.
+description: Deliver a bounded task or PR slice with behavior proof. Use work-issue for full GitHub issue delivery.
 ---
 
 # Implement
