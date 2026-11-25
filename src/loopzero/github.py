@@ -95,7 +95,8 @@ class Readiness:
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
-                          r"connection reset|no server is currently", re.IGNORECASE)
+                          r"connection reset|no server is currently|error connecting to api\.github\.com|"
+                          r"unexpected end of JSON input|Something went wrong while executing your query", re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str] | None] = ContextVar("github_reads", default=None)
@@ -246,8 +247,14 @@ def app_token() -> str:
     return token
 
 
+def _transient_error(tail: str, retry_idempotent: bool) -> bool:
+    return bool(TRANSIENT_RE.search(tail)) or (
+        retry_idempotent and "something went wrong while executing your query" in tail.lower()
+    )
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
-        token: str | None = None) -> str:
+        token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
     patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
     request_args = args
@@ -255,9 +262,11 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
     cwd = cwd or Path("/")
-    scope = _read_scope.get() if _read_only(args) else None
+    read_only = _read_only(args)
+    retryable = read_only or retry_idempotent
+    scope = _read_scope.get() if read_only else None
     selected = token if token is not None else (
-        scope[1] if scope else (app_token() if _read_only(args) else ""))
+        scope[1] if scope else (app_token() if read_only else ""))
     deadline = scope[0] if scope else None
     for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
         if deadline is not None:
@@ -271,7 +280,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         except ToolMissing as exc:
             raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout:
-            if delay is None or not _read_only(args):
+            if delay is None or not retryable:
                 raise
             _retry_sleep(delay)
             continue
@@ -287,7 +296,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                               "GitHub's reset or Retry-After; no automatic retry.")
             raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
                           "No automatic retry.")
-        if done.exit_code == 0 or delay is None or not _read_only(args) or not TRANSIENT_RE.search(tail):
+        if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
         _retry_sleep(delay)
     if done.exit_code != 0:
@@ -790,7 +799,16 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
                 posted["data"]["addPullRequestReviewThreadReply"]["comment"]["id"]
             except (KeyError, TypeError) as exc:
                 raise GhError(("resolve", finding_id), "reply was not posted; not resolving") from exc
-            _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}")
+            try:
+                _gh("api", "graphql", "-f", f"query={_RESOLVE_MUTATION}", "-F", f"thread={thread_id}",
+                    retry_idempotent=True)
+            except (GhError, ProcTimeout) as exc:
+                raise GhError(
+                    ("resolve", finding_id),
+                    f"reply posted to finding {finding_id}, but thread resolution was not confirmed. "
+                    f"If its thread is still open on PR #{number}, resolve it there. "
+                    f"Do not rerun loopzero resolve (it could post the reply again).\n{exc}",
+                ) from exc
             return finding
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
