@@ -37,16 +37,10 @@ limit on the backlog.
   update its latest observation; distinct failures, especially security or
   privacy defects, get their own issue. A confirmed recurrence of a closed one
   reopens it under the same recovery rule.
-- **Work:** ownership, claims, linked PRs and acceptance work as before. Only
-  [classes reserved under merge authority](../core/CONTRACT.md#merge-authority) carry a
-  `hold` label plus one issue comment naming the hazard and end condition; age
-  alone never implies a hold.
-- **Close:** closure rules do not change. Incidents, QA issues and goals close
-  on their own acceptance and authority ([CONTRACT.md](../core/CONTRACT.md),
-  [DELEGATION.md](DELEGATION.md)). A green unrelated job, age or a count target
-  is not closure evidence.
-- **PR review findings** stay in the PR's review threads. Never copy them into
-  backlog issues.
+- **Work and close:** follow [delivery roles](DELEGATION.md) for ownership and
+  closure, and the contract for [holds](../core/CONTRACT.md#merge-authority)
+  and [review findings](../core/CONTRACT.md#findings). Age, a count target or an
+  unrelated green job never sets a hold or closes an issue.
 - **Summary:** the existing delivery sweep refreshes the pinned summary through
   the REST API and reports any unlabelled or conflicting issues. Add no gate,
   ledger or second work state.
