@@ -176,8 +176,9 @@ Children waiting on a question or approval are waiters, not productive work.
 grants, owners act and record the decision on the issue/PR or their own log:
 
 - Re-own a stalled child under its existing brief and grant.
-- Rebase onto current main and retest within existing proof and review budgets;
-  product conflicts or new migrations go to the decisions owner.
+- Integrate base changes under the [review budget](../core/CONTRACT.md#review-budget)
+  and [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority).
+  Product conflicts or new migrations go to the decisions owner.
 - Close non-QA work whose full acceptance is proved; preserve separate QA,
   umbrella and hold conditions.
 - Revert their own failed trial to its previously authorized setting under its
@@ -515,9 +516,8 @@ declared allowlist; a scope-only or metadata finding never earns another round.
 
 Read-only work may share stable source. Sequence overlapping writers or
 integrate deliberately; never run them in one checkout. Do not pre-clear file
-overlap by message: rebase and the queue surface conflicts and the later lander
-rebases; ask once, on the PR, only when both change the same function. Respect
-concurrency limits and avoid competing suites whose temporary-directory cleanup
+overlap by message. Ask once, on the PR, only when both change the same function.
+Respect concurrency limits and avoid competing suites whose temporary-directory cleanup
 can interfere. Any command using more than one core for more than a minute runs
 under the repository's shared resource/test slots, including builds, type checks,
 formatters and parallel tests. When the host is saturated, shed out-of-slot CPU
@@ -546,10 +546,9 @@ loopzero --config .loopzero/stack-workflow.toml review
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
 the coordinator must verify the copy and its one-field difference. Do not
 retarget to main just to launch review. After the producer lands, retarget the
-consumer to main and return to the canonical configuration. If integration or
-rebase changes the head, rerun checks and review under the existing lineage
-budget before readiness and merge; an earlier approval is not evidence for the
-new head.
+consumer to main and return to the canonical configuration. Before readiness and
+merge, follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
+and [review budget](../core/CONTRACT.md#review-budget).
 
 Nested background results may reach the top-level session instead of their
 owner: run nested reviewers in the foreground or forward results promptly.
