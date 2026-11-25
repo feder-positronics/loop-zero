@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shlex
@@ -19,6 +20,8 @@ from loopzero.runners import (
     RunnerUsageLimit,
     author_families,
     build_prompt,
+    codex_evidence,
+    merge_reviews,
     review_with,
     split_diff,
 )
@@ -335,6 +338,39 @@ def test_instruction_policy_matches_across_native_channels(fake_bin, tmp_path):
     policy = claude[claude.index("--append-system-prompt") + 1]
     override = next(arg for arg in _argv(fake_bin, "codex") if arg.startswith("developer_instructions="))
     assert tomllib.loads(override)["developer_instructions"].encode() == policy.encode()
+
+
+
+@pytest.mark.parametrize(("kind", "split"), [("primary", False), ("delta", False), ("primary", True)])
+def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path, kind, split):
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+    git(tmp_path, "init", "-q")
+    head, base = "a" * 40, "b" * 40
+    task = "## Acceptance\nPreserve Ω."
+    diffs = ["+first Ω\n", "+second\n"] if split else ["+first Ω\n"]
+    full_diff = "".join(diffs).encode()
+    context = {
+        "repo": "acme/widgets", "pr": 7, "publisher": "bot", "head": head, "kind": kind,
+        "base": base, "diff_sha256": hashlib.sha256(full_diff).hexdigest(),
+        "diff_bytes": len(full_diff),
+    }
+    results = []
+    for index, diff in enumerate(diffs, 1):
+        results.append(review_with(
+            "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
+            review_context=context, chunk=(index, len(diffs)) if split else None,
+        ))
+        override = next(arg for arg in _argv(fake_bin, "codex")
+                        if arg.startswith("developer_instructions="))
+        policy = tomllib.loads(override)["developer_instructions"]
+        assert "rev-parse HEAD" not in policy and "diff --no-color" not in policy
+        header, raw_diff = (fake_bin / "codex.stdin").read_bytes().split(b"\n", 1)
+        assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
+        assert raw_diff == diff.encode()
+
+    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    assert proof["complete"]
+    assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
 
 @pytest.mark.parametrize("version", ["codex-cli 0.168.0", "codex-cli 1.0.0-beta.1", "custom build", ""])
@@ -1069,7 +1105,7 @@ def test_missing_bwrap_fails_closed(fake_bin: Path, tmp_path: Path, monkeypatch:
 def test_bwrap_probe_failure_fails_closed(fake_bin: Path, tmp_path: Path, fake_tool) -> None:
     _fake_claude(fake_bin, _claude_envelope(APPROVE))
     fake_tool("bwrap", "echo 'namespace denied' >&2\nexit 1\n")
-    with pytest.raises(SandboxUnavailable, match="namespace denied"):
+    with pytest.raises(SandboxUnavailable, match="namespace creation failed: exit 1"):
         _review("claude", tmp_path)
     assert not (fake_bin / "claude.stdin").exists()
 

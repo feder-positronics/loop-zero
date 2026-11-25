@@ -1298,10 +1298,6 @@ def review_with(
         context = {**review_context, "cwd": str(cwd.resolve()), "index": chunk[0] if chunk else 1,
                    "chunks": chunk[1] if chunk else 1, "requested": {"model": model, "effort": effort},
                    "fragment_sha256": hashlib.sha256(diff.encode()).hexdigest()}
-        policy += (" If commissioned inspection is required, retain actual completed head and pinned-diff reads. "
-                   "Use git -C " + json.dumps(context["cwd"]) + " rev-parse HEAD and git -C "
-                   + json.dumps(context["cwd"]) + " diff --no-color " + context["base"] + " " + head
-                   + "; separate native calls in the same session qualify. Do not echo evidence or use moving refs.")
         context.update(prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
                        policy_sha256=hashlib.sha256(policy.encode()).hexdigest(),
                        source_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest())
