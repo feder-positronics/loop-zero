@@ -2284,6 +2284,13 @@ def test_ready_wait_reports_missing_checks_without_lifecycle_recovery(
 
     assert code == 1 and "waiting:" in out and f"head {head[:12]}" in err and "workflow scheduling, triggers and permissions" in err
     assert "after correcting the cause, rerun the same `--wait` command" in err and not any(s in err for s in ("close", "reopen", "retrigger", "created no run"))
+    for endpoint in ("check-runs", "statuses"):
+        # One read for initial readiness and one for the post-grace poll.
+        assert sum(
+            c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/{endpoint}"]
+            for c in gh.calls
+        ) == 2
+
 
 
 def test_wait_keeps_waiting_when_a_sibling_required_check_is_running(
@@ -2312,6 +2319,13 @@ def test_ready_wait_tolerates_a_late_required_job_of_a_running_workflow(
     code, out, err = run(capsys, "ready", "--wait=0")
 
     assert (code, err) == (3, "") and "timed out waiting for required checks" in out
+    for endpoint in ("check-runs", "statuses"):
+        # One read for initial readiness and one for the post-grace poll.
+        assert sum(
+            c["argv"][:2] == ["api", f"repos/{REPO}/commits/{head}/{endpoint}"]
+            for c in gh.calls
+        ) == 2
+
 
 
 def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
