@@ -3392,6 +3392,26 @@ def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, invalid):
     assert "receipt accepted:" not in out
 
 
+@pytest.mark.parametrize("exit_code,ok", [(False, None), (True, None), (0, True), (1, False)])
+def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok):
+    path = wt / ".loopzero/checks.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({
+        "head": head, "dirty": False,
+        "results": [{"command": "true", "exit_code": exit_code, "duration_s": 0.1, "tail": ""}],
+    }))
+
+    report = cli._load_report(wt)
+    if ok is None:
+        assert report is None
+        warning = capsys.readouterr().err
+        assert "warning: ignoring unreadable" in warning
+        assert str(path) in warning and "exit_code" in warning
+    else:
+        assert report is not None and report.ok is ok
+        assert report.head == head
+
+
 def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
     arm_approved_ready_pr(gh, head, wt)
     cli._load_report(wt)

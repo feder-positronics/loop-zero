@@ -48,6 +48,11 @@ class Config:
     inputs: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
+def is_check_exit_code(value: object) -> bool:
+    """Recognize JSON integer exit codes without accepting booleans."""
+    return type(value) is int
+
+
 @dataclass(frozen=True)
 class CheckResult:
     command: str
