@@ -384,8 +384,9 @@ Run `python3 scripts/check_architecture_docs.py [BASE]`. It compares the base
 (default: merge-base of HEAD and `origin/main`) with the working tree, including
 new files, and validates local Markdown links and anchors in this guide, the docs
 index, README and AGENTS guidance without network access. The repository's
-`workflow.toml` runs the default gate; PR and merge-group CI enforce it against
-the event's base SHA. Push-to-main CI runs `--links-only`, because squash merging
+`workflow.toml` runs the default gate (alongside `tach check` against
+[tach.toml](../tach.toml) for module dependency boundaries); PR and merge-group
+CI enforce it against the event's base SHA. Push-to-main CI runs `--links-only`, because squash merging
 can drop authored trailers and landed history cannot re-establish the pre-merge
 acknowledgement; that mode still rejects broken local links and anchors.
 `loopzero check` pins checks to trusted base configuration, so run a new or

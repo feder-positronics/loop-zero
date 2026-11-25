@@ -633,7 +633,7 @@ def cmd_review(args: argparse.Namespace) -> int:
             )
         if not result.fallback and not any(family not in authors for family in config.reviewers):
             raise IndependentReviewerUnavailable(
-                _independence_message(authors, excluded, [], config.reviewers)
+                _independence_message(authors, excluded, [])
             )
         if result.family in authors and not result.fallback:
             raise IndependentReviewerUnavailable(
@@ -872,13 +872,13 @@ def _run_review(
             print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
-            _independence_message(authors, excluded, failures, config.reviewers)
+            _independence_message(authors, excluded, failures)
         )
     return dataclasses.replace(result, fallback=fallback)
 
 
 def _independence_message(
-    authors: set[str], excluded: list[str], failures: list[str], configured: tuple[str, ...]
+    authors: set[str], excluded: list[str], failures: list[str]
 ) -> str:
     identity = ", ".join(sorted(authors)) or "unknown"
     excluded_text = ", ".join(excluded) if excluded else "none"
@@ -955,12 +955,13 @@ CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree t
 
 
 def _cleanup(wt: Path, pr: github.PR) -> None:
-    root, name = _repo_root(wt), None
+    _repo_root(wt)
+    name = None
     try:
         if worktree.head(wt) != pr.head_sha:
             raise worktree.WorktreeError("local HEAD differs from merged PR head")
         name = worktree.branch(wt)
-        worktree.cleanup(root, wt)
+        worktree.cleanup(wt)
     except (worktree.WorktreeError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() or name is None else (
             f"; worktree removed; delete local branch {name!r} if it still points at the merged head")
@@ -1168,7 +1169,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    wt: Path, config: Config, branch: str, pr: github.PR,
+    config: Config, branch: str, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
@@ -1252,7 +1253,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(wt, config, branch, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(config, branch, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3

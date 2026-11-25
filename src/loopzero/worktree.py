@@ -162,7 +162,7 @@ def merges_since(wt: Path, sha: str) -> list[str]:
     return _git(Path(wt), "rev-list", "--merges", f"{sha}..HEAD").split()
 
 
-def cleanup(repo_root: Path, wt: Path) -> None:
+def cleanup(wt: Path) -> None:
     """Remove the worktree and its branch. Refuses when the worktree is dirty."""
     wt = Path(wt).absolute()
     if not wt.exists():

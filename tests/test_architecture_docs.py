@@ -78,3 +78,22 @@ def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
 def test_missing_base_fails_closed(git_repo):
     prepare(git_repo)
     assert run(git_repo, "not-a-revision").returncode == 1
+
+
+def test_tach_enforces_module_boundaries(tmp_path):
+    import shutil
+
+    repo_root = Path(__file__).resolve().parents[1]
+    tach = Path(sys.executable).with_name("tach")
+    assert tach.exists(), f"tach not installed next to {sys.executable}"
+    clean = subprocess.run([str(tach), "check"], cwd=repo_root,
+                           text=True, capture_output=True, check=False)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+
+    shutil.copy2(repo_root / "tach.toml", tmp_path / "tach.toml")
+    shutil.copytree(repo_root / "src", tmp_path / "src")
+    types_py = tmp_path / "src/loopzero/types.py"
+    types_py.write_text("from loopzero import cli\n" + types_py.read_text())
+    broken = subprocess.run([str(tach), "check"], cwd=tmp_path,
+                            text=True, capture_output=True, check=False)
+    assert broken.returncode != 0, "tach check must reject reverse imports into types.py"

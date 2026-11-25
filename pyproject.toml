@@ -18,15 +18,21 @@ build-backend = "hatchling.build"
 packages = ["src/loopzero"]
 
 [dependency-groups]
-dev = ["pytest>=8", "ruff>=0.6"]
+dev = ["pytest>=8", "ruff>=0.6", "tach>=0.35.3,<0.36"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+addopts = "-q -p no:tach"
 
 [tool.ruff]
 line-length = 100
 target-version = "py314"
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "UP", "B", "SIM", "PIE", "PERF", "RUF", "RET"]
+select = [
+    "E4", "E7", "E9", "F", "UP", "B", "SIM", "PIE", "PERF", "RUF", "RET",
+    "ERA", "ARG", "PGH003", "PGH004",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]

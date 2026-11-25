@@ -1,0 +1,81 @@
+# Module dependency boundaries for loop-zero; enforced by `tach check`.
+# Mirrors the layered architecture in docs/REWRITE-SPEC.md.
+source_roots = ["src"]
+exact = true
+forbid_circular_dependencies = true
+exclude = ["tests", "scripts"]
+
+[[modules]]
+path = "loopzero"
+depends_on = []
+
+[[modules]]
+path = "loopzero.types"
+depends_on = []
+
+[[modules]]
+path = "loopzero._proc"
+depends_on = ["loopzero.types"]
+
+[[modules]]
+path = "loopzero.worktree"
+depends_on = ["loopzero._proc"]
+
+[[modules]]
+path = "loopzero.config"
+depends_on = ["loopzero._proc", "loopzero.types", "loopzero.worktree"]
+
+[[modules]]
+path = "loopzero.sandbox"
+depends_on = ["loopzero", "loopzero._proc", "loopzero.config", "loopzero.types"]
+
+[[modules]]
+path = "loopzero.runners"
+depends_on = ["loopzero._proc", "loopzero.config", "loopzero.sandbox", "loopzero.types"]
+
+[[modules]]
+path = "loopzero.github"
+depends_on = ["loopzero._proc", "loopzero.runners", "loopzero.types"]
+
+[[modules]]
+path = "loopzero.mergify"
+depends_on = ["loopzero.github", "loopzero.types"]
+
+[[modules]]
+path = "loopzero.candidate"
+depends_on = ["loopzero.github"]
+
+[[modules]]
+path = "loopzero.eligibility"
+depends_on = [
+    "loopzero.candidate",
+    "loopzero.config",
+    "loopzero.github",
+    "loopzero.runners",
+    "loopzero.types",
+]
+
+[[modules]]
+path = "loopzero.hosted"
+depends_on = [
+    "loopzero.candidate",
+    "loopzero.config",
+    "loopzero.eligibility",
+    "loopzero.github",
+    "loopzero.mergify",
+    "loopzero.types",
+]
+
+[[modules]]
+path = "loopzero.cli"
+depends_on = [
+    "loopzero._proc",
+    "loopzero.config",
+    "loopzero.eligibility",
+    "loopzero.github",
+    "loopzero.mergify",
+    "loopzero.runners",
+    "loopzero.sandbox",
+    "loopzero.types",
+    "loopzero.worktree",
+]

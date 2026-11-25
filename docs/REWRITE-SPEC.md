@@ -23,6 +23,8 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 ## Live references
 
 - [Mergify operations](MERGIFY.md): candidate constraints, protection and recovery.
+- [Module boundaries](../tach.toml): exact layered dependency rules enforced by
+  `uv run --group dev tach check` in CI and `loopzero check`.
 - [Size budget script](../scripts/size_budget.sh): authoritative source, test,
   core/delegation Markdown caps and per-function McCabe complexity ratchet
   against base; over-cap line budgets pass only when they do not grow, and

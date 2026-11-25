@@ -2316,7 +2316,7 @@ def test_merge_names_branch_left_after_worktree_removal(
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state='MERGED', head=head_of(wt), sha='d' * 40))
     gh.respond("api -X", "")
 
-    def remove_then_fail(_root, path):
+    def remove_then_fail(path):
         shutil.rmtree(path)
         raise cli.worktree.WorktreeError("cannot lock ref")
 
