@@ -65,10 +65,12 @@ Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head.
 Suggestions must not expand scope. Follow the contract's owner queue route and
 merge authority.
-Rebase your own commits onto the configured base on origin before the primary
-review. For a stack, follow [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
+Before the primary review, rebase your own commits onto `origin/<base>` using
+`[repo].base` (default `main`). For a stack, follow
+[stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 Leave base merges out of a branch awaiting its delta.
-After an approved primary or a delta, merge main into the existing branch when the base or its check scripts change.
+After an approved primary or a delta, merge `origin/<base>` into the existing
+branch when the base or its check scripts change.
 Preserve the primary for the delta and the delta for
 post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
 
