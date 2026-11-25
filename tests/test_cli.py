@@ -460,6 +460,19 @@ def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -
     assert "  true" not in out
 
 
+def test_check_reads_workflow_from_reported_base_commit(wt, repo, capsys):
+    older_base = head_of(repo)
+    advance_checks(repo, ["echo current-base"])
+    base = head_of(repo)
+    git(wt, "tag", "origin/main", older_base)
+
+    code, out, err = run(capsys, "check")
+
+    assert (code, err) == (0, "")
+    assert "  echo current-base" in out and f"checks pinned to origin/main@{base}" in out
+    assert "  echo ok" not in out
+
+
 def test_check_uses_worktree_checks_when_base_has_no_workflow(
     wt: Path, repo: Path, capsys
 ) -> None:
