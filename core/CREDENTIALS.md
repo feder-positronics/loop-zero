@@ -39,6 +39,8 @@ back to another account. Pass the key directly to the SDK or request header only
 for the documented endpoint; do not export it broadly or follow cross-origin
 redirects with it.
 
+## Keep credentials out of output
+
 Never display keys, including through `cat`, command arguments, prompts, source,
 fixtures, task files, PRs, workflow configuration or logs. Disable debug HTTP
 logging or redact authorization headers. Report only availability and sanitized
