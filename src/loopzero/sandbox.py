@@ -26,6 +26,7 @@ from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exi
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
+CHECK_TAIL_BYTES = 16 * 1024
 HEARTBEAT_INTERVAL = 30.0
 SANDBOX_HOME = "/tmp/home"
 # Only these system directories are exposed read-only by default; home tool paths
@@ -67,7 +68,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
     base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
-    previous = _previous(config, worktree) if config.inputs and not dirty else {}
+    settings_sha256 = settings_fingerprint(config, worktree, base=base)
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -103,7 +105,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             old = previous.get(command)
             if (key and old and old.get("input_key") == key
                     and is_check_exit_code(old.get("exit_code")) and old["exit_code"] == 0):
-                result = CheckResult(command, 0, 0.0, old.get("tail", ""), key, old["head"])
+                result = CheckResult(command, 0, 0.0, _check_tail(old.get("tail", "")), key, old["head"])
                 if status:
                     status(f"reused {old['head'][:8]}")
             else:
@@ -127,19 +129,41 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     f"dirty before: {dirty}; dirty after: {final_dirty}"
         )))
         dirty = True
-    return CheckReport(head=head, dirty=dirty, results=tuple(results))
+    return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
-def _previous(config: Config, worktree: Path) -> dict:
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
     if _git(config, worktree, "ls-files", "--", ".loopzero"):
         return {}
     try:
         data = json.loads((worktree / ".loopzero/checks.json").read_text())
-        if data["dirty"] is not False or not isinstance(data["head"], str):
+        if (data["dirty"] is not False or not isinstance(data["head"], str)
+                or data.get("settings_sha256") != settings_sha256):
             return {}
-        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]}
+        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]
+                if isinstance(r.get("tail", ""), str)}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
+
+
+def _execution_settings(config: Config, base: str) -> dict:
+    settings = {k: v for k, v in asdict(config).items() if k in {
+        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    if config.check_runner:
+        settings["base"] = base
+        settings["runner_executable"] = _runner_executable(config)
+        settings["environment"] = _proc.build_env(config.env_allowlist)
+    else:
+        settings["environment"] = _sandbox_environment(config)
+    return settings
+
+
+def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = None) -> str:
+    """Bind a receipt to its check execution and stage reuse settings."""
+    if base is None and config.check_runner:
+        base = config_mod.base_revision(worktree, config.base_branch)
+    payload = [_execution_settings(config, base or ""), config.inputs]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
 def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> str | None:
@@ -150,12 +174,7 @@ def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> 
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    settings = {k: v for k, v in asdict(config).items() if k in {
-        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
-    if config.check_runner:
-        settings["base"] = base
-    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
-    payload = [command, __version__, settings, blobs]
+    payload = [command, __version__, _execution_settings(config, base), blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -215,11 +234,13 @@ def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tupl
         if (not path.is_absolute() and "/" in script and ".." not in path.parts
                 and not any((worktree / path).resolve().is_relative_to(Path(root)) for root in config.writable)
                 and not (worktree / path).is_file()):
-            return CheckResult(command, 1, 0.0,
-                    f"Check preflight: repo-local file {script!r} is absent from this task tree. "
-                    "If trusted-base checks advanced, integrate the current configured base "
-                    "into this task branch (resolve conflicts), then rerun loopzero check; "
-                    "otherwise restore the required file."), ()
+            message = (
+                f"Check preflight: repo-local file {script!r} is absent from this task tree. "
+                "If trusted-base checks advanced, integrate the current configured base "
+                "into this task branch (resolve conflicts), then rerun loopzero check; "
+                "otherwise restore the required file."
+            )
+            return CheckResult(command, 1, 0.0, _check_tail(message)), ()
         match = re.fullmatch(r"uv run((?: --group [A-Za-z0-9_-]+)*) [A-Za-z0-9_./][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./=-]+)*", command)
         if match:
             groups = [*(groups or []), *match[1].split()[1::2]]
@@ -254,6 +275,13 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
     return requested if hard == resource.RLIM_INFINITY else min(requested, hard)
 
 
+def _check_tail(text: str) -> str:
+    suffix = text.rstrip("\n")[-CHECK_TAIL_BYTES:]
+    encoded = suffix.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
+    # A byte cut can start inside a multibyte character.
+    return _proc.tail(encoded.decode("utf-8", errors="ignore"))
+
+
 def _run_one(
     config: Config, worktree: Path, prefix: list[str], command: str, timeout: float
 ) -> CheckResult:
@@ -271,8 +299,8 @@ def _run_one(
         )
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
-                           _proc.tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
-    return CheckResult(command, done.exit_code, done.duration_s, _proc.tail(done.stdout))
+                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(done.stdout))
 
 
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
@@ -294,6 +322,15 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
         raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
+
+
+def _sandbox_environment(config: Config) -> dict[str, str]:
+    return {
+        **SANDBOX_ENV,
+        **_proc.build_env(config.env_allowlist),
+        **dict(config.env),
+        "HOME": SANDBOX_HOME,
+    }
 
 
 def bwrap_argv(
@@ -351,8 +388,7 @@ def bwrap_argv(
     for entry, source in (scratch or {}).items():
         argv += ["--bind", str(source), str(worktree / entry)]
     argv += ["--chdir", str(worktree), *(["--clearenv"] if clearenv else [])]
-    env = {**SANDBOX_ENV, **_proc.build_env(config.env_allowlist), **dict(config.env)}
-    for key, value in env.items():
+    for key, value in _sandbox_environment(config).items():
         if key != "HOME":
             argv += ["--setenv", key, value]
     argv += ["--setenv", "HOME", SANDBOX_HOME, "--"]
@@ -387,6 +423,11 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return obj
 
 
+def _runner_executable(config: Config) -> str | None:
+    executable = config.check_runner[0]
+    return executable if Path(executable).is_absolute() else shutil.which(executable)
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -397,8 +438,7 @@ def _dispatch_one(
     try:
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed before stage")
-        executable = (config.check_runner[0] if Path(config.check_runner[0]).is_absolute()
-                      else shutil.which(config.check_runner[0]))
+        executable = _runner_executable(config)
         if not executable:
             raise ValueError("Stage runner executable missing")
         argv = (executable, *config.check_runner[1:])
@@ -438,10 +478,10 @@ def _dispatch_one(
                 raise ValueError("Local fallback failed")
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
-                           _proc.tail(frame["tail"]))
+                           _check_tail(frame["tail"]))
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT,
                            exc.duration_s if exc.duration_s is not None else timeout,
-                           _proc.tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        return CheckResult(command, 1, 0.0, f"Stage runner failed: {exc}")
+        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {exc}"))

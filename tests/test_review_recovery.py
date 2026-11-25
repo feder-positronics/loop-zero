@@ -61,6 +61,20 @@ def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=Fals
     return head
 
 
+@pytest.fixture
+def interrupted_receipt(wt, gh, fake_bin, monkeypatch, capsys):
+    original = github._api
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
+    assert run(capsys, "review")[0] == 130
+    path = cli._review_file(wt, head, "primary")
+    return head, path, json.loads(path.read_text()), original
+
+
+def assert_single_publication(gh, fake_bin):
+    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+    assert len([c for c in gh.calls if "--input" in c]) == 1
+
+
 @pytest.mark.parametrize("kind", ["primary", "delta"])
 @pytest.mark.parametrize("verdict", [0, 5])
 @pytest.mark.parametrize("interrupted", [False, True, "timeout"])
@@ -214,30 +228,20 @@ def test_recovery_transport_caps_request_time_and_does_not_retry(monkeypatch, fa
         return _proc.Completed(1, "", "HTTP 503", 0)
     monkeypatch.setattr(github, "run", request)
     monkeypatch.setattr(github, "app_token", lambda: "")
-    with github.bounded_reads(0.5), pytest.raises((github.GhError, _proc.ProcTimeout)):
+    with github.bounded_reads(github.time.monotonic() + 0.5), pytest.raises((github.GhError, _proc.ProcTimeout)):
         github.api_get("repos/acme/widgets/pulls/7/reviews")
     assert len(timeouts) == 1 and 0 < timeouts[0] <= 0.5
 
 
 @pytest.mark.parametrize("source", ["model", "repost"])
-@pytest.mark.parametrize(
-    ("metadata", "shape"),
-    [
-        ("legacy", "single"),
-        ("legacy", "chunked"),
-        ("legacy", "truncated"),
-        ("null", "single"),
-        ("empty", "single"),
-        ("malformed", "single"),
-    ],
-)
+@pytest.mark.parametrize("metadata,shape", [
+    ("legacy", "single"), ("legacy", "chunked"), ("legacy", "truncated"),
+    ("null", "single"), ("empty", "single"), ("malformed", "single"),
+])
 def test_historical_publication_recovery_is_exact_and_legacy_only(
-    wt, gh, fake_bin, monkeypatch, capsys, metadata, source, shape,
+    interrupted_receipt, gh, fake_bin, capsys, metadata, source, shape,
 ):
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
-    assert run(capsys, "review")[0] == 130
-    path = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-    saved = json.loads(path.read_text())
+    head, path, saved, _ = interrupted_receipt
     envelope = json.loads(saved["raw"])
     if shape == "chunked":
         saved["chunk_count"] = 2
@@ -272,8 +276,7 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
                                "state": "COMMENTED", "user": {"login": LOGIN}}])
     code, _out, err = run(capsys, "review", "--repost")
     assert code == (0 if metadata == "legacy" else 1), err
-    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert_single_publication(gh, fake_bin)
     if metadata == "legacy":
         mixed = body.partition("\n\n<details>")[0] + (
             "\n\nNative Claude output is retained in the restricted local review receipt."
@@ -294,12 +297,10 @@ def test_historical_publication_recovery_is_exact_and_legacy_only(
 
 
 @pytest.mark.parametrize("optional", ["junk", [], [{"model": "request"}] * 5])
-def test_optional_settings_cannot_block_explicit_repost(wt, gh, fake_bin, monkeypatch, capsys, optional):
-    original = github._api
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
-    assert run(capsys, "review")[0] == 130
-    path = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-    saved = json.loads(path.read_text())
+def test_optional_settings_cannot_block_explicit_repost(
+    interrupted_receipt, gh, fake_bin, monkeypatch, capsys, optional,
+):
+    _, path, saved, original = interrupted_receipt
     saved["provenance"]["requested_settings"] = optional
     saved["provenance"]["reported_settings"] = "forged"
     path.write_text(json.dumps(saved))
@@ -343,31 +344,40 @@ def test_repost_confirms_published_legacy_fallback_note_but_never_posts_one(
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
 
-def test_repost_confirms_pre_configured_claude_settings(wt, gh, fake_bin, monkeypatch, capsys):
-    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
-    assert run(capsys, "review")[0] == 130
-    path = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
-    saved = json.loads(path.read_text())
-    requested = saved["provenance"]["requested_settings"][0]
+@pytest.mark.parametrize("publication", ["pre-configured", "transcript", "summary"])
+def test_repost_confirms_historical_claude_publication(
+    interrupted_receipt, gh, fake_bin, capsys, publication,
+):
+    head, path, saved, _ = interrupted_receipt
+    request = saved["provenance"]["requested_settings"][0]
+    settings = ("CLI claims" if publication == "pre-configured"
+                else "launch configuration and CLI claims")
     body = (
         f'{support.marker(head, "primary", "model")}\n'
         f"loopzero primary review by claude on `{head}`, {saved['duration_s']:.1f}s: "
         "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
-        "Settings per native call (CLI claims, not backend attestation):\n"
-        f"- Call 1: requested model {requested['model'] or 'unknown'} "
-        f"(effort {requested['effort'] or 'unknown'}); "
-        f"CLI-reported model {saved['model'] or 'unknown'} (effort {saved['effort'] or 'unknown'})\n\n"
-        f"<details><summary>Raw reviewer output</summary>\n\n```\n{saved['raw']}\n```\n</details>"
+        f"Settings per native call ({settings}, not backend attestation):\n"
+        f"- Call 1: requested model {request['model'] or 'unknown'} "
+        f"(effort {request['effort'] or 'unknown'}); "
+        f"CLI-reported model {saved['model'] or 'unknown'} (effort {saved['effort'] or 'unknown'})"
     )
+    if publication != "pre-configured":
+        body += "; configured model unknown (effort unknown)"
+    if publication == "summary":
+        body += "\n\nNative Claude output is retained in the restricted local review receipt."
+    else:
+        body += f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{saved['raw']}\n```\n</details>"
     row = {"id": 17, "commit_id": head, "body": body, "state": "COMMENTED", "user": {"login": LOGIN}}
     gh.respond(reviews_key(), [row])
-    assert "configured_settings" in saved["provenance"]
-    assert run(capsys, "review", "--repost")[0] == 1
-    saved["provenance"].pop("configured_settings")
-    path.write_text(json.dumps(saved))
-    code, _out, err = run(capsys, "review", "--repost")
+    if publication == "pre-configured":
+        assert "configured_settings" in saved["provenance"]
+        assert run(capsys, "review", "--repost")[0] == 1
+        saved["provenance"].pop("configured_settings")
+        path.write_text(json.dumps(saved))
+    code, out, err = run(capsys, "review", "--repost")
     assert code == 0, err
-    gh.respond(reviews_key(), [{**row, "body": body + "changed"}])
-    assert run(capsys, "review", "--repost")[0] == 1
-    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
-    assert len([c for c in gh.calls if "--input" in c]) == 1
+    assert saved["raw"] not in out + err
+    if publication == "pre-configured":
+        gh.respond(reviews_key(), [{**row, "body": body + "changed"}])
+        assert run(capsys, "review", "--repost")[0] == 1
+    assert_single_publication(gh, fake_bin)

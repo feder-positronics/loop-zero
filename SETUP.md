@@ -58,11 +58,29 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
+after GitHub may have accepted a Claude review, run `loopzero review --repost`
+with the publishing CLI revision or a newer compatible revision. The rollback
+CLI predating #732 expects a transcript where the newer publication has a
+retention notice. Keep the original local receipt and confirm the existing
+publication before resuming the rollback.
+
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
 SRC=~/.local/share/loopzero/source    # stable path; repoint it to upgrade
 mkdir -p ~/.local/share/loopzero ~/.agents/skills ~/.claude/skills
-ln -sfn "$CHECKOUT" "$SRC.new" && mv -T "$SRC.new" "$SRC"
+python3 - "$CHECKOUT" "$SRC" <<'PYTHON' &&
+import os
+import sys
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+checkout, source = map(Path, sys.argv[1:])
+with TemporaryDirectory(dir=source.parent) as staging:
+    link = Path(staging) / source.name
+    link.symlink_to(checkout.resolve(strict=True), target_is_directory=True)
+    os.replace(link, source)
+PYTHON
 for d in "$SRC"/core/skills/*/; do
   n=$(basename "$d")
   ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
@@ -270,6 +288,10 @@ the two systemd units to `~/.config/systemd/user/`, then
 
 ## First run
 
+Commit and push `workflow.toml` to the configured remote base
+(`origin/main` by default) before your first task. `loopzero start` fetches
+that base and creates the task worktree from it.
+
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
 $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
@@ -398,6 +420,15 @@ Set `[delivery].review_publishers` to the GitHub logins that publish model revie
 Local readiness reads that list from the base configuration (legacy installations
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
 its CI token's login is never a reviewer identity.
+
+Codex evidence v1 can include configured settings. For that shape the hosted
+reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
+or a newer compatible revision. An older reader can report `no review recorded
+for the current head` even when the publisher recorded a valid approval. Advance
+the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
+(the loop-zero checkout ref or installed package revision). Dispatch the
+eligibility workflow for the existing PR, or run the command below with its
+unchanged source SHA. The refreshed reader can use the approval already on GitHub.
 
 From a trusted base checkout, run:
 

@@ -49,15 +49,11 @@ print(json.dumps({'type':'turn.completed','usage':usage}))
 print('model: gpt-6.2-astra\\nreasoning effort: medium',file=sys.stderr)
 """.replace(",BASE,HEAD", "," + repr(base) + "," + repr(head))
     fake_tool("codex", script)
+    encoded_patch = patch.encode()
     context = {
-        "repo": "acme/widgets",
-        "pr": 7,
-        "publisher": "bot",
-        "head": head,
-        "kind": "primary",
-        "base": base,
-        "diff_sha256": hashlib.sha256(patch.encode()).hexdigest(),
-        "diff_bytes": len(patch.encode()),
+        "repo": "acme/widgets", "pr": 7, "publisher": "bot", "head": head,
+        "kind": "primary", "base": base, "diff_bytes": len(encoded_patch),
+        "diff_sha256": hashlib.sha256(encoded_patch).hexdigest(),
     }
 
     def invoke(chunk=None):
@@ -84,10 +80,7 @@ def body(result):
 
 def row(result, rendered=None):
     return {
-        "id": 100,
-        "commit_id": result.head,
-        "user": {"login": "bot"},
-        "state": "COMMENTED",
+        "id": 100, "commit_id": result.head, "user": {"login": "bot"}, "state": "COMMENTED",
         "body": rendered if rendered is not None else body(result),
     }
 
@@ -98,13 +91,13 @@ def rewrite(result, change):
     return dataclasses.replace(result, raw=json.dumps(decoded))
 
 
-def packed(value):
-    token = (
-        base64.urlsafe_b64encode(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
-        .decode()
-        .rstrip("=")
-    )
+def packed_json(payload):
+    token = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
     return runners.CODEX_HEADER + token + " -->"
+
+
+def packed(value):
+    return packed_json(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
 def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path):
@@ -140,30 +133,12 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path
     assert json.loads(path.read_text())["raw"] == result.raw
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "fatal_before",
-        "fatal_after",
-        "missing_terminal",
-        "wrong_final",
-        "mixed_session",
-        "wrong_repo",
-        "wrong_cd",
-        "unbound_repo",
-        "quoted_command",
-        "ambiguous_shell",
-        "moving_range",
-        "failed",
-        "echo",
-        "unmatched",
-        "wrong_head",
-        "wrong_diff",
-        "duplicate_event",
-        "after_verdict",
-        "terminal_failure",
-    ],
-)
+@pytest.mark.parametrize("mutation", [
+    "fatal_before", "fatal_after", "missing_terminal", "wrong_final", "mixed_session",
+    "wrong_repo", "wrong_cd", "unbound_repo", "quoted_command", "ambiguous_shell",
+    "moving_range", "failed", "echo", "unmatched", "wrong_head", "wrong_diff",
+    "duplicate_event", "after_verdict", "terminal_failure",
+])
 def test_full_native_attribution_and_fatal_controls(native, mutation):
     result = native[0]()
     data = json.loads(result.raw)
@@ -171,8 +146,7 @@ def test_full_native_attribution_and_fatal_controls(native, mutation):
     fatal = {
         "type": "item.completed",
         "item": {
-            "id": "fatal",
-            "type": "error",
+            "id": "fatal", "type": "error",
             "message": "Code Mode is unavailable because failed to spawn code-mode host /different/release/codex-code-mode-host: host executable was not found. Code mode will fail closed; install helper.",
         },
     }
@@ -242,10 +216,9 @@ def test_full_native_attribution_and_fatal_controls(native, mutation):
         assert evidence["calls"][0]["inspection"] == "unknown"
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ["valid", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index"],
-)
+@pytest.mark.parametrize("mutation", [
+    "valid", "missing", "reorder", "duplicate_session", "range", "context", "chunk_index",
+])
 def test_complete_ordered_native_chunks(native, mutation):
     first, second = native[0]((1, 2)), native[0]((2, 2))
     merged = runners.merge_reviews([first, second])
@@ -278,90 +251,64 @@ def test_complete_ordered_native_chunks(native, mutation):
             runners.codex_evidence(changed)
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    [
-        "unknown_field",
-        "version",
-        "bool_count",
-        "float_pr",
-        "bad_ref",
-        "bad_digest",
-        "offset",
-        "missing_call",
-        "session",
-        "kind",
-        "repo",
-        "pr",
-        "publisher",
-        "head",
-        "complete",
-        "fatal",
-        "duplicate_header",
-        "before_marker",
-        "after_prose",
-        "noncanonical",
-        "duplicate_key",
-        "oversized",
-    ],
-)
-def test_strict_transport_and_no_older_approval_revival(native, mutation):
+def update_evidence(value, path, replacement):
+    for key in path[:-1]:
+        value = value[key]
+    value[path[-1]] = replacement
+
+
+@pytest.mark.parametrize("path,replacement", [
+    (("extra",), 1),
+    (("version",), 2),
+    (("chunk_count",), True),
+    (("pr",), 7.0),
+    (("receipt",), "/private/review.json"),
+    (("raw_sha256",), "A" * 64),
+    (("calls", 0, "head_event", "start"), -1),
+    (("calls",), []),
+    (("calls", 0, "session"), None),
+    (("kind",), "delta"),
+    (("repo",), "another/repo"),
+    (("pr",), 8),
+    (("publisher",), "stranger"),
+    (("head",), "f" * 40),
+    (("complete",), False),
+    (("calls", 0, "fatal"), "present"),
+])
+def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, replacement):
     result = native[0]()
     rendered = body(result)
     line = rendered.splitlines()[1]
     value = runners.decode_codex_evidence(line)
-    if mutation == "unknown_field":
-        value["extra"] = 1
-    if mutation == "version":
-        value["version"] = 2
-    if mutation == "bool_count":
-        value["chunk_count"] = True
-    if mutation == "float_pr":
-        value["pr"] = 7.0
-    if mutation == "bad_ref":
-        value["receipt"] = "/private/review.json"
-    if mutation == "bad_digest":
-        value["raw_sha256"] = "A" * 64
-    if mutation == "offset":
-        value["calls"][0]["head_event"]["start"] = -1
-    if mutation == "missing_call":
-        value["calls"] = []
-    if mutation == "session":
-        value["calls"][0]["session"] = None
-    if mutation == "kind":
-        value["kind"] = "delta"
-    if mutation == "repo":
-        value["repo"] = "another/repo"
-    if mutation == "pr":
-        value["pr"] = 8
-    if mutation == "publisher":
-        value["publisher"] = "stranger"
-    if mutation == "head":
-        value["head"] = "f" * 40
-    if mutation == "complete":
-        value["complete"] = False
-    if mutation == "fatal":
-        value["calls"][0]["fatal"] = "present"
-    changed = rendered.replace(line, packed(value))
+    update_evidence(value, path, replacement)
+    latest = row(result, rendered.replace(line, packed(value)))
+    assert eligibility.eligible_review(
+        [row(result), latest], result.head, ("bot",), repo="acme/widgets", number=7
+    ) is None
+
+
+@pytest.mark.parametrize("mutation", [
+    "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
+])
+def test_strict_transport_and_no_older_approval_revival(native, mutation):
+    result = native[0]()
+    rendered = body(result)
+    line = rendered.splitlines()[1]
     if mutation == "duplicate_header":
         changed = rendered.replace(line, line + "\n" + line)
-    if mutation == "before_marker":
+    elif mutation == "before_marker":
         changed = line + "\n" + rendered.replace(line + "\n", "")
-    if mutation == "after_prose":
+    elif mutation == "after_prose":
         changed = rendered.replace(line + "\n", "") + "\n" + line
-    if mutation == "noncanonical":
+    elif mutation == "noncanonical":
         changed = rendered.replace(line, line[:-4] + "= -->")
-    if mutation == "duplicate_key":
+    elif mutation == "duplicate_key":
+        value = runners.decode_codex_evidence(line)
         payload = json.dumps(value, sort_keys=True, separators=(",", ":")).replace(
             '"version":1', '"version":1,"version":1'
         )
-        changed = rendered.replace(
-            line,
-            runners.CODEX_HEADER
-            + base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
-            + " -->",
-        )
-    if mutation == "oversized":
+        changed = rendered.replace(line, packed_json(payload))
+    else:
         changed = rendered.replace(line, runners.CODEX_HEADER + "x" * 8192 + " -->")
     prior = row(result)
     latest = row(result, changed)
@@ -405,12 +352,8 @@ def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evi
     ) is None
 
 
-@pytest.mark.parametrize(
-    "kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta"]
-)
-def test_large_publication_confirmation_and_hosted_agreement(
-    native, gh, tmp_path, fake_bin, monkeypatch, kind
-):
+@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta"])
+def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_path, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
     result = native[0]()
@@ -464,7 +407,9 @@ def test_large_publication_confirmation_and_hosted_agreement(
     gitdir = native[2] / ".git/info/exclude"
     gitdir.write_text(gitdir.read_text() + "\n.loopzero/\n")
     cli._save_review(native[2], result)
-    cli._save_report(native[2], CheckReport(head, False, ()))
+    cli._save_report(
+        native[2], CheckReport(head, False, (), cli.sandbox.settings_fingerprint(cfg, native[2]))
+    )
     pr = github.pr_view(repo, 7)
     assert (
         cli._readiness(native[2], cfg, pr, head, [review]).ready
@@ -514,19 +459,10 @@ def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, locatio
     )
 
 
-@pytest.mark.parametrize(
-    "field,value",
-    [
-        ("raw_bytes", True),
-        ("raw_bytes", 0),
-        ("raw_bytes", 2**31),
-        ("chunk_count", 0),
-        ("repo", "x" * 257),
-        ("publisher", "/private"),
-        ("kind", []),
-        ("complete", 1),
-    ],
-)
+@pytest.mark.parametrize("field,value", [
+    ("raw_bytes", True), ("raw_bytes", 0), ("raw_bytes", 2**31), ("chunk_count", 0),
+    ("repo", "x" * 257), ("publisher", "/private"), ("kind", []), ("complete", 1),
+])
 def test_strict_projection_types_and_bounds(native, field, value):
     result = native[0]()
     evidence = runners.codex_evidence(result)
@@ -551,54 +487,37 @@ def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
     assert cli._load_review(tmp_path, legacy.head, "primary").raw == legacy.raw
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        "prose",
-        "fence",
-        "wrong_adjudication",
-        "unknown_leading",
-        "whitespace_json",
-        "oversized_model",
-        "oversized_effort",
-        "invalid_event_offset",
-    ],
-)
+@pytest.mark.parametrize("change", [
+    "fence", "wrong_adjudication", "unknown_leading", "whitespace_json",
+    "oversized_model", "oversized_effort", "invalid_event_offset",
+])
 def test_leading_block_is_anchored_and_schema_complete(native, change):
     result = native[0]()
     rendered = body(result)
     line = rendered.splitlines()[1]
     value = runners.decode_codex_evidence(line)
-    if change == "prose":
-        modified = rendered.replace(line + "\n", "") + "\n" + line
-    elif change == "fence":
+    if change == "fence":
         modified = rendered.replace(line + "\n", "") + "\n```\n" + line + "\n```"
     elif change == "wrong_adjudication":
-        modified = rendered.replace(
-            line, line + "\n<!-- loopzero:adjudication v=1 replaces=1 target=" + ("f" * 40) + " -->"
-        )
+        marker = "<!-- loopzero:adjudication v=1 replaces=1 target=" + ("f" * 40) + " -->"
+        modified = rendered.replace(line, line + "\n" + marker)
     elif change == "unknown_leading":
         modified = rendered.replace(line, line + "\n<!-- loopzero:unadopted v=1 -->")
+    elif change == "whitespace_json":
+        modified = rendered.replace(line, packed_json(json.dumps(value, indent=2)))
     else:
-        if change == "oversized_model":
-            value["calls"][0]["reported"]["model"] = "m" * 129
-        if change == "oversized_effort":
-            value["calls"][0]["requested"]["effort"] = "e" * 33
-        if change == "invalid_event_offset":
-            value["calls"][0]["diff_event"]["end"] = value["raw_bytes"] + 1
-        if change == "whitespace_json":
-            token = (
-                base64.urlsafe_b64encode(json.dumps(value, indent=2).encode()).decode().rstrip("=")
-            )
-            changed = runners.CODEX_HEADER + token + " -->"
-        else:
-            changed = packed(value)
-        modified = rendered.replace(line, changed)
+        path, replacement = {
+            "oversized_model": (("calls", 0, "reported", "model"), "m" * 129),
+            "oversized_effort": (("calls", 0, "requested", "effort"), "e" * 33),
+            "invalid_event_offset": (("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1),
+        }[change]
+        update_evidence(value, path, replacement)
+        modified = rendered.replace(line, packed(value))
     present, evidence = eligibility.review_projection(
         row(result, modified), result.head, "acme/widgets", 7
     )
     assert evidence is None
-    assert present is (change not in ("prose", "fence"))
+    assert present is (change != "fence")
 
 
 def test_utf8_raw_is_hashed_exactly_and_local_replay_regenerates(native, tmp_path):
@@ -632,10 +551,7 @@ def test_frozen_synthetic_five_and_legacy_truncated_unknown():
         + "\n**approve**\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>",
     }
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
-    assert (
-        eligibility.eligible_review([legacy], head, ("bot",), repo="acme/widgets", number=7)
-        is legacy
-    )
+    assert eligibility.eligible_review([legacy], head, ("bot",), repo="acme/widgets", number=7) is legacy
 
 
 @pytest.mark.parametrize("identity", ["another-session", None, {}])
@@ -712,3 +628,14 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow
                 github._review_body(result, [], padded + "\n" + adjudication)
         else:
             assert github._review_body(result, [], padded + "\n" + adjudication).startswith(padded)
+
+
+@pytest.mark.parametrize("case", ["v1", "extended", "v2", "extra", "bad-settings", "too-long", "untrusted"])
+def test_hosted_eligibility_replays_synthetic_codex_v1(monkeypatch, case):
+    review, ready = json.loads((Path(__file__).parent / "fixtures/codex-v1-hosted-synthetic.json").read_text())[case]
+    head, repo, number = review["commit_id"], "acme/widgets", 7
+    pr = github.PR(number, "https://example.invalid", head, "main", False, "OPEN", "MERGEABLE")
+    monkeypatch.setattr(github, "pr_view", lambda *_: pr)
+    monkeypatch.setattr(github, "api_get", lambda *_: [review])
+    monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
+    assert eligibility.evaluate(repo, number, head, "main", ("bot",)).ready is ready

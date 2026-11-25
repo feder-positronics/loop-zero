@@ -33,6 +33,7 @@ MARKER_RE = re.compile(
 )
 PAGE = 100
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
+CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
 _ANCHOR_NOTE = "No file location given by the reviewer; anchored here.\n\n"
@@ -62,6 +63,10 @@ class GhError(Exception):
         self.tail = _redact_tokens(tail, token) + guidance
         command_text = _redact_tokens(" ".join(command), token)
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
+
+
+class ReadDeadline(GhError):
+    """A shared GitHub read deadline elapsed."""
 
 
 class GhMissing(GhError):
@@ -104,7 +109,7 @@ TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeo
                           r"unexpected end of JSON input|Something went wrong while executing your query", re.IGNORECASE)
 RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
-_read_scope: ContextVar[tuple[float, str] | None] = ContextVar("github_reads", default=None)
+_read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _GITHUB_TOKEN_RE = re.compile(
@@ -113,18 +118,26 @@ _GITHUB_TOKEN_RE = re.compile(
 
 
 @contextmanager
-def bounded_reads(seconds: float, token: str = ""):
-    """Share one deadline across a reconciliation's reads; never retry these reads."""
+def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = False):
+    """Share a monotonic budget across reads, including any retries."""
     previous = _read_scope.get()
-    deadline = time.monotonic() + seconds
     deadline = min(previous[0], deadline) if previous else deadline
-    scope = _read_scope.set((deadline, token))
+    scope = _read_scope.set((deadline, token, retry))
     try:
         yield
-        if time.monotonic() >= deadline:
-            raise GhError(("gh", "api"), "publication read-back deadline exceeded")
+        _read_timeout(0)
     finally:
         _read_scope.reset(scope)
+
+
+def _read_timeout(limit: float) -> float:
+    scope = _read_scope.get()
+    if scope is None:
+        return limit
+    remaining = scope[0] - time.monotonic()
+    if remaining <= 0:
+        raise ReadDeadline(("gh",), "GitHub read deadline exceeded")
+    return min(limit, remaining)
 
 
 @contextmanager
@@ -244,8 +257,8 @@ def app_token() -> str:
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=10)
-    except (ToolMissing, ProcTimeout, OSError):
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
+    except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
@@ -280,28 +293,27 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (
-        scope[1] if scope else (app_token() if read_only else ""))
-    deadline = scope[0] if scope else None
-    for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise GhError(argv, "publication read-back deadline exceeded", token=selected)
-            timeout = min(timeout, remaining)
+    selected = token if token is not None else (scope[1] if scope else None)
+    if selected is None:
+        selected = app_token() if read_only else ""
+    delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
+    for delay in delays:
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
-                       extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
+                       extra_env={"GH_TOKEN": selected} if selected else None,
+                       timeout=_read_timeout(timeout) if scope else timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
+            if scope and scope[2]:
+                _read_timeout(timeout)
             if delay is None or not retryable:
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
                 ) from None
-            _retry_sleep(delay)
+            _retry_sleep(_read_timeout(delay) if scope else delay)
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
@@ -314,7 +326,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhError(argv, tail, token=selected, guidance=guidance)
         if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
-        _retry_sleep(delay)
+        _retry_sleep(_read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
         error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
@@ -349,7 +361,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         query = "query { rateLimit { remaining resetAt } }"
         result = run(["gh", "api", "graphql", "-f", f"query={query}"], cwd=cwd,
                      env_allowlist=GH_ENV, extra_env={"GH_TOKEN": token} if token else None,
-                     timeout=10)
+                     timeout=_read_timeout(10))
         if result.exit_code:
             return ""
         data = json.loads(result.stdout)
@@ -362,7 +374,7 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
         if (type(limit["remaining"]) is int and limit["remaining"] == 0
                 and stamp.tzinfo is not None and stamp.timestamp() > time.time()):
             return f"\nGraphQL quota resets at {stamp.isoformat()} (diagnostic query)."
-    except (ToolMissing, ProcTimeout, KeyError, TypeError, ValueError, OverflowError, OSError):
+    except (ToolMissing, ProcTimeout, ReadDeadline, KeyError, TypeError, ValueError, OverflowError, OSError):
         pass
     return ""
 
@@ -918,10 +930,11 @@ def _check_signals(
     review_grace: bool = False,
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
-) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...]]:
+) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
     signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
-    for cr in _paged(f"repos/{repo}/commits/{head_sha}/check-runs"):
+    runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
+    for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
@@ -973,7 +986,22 @@ def _check_signals(
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
         if _has_active_replacement(cr, workflows, head_sha):
             superseded.append(name)
-    return states, (*stale, *superseded), stale_verdicts
+    return states, (*stale, *superseded), stale_verdicts, _check_suites_at_limit(runs)
+
+
+def _check_suites_at_limit(runs: list[dict]) -> bool:
+    suites = {
+        suite["id"] for run in runs
+        if isinstance(suite := run.get("check_suite"), dict) and type(suite.get("id")) is int
+    }
+    return len(suites) >= CHECK_SUITE_LIMIT
+
+
+def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
+    if capped:
+        return (f"cannot determine required check '{name}' on {head_sha[:12]}: "
+                f"GitHub's {CHECK_SUITE_LIMIT:,}-suite limit")
+    return f"required check '{name}' missing on {head_sha[:12]}"
 
 
 def _has_active_replacement(check: dict, workflows: list[dict], head_sha: str) -> bool:
@@ -1045,14 +1073,14 @@ def readiness(
     for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
-    checks, stale, stale_verdicts = (_check_signals(
+    checks, stale, stale_verdicts, capped = (_check_signals(
         repo, pr.head_sha, review_at, review_grace, required_ci if workflow_wait else (),
         workflow_wait and stale_verdict_grace,
-    ) if required_ci else ({}, (), ()))
+    ) if required_ci else ({}, (), (), False))
     for name in required_ci:
         conclusion = checks.get(name)
         if conclusion is None:
-            reasons.append(f"required check '{name}' missing on {pr.head_sha[:12]}")
+            reasons.append(_missing_check_reason(name, pr.head_sha, capped))
         elif conclusion != "success":
             reasons.append(f"required check '{name}' is {conclusion}")
     return Readiness(

@@ -16,6 +16,8 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 @pytest.mark.parametrize('body,verdict,tails', [
     ('print(json.dumps(r))', True, ['ok', 'ok']),
     ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
+    ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
+     ['Ω' * 8188 + ' newest']),
     ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
     ('r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
     *[(body, False, None) for body in [
@@ -70,7 +72,8 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         assert calls == ['echo one']
     _save_report(git_repo, report)
     assert _load_report(git_repo) == report
-    assert set(json.loads((git_repo / '.loopzero/checks.json').read_text())) == {'head', 'dirty', 'results'}
+    receipt = json.loads((git_repo / '.loopzero/checks.json').read_text())
+    assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
 
 
 @pytest.mark.parametrize('dirty', [True, False])
