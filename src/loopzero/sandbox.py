@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import __version__, _proc
 from . import config as config_mod
-from .types import CheckReport, CheckResult, Config, LoopZeroError
+from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -101,7 +101,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 progress(command)
             key = _input_key(config, worktree, command, base) if not dirty else None
             old = previous.get(command)
-            if key and old and old.get("input_key") == key and old.get("exit_code") == 0:
+            if (key and old and old.get("input_key") == key
+                    and is_check_exit_code(old.get("exit_code")) and old["exit_code"] == 0):
                 result = CheckResult(command, 0, 0.0, old.get("tail", ""), key, old["head"])
                 if status:
                     status(f"reused {old['head'][:8]}")
