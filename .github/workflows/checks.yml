@@ -29,8 +29,6 @@ jobs:
         run: |
           uv run --python 3.14 --group dev ruff check src tests
           uv run --python 3.14 --group dev tach check
-      - name: Tests
-        run: uv run --python 3.14 --group dev pytest -q
       - name: Architecture docs and size budget
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -42,6 +40,8 @@ jobs:
             python3 scripts/check_architecture_docs.py "$BASE_SHA"
           fi
           scripts/size_budget.sh "$BASE_SHA"
+      - name: Tests
+        run: uv run --python 3.14 --group dev pytest -q
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q

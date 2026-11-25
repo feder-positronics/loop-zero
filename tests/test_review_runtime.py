@@ -15,9 +15,9 @@ from tests.test_runners import APPROVE, _fake_claude, _fake_codex, _native_codex
 repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
 fake_bwrap = test_runners.fake_bwrap
 
-RECEIPTS = [row for date in ("20261027", "20261028") for row in json.loads(
-    (Path(__file__).parent / f"fixtures/review-runtime-{date}.json").read_text())]
-PUBLISHER = ("loopzero-feder-positronics[bot]",)
+RECEIPTS = [row for size in ("five", "six") for row in json.loads(
+    (Path(__file__).parent / f"fixtures/review-runtime-startup-{size}.json").read_text())]
+PUBLISHER = ("example-review[bot]",)
 
 
 def envelope(row):
@@ -49,7 +49,7 @@ def result(row):
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_real_startup_failure_refuses_saved_result_and_multichunk(row, tmp_path):
+def test_legacy_startup_failure_refuses_saved_result_and_multichunk(row, tmp_path):
     bad = result(row)
     assert not runners.validate_runner_result(bad)
     cli._save_review(tmp_path, bad)
@@ -61,7 +61,7 @@ def test_real_startup_failure_refuses_saved_result_and_multichunk(row, tmp_path)
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_real_startup_exit_zero_never_publishes(wt, gh, fake_bin, capsys, row):
+def test_legacy_startup_exit_zero_never_publishes(wt, gh, fake_bin, capsys, row):
     prepare_review(wt, gh, fake_bin)
     # Force the already-configured Codex route without changing the public CLI policy.
 
@@ -97,7 +97,7 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
         fatal["item"]["message"] = "Quoted evidence: " + fatal["item"]["message"]
     if mode == "path":
         fatal["item"]["message"] = fatal["item"]["message"].replace(
-            "/home/marcin/.codex/packages/standalone/releases/0.164.0-x86_64-unknown-linux-musl/bin/",
+            "/opt/example/codex/0.164.0/bin/",
             "/another release/bin/",
         )
     if mode == "version":
@@ -146,7 +146,7 @@ def test_invalid_latest_cannot_revive_older_approval(row):
 
 
 @pytest.mark.parametrize("row", RECEIPTS, ids=lambda r: str(r["id"]))
-def test_real_startup_repost_refuses_before_any_publication(wt, gh, fake_bin, capsys, row):
+def test_legacy_startup_repost_refuses_before_any_publication(wt, gh, fake_bin, capsys, row):
     current = prepare_review(wt, gh, fake_bin)
     bad = dataclasses.replace(result(row), head=current, kind="primary")
     cli._save_review(wt, bad)
@@ -157,11 +157,14 @@ def test_real_startup_repost_refuses_before_any_publication(wt, gh, fake_bin, ca
 
 
 
-@pytest.mark.parametrize("number", [9179, 9173, 9174, 9175, 9275, 9284, 9220])
+# Keep the original routing inputs to catch a return of target-specific behavior.
+@pytest.mark.parametrize(
+    ("number", "case"), [(9179, 1), (9173, 4), (9174, 5), (9175, 6), (9275, 3), (9284, 2), (9220, 7)]
+)
 @pytest.mark.parametrize("repository", ["feder-positronics/intelflo", "elsewhere/intelflo"])
-def test_retired_targets_use_ordinary_eligibility_and_budget(number, repository):
+def test_retired_targets_use_ordinary_eligibility_and_budget(number, case, repository):
     target = "a" * 40
-    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == number])
+    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == case])
     snapshot = copy.deepcopy(rows)
     replacement = {
         "id": 999, "commit_id": target, "user": {"login": PUBLISHER[0]},

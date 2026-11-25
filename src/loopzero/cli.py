@@ -430,13 +430,19 @@ _REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
 
 
 def _require_pr_details(wt: Path) -> None:
-    """Refuse an unfilled Context/Problem/Goal line (text or indented sub-list) before push."""
+    """Report every unfilled PR description field before push."""
     task = worktree.task_text(wt)
+    unfilled = []
     for name in _REQUIRED_TASK_LINES:
         match = re.search(rf"^- \*\*{name}:\*\*[ \t]*(.*(?:\n[ \t]+\S.*)*)", task, re.MULTILINE)
         value = match.group(1).strip() if match else ""
         if not value or re.fullmatch(r"<[^<>]*>", value):
-            raise CliError(f"fill '- **{name}:**' in {worktree.task_file(wt)}")
+            unfilled.append(f"'- **{name}:**'")
+    if unfilled:
+        raise CliError(
+            f"fill {', '.join(unfilled)} in {worktree.task_file(wt)}"
+            " (Context, Problem and Goal become the PR description)"
+        )
 
 
 def _append_review(body: str, result: ReviewResult) -> str:
@@ -591,12 +597,25 @@ def _published_fallback(note: str, candidates: list[str], excluded: list[str]) -
             and all(reason in _FALLBACK_REASONS for _family, _sep, reason in parts))
 
 
+def _require_review_pr(config: Config, branch: str) -> github.PR:
+    try:
+        return _require_pr(config, branch)
+    except github.GhError as exc:
+        if "HTTP 404" in exc.tail and github.app_token():
+            raise CliError(
+                f"GitHub App could not access pull requests for {config.repo} (HTTP 404). "
+                "Check that the GitHub App installation includes this repository, "
+                "then rerun `loopzero review`."
+            ) from exc
+        raise
+
+
 def cmd_review(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
-    pr = _require_pr(config, branch)
+    pr = _require_review_pr(config, branch)
     _require_pushed(pr, head)
     if pr.base_ref != config.base_branch:
         raise CliError(f"PR targets {pr.base_ref}, configured base is {config.base_branch}")
@@ -1328,6 +1347,9 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         raise CliError("a reply saying what changed (or why it does not apply) is required")
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
     print(f"resolved {args.finding}: {finding.title}")
+    if not github.open_blocking_findings(config.repo, pr.number):
+        github.refresh_eligibility(config.repo, pr.number, config.base_branch)
+        print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0
 
 

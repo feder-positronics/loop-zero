@@ -27,6 +27,7 @@ import argparse
 import datetime as dt
 import json
 import math
+import random
 import re
 import shlex
 import statistics
@@ -231,6 +232,48 @@ def open_at(issues, end):
             (not i.get("closed_at") or timestamp(i["closed_at"]) >= end)]
 
 
+def weekly_sample(repo, start, end, pulls, orders, open_orders, stalls):
+    oldest = sorted(open_at(open_orders or [], end), key=lambda row: (
+        timestamp(row["created_at"]), row["number"]))
+    accepted = sorted(
+        (row for row in orders or [] if row.get("state_reason") == "completed"
+         and row.get("closed_at") and start <= timestamp(row["closed_at"]) < end),
+        key=lambda row: (timestamp(row["created_at"]) - timestamp(row["closed_at"]),
+                         row["number"]),
+    )
+    stalled = sorted(stalls or [],
+                     key=lambda alert: (-alert["hours"], alert["issue"]))
+    merged = sorted({row["number"] for row in pulls or []
+                     if row.get("merged_at") and start <= timestamp(row["merged_at"]) < end})
+    seed = f"{repo}@{stamp(end)}"
+    sample = [{"kind": "merged_control", "number": number}
+              for number in random.Random(seed).sample(merged, min(2, len(merged)))]
+    seen = {item["number"] for item in sample}
+
+    for kind, numbers, limit in (
+        ("slowest_accepted", (row["number"] for row in accepted), 2),
+        ("stalled_p0", (alert["issue"] for alert in stalled), 1),
+        ("oldest_open_order", (row["number"] for row in oldest), 4),
+    ):
+        picked = 0
+        for number in numbers:
+            if picked == limit or len(sample) == 8:
+                break
+            if number not in seen:
+                sample.append({"kind": kind, "number": number})
+                seen.add(number)
+                picked += 1
+    return {
+        "seed": seed, "items": sample, "shortfall": max(0, 6 - len(sample)),
+        "pool_sizes": {
+            "merged_control": len(merged) if pulls is not None else UNKNOWN,
+            "slowest_accepted": len(accepted) if orders is not None else UNKNOWN,
+            "stalled_p0": len(stalled) if stalls is not None else UNKNOWN,
+            "oldest_open_order": len(oldest) if open_orders is not None else UNKNOWN,
+        },
+    }
+
+
 def host_fields(data, name):
     values = data.get(name)
     if not isinstance(values, dict):
@@ -279,20 +322,27 @@ def issue_progress(inputs, repo, issue, end):
     return max(date for date in dates if date < end)
 
 
+def stalled_p0s(inputs, args, p0, end):
+    if args.stall_hours is None or p0 is None:
+        return None
+    stalls = []
+    for issue in sorted(open_at(p0, end), key=lambda row: row["number"]):
+        name = f"p0/#{issue['number']}/activity"
+        latest = inputs.read(name, lambda order=issue: issue_progress(
+            inputs, args.repo, order, end), dt.datetime)
+        if latest is not None and (end - latest) / HOUR >= args.stall_hours:
+            stalls.append({"kind": "stalled_p0", "issue": issue["number"],
+                           "last_activity": stamp(latest), "hours": (end - latest) / HOUR})
+    return stalls
+
+
 def find_alerts(inputs, args, metrics, p0, host, end):
     for key, minimum, maximum in args.band:
         value = metrics[key]
         if value != UNKNOWN and not minimum <= value <= maximum:
             inputs.alerts.append({"kind": "outside_band", "metric": key, "value": value,
                                   "min": minimum, "max": maximum})
-    if args.stall_hours is not None and p0 is not None:
-        for issue in sorted(open_at(p0, end), key=lambda row: row["number"]):
-            name = f"p0/#{issue['number']}/activity"
-            latest = inputs.read(name, lambda order=issue: issue_progress(
-                inputs, args.repo, order, end), dt.datetime)
-            if latest is not None and (end - latest) / HOUR >= args.stall_hours:
-                inputs.alerts.append({"kind": "stalled_p0", "issue": issue["number"],
-                                      "last_activity": stamp(latest), "hours": (end - latest) / HOUR})
+    inputs.alerts.extend(stalled_p0s(inputs, args, p0, end) or [])
     owners = host.get("owners", {})
     if not isinstance(owners, dict):
         owners = {}
@@ -314,18 +364,21 @@ def load_github(inputs, args, lower):
                      direction="desc", **({"base": args.base} if args.base else {}))
         return validate_rows(rows, ("closed_at", "merged_at"))
 
-    def issues(label, **params):
-        if not label:
-            raise ValueError("label absent")
-        rows = pages(inputs, f"{root}/issues", state="all", labels=label, **params)
-        return validate_rows([row for row in rows if "pull_request" not in row], ("closed_at",))
-
     return (
         inputs.read("pulls", pulls, list),
-        inputs.read("outcome_issues", lambda: issues(args.label_outcome, since=stamp(lower)), list),
-        inputs.read("order_issues", lambda: issues(args.label_order, since=stamp(lower)), list),
-        inputs.read("p0_issues", lambda: issues(args.label_p0), list),
+        inputs.read("outcome_issues", lambda: load_issues(
+            inputs, args.repo, args.label_outcome, since=stamp(lower)), list),
+        inputs.read("order_issues", lambda: load_issues(
+            inputs, args.repo, args.label_order, since=stamp(lower)), list),
+        inputs.read("p0_issues", lambda: load_issues(inputs, args.repo, args.label_p0), list),
     )
+
+
+def load_issues(inputs, repo, label, state="all", **params):
+    if not label:
+        raise ValueError("label absent")
+    rows = pages(inputs, f"repos/{repo}/issues", state=state, labels=label, **params)
+    return validate_rows([row for row in rows if "pull_request" not in row], ("closed_at",))
 
 
 def validate_rows(rows, date_fields):
@@ -425,15 +478,23 @@ def main(argv=None):
     selected = metrics.get("custom_window", metrics["last_7_days"])
     if args.alerts:
         find_alerts(inputs, args, selected, p0, host, end)
-    inputs.save()
-    if args.alerts:
+        inputs.save()
         print(json.dumps({"alerts": inputs.alerts}, indent=2, sort_keys=True))
         return 0
+    open_orders = inputs.read("open_order_issues", lambda: load_issues(
+        inputs, args.repo, args.label_order, state="open"), list)
+    if open_orders is not None:
+        # Include recent orders that closed after a historical report's end.
+        open_orders = list({row["number"]: row for row in [*(orders or []), *open_orders]}.values())
+    stalls = stalled_p0s(inputs, args, p0, end)
+    inputs.save()
     trend = [metrics[name] for name in names]
     report = {
         "repo": args.repo, "last_7_days": trend[-1], "previous_7_days": trend[-2],
         "trend_4_weeks": trend, "custom_window": metrics.get("custom_window"),
         "alerts": inputs.alerts,
+        "weekly_sample": weekly_sample(args.repo, weekly[-1][0], end, pulls, orders,
+                                       open_orders, stalls),
     }
     print(json.dumps(report, indent=2, sort_keys=True))
     print_table(trend)

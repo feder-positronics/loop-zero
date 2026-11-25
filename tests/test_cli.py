@@ -13,8 +13,10 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero import cli, github, mergify
+from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
+from tests.fake_gh import replay
 from tests.test_github import (
     FakeGh,
     branch_history_key,
@@ -77,6 +79,22 @@ def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     fake.respond(f"api repos/{REPO}/pulls/7/files",
                  [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
     return fake
+
+
+@pytest.fixture
+def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay only GitHub CLI requests in-process for the polling cases."""
+    run_process = github.run
+
+    def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
+        if argv[0] != "gh":
+            return run_process(argv, cwd=cwd, env_allowlist=env_allowlist,
+                               extra_env=extra_env, **kwargs)
+        token = build_env(env_allowlist, extra_env).get("GH_TOKEN")
+        code, stdout, stderr = replay(argv[1:], str(gh.calls_file), str(gh.scenario_file), str(cwd), token)
+        return Completed(code, stdout, stderr, 0)
+
+    monkeypatch.setattr(github, "run", run)
 
 
 @pytest.fixture
@@ -488,6 +506,27 @@ def test_check_fails_when_base_workflow_is_malformed(
 # --- pr ------------------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("token, status, installation_hint", [
+    ("app-token", 404, True),
+    ("", 404, False),
+    ("app-token", 403, False),
+])
+def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
+                                  token, status, installation_hint):
+    monkeypatch.setattr(github, "app_token", lambda: token)
+    gh.fail(pr_list_key(), f"gh: request failed (HTTP {status})")
+
+    code, _, err = run(capsys, "review")
+
+    assert code == 1
+    assert REPO in err and f"HTTP {status}" in err
+    assert ("GitHub App installation" in err) == installation_hint
+    if installation_hint:
+        assert "rerun `loopzero review`" in err
+    assert [call["token"] or "" for call in gh.calls] == [token]
+    assert not (fake_bin / "claude.stdin").exists()
+
+
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
@@ -620,6 +659,33 @@ def test_pr_refuses_missing_context_problem_or_goal(
     code, out, err = run(capsys, "pr")
 
     assert code == 1 and out == "" and f"- **{name}:**" in err
+    assert gh.calls == []
+
+
+def test_pr_reports_all_unfilled_task_lines(wt: Path, gh: FakeGh, capsys) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.write_text(
+        "- **Context:**\n"
+        "- **Problem:** <describe the problem>\n"
+    )
+
+    assert run(capsys, "pr") == (
+        1, "",
+        f"loopzero pr: fill '- **Context:**', '- **Problem:**', '- **Goal:**' in {task}"
+        " (Context, Problem and Goal become the PR description)\n",
+    )
+    assert gh.calls == []
+
+
+def test_pr_explains_how_to_create_missing_task_file(wt: Path, gh: FakeGh, capsys) -> None:
+    task = wt / ".loopzero" / "task.md"
+    task.unlink()
+
+    assert run(capsys, "pr") == (
+        1, "",
+        f"loopzero pr: missing {task}. Run `loopzero start <slug>` for a new task worktree, "
+        "or create the file with '- **Context:**', '- **Problem:**' and '- **Goal:**' lines.\n",
+    )
     assert gh.calls == []
 
 
@@ -1724,6 +1790,7 @@ def test_ready_wait_tracks_the_replacement_workflow(
                             "not ready: required check 'checks' is failure\n")
 
 
+@pytest.mark.usefixtures("replay_gh")
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
 @pytest.mark.parametrize("delivery", ["squash", "mergify"])
 @pytest.mark.parametrize("initial_pending", [False, True])
@@ -1818,6 +1885,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
+@pytest.mark.usefixtures("replay_gh")
 @pytest.mark.parametrize("run_appears", [True, False])
 def test_ready_transition_missing_run_gets_observation_grace(
     wt, gh, capsys, monkeypatch, head, run_appears
@@ -2660,20 +2728,36 @@ def _finding_thread(marker_id: str, head: str) -> dict:
             "line": 3, "comments": {"nodes": [{"body": body}]}}
 
 
-def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeGh, capsys, head, outcome) -> None:
     gh.respond_pr_list([pr_json(headRefOid=head)])
     posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
     listing = threads_json(_finding_thread("0b9b59e7", head))
-    gh.respond("api graphql", listing, listing, posted, {"data": {}})
+    remaining = listing if outcome == "remaining" else threads_json()
+    gh.respond("api graphql", listing, listing, posted, {"data": {}}, remaining)
+    gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
 
     code, out, err = run(capsys, "resolve")
     assert (code, err) == (0, "") and out == "0b9b59e7  important  src/a.py:3  Off by one\n"
+    assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
-    assert (code, err) == (0, "") and out == "resolved 0b9b59e7: Off by one\n"
+    assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
     calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
+    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
+    dispatches = [c["argv"] for c in gh.calls if endpoint in c["argv"]]
+    if outcome == "remaining":
+        assert (code, err, dispatches) == (0, "", [])
+        assert len(out.splitlines()) == 1
+    else:
+        assert dispatches == [["api", "-X", "POST", endpoint, "-f", "ref=main", "-f", "inputs[pr]=7"]]
+        if outcome == "refreshed":
+            assert (code, err) == (0, "") and out.splitlines()[-1] == "refreshed Loop-zero Eligibility for PR #7"
+        else:
+            assert code == 1 and "HTTP 403" in err
+            assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
 
 
 def test_resolve_leaves_the_thread_open_when_the_reply_was_not_posted(

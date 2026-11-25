@@ -1,4 +1,4 @@
-"""Sanitized #9284/#9275 streams: native JSONL omits settings, never inspection."""
+"""Synthetic Codex 0.165.0 streams with inspection and no reported settings."""
 import dataclasses
 import json
 import shlex
@@ -19,11 +19,11 @@ from tests.test_runners import (
 )
 
 
-@pytest.mark.parametrize("number", [9284, 9275])
+@pytest.mark.parametrize("stream", ["five-reads", "seven-reads"])
 @pytest.mark.parametrize("mode", ["pinned", "default", "model-only", "effort-only", "wrong", "reported-conflict", "failed-read"])
-def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_path, number, mode):
+def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_path, stream, mode):
     git(tmp_path, "init", "-q")
-    raw = json.loads((Path(__file__).parent / f"fixtures/codex-0165-refused-{number}.json").read_text())
+    raw = json.loads((Path(__file__).parent / f"fixtures/codex-0165-refused-{stream}.json").read_text())
     context = raw.pop("review_context")
     if mode == "failed-read":
         raw["events"][3]["item"]["exit_code"] = 1
@@ -53,6 +53,7 @@ def test_refused_stream_fresh_launch_records_only_explicit_flags(fake_bin, tmp_p
     projection = runners.codex_evidence(native)
     assert runners.decode_codex_evidence(runners.encode_codex_evidence(projection)) == projection
     assert projection["calls"][0]["configured"] == call["configured"]
+    assert projection["calls"][0]["inspection"] == ("unknown" if mode == "failed-read" else "verified")
     body = github._review_body(native, [], cli.review_marker(native.head, native.kind))
     assert f"configured model {pins.get('model', 'unknown')} (effort {pins.get('effort', 'unknown')})" in body
     # A retained receipt from before the fix cannot be upgraded from requested/model fields.

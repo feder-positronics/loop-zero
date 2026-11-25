@@ -197,9 +197,23 @@ def test_temp_parent_cannot_be_exposed(git_repo, bwrap_log):
         sandbox.run_checks(make_config(writable=(tempfile.gettempdir(),)), git_repo)
 
 
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log):
+def inject_check_timeout(monkeypatch, output, before_timeout=None):
+    run = subprocess.run
+
+    def run_with_timeout(argv, **kwargs):
+        if argv[-3:-1] == ["/bin/sh", "-c"]:
+            if before_timeout is not None:
+                before_timeout()
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=output)
+        return run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_with_timeout)
+
+
+def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
+    inject_check_timeout(monkeypatch, b"partial\n")
     report = sandbox.run_checks(
-        make_config(checks=("echo partial; sleep 5", "echo after")), git_repo, timeout=0.3
+        make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
     )
     (first,) = report.results
     assert (first.exit_code, first.tail.splitlines()[0]) == (sandbox.TIMEOUT_EXIT, "partial")
@@ -490,22 +504,32 @@ def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log
 
 
 def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, monkeypatch):
-    import time
+    import threading
 
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    events = []
+    observed, events, reporters = threading.Event(), [], []
+
+    def status(message):
+        events.append(message)
+        if message.startswith("stage 1/2: running"):
+            reporters.append(threading.current_thread())
+            observed.set()
+        else:
+            assert reporters and all(not reporter.is_alive() for reporter in reporters)
+
+    def wait_for_heartbeat():
+        assert observed.wait(5), "no running heartbeat before timeout"
+
+    inject_check_timeout(monkeypatch, b"private\n", wait_for_heartbeat)
     report = sandbox.run_checks(
-        make_config(checks=("echo private; exec sleep 5", "echo never")), git_repo,
-        timeout=0.2, status=events.append,
+        make_config(checks=("echo private", "echo never")), git_repo,
+        timeout=0.2, status=status,
     )
     assert any("running" in event for event in events)
     assert events[-1].startswith("stage 1/2: exit 124 (")
     assert all("private" not in event for event in events)
     assert len(report.results) == 1 and not report.ok
     assert report.results[0].tail == "private\n\n[loopzero] timed out after 0.2s"
-    stopped = list(events)
-    time.sleep(0.1)
-    assert events == stopped
 
 
 def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch):

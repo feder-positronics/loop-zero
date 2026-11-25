@@ -211,10 +211,7 @@ version.
 ## Review budget
 
 Loop-zero serves internal projects only and does not target tamper resistance for outside users.
-Freeze new work on evidence projections, receipt archives, attempt reservations and reviewer version pins, simplifying or deleting them when they break or obstruct delivery.
-
-The Codex runner records the CLI version observed at launch in the review receipt.
-All PRs use the ordinary review budget and eligibility rules.
+Freeze new work on Codex evidence projections. Simplify or delete them when they break or obstruct delivery.
 
 - One primary and at most one delta per PR. The delta reads only
   changes since the primary; unresolved primary findings still count under
