@@ -2466,9 +2466,7 @@ def test_second_merge_retries_remote_branch_cleanup(
     assert len(deletes) == 2
 
 
-def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
-    code, out, _ = run(capsys, "status", "--path")
-    assert code == 0 and out == f"{wt}\n"
+def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
     code, out, _ = run(capsys, "status")

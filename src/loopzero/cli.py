@@ -1355,9 +1355,6 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
-    if args.path:
-        print(wt)
-        return 0
     config = _load_config(args, wt, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     print(f"worktree: {wt}")
@@ -1438,7 +1435,6 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("reply", nargs="?", default="", help="what changed, e.g. the fix commit")
     resolve.set_defaults(func=cmd_resolve)
     status = sub.add_parser("status", help="show where this branch is in the sequence")
-    status.add_argument("--path", action="store_true", help="print only the worktree path")
     status.set_defaults(func=cmd_status)
     return parser
 
