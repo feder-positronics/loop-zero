@@ -20,7 +20,7 @@ from tests.test_cli import (
     run,
 )
 
-gh, repo, wt = support.gh, support.repo, support.wt
+gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
 
 
 def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=False,
