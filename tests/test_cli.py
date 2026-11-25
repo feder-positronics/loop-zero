@@ -194,6 +194,25 @@ def without_accepted_receipt(out: str) -> str:
                    if not line.startswith("receipt accepted:"))
 
 
+@pytest.fixture
+def git_calls(monkeypatch):
+    calls = []
+    original = subprocess.run
+
+    def record(argv, *args, **kwargs):
+        if argv[0] == "git":
+            calls.append(argv[1:])
+        return original(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", record)
+    return calls
+
+
+def assert_git_cost(calls, total, workflow_reads):
+    assert len(calls) == total, calls
+    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in calls) == workflow_reads
+
+
 def run(capsys, *argv: str) -> tuple[int, str, str]:
     code = cli.main(list(argv))
     captured = capsys.readouterr()
@@ -507,10 +526,15 @@ def test_primary_review_diffs_from_merge_base_not_base_tip(
     assert code == 0 and "upstream = 1" not in prompt
 
 
+@pytest.mark.parametrize("workflow, error", [
+    ("[checks\n", "invalid TOML"),
+    ("checks = []\n", "[checks] must be a table"),
+    ("delivery = []\n", "[delivery] must be a table"),
+])
 def test_check_fails_when_base_workflow_is_malformed(
-    wt: Path, repo: Path, capsys
+    wt: Path, repo: Path, capsys, workflow, error,
 ) -> None:
-    (repo / "workflow.toml").write_text("[checks\n")
+    (repo / "workflow.toml").write_text(workflow)
     git(repo, "add", "workflow.toml")
     git(repo, "commit", "-q", "-m", "break workflow")
     git(repo, "push", "-q", "origin", "main")
@@ -518,7 +542,7 @@ def test_check_fails_when_base_workflow_is_malformed(
     code, out, err = run(capsys, "check")
 
     assert code == 1 and out == ""
-    assert "origin/main:workflow.toml: invalid TOML" in err
+    assert f"origin/main:workflow.toml: {error}" in err
 
 
 # --- pr ------------------------------------------------------------------------------------
@@ -886,12 +910,14 @@ def commit_mergify_configuration(wt: Path, message: str = "use mergify") -> None
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
-def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch) -> None:
+def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsys, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
+    git_calls.clear()
     code, out, err = run(capsys, "review")
+    assert_git_cost(git_calls, 16, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1072,7 +1098,7 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
                                                     capsys, padding: str, head) -> None:
     arm_empty_primary_review_history(gh, head)
     gh.fail(post_key(), "HTTP 500 server error")
-    envelope = {"padding": padding,
+    envelope = {"padding": padding, "synthetic_metadata": "private-runner-metadata",
                 **_claude_envelope(CHANGES, modelUsage={"claude-sonnet-4-6": {}})}
     _fake_claude(fake_bin, envelope)
     saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
@@ -1082,13 +1108,14 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     saved_bytes = saved.read_bytes()
     data = json.loads(saved_bytes)
     assert json.loads(data["raw"]) == envelope
+    assert saved.stat().st_mode & 0o777 == 0o600
     assert data["head"] == head and data["kind"] == "primary" and data["family"] == "claude"
     assert data["verdict"] == "request_changes" and len(data["findings"]) == 2
     assert data["model"] == "claude-sonnet-4-6" and data["duration_s"] >= 0
     first_body = posted_review(gh)["body"]
     assert "model claude-sonnet-4-6" in first_body
     assert len(first_body.encode("utf-8")) < 65_536
-    assert ("Transcript truncated" in first_body) == bool(padding)
+    assert "private-runner-metadata" not in first_body and "Raw reviewer output" not in first_body
     # Repost can still read ordinary receipts containing the old pair defaults.
     data.update(members=[], reconciliation="", pair_authority=None, pair_prompt_sha256=None)
     saved.write_text(json.dumps(data))
@@ -1101,10 +1128,47 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert marker(head, "primary", "repost") in payload["body"] and "Nit" in payload["body"]
     assert "claude-session-123" in payload["body"]
     assert len(payload["body"].encode("utf-8")) < 65_536
-    assert ("Transcript truncated" in payload["body"]) == bool(padding)
+    assert "private-runner-metadata" not in payload["body"] and "Raw reviewer output" not in payload["body"]
     assert saved.read_bytes() == saved_bytes
     assert "model claude-sonnet-4-6" in payload["body"]
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
+
+
+@pytest.mark.parametrize("repost", [False, True], ids=["first-save", "repost"])
+def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, capsys, monkeypatch, repost):
+    head = prepare_review(wt, gh, fake_bin)
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    if repost:
+        gh.fail(post_key(), "HTTP 500 server error")
+        code, _, err = run(capsys, "review")
+        assert code == 1 and f"review saved at {saved}" in err
+        original = saved.read_bytes()
+        (fake_bin / "claude.stdin").unlink()
+        gh.respond(post_key(), {"id": 5})
+        args = ["review", "--repost"]
+    else:
+        args = ["review"]
+    calls_before = len(gh.calls)
+    encode = json.dumps
+
+    def interrupt_encoding(value, *args, **kwargs):
+        if isinstance(value, dict) and "publication" in value:
+            raise KeyboardInterrupt
+        return encode(value, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json, "dumps", interrupt_encoding)
+        assert cli.main(args) == 130
+    assert all(call["argv"][:2] != post_key().split() for call in gh.calls[calls_before:])
+
+    if repost:
+        assert saved.read_bytes() == original
+        assert run(capsys, "review", "--repost")[0] == 0
+        assert saved.read_bytes() == original
+        assert saved.stat().st_mode & 0o777 == 0o600
+        assert not (fake_bin / "claude.stdin").exists()
+    else:
+        assert not saved.exists()
 
 
 def test_repost_refuses_retired_paired_review(
@@ -1350,6 +1414,25 @@ def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, c
     assert f"`git reset --hard {reviewed}`" in err
     assert "cherry-pick any later fixes" in err
     assert "run `loopzero review` before merging main again" in err
+
+
+def test_review_delta_replays_fixes_when_reviewed_head_is_second_parent(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys
+) -> None:
+    reviewed = head_of(wt)
+    git(wt, "reset", "--hard", "main")
+    git(wt, "commit", "-q", "--allow-empty", "-m", "independent branch work")
+    git(wt, "merge", "-q", "--no-edit", reviewed)
+    prepare_review(wt, gh, fake_bin, history=[rev(reviewed, "primary", state="CHANGES_REQUESTED")])
+    _fake_codex(fake_bin, json.dumps(APPROVE))
+
+    code, _, err = run(capsys, "review")
+
+    assert code == 1
+    assert f"replay the fixes on the reviewed head {reviewed[:12]}" in err
+    assert "git reset --hard" not in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert not (fake_bin / "codex.stdin").exists()
 
 
 def test_review_delta_refuses_rewritten_primary(wt, gh, fake_bin, capsys):
@@ -1723,11 +1806,13 @@ def test_outdated_blocker_requires_resolution_after_delta(wt, gh, capsys, head, 
 @pytest.mark.parametrize("branch", [
     "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
 ])
-def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch) -> None:
+def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch, git_calls) -> None:
     git(wt, "branch", "-m", branch)
     arm_approved_ready_pr(gh, head, wt, branch=branch)
     gh.respond("pr ready", "")
+    git_calls.clear()
     code, out, err = run(capsys, "ready")
+    assert_git_cost(git_calls, 6, 1)
     assert (code, err) == (0, "") and out.endswith(f"ready: {URL}\n")
     assert ["pr", "ready", "7", "--repo", REPO] in [c["argv"] for c in gh.calls]
 
@@ -2691,7 +2776,7 @@ def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch,
     assert config.load(bad_config).scratch == ("./.venv",)
 
 
-def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
+def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
     code, out, _ = run(capsys, "status")
@@ -2700,7 +2785,9 @@ def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
     assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")
     (wt / "scratch").write_text("x")
+    git_calls.clear()
     code, out, _ = run(capsys, "status")
+    assert_git_cost(git_calls, 6, 1)
     assert code == 0 and "dirty:    yes" in out
     assert f"pr:       #7 {URL} (draft, OPEN)" in out
     assert f"review:   primary on {head[:12]} (approved)" in out
@@ -3004,6 +3091,28 @@ def test_resolve_requires_confirmation_from_github(wt: Path, gh: FakeGh, capsys,
     assert not any("eligibility.yml/dispatches" in " ".join(call["argv"]) for call in gh.calls)
     assert sum("addPullRequestReviewThreadReply" in " ".join(call["argv"]) for call in gh.calls) == 1
     assert run(capsys, "resolve") == (0, "0b9b59e7  important  src/a.py:3  Off by one\n", "")
+
+
+def test_resolve_reports_recovery_when_followup_read_fails(wt, gh, capsys, head):
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    posted = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id": "C1"}}}}
+    listing = threads_json(_finding_thread("0b9b59e7", head))
+    resolved = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
+    gh.respond("api graphql", listing, posted, resolved,
+               {"stdout": "", "stderr": "gh: Forbidden (HTTP 403)", "exit_code": 1})
+
+    code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed the loop bound.")
+
+    assert code == 1 and "resolved 0b9b59e7" in out
+    assert "Resolved finding 0b9b59e7 on PR #7" in err
+    assert "could not refresh Loop-zero Eligibility" in err and "HTTP 403" in err
+    assert "run `loopzero resolve`" in err and "if no findings remain" in err
+    endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
+    assert f"gh api -X POST {endpoint} -f ref=main -f 'inputs[pr]=7'" in err
+
+    gh.respond("api graphql", threads_json())
+    assert run(capsys, "resolve") == (0, "", "")
+    assert not any(endpoint in call["argv"] for call in gh.calls)
 
 
 @pytest.mark.parametrize("recovers", [True, False])
@@ -3411,6 +3520,26 @@ def test_invalid_receipt_is_not_announced(wt, gh, capsys, head, invalid):
     code, out, _ = run(capsys, "ready")
     assert code == 1 and "run loopzero check at this head" in out
     assert "receipt accepted:" not in out
+
+
+@pytest.mark.parametrize("exit_code,ok", [(False, None), (True, None), (0, True), (1, False)])
+def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok):
+    path = wt / ".loopzero/checks.json"
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps({
+        "head": head, "dirty": False,
+        "results": [{"command": "true", "exit_code": exit_code, "duration_s": 0.1, "tail": ""}],
+    }))
+
+    report = cli._load_report(wt)
+    if ok is None:
+        assert report is None
+        warning = capsys.readouterr().err
+        assert "warning: ignoring unreadable" in warning
+        assert str(path) in warning and "exit_code" in warning
+    else:
+        assert report is not None and report.ok is ok
+        assert report.head == head
 
 
 def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
