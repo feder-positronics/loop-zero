@@ -140,7 +140,8 @@ def task_text(wt: Path) -> str:
     if not task.exists():
         raise WorktreeError(
             f"missing {task}. Run `loopzero start <slug>` for a new task worktree, "
-            "or create the file with '- **Context:**', '- **Problem:**' and '- **Goal:**' lines."
+            "or recreate the file using the handoff template at "
+            "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
     return task.read_text()
 
