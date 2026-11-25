@@ -2680,7 +2680,7 @@ def test_commands_refuse_base_branch(wt: Path, gh: FakeGh, capsys, base) -> None
     git(wt, "checkout", "-q", "--detach")
     for command in ("pr", "review", "ready", "merge"):
         code, out, err = run(capsys, command)
-        assert code == 1 and out == "" and "symbolic-ref" in err, command
+        assert code == 1 and out == "" and "HEAD is detached" in err, command
     assert gh.calls == []
 
 
