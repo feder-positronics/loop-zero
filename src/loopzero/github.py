@@ -1238,11 +1238,16 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     if current != expected_head:
         return current is None
     ref = f"refs/heads/{branch}"
-    argv = ("git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
-            "push", "--no-verify", "--no-follow-tags", f"--force-with-lease={ref}:{expected_head}",
+    argv = ("git", "-c", "credential.helper=!gh auth git-credential",
+            "push", f"--force-with-lease={ref}:{expected_head}",
             f"https://github.com/{repo}.git", f":{ref}")
-    done = run(argv, cwd=Path.cwd(), env_allowlist=GH_ENV, timeout=120,
-               extra_env={"GIT_TERMINAL_PROMPT": "0"})
+    env = {"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"}
+    with tempfile.TemporaryDirectory(prefix="loopzero-cleanup-") as scratch:
+        init = ("git", "init", "--bare", "--template=")
+        done = run(init, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
+        if done.exit_code != 0:
+            raise GhError(init, done.stderr or done.stdout)
+        done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
     if done.exit_code == 0:
         return True
     current = _remote_branch_head(endpoint)

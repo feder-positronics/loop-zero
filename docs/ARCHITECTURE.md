@@ -252,6 +252,8 @@ After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
 step, and a moved ref is left in place with a warning. The Git push lease
 checks the expected SHA at deletion time even if the ref changes after the REST read.
+The push uses a temporary bare repository and ignores local, global, and system
+Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal

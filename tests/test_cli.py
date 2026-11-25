@@ -74,14 +74,25 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture
-def repo(git_seed: Path, tmp_path: Path, fake_tool) -> Path:
+def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch) -> Path:
     """A private copy of both Git repositories and a per-case fake bwrap."""
     checkout = tmp_path / "repo"
     origin = tmp_path / "origin.git"
     shutil.copytree(git_seed / "repo", checkout)
     shutil.copytree(git_seed / "origin.git", origin)
     git(checkout, "remote", "set-url", "origin", str(origin))
-    git(checkout, "config", f"url.{origin}.insteadOf", f"https://github.com/{REPO}.git")
+    run_command = github.run
+
+    def local_transport(argv, **kwargs):
+        if argv[0] == "git" and "push" in argv:
+            assert argv[-2] == f"https://github.com/{REPO}.git"
+            assert Path(kwargs["cwd"]) != Path.cwd()
+            assert kwargs["extra_env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+            assert kwargs["extra_env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+            argv = (*argv[:-2], str(origin), argv[-1])
+        return run_command(argv, **kwargs)
+
+    monkeypatch.setattr(github, "run", local_transport)
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
     return checkout
 
@@ -2926,7 +2937,6 @@ def test_merge_warns_when_remote_branch_moves(wt, repo, gh, capsys, monkeypatch,
     git(wt, "push", "origin", f"{head}:{branch}")
     newer = git(wt, "commit-tree", "HEAD^{tree}", "-p", head, "-m", "new work").strip()
     read = github.api_get
-    call = github._gh
 
     def observe(endpoint, *args, **kwargs):
         if endpoint == remote_ref:
@@ -2937,12 +2947,6 @@ def test_merge_warns_when_remote_branch_moves(wt, repo, gh, capsys, monkeypatch,
             return {"object": {"sha": current}}
         return read(endpoint, *args, **kwargs)
 
-    def rest(*args, **kwargs):
-        if args == ("api", "-X", "DELETE", f"repos/{REPO}/git/refs/heads/lz/t1"):
-            return git(repo, "push", "origin", f":{branch}")
-        return call(*args, **kwargs)
-
-    monkeypatch.setattr(github, "_gh", rest)
     monkeypatch.setattr(github, "api_get", observe)
     code, out, err = run(capsys, "merge")
 
