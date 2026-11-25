@@ -161,8 +161,8 @@ def diff_since(wt: Path, sha: str) -> str:
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:
-    """Merge commits between ``sha`` and HEAD; their diff would carry the merged-in changes."""
-    return _git(Path(wt), "rev-list", "--merges", f"{sha}..HEAD").split()
+    """First-parent merges between ``sha`` and HEAD, oldest first."""
+    return _git(Path(wt), "rev-list", "--first-parent", "--reverse", "--merges", f"{sha}..HEAD").split()
 
 
 def cleanup(wt: Path) -> None:
