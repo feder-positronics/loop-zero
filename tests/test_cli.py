@@ -612,6 +612,10 @@ def test_primary_review_stops_when_shallow_history_hides_merge_base(
     ("[checks\n", "invalid TOML"),
     ("checks = []\n", "[checks] must be a table"),
     ("delivery = []\n", "[delivery] must be a table"),
+    (
+        WORKFLOW.replace("[checks]", "[check]"),
+        "unknown key(s) in top level: check",
+    ),
 ])
 def test_check_fails_when_base_workflow_is_malformed(
     wt: Path, repo: Path, capsys, workflow, error,
@@ -625,6 +629,28 @@ def test_check_fails_when_base_workflow_is_malformed(
 
     assert code == 1 and out == ""
     assert f"origin/main:workflow.toml: {error}" in err
+    assert not (wt / ".loopzero" / "checks.json").exists()
+
+
+def test_check_rejects_empty_commands(wt: Path, repo: Path, capsys) -> None:
+    advance_checks(repo, [])
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 1
+    assert "origin/main:workflow.toml: checks.commands" in err
+    assert "PASS" not in out
+    assert not (wt / ".loopzero" / "checks.json").exists()
+
+
+def test_readiness_rejects_existing_empty_check_receipt(wt: Path, repo: Path) -> None:
+    advance_checks(repo, [])
+    args = SimpleNamespace(config=None, command="ready")
+    config = cli._load_config(args, wt, pin_checks=True)
+    head = head_of(wt)
+    cli._save_report(wt, CheckReport(head, False, (), cli.sandbox.settings_fingerprint(config, wt)))
+
+    assert cli._current_check_report(wt, config, head) is None
 
 
 # --- pr ------------------------------------------------------------------------------------
