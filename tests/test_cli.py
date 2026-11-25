@@ -1778,9 +1778,14 @@ def test_review_fails_with_three_line_errors_and_remedies_without_spending_budge
     assert all(c["argv"][1] != post_key().split(" ")[1] for c in gh.calls)
 
 
-def test_review_reports_missing_bwrap_like_check(
-    wt: Path, gh: FakeGh, fake_bin: Path, capsys, monkeypatch
+@pytest.mark.parametrize(("platform", "message"), [
+    ("linux", "bwrap not found on PATH (install bubblewrap)"),
+    ("darwin", "fresh local reviews use Bubblewrap and require Linux. Run loopzero review on a Linux host"),
+])
+def test_review_reports_unavailable_sandbox(
+    wt: Path, gh: FakeGh, fake_bin: Path, capsys, monkeypatch, platform, message
 ) -> None:
+    monkeypatch.setattr(sys, "platform", platform)
     prepare_review(wt, gh, fake_bin)
     original = cli.runners.shutil.which
     monkeypatch.setattr(
@@ -1788,7 +1793,7 @@ def test_review_reports_missing_bwrap_like_check(
     )
     code, out, err = run(capsys, "review")
     assert code == 2 and out.startswith("reviewer paths pinned")
-    assert err == "sandbox unavailable: bwrap not found on PATH (install bubblewrap)\n"
+    assert err == f"sandbox unavailable: {message}\n"
 
 
 def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypatch, head) -> None:

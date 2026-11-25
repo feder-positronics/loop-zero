@@ -73,8 +73,9 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
    your repo root and set `repo.name`, `checks.commands` and `required_ci`.
    Commit and push `workflow.toml` to the configured remote base
    (`origin/main` by default) before starting your first task.
-3. Make sure `git`, `gh auth status`, `bwrap` and `claude` or `codex` work in
-   your shell (details in [SETUP.md](SETUP.md)).
+3. Verify `git`, `gh auth status`, and your `claude` or `codex` CLI. Run
+   fresh local reviews and default checks on Linux with `bwrap` on `PATH`.
+   See [SETUP.md](SETUP.md).
 4. Install the [core/skills](core/skills) once per machine from a source
    checkout at the same pinned revision as the CLI
    ([agent setup](SETUP.md#connect-your-agent)). Entry skills are `plan`,
