@@ -566,6 +566,30 @@ def test_primary_review_diffs_from_merge_base_not_base_tip(
     assert code == 0 and "upstream = 1" not in prompt
 
 
+def test_primary_review_stops_when_shallow_history_hides_merge_base(
+    wt: Path, repo: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    (repo / "upstream.py").write_text("upstream = 1\n")
+    git(repo, "add", "upstream.py")
+    git(repo, "commit", "-qm", "upstream change")
+    git(repo, "push", "-q", "origin", "main")
+    git(wt, "push", "-q", "origin", "HEAD:refs/heads/lz/t1")
+    shallow = tmp_path / "shallow"
+    origin = tmp_path / "origin.git"
+    git(repo, "clone", "-q", "--depth=1", "--no-single-branch", "--branch", "lz/t1",
+        origin.as_uri(), str(shallow))
+    (shallow / ".git/info/exclude").write_text(".loopzero/\n")
+    shutil.copytree(wt / ".loopzero", shallow / ".loopzero")
+    monkeypatch.chdir(shallow)
+    prepare_review(shallow, gh, fake_bin)
+
+    code, _, err = run(capsys, "review")
+
+    assert code == 1 and "no merge base" in err and "deepen or unshallow" in err
+    assert not (fake_bin / "claude.stdin").exists()
+    assert all("--method" not in call["argv"] for call in gh.calls)
+
+
 @pytest.mark.parametrize("workflow, error", [
     ("[checks\n", "invalid TOML"),
     ("checks = []\n", "[checks] must be a table"),
