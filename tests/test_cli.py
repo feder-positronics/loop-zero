@@ -569,6 +569,29 @@ def test_review_pr_lookup_failure(gh, wt, fake_bin, monkeypatch, capsys,
     assert not (fake_bin / "claude.stdin").exists()
 
 
+@pytest.mark.parametrize("command, key", [("pr", branch_history_key()), ("status", pr_list_key())])
+@pytest.mark.parametrize("use_app", [True, False])
+def test_pr_list_404_explains_app_installation(
+    wt, repo, gh, fake_tool, monkeypatch, capsys, command, key, use_app,
+):
+    helper = fake_tool("app-token", "echo app-token") if use_app else wt / "missing-token"
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    monkeypatch.setenv("GH_TOKEN", "personal-token")
+    gh.respond(key, {"message": "Not Found"}, exit=1, stderr="gh: Not Found (HTTP 404)")
+    run(capsys, "check")
+
+    code, _, err = run(capsys, command)
+
+    assert code == 1
+    assert key.removeprefix("api ") in err and "gh: Not Found (HTTP 404)" in err
+    assert '"message": "Not Found"' in err
+    assert ("Check that the GitHub App installation includes this repository" in err) == use_app
+    assert [(call["argv"], call["token"]) for call in gh.calls] == [
+        (key.split(), "app-token" if use_app else "personal-token"),
+    ]
+    assert git(repo.parent / "origin.git", "branch", "--list", "lz/t1").strip() == ""
+
+
 @pytest.mark.parametrize("options", [(), ("--repost",)])
 def test_review_pr_detail_404(gh, wt, monkeypatch, capsys, options):
     monkeypatch.setattr(github, "app_token", lambda: "app-token")
