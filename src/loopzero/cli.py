@@ -1094,6 +1094,11 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
     return result
 
 
+def _require_no_merge_hold(pr: github.PR) -> None:
+    if "hold" in pr.labels:
+        raise CliError(f"PR #{pr.number} {github.MERGE_HOLD_MESSAGE}")
+
+
 def _pr_readiness(
     wt: Path, config: Config, *, allow_merged: bool = False, workflow_wait: bool = False
 ) -> tuple[github.PR, github.Readiness | None]:
@@ -1104,6 +1109,7 @@ def _pr_readiness(
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
+    _require_no_merge_hold(pr)
     return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait,
                           announce_receipt=True)
 
@@ -1286,6 +1292,7 @@ def _wait_for_checks(
         _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
         if allow_merged and current.state == "MERGED":
             return current, None, kicked
+        _require_no_merge_hold(current)
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
             github.mark_ready(config.repo, pr.number)
@@ -1456,7 +1463,9 @@ def _merge_with_mergify(
         config.repo, pr.number, pr.head_sha, queue
     )
     state = mergify.membership(config.repo, pr.number, queue)
-    if sha := github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha):
+    if sha := github.merged_sha(
+        config.repo, pr.number, expected_head=pr.head_sha, check_hold=not requested and state is None,
+    ):
         return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
