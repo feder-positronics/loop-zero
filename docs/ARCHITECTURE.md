@@ -99,13 +99,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    digest covers execution and stage reuse settings, including the effective
    allowlisted environment, without recording raw environment values. Waiters
    check for policy changes on every poll.
-   Ancestor coverage includes outdated unresolved threads
-   when checking for blocking findings and requires GitHub to report the current head as ahead.
-   This comparison establishes ancestry for both merge commits and ordinary commits.
-   An approved primary or eligible delta can carry forward on that ancestry check. A
-   primary that requested changes also requires resolved blocking findings at the reviewed
-   head and a first-parent chain of verified merges from the PR base. Readiness
-   reconstructs each merge in an isolated Git repository and checks its tree.
+   Local readiness and hosted eligibility carry a review forward only across
+   a first-parent chain of verified merges from the configured PR base. They
+   reconstruct each merge in an isolated Git repository and compare its tree
+   with the actual merge tree. Unavailable history blocks inherited coverage.
+   Ancestor coverage includes outdated unresolved blocking threads. A primary
+   that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede
@@ -470,7 +469,11 @@ must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
-Keys bind committed paths/blob IDs, command, version and sandbox configuration.
+Keys bind committed paths/blob IDs, command, version, sandbox configuration and
+the resolved base SHA. The receipt fingerprint also binds that SHA when reuse
+is configured, so advancing the base invalidates a pass at the same task head.
+If the remote ref is absent, checks use the task's recorded base. Without
+either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
