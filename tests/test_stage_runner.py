@@ -74,6 +74,24 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
 
 
+def test_runner_bounds_multibyte_tail_without_changing_exit_code(git_repo):
+    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    script = """import json, sys
+row = json.load(sys.stdin)
+row.pop("env")
+row.update(exit_code=7, duration_s=0.1, not_started=False, tail="Ω" * 10_000 + " newest")
+print(json.dumps(row))
+"""
+    config = make_config(check_runner=(sys.executable, "-c", script))
+
+    (result,) = sandbox.run_checks(config, git_repo).results
+
+    assert result.exit_code == 7
+    assert len(result.tail.encode("utf-8")) == 16 * 1024 - 1
+    assert result.tail.endswith("Ω newest")
+    assert "\ufffd" not in result.tail
+
+
 @pytest.mark.parametrize('dirty', [True, False])
 def test_runner_unavailable(git_repo, monkeypatch, dirty):
     if dirty:
