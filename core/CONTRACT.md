@@ -186,9 +186,9 @@ version.
 
 - Findings live only in PR review threads, expire at merge, and must not be
   copied into files, issues or backlogs.
-- Blocking marker:
+- Blocking marker, as the first line of a thread a review publisher opened:
   `<!-- loopzero:finding v=1 severity=critical head=<sha> id=<8-hex> -->`
-  (or `important`).
+  (or `important`). Other threads never block.
 - `critical`: wrong or unsafe; must fix. `important`: ships a bug or breaks
   acceptance; must fix. `suggestion`: never counted or blocking.
 - Missing diff or required evidence: return one `critical` finding; never

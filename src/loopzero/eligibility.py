@@ -144,7 +144,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
         verdict = summary.partition(": **")[2]
         state = latest.get("state")
         if verdict.startswith("request_changes** (") and state in {"CHANGES_REQUESTED", "COMMENTED"}:
-            if github.open_blocking_findings(repo, number, reviewed):
+            if github.open_blocking_findings(repo, number, reviewed, publishers):
                 return None
         elif not (verdict.startswith("approve** (") and state in {"APPROVED", "COMMENTED"}):
             return None
@@ -172,7 +172,8 @@ def evaluate(repo: str, number: int, head: str, base: str,
         page += 1
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
-                              ancestor_review=review is not None and review["commit_id"] != head)
+                              ancestor_review=review is not None and review["commit_id"] != head,
+                              publishers=publishers)
     if github.pr_view(repo, number).head_sha != head:
         return github.Readiness(False, ("source head changed during eligibility refresh",))
     return result

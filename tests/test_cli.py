@@ -1918,7 +1918,7 @@ def test_ready_after_reviewed_head(
     prefix = cli._repost_prefix(result) if reposted else marker(reviewed, kind)
     review["body"] = github.review_payload(REPO, 7, reviewed, result, prefix)["body"]
     thread = {"isResolved": resolved, "isOutdated": True, "path": "feature.py", "line": 1,
-              "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=important head={reviewed} -->"}]}}
+              "comments": {"nodes": [{"author": {"login": LOGIN}, "body": f"<!-- loopzero:finding v=1 severity=important head={reviewed} id=0b9b59e7 -->"}]}}
     reviews = [rev("f" * 40, "primary"), review] if kind == "delta" else [review]
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=reviews,
                                       readiness={"threads": (thread,)}, isDraft=False)
@@ -1952,7 +1952,7 @@ def test_exact_head_delta_ignores_outdated_blocker(wt, gh, capsys, head):
     previous = git(wt, "rev-parse", "HEAD^").strip()
     history = [rev("f" * 40, "primary"), rev(head, "delta")]
     thread = {"isResolved": False, "isOutdated": True, "path": "feature.py", "line": 1,
-              "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={previous} -->"}]}}
+              "comments": {"nodes": [{"author": {"login": LOGIN}, "body": f"<!-- loopzero:finding v=1 severity=critical head={previous} id=0b9b59e7 -->"}]}}
     arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=history,
                                       readiness={"threads": (thread,)}, isDraft=False)
     code, _, _ = run(capsys, "ready")
@@ -2586,8 +2586,8 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
 ) -> None:
     finding = {
         "isResolved": False, "path": "feature.py", "line": 1,
-        "comments": {"nodes": [{"body":
-            f"<!-- loopzero:finding severity=important head={head} -->\n"
+        "comments": {"nodes": [{"author": {"login": LOGIN}, "body":
+            f"<!-- loopzero:finding v=1 severity=important head={head} id=0b9b59e7 -->\n"
             "**important: Fix this**"}]},
     }
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", readiness={"threads": (finding,)})
@@ -2704,7 +2704,7 @@ def test_merge_refuses_when_not_ready(wt: Path, gh: FakeGh, capsys, head) -> Non
     gh.respond(reviews_key(), [rev(head, "primary")])
     arm_readiness(gh, head, wt, threads=(
         {"isResolved": False, "isOutdated": False, "path": "feature.py", "line": 1,
-         "comments": {"nodes": [{"body": f"<!-- loopzero:finding severity=critical head={head} -->"
+         "comments": {"nodes": [{"author": {"login": LOGIN}, "body": f"<!-- loopzero:finding v=1 severity=critical head={head} id=0b9b59e7 -->"
                                          "\n**critical: Bad**"}]}},))
     code, out, err = run(capsys, "merge")
     out = without_accepted_receipt(out)
@@ -3447,7 +3447,7 @@ def _finding_thread(marker_id: str, head: str) -> dict:
     body = (f"<!-- loopzero:finding v=1 severity=important head={head} id={marker_id} -->\n"
             "**important: Off by one**\n\nThe loop skips the last row.")
     return {"id": "THREAD_1", "isResolved": False, "isOutdated": False, "path": "src/a.py",
-            "line": 3, "comments": {"nodes": [{"body": body}]}}
+            "line": 3, "comments": {"nodes": [{"author": {"login": LOGIN}, "body": body}]}}
 
 
 @pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
@@ -3466,7 +3466,8 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(wt: Path, gh: FakeG
 
     code, out, err = run(capsys, "resolve", "0b9b59e7", "Fixed in abc1234: loop bound corrected.")
     assert out.splitlines()[0] == "resolved 0b9b59e7: Off by one"
-    calls = [c["argv"] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]][2:]
+    calls = [c["argv"] for c in gh.calls
+             if c["argv"][:2] == ["api", "graphql"] and "viewer {" not in c["argv"][3]][2:]
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
     endpoint = f"repos/{REPO}/actions/workflows/eligibility.yml/dispatches"
@@ -3492,6 +3493,8 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, wt, capsys, monkeypat
 
     def github_call(*args, **kwargs):
         query = args[3]
+        if "viewer {" in query:
+            return {"data": {"viewer": {"login": LOGIN}}}
         if "reviewThreads(" in query:
             node["isResolved"] = bool(accepted["resolution"])
             node["comments"]["pageInfo"] = {
@@ -3544,6 +3547,21 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, wt, capsys, monkeypat
     assert "refreshed Loop-zero Eligibility for PR #7" in out
     assert sum("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls) == 1
     assert run(capsys, "resolve") == (0, "", "")
+
+
+def test_resolve_and_ready_ignore_findings_from_non_publishers(wt: Path, gh: FakeGh, capsys, head) -> None:
+    planted = _finding_thread("0b9b59e7", head)
+    planted["comments"]["nodes"][0]["author"] = {"__typename": "User", "login": "outsider"}
+    gh.respond_pr_list([pr_json(headRefOid=head)])
+    gh.respond("api graphql", threads_json(planted))
+    assert run(capsys, "resolve") == (0, "", "")
+
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=[rev(head, "primary")],
+                                      readiness={"threads": (planted,)}, isDraft=False)
+    code, out, _ = run(capsys, "ready")
+    gh.respond_pr_view(pr_json(headRefOid=head))
+    hosted = cli.eligibility.evaluate(REPO, 7, head, "main", (LOGIN,))
+    assert (code, hosted.ready) == (0, True), out
 
 
 @pytest.mark.parametrize("response", [
@@ -3613,7 +3631,8 @@ def test_resolve_retries_only_thread_resolution(wt: Path, gh: FakeGh, capsys, mo
         assert code == 1
         assert "reply posted to finding 0b9b59e7" in err
         assert "Retry loopzero resolve with the same reply" in err
-    queries = [c["argv"][3] for c in gh.calls if c["argv"][:2] == ["api", "graphql"]]
+    queries = [c["argv"][3] for c in gh.calls
+               if c["argv"][:2] == ["api", "graphql"] and "viewer {" not in c["argv"][3]]
     assert len(queries) == 2 + len(outcomes) + recovers
     assert "addPullRequestReviewThreadReply" in queries[1]
     assert all("resolveReviewThread" in query for query in queries[2:2 + len(outcomes)])
