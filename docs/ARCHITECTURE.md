@@ -221,9 +221,8 @@ replay without consuming review budget. Quoted diagnostics and absence of tool
 calls alone do not invalidate a review.
 Eligibility rejects fatal latest evidence without reviving an older
 approval. The retired [incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
-remains historical evidence. All PRs use ordinary eligibility and review
-budgets. The leading-block reader still validates archived adjudication markers
-alongside their original evidence.
+remains historical evidence. The leading-block reader still validates archived
+adjudication markers alongside their original evidence.
 New Codex publication derives one canonical v1 `codex-evidence` comment from the
 complete validated private native stream, across every ordered chunk/session.
 It immediately follows the byte-zero review marker, before human text. The anchored leading block is limited to 8192 bytes; strict schema,
