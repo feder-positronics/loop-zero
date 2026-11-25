@@ -228,9 +228,10 @@ def test_recovery_transport_caps_request_time_and_does_not_retry(monkeypatch, fa
         return _proc.Completed(1, "", "HTTP 503", 0)
     monkeypatch.setattr(github, "run", request)
     monkeypatch.setattr(github, "app_token", lambda: "")
+    monkeypatch.setattr(github.time, "monotonic", lambda: 10.0)
     with github.bounded_reads(github.time.monotonic() + 0.5), pytest.raises((github.GhError, _proc.ProcTimeout)):
         github.api_get("repos/acme/widgets/pulls/7/reviews")
-    assert len(timeouts) == 1 and 0 < timeouts[0] <= 0.5
+    assert timeouts == [0.5]
 
 
 @pytest.mark.parametrize("source", ["model", "repost"])
