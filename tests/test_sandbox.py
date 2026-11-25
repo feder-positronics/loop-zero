@@ -553,7 +553,7 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
-                                    'failed', 'dirty_receipt', 'keyless', 'dirty_tree'])
+                                    'failed', 'dirty_receipt', 'keyless', 'dirty_tree', 'legacy'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     import json
     from dataclasses import replace
@@ -593,6 +593,8 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
                 row['exit_code'] = 1
         elif change == 'dirty_receipt':
             data['dirty'] = True
+        elif change == 'legacy':
+            data.pop('settings_sha256', None)
         else:
             for row in data['results']:
                 row.pop('input_key')
@@ -648,3 +650,11 @@ def test_input_key_distinguishes_runners(git_repo):
     }
     assert None not in keys
     assert len(keys) == 3
+
+
+def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch):
+    cfg = make_config(check_runner=("runner",), env_allowlist=())
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/first/runner")
+    original = sandbox.settings_fingerprint(cfg, git_repo, base="base")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/second/runner")
+    assert sandbox.settings_fingerprint(cfg, git_repo, base="base") != original

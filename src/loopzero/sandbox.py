@@ -68,7 +68,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                                                    "Runner requires a clean worktree"),))
     base = config_mod.base_revision(worktree, config.base_branch) if config.check_runner else ""
     settings_sha256 = settings_fingerprint(config, worktree, base=base)
-    previous = _previous(config, worktree) if config.inputs and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
@@ -130,12 +130,13 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
-def _previous(config: Config, worktree: Path) -> dict:
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
     if _git(config, worktree, "ls-files", "--", ".loopzero"):
         return {}
     try:
         data = json.loads((worktree / ".loopzero/checks.json").read_text())
-        if data["dirty"] is not False or not isinstance(data["head"], str):
+        if (data["dirty"] is not False or not isinstance(data["head"], str)
+                or data.get("settings_sha256") != settings_sha256):
             return {}
         return {r["command"]: dict(r, head=data["head"]) for r in data["results"]}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -147,7 +148,7 @@ def _execution_settings(config: Config, base: str) -> dict:
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
     if config.check_runner:
         settings["base"] = base
-    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
+        settings["runner_executable"] = _runner_executable(config)
     return settings
 
 
@@ -167,7 +168,9 @@ def _input_key(config: Config, worktree: Path, command: str, base: str = "") -> 
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     blobs = _git(config, worktree, "diff-tree", "--no-commit-id", "--raw", "-r", "-z",
                  "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
-    payload = [command, __version__, _execution_settings(config, base), blobs]
+    settings = _execution_settings(config, base)
+    settings["environment"] = {k: os.environ.get(k) for k in config.env_allowlist}
+    payload = [command, __version__, settings, blobs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -400,6 +403,11 @@ def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return obj
 
 
+def _runner_executable(config: Config) -> str | None:
+    executable = config.check_runner[0]
+    return executable if Path(executable).is_absolute() else shutil.which(executable)
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -410,8 +418,7 @@ def _dispatch_one(
     try:
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed before stage")
-        executable = (config.check_runner[0] if Path(config.check_runner[0]).is_absolute()
-                      else shutil.which(config.check_runner[0]))
+        executable = _runner_executable(config)
         if not executable:
             raise ValueError("Stage runner executable missing")
         argv = (executable, *config.check_runner[1:])

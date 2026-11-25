@@ -2206,7 +2206,10 @@ def test_ready_requires_clean_successful_local_report_at_head(
     assert out.endswith("not ready: run loopzero check at this head\n")
 
 
-def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, head, tmp_path):
+@pytest.mark.parametrize("wait_for", [None, "ready", "merge"])
+def test_ready_requires_receipt_from_current_check_environment(
+    wt, gh, capsys, head, tmp_path, monkeypatch, wait_for,
+):
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
     config_path = tmp_path / "check-policy.toml"
     command = 'test "$CHECK_POLICY" = old'
@@ -2218,7 +2221,20 @@ def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, h
     assert run(capsys, *args, "check")[0] == 0
     assert run(capsys, *args, "ready")[0] == 0
 
-    config_path.write_text(config.replace('CHECK_POLICY = "old"', 'CHECK_POLICY = "new"'))
+    new_config = config.replace('CHECK_POLICY = "old"', 'CHECK_POLICY = "new"')
+    if wait_for:
+        arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
+
+        def finish_checks(_seconds):
+            config_path.write_text(new_config)
+            arm_check_runs(gh, head, [
+                {"name": "checks", "status": "completed", "conclusion": "success"}])
+
+        monkeypatch.setattr(cli, "_sleep", finish_checks)
+        code, _, err = run(capsys, *args, wait_for, "--wait")
+        assert code == 1 and "workflow settings changed while waiting; run loopzero check" in err
+    else:
+        config_path.write_text(new_config)
     code, out, _ = run(capsys, *args, "ready")
     assert code == 1
     assert out.endswith("not ready: run loopzero check at this head\n")

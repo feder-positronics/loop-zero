@@ -1033,7 +1033,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
             print(f"waiting for required checks; {NEXT_WAIT}")
             return 3
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started)
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
+                                  args=args)
         if waited is None:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
@@ -1041,7 +1042,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
-            waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started)
+            waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started,
+                                      args=args)
             if waited is None:
                 print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
                 return 3
@@ -1099,7 +1101,7 @@ def _poll_until(started: float, timeout: float) -> Iterator[None]:
 
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None,
+    started: float | None = None, args: argparse.Namespace | None = None,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
@@ -1112,13 +1114,17 @@ def _wait_for_checks(
                 f"PR head changed while waiting: {pr.head_sha[:12]} to {current.head_sha[:12]}"
             )
         readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
-        if not kicked and (waiting := _draft_checks_waiting(config, current, readiness)):
+        waiting = () if kicked else _draft_checks_waiting(config, current, readiness)
+        pending = _pending_checks(config, current, readiness, kicked)
+        if ((waiting or not pending) and args is not None
+                and _load_config(args, wt, pin_checks=True) != config):
+            raise CliError("workflow settings changed while waiting; run loopzero check and retry")
+        if waiting:
             github.mark_ready(config.repo, pr.number)
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
-            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started)
+            return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started, args=args)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             return None  # A post-transition read cannot grant success beyond the original deadline.
-        pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked
         if pending != shown:
@@ -1316,7 +1322,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started)
+        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started,
+                                  args=args)
         if waited is None:
             print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
