@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
+from email.utils import format_datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -2499,6 +2501,20 @@ def test_ready_transition_immediate_green_is_best_effort(wt, gh, capsys, head, w
     (False, 300, "tie", True, 1, False),
     (False, 300, False, False, 1, False),
     (False, 300, "missing", True, 1, False),
+    (False, 5, "fractional-review", True, 0, True),
+    (False, 180, "fractional-newer", True, 1, False),
+    (False, 180, "offset-tie", True, 1, False),
+    (False, 180, "offset-older", True, 0, True),
+    (False, 180, "naive-check", True, 1, False),
+    (False, 180, "malformed-check", True, 1, False),
+    (False, 5, "naive-review", True, 1, False),
+    (False, 5, "malformed-review", True, 1, False),
+    (False, 5, "missing-review", True, 1, False),
+    (False, 5, "server-synced", True, 0, True),
+    (False, 5, "server-host-behind", True, 0, True),
+    (False, 5, "server-host-ahead", True, 0, True),
+    (False, 900, "server-old-review", True, 1, False),
+    (False, 5, "invalid-date", True, 0, True),
 ])
 def test_ready_wait_review_failure_freshness(
     wt: Path,
@@ -2515,24 +2531,39 @@ def test_ready_wait_review_failure_freshness(
     head,
 ) -> None:
     (wt / "workflow.toml").write_text(WORKFLOW.replace('["checks"]', json.dumps([name])))
-    arm_approved_pr_with_check_result(
-        gh,
-        head,
-        wt,
-        "success",
-        reviews=[rev(head, "primary") | {"submitted_at": "2026-09-23T12:00:00Z"}],
-        isDraft=False,
-    )
-    clock = [1790164800 + age]  # 2026-09-23T12:00:00Z plus review age
-    start = clock[0]
+    review_at = {
+        "fractional-review": "2026-09-23T12:00:00.125Z",
+        "offset-tie": "2026-09-23T12:00:00+00:00",
+        "offset-older": "2026-09-23T13:00:00+01:00",
+        "naive-review": "2026-09-23T12:00:00",
+        "malformed-review": "bad",
+        "missing-review": None,
+    }.get(new_failure, "2026-09-23T12:00:00Z")
+    reviews = [rev(head, "primary") | {"submitted_at": review_at}]
+    arm_approved_pr_with_check_result(gh, head, wt, "success", reviews=reviews, isDraft=False)
+    server_now = 1790164800 + age
+    server_timeline = str(new_failure).startswith("server-")
+    if server_timeline or new_failure == "invalid-date":
+        date = ("bad" if new_failure == "invalid-date" else
+                format_datetime(datetime.fromtimestamp(server_now, UTC), usegmt=True))
+        gh.respond(reviews_key(), f"HTTP/2 200 OK\nDate: {date}\n\n{json.dumps(reviews)}")
+    offset = {"server-host-behind": -40, "server-host-ahead": 1000, "server-old-review": -40}
+    start = server_now + offset.get(new_failure, 0)
+    clock = [start]
     monkeypatch.setattr(cli.time, "time", lambda: clock[0])
     monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0] - start)
     failed_at = {
         "tie": "2026-09-23T12:00:00Z",
         "missing": None,
+        "fractional-review": "2026-09-23T12:00:00.000Z",
+        "fractional-newer": "2026-09-23T12:00:00.250Z",
+        "offset-tie": "2026-09-23T11:00:00-01:00",
+        "offset-older": "2026-09-23T13:59:59+02:00",
+        "naive-check": "2026-09-23T11:59:00",
+        "malformed-check": "bad",
     }.get(
         new_failure,
-        "2026-09-23T12:00:10Z" if new_failure else "2026-09-23T11:59:00Z",
+        "2026-09-23T12:00:10Z" if new_failure is True else "2026-09-23T11:59:59Z",
     )
     runs = (
         [{"name": name, "status": "completed", "conclusion": "failure", "completed_at": failed_at}]
@@ -2567,14 +2598,17 @@ def test_ready_wait_review_failure_freshness(
             gh.respond(f"api repos/{REPO}/commits/{head}/statuses",
                        [{"context": name, "state": "success"}])
     monkeypatch.setattr(cli, "_sleep", advance)
+    wait_flag = "--wait=10" if server_timeline else "--wait=60" if age < 0 else "--wait"
     code, out, err = run(
         capsys,
         "--config",
         "workflow.toml",
         "ready",
-        *(["--wait=60" if age < 0 else "--wait"] if wait else []),
+        *([wait_flag] if wait else []),
     )
     assert (code, err, bool(sleeps)) == (expected, "", waited)
+    if server_timeline and waited:
+        assert sleeps == [5.0]
     assert out.endswith(f"ready: {URL}\n" if expected == 0 else
                         f"not ready: required check '{name}' is failure\n")
     assert (f"waiting: required check '{name}' is failure" in out) == waited
