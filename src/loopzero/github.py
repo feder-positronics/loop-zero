@@ -94,6 +94,7 @@ class Readiness:
     reasons: tuple[str, ...]
     waitable_failures: tuple[str, ...] = ()
     stale_verdicts: tuple[str, ...] = ()
+    has_pending_checks: bool = False
 
 
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
@@ -1047,6 +1048,7 @@ def readiness(
             )
         ),
         stale_verdicts=tuple(name for name in required_ci if name in stale_verdicts),
+        has_pending_checks="pending" in checks.values(),
     )
 
 
