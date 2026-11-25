@@ -830,9 +830,13 @@ def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Find
     raise GhError(("resolve", finding_id), f"no open blocking finding {finding_id} on #{number}")
 
 
-def refresh_eligibility(repo: str, number: int, base: str) -> None:
-    args = ("api", "-X", "POST", f"repos/{repo}/actions/workflows/eligibility.yml/dispatches",
+def eligibility_dispatch_args(repo: str, number: int, base: str) -> tuple[str, ...]:
+    return ("api", "-X", "POST", f"repos/{repo}/actions/workflows/eligibility.yml/dispatches",
             "-f", f"ref={base}", "-f", f"inputs[pr]={number}")
+
+
+def refresh_eligibility(repo: str, number: int, base: str) -> None:
+    args = eligibility_dispatch_args(repo, number, base)
     try:
         _gh(*args)
     except (GhError, ProcTimeout, OSError) as exc:
