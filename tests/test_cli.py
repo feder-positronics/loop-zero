@@ -176,16 +176,17 @@ def arm_check_runs(gh: FakeGh, head: str, *runs) -> None:
 
 def arm_readiness(
     gh: FakeGh, head: str, wt: Path, *, threads=(), conclusion: str = "success",
-    local_exit: int = 0, dirty: bool = False,
+    local_exit: int | None = 0, dirty: bool = False,
 ) -> None:
     gh.respond("api graphql", threads_json(*threads))
     arm_check_runs(gh, head, [
         {"name": "checks", "status": "completed", "conclusion": conclusion}])
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
-    cli._save_report(
-        wt, CheckReport(head, dirty, tuple(
-            CheckResult(command, local_exit, 0.1, "") for command in ("echo ok", "test -f README.md")))
-    )
+    if local_exit is not None:
+        cli._save_report(
+            wt, CheckReport(head, dirty, tuple(
+                CheckResult(command, local_exit, 0.1, "") for command in ("echo ok", "test -f README.md")))
+        )
 
 
 def without_accepted_receipt(out: str) -> str:
@@ -1670,6 +1671,36 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch) -> 
 
     assert out.count("receipt accepted:") == 1
     assert f"head={head}" in out and "environment=unknown" in out
+
+
+def test_late_check_keeps_current_passing_receipt(wt, gh, capsys, monkeypatch):
+    old_head = head_of(wt)
+    receipt = wt / ".loopzero/checks.json"
+    run_stage = cli.sandbox._run_one
+    refreshed = []
+    passing_receipt = []
+    monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
+
+    def finish_new_check_first(*args):
+        monkeypatch.setattr(cli.sandbox, "_run_one", run_stage)
+        git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
+        assert run(capsys, "check")[0] == 0
+        passing_receipt.append(receipt.read_bytes())
+        return run_stage(*args)
+
+    monkeypatch.setattr(cli.sandbox, "_run_one", finish_new_check_first)
+    code, _, err = run(capsys, "check")
+    head = head_of(wt)
+    assert code == 1
+    assert f"HEAD before: {old_head}; HEAD after: {head}" in err
+    assert receipt.read_bytes() == passing_receipt[0]
+    assert refreshed == [head]
+
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None})
+    gh.respond("pr ready", "")
+    code, out, err = run(capsys, "ready")
+    assert (code, err) == (0, "")
+    assert "receipt accepted:" in out
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
