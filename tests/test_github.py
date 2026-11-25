@@ -708,7 +708,8 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     clock = [0.0]
-    monkeypatch.setattr(github.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(github.time, "time", lambda: clock[0])
+    monkeypatch.setattr(github.time, "monotonic", lambda: 100.0)  # stopped during host suspend
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}})
@@ -727,9 +728,29 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
         "operator-token", "operator-token", "operator-token",
     ]
     assert counter.read_text().splitlines() == ["called"]
-    clock[0] = 3001.0
+    clock[0] = 3601.0
     github.api_get("repos/acme/widgets")
     assert counter.read_text().splitlines() == ["called", "called"]
+
+
+def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    wall, real_run = [1_000_000.0], github.run
+    suspend = lambda: wall.append(wall.pop() + 3601)  # noqa: E731
+    monkeypatch.setattr(github.time, "time", lambda: wall[0])
+    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), wall[0] == 1e6 and suspend())[0])
+    monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
+    monkeypatch.setenv("GH_TOKEN", "operator-token")
+    gh.expect(["api", "repos/acme/widgets", "--include"], {})
+    gh.expect(["api", "repos/acme/widgets", "--include"], exit=1, stderr="HTTP 502: Bad Gateway")
+    gh.expect(["api", "repos/acme/widgets", "--include"], {})
+    github.api_get("repos/acme/widgets")  # mint, then suspend before the token is used
+    github.api_get("repos/acme/widgets")  # fails transiently, then suspends in the backoff
+    assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
 
 
 def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
@@ -1180,12 +1201,15 @@ def _queue_json(queued: bool) -> dict:
     return {"data": {"repository": {"pullRequest": {"isInMergeQueue": queued}}}}
 
 
-def test_merge_unverified(gh: FakeGh) -> None:
+@pytest.mark.parametrize("missing", [False, True])
+def test_merge_unverified(gh: FakeGh, missing: bool) -> None:
     unmerged = merge_json(state='OPEN', head=HEAD, sha=None)
     gh.respond("pr merge", "")
     gh.respond(f"api repos/{REPO}/pulls/7", unmerged, unmerged)
-    gh.respond("api graphql", _queue_json(False))
-    with pytest.raises(github.MergeFailed, match="neither merged nor queued"):
+    response = {"data": {"repository": {"pullRequest": None}}} if missing else _queue_json(False)
+    gh.respond("api graphql", response)
+    message = "GitHub queue lookup for PR #7: queue status could not be verified" if missing else "neither merged nor queued"
+    with pytest.raises(github.MergeFailed, match=message):
         github.merge(REPO, 7, "merge", HEAD)
     assert not any(c["argv"][:2] == ["api", "-X"] for c in gh.calls), "no ref delete"
 
@@ -1403,14 +1427,14 @@ def test_merged_branch_history_requires_terminal_page(gh: FakeGh) -> None:
     assert len(gh.calls) == 2
 
 
-def test_merged_branch_history_fails_at_page_limit(gh: FakeGh, monkeypatch) -> None:
+def test_merged_branch_history_fails_at_page_limit(monkeypatch) -> None:
     monkeypatch.setattr(github, "PAGE", 1)
-    for page in range(1, 101):
-        key = branch_history_key(page).replace("per_page=100", "per_page=1")
-        gh.respond(key, [closed_history_row(pr_json(number=page, state="CLOSED"))])
-
+    pages = ({branch_history_key(page).removeprefix("api ").replace("per_page=100", "per_page=1"):
+              [closed_history_row(pr_json(number=page, state="CLOSED"))]} for page in range(1, 101))
+    monkeypatch.setattr(github, "api_get", lambda endpoint: next(pages)[endpoint])
     with pytest.raises(github.GhError, match="exceeds 100-page publication limit"):
         github.merged_pr_for_branch(REPO, "lz/t1")
+    assert next(pages, None) is None
 
 
 @pytest.mark.parametrize("capped", [False, True])

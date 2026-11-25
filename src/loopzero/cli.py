@@ -75,6 +75,17 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
     return done.stdout.strip()
 
 
+def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
+    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
+                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    if done.exit_code != 0:
+        detail = _proc.tail(done.stderr)[-2000:]
+        if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
+                               for line in done.stdout.splitlines()):
+            detail += "\nremote moved since PR lookup; fetch and retry"
+        raise CliError(f"git {' '.join(args)} failed: {detail.strip()}")
+
+
 def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
 
@@ -521,15 +532,15 @@ def _append_review(body: str, result: ReviewResult) -> str:
 def _refresh_pr_checks(wt: Path, config: Config) -> None:
     """Best-effort refresh only when local HEAD is the existing PR head."""
     argv = ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]
-    upstream = _proc.run(argv, cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
-    if upstream.exit_code != 0:
-        return
     try:
+        upstream = _proc.run(argv, cwd=wt, env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
+        if upstream.exit_code != 0:
+            return
         branch, head = worktree.branch(wt), worktree.head(wt)
         pr = github.pr_for_branch(config.repo, branch)
         if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
             _update_pr_checks(wt, head, config, pr)
-    except (github.GhError, OSError, ValueError, CliError) as exc:
+    except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
@@ -630,14 +641,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        push.append(f"--force-with-lease={branch}:{pr.head_sha}")
+        push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
-    try:
-        _git(wt, *push, timeout=PUSH_TIMEOUT)
-    except CliError as exc:
-        if force_lease:
-            raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
-        raise
+    _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
         if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
@@ -779,6 +785,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         prefix = _repost_prefix(result)
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
+    token = _refresh_publisher_token(token, publisher)
     try:
         github.post_review(
             config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -803,6 +810,16 @@ def cmd_review(args: argparse.Namespace) -> int:
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
+
+
+def _refresh_publisher_token(token: str, publisher: str) -> str:
+    """The review may outlive the app token: re-mint it, but only for the same publisher."""
+    if not token or (fresh := github.app_token()) == token:
+        return token
+    if not fresh or github.login(token=fresh).casefold() != publisher.casefold():
+        raise CliError(f"could not refresh the app token for review publisher {publisher}; the review "
+                       "is saved: fix the app token helper, then run `loopzero review --repost`")
+    return fresh
 
 
 def _review_verdict(result: ReviewResult) -> int:
@@ -908,8 +925,8 @@ def _run_review(
         raise CliError(
             f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
             "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
-            "`git reset --hard <original-tip>` and replay any later fixes. Push the restored head "
-            f"and run `loopzero review` before merging {config.base_branch}, or open a new PR "
+            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
+            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
             "from the current branch"
         )
     if kind == "delta" and (merges := worktree.merges_since(wt, since)):
@@ -917,7 +934,8 @@ def _run_review(
         raise CliError(
             f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
             f"merged-in changes in the delta material. To recover, {recovery}. "
-            f"Push the recovered head and run `loopzero review` before merging {config.base_branch} again"
+            f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
+            f"before merging {config.base_branch} again"
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
@@ -1202,11 +1220,12 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
+    allow_merged: bool = False,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args)
+                                shown=shown, args=args, allow_merged=allow_merged)
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1215,7 +1234,7 @@ def _wait_with_deadline(
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True)
+                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1476,8 +1495,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started,
-                                  args=args, allow_merged=True)
+        waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
+                                     args=args, allow_merged=True)
         if waited is None:
             return 3
         pr, readiness, _ = waited
@@ -1555,8 +1574,6 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         for marker_id, _thread, f in github.open_findings(config.repo, pr.number):
             print(f"{marker_id}  {f.severity}  {f.path or '-'}:{f.line or '-'}  {f.title}")
         return 0
-    if not args.reply.strip():
-        raise CliError("a reply saying what changed (or why it does not apply) is required")
     finding = github.resolve_finding(config.repo, pr.number, args.finding, args.reply)
     print(f"resolved {args.finding}: {finding.title}")
     try:
@@ -1659,8 +1676,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument(
         "--repost", action="store_true", help="post the saved review for HEAD without a model"
     )
-    review.add_argument("--model", help="reviewer model override for this run")
-    review.add_argument("--effort", help="reviewer effort override for this run")
+    review.add_argument("--model", help="reviewer model override for a fresh review")
+    review.add_argument("--effort", help="reviewer effort override for a fresh review")
     review.set_defaults(func=cmd_review)
     ready = sub.add_parser(
         "ready", help="compute readiness and mark the PR ready; --wait polls required checks"
@@ -1678,7 +1695,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ready.set_defaults(func=cmd_ready)
     merge.set_defaults(func=cmd_merge)
-    resolve = sub.add_parser("resolve", help="list open findings, or reply to one and resolve it")
+    resolve = sub.add_parser(
+        "resolve", usage='%(prog)s [<finding-id> "<reply>"]',
+        help="list open findings, or reply to one and resolve it",
+    )
     resolve.add_argument("finding", nargs="?", help="finding id from the list (8 hex digits)")
     resolve.add_argument("reply", nargs="?", default="", help="what changed, e.g. the fix commit")
     resolve.set_defaults(func=cmd_resolve)
@@ -1701,7 +1721,14 @@ def main(argv: list[str] | None = None) -> int:
     # Progress lines must precede the stderr verdict when both go to one file.
     if isinstance(sys.stdout, io.TextIOWrapper):
         sys.stdout.reconfigure(line_buffering=True)
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == "resolve" and args.finding is not None and not args.reply.strip():
+        parser.error('expected resolve [<finding-id> "<reply>"] with a nonblank reply for a finding')
+    if args.command == "review" and args.repost:
+        conflicts = [f"--{name}" for name in ("model", "effort") if getattr(args, name) is not None]
+        if conflicts:
+            parser.error(f"review --repost cannot be combined with {' or '.join(conflicts)}")
     try:
         return args.func(args)
     except IndependentReviewerUnavailable as exc:

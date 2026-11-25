@@ -254,22 +254,32 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _cached_app_token() -> str:
+    # Installation tokens expire one hour after minting by wall clock, suspend included.
+    token, minted = _app_token_cache
+    return token if token and 0 <= time.time() - minted < 3000 else ""
+
+
 def app_token() -> str:
     global _app_token_cache
-    token, expires = _app_token_cache
-    if token and time.monotonic() < expires:
+    if token := _cached_app_token():
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
+    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    token = result.stdout.strip()
-    _app_token_cache = (token, time.monotonic() + 3000)
-    return token
+    _app_token_cache = (result.stdout.strip(), minted)
+    return _cached_app_token()
+
+
+def _select_token(token: str | None, scope: tuple[float, str | None, bool] | None, read_only: bool) -> str:
+    selected = token if token is not None else (scope[1] if scope else None)
+    return selected if selected is not None else (app_token() if read_only else "")
 
 
 def _transient_error(tail: str, retry_idempotent: bool) -> bool:
@@ -299,11 +309,9 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (scope[1] if scope else None)
-    if selected is None:
-        selected = app_token() if read_only else ""
     delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
     for delay in delays:
+        selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
@@ -1181,15 +1189,22 @@ def merge_pending(repo: str, number: int) -> bool:
     """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     owner, name = repo.split("/", 1)
-    data = _gh_json(
+    argv = (
         "api", "graphql", "-f", f"query={_QUEUE_QUERY}", "-F", f"owner={owner}",
         "-F", f"name={name}", "-F", f"number={number}",
     )
     try:
+        data = _gh_json(*argv)
         pr = data["data"]["repository"]["pullRequest"]
-        return bool(pr["isInMergeQueue"] or pr.get("autoMergeRequest"))
-    except (KeyError, TypeError):
-        return False
+        queued = pr["isInMergeQueue"]
+        auto = pr.get("autoMergeRequest")
+        if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
+            raise ValueError("invalid queue fields")
+    except (GhError, ProcTimeout, KeyError, TypeError, ValueError) as exc:
+        raise MergeFailed(("gh", "api", "graphql"),
+                          f"GitHub queue lookup for PR #{number}: queue status could not be verified. "
+                          f"Check the PR's queue or merge state before retrying.\n{str(exc)[-300:]}") from exc
+    return queued or bool(auto)
 
 
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
@@ -1212,12 +1227,18 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
-    if merge_pending(repo, number):
-        return None
+    queue_error = None
+    try:
+        if merge_pending(repo, number):
+            return None
+    except MergeFailed as exc:
+        queue_error = exc
     # The queue may have landed the PR between the two reads; look once more.
     sha = merged_sha(repo, number, expected_head=head_sha)
     if sha:
         return sha
+    if queue_error:
+        raise queue_error
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
