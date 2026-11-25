@@ -13,8 +13,10 @@ from types import SimpleNamespace
 import pytest
 
 from loopzero import cli, github, mergify
+from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git
+from tests.fake_gh import replay
 from tests.test_github import (
     FakeGh,
     branch_history_key,
@@ -77,6 +79,22 @@ def gh(fake_bin: Path, tmp_path: Path) -> FakeGh:
     fake.respond(f"api repos/{REPO}/pulls/7/files",
                  [{"filename": "feature.py", "patch": "@@ -0,0 +1 @@\n+print('hi')"}])
     return fake
+
+
+@pytest.fixture
+def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replay only GitHub CLI requests in-process for the polling cases."""
+    run_process = github.run
+
+    def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
+        if argv[0] != "gh":
+            return run_process(argv, cwd=cwd, env_allowlist=env_allowlist,
+                               extra_env=extra_env, **kwargs)
+        token = build_env(env_allowlist, extra_env).get("GH_TOKEN")
+        code, stdout, stderr = replay(argv[1:], str(gh.calls_file), str(gh.scenario_file), str(cwd), token)
+        return Completed(code, stdout, stderr, 0)
+
+    monkeypatch.setattr(github, "run", run)
 
 
 @pytest.fixture
@@ -1724,6 +1742,7 @@ def test_ready_wait_tracks_the_replacement_workflow(
                             "not ready: required check 'checks' is failure\n")
 
 
+@pytest.mark.usefixtures("replay_gh")
 @pytest.mark.parametrize("replacement,expected", [("success", 0), ("failure", 1), ("pending", 3)])
 @pytest.mark.parametrize("delivery", ["squash", "mergify"])
 @pytest.mark.parametrize("initial_pending", [False, True])
@@ -1818,6 +1837,7 @@ def test_ready_transition_preserves_deadline_and_gates(wt, gh, capsys, monkeypat
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
+@pytest.mark.usefixtures("replay_gh")
 @pytest.mark.parametrize("run_appears", [True, False])
 def test_ready_transition_missing_run_gets_observation_grace(
     wt, gh, capsys, monkeypatch, head, run_appears
