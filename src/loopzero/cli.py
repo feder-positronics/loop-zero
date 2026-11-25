@@ -250,6 +250,9 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
+MERGEABILITY_PENDING = "GitHub is computing mergeability"
+
+
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
@@ -298,6 +301,8 @@ def _readiness(
                 f"review cap spent (primary + delta) and {head[:12]} has no eligible review. "
                 "Open a new PR for the changes that need review",
             ))
+    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
+        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     return result
 
 
@@ -1031,7 +1036,6 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started)
         if waited is None:
-            print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
         pr, readiness, kicked = waited
     if readiness.ready and pr.is_draft and not kicked:
@@ -1039,14 +1043,13 @@ def cmd_ready(args: argparse.Namespace) -> int:
         if args.wait is not None:
             waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started)
             if waited is None:
-                print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
                 return 3
             pr, readiness, kicked = waited
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
-            print(f"not ready: required checks pending or missing; {NEXT_WAIT}")
+            print(NEXT_WAIT)
         return 1
     print(f"ready: {pr.url}")
     return 0
@@ -1070,14 +1073,18 @@ def _draft_checks_waiting(
 def _pending_checks(
     config: Config, pr: github.PR, readiness: github.Readiness, kicked: bool = False
 ) -> tuple[str, ...]:
-    """Reasons worth waiting on: every blocker is a required check that may still turn green.
+    """Reasons worth waiting on: mergeability or required checks can still settle.
 
     `kicked` also accepts `skipped`: this run just marked the draft ready, and the
     skipped result belongs to the draft until GitHub replaces it.
     """
-    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if kicked else [])]
+    draft_waiting = pr.is_draft and pr.mergeable == "UNKNOWN"
+    states = [f"missing on {pr.head_sha[:12]}", "is pending"]
+    if kicked or draft_waiting:
+        states.append("is skipped")
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
     waitable.update(readiness.waitable_failures)
+    waitable.add(MERGEABILITY_PENDING)
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
@@ -1113,7 +1120,7 @@ def _wait_for_checks(
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
-            return None  # A post-transition read cannot grant success beyond the original deadline.
+            break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked
@@ -1139,6 +1146,10 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
+    if shown and MERGEABILITY_PENDING in shown:
+        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
+    else:
+        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
     return None
 
 
@@ -1314,7 +1325,6 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started)
         if waited is None:
-            print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
         pr, readiness, _ = waited
     if readiness is None:
