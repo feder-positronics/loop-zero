@@ -371,3 +371,34 @@ def test_repost_confirms_pre_configured_claude_settings(wt, gh, fake_bin, monkey
     assert run(capsys, "review", "--repost")[0] == 1
     assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
     assert len([c for c in gh.calls if "--input" in c]) == 1
+
+
+@pytest.mark.parametrize("transcript_published", [True, False])
+def test_repost_confirms_claude_publication_across_transcript_cutover(
+    wt, gh, fake_bin, monkeypatch, capsys, transcript_published,
+):
+    head = lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=0, interrupted=True)
+    assert run(capsys, "review")[0] == 130
+    saved = json.loads((wt / ".loopzero" / f"review-{head[:12]}-primary.json").read_text())
+    request = saved["provenance"]["requested_settings"][0]
+    body = (
+        f'{support.marker(head, "primary", "model")}\n'
+        f"loopzero primary review by claude on `{head}`, {saved['duration_s']:.1f}s: "
+        "**approve** (0 critical, 0 important, 0 suggestion)\n\n"
+        "Settings per native call (launch configuration and CLI claims, not backend attestation):\n"
+        f"- Call 1: requested model {request['model'] or 'unknown'} "
+        f"(effort {request['effort'] or 'unknown'}); "
+        f"CLI-reported model {saved['model'] or 'unknown'} (effort {saved['effort'] or 'unknown'}); "
+        "configured model unknown (effort unknown)"
+    )
+    if transcript_published:
+        body += f"\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{saved['raw']}\n```\n</details>"
+    else:
+        body += "\n\nNative Claude output is retained in the restricted local review receipt."
+    gh.respond(reviews_key(), [{"id": 17, "commit_id": head, "body": body,
+                               "state": "COMMENTED", "user": {"login": LOGIN}}])
+    code, out, err = run(capsys, "review", "--repost")
+    assert code == 0, err
+    assert saved["raw"] not in out + err
+    assert (fake_bin / "claude.runs").read_text().splitlines() == ["run"]
+    assert len([c for c in gh.calls if "--input" in c]) == 1

@@ -27,9 +27,9 @@ jobs:
         run: |
           git fetch -q --depth=1 origin "$BASE_SHA"
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
-            python3 scripts/check_architecture_docs.py --links-only
+            uv run --python 3.14 python scripts/check_architecture_docs.py --links-only
           else
-            python3 scripts/check_architecture_docs.py "$BASE_SHA"
+            uv run --python 3.14 python scripts/check_architecture_docs.py "$BASE_SHA"
           fi
           scripts/size_budget.sh "$BASE_SHA"
       - name: Install bubblewrap for the sandbox test
@@ -45,4 +45,7 @@ jobs:
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q
-          uv run --python 3.14 --isolated --with dist/*.whl loopzero --help
+          smoke_env="$(mktemp -d)"
+          uv venv --python 3.14 "$smoke_env"
+          uv pip install --python "$smoke_env/bin/python" dist/*.whl
+          "$smoke_env/bin/loopzero" --help
