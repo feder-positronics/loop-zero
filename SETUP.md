@@ -99,16 +99,9 @@ unpins them. Then:
 
 - `[checks] commands` — must exit zero before a PR opens; for uv projects
   `uv run --group dev ruff check .` and `uv run --group dev pytest -q` work.
-- `[checks] required_ci` — exact GitHub check names green before merge.
-- `[checks] ro_paths` — `/home` is hidden; list toolchain paths under it in
-  full (`/home/<you>/.local/bin`, `/home/<you>/.local/share/uv`).
-- `[checks] writable` — the worktree is read-only except per-run scratch over
-  `[checks] scratch` (default `.venv`, `.ruff_cache`, `.pytest_cache`,
-  `node_modules/.cache`, created as empty git-invisible dirs). List a shared
-  cache like `~/.cache/uv` here; a check can then write to it (trust). uv projects
-  must commit `uv.lock`.
-- `[checks] env` — e.g. `{ UV_CACHE_DIR = "/home/<you>/.cache/uv" }`; wins over
-  sandbox defaults and host variables. `PATH` and `HOME` cannot be overridden.
+- Configure hosted check names, mounts, scratch and environment in the
+  [commented workflow example](workflow.example.toml). See the contract's
+  [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
 - For offline checks, warm the configured writable uv cache on the host with
@@ -275,22 +268,12 @@ the two systemd units to `~/.config/systemd/user/`, then
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
 $EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
-# ...make a small change and add a test...
-git add . && git commit -m "Describe the change"
-loopzero check                        # exit 0, or FAIL; renders the PR Validation section when open
-loopzero pr                           # draft PR opens; URL printed
-loopzero review                       # model review posted on the PR
-
-# If blocking threads need fixes, apply them, then:
-git add . && git commit -m "Fix review findings"
-loopzero check && loopzero pr         # push the fixes
-loopzero resolve <id> "<fix commit and what changed>"  # once per repaired blocking thread
-loopzero review                       # delta review of the fixes
-loopzero ready --wait                 # marks the PR ready and waits for required CI
-loopzero status                       # next step and why
-cd <repository-root>
-(cd <worktree> && loopzero merge --wait)  # landed merge deletes branch and worktree
 ```
+
+Use the [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) to navigate
+the contract's [six steps](core/CONTRACT.md#the-six-steps). Run `loopzero status`
+to see the next step. See [Blockers](core/CONTRACT.md#blockers) for how to
+resolve review findings.
 
 ## Merging under a merge queue
 
