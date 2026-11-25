@@ -7,6 +7,7 @@ import re
 import stat
 import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 from loopzero._proc import run
 
@@ -96,24 +97,25 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 def _ensure_excludes(repo_root: Path) -> None:
     common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    exclude = (common / "info" / "exclude").resolve()
+    exclude = common / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude = exclude.resolve()
     existing = exclude.read_text() if exclude.exists() else ""
     lines = set(existing.splitlines())
     missing = [e for e in EXCLUDES if e not in lines]
     if missing:
         sep = "" if not existing or existing.endswith("\n") else "\n"
         mode = stat.S_IMODE(exclude.stat().st_mode) if exclude.exists() else None
-        with tempfile.NamedTemporaryFile(mode="w", dir=exclude.parent, delete=False) as stream:
-            temp = Path(stream.name)
-            try:
+        temp = exclude.with_name(f".exclude-{uuid4().hex}")
+        stream = temp.open("x")
+        try:
+            with stream:
                 stream.write(existing + sep + "\n".join(missing) + "\n")
-                stream.close()
-                if mode is not None:
-                    temp.chmod(mode)
-                temp.replace(exclude)
-            finally:
-                temp.unlink(missing_ok=True)
+            if mode is not None:
+                temp.chmod(mode)
+            temp.replace(exclude)
+        finally:
+            temp.unlink(missing_ok=True)
 
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
