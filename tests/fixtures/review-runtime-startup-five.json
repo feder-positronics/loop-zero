@@ -1,0 +1,52 @@
+[
+  {
+    "number": 1,
+    "id": 1,
+    "commit_id": "0000000000000000000000000000000000000001",
+    "body": "<!-- loopzero:review v=1 head=0000000000000000000000000000000000000001 kind=delta source=model -->\n**approve**\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\n  \"type\": \"codex_exec_result\",\n  \"session_id\": \"startup-1\",\n  \"token_usage\": {\n    \"input_tokens\": 30,\n    \"cached_input_tokens\": 0,\n    \"cache_write_input_tokens\": 0,\n    \"output_tokens\": 12,\n    \"reasoning_output_tokens\": 0\n  },\n  \"final_message\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": []}\",\n  \"events\": [\n    {\n      \"type\": \"thread.started\",\n      \"thread_id\": \"startup-1\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"error\",\n        \"id\": \"startup\",\n        \"message\": \"Code Mode is unavailable because failed to spawn code-mode host /opt/example/codex/0.164.0/bin/codex-code-mode-host: executable not found. Code mode will fail closed.\"\n      }\n    },\n    {\n      \"type\": \"turn.started\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"agent_message\",\n        \"id\": \"final\",\n        \"text\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": []}\"\n      }\n    },\n    {\n      \"type\": \"turn.completed\",\n      \"usage\": {\n        \"input_tokens\": 30,\n        \"cached_input_tokens\": 0,\n        \"cache_write_input_tokens\": 0,\n        \"output_tokens\": 12,\n        \"reasoning_output_tokens\": 0\n      }\n    }\n  ],\n  \"reported_settings\": {\n    \"model\": null,\n    \"effort\": null\n  }\n}\n```\n\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "example-review[bot]"
+    }
+  },
+  {
+    "number": 2,
+    "id": 2,
+    "commit_id": "0000000000000000000000000000000000000002",
+    "body": "<!-- loopzero:review v=1 head=0000000000000000000000000000000000000002 kind=primary source=model -->\n**approve**\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\n  \"type\": \"codex_exec_result\",\n  \"session_id\": \"startup-2\",\n  \"token_usage\": {\n    \"input_tokens\": 30,\n    \"cached_input_tokens\": 0,\n    \"cache_write_input_tokens\": 0,\n    \"output_tokens\": 12,\n    \"reasoning_output_tokens\": 0\n  },\n  \"final_message\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": [{\\\"severity\\\": \\\"suggestion\\\", \\\"path\\\": \\\"example.txt\\\", \\\"line\\\": 1, \\\"title\\\": \\\"Clarify the label\\\", \\\"body\\\": \\\"Use a more specific label.\\\"}]}\",\n  \"events\": [\n    {\n      \"type\": \"thread.started\",\n      \"thread_id\": \"startup-2\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"error\",\n        \"id\": \"startup\",\n        \"message\": \"Code Mode is unavailable because failed to spawn code-mode host /opt/example/codex/0.164.0/bin/codex-code-mode-host: executable not found. Code mode will fail closed.\"\n      }\n    },\n    {\n      \"type\": \"turn.started\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"agent_message\",\n        \"id\": \"final\",\n        \"text\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": [{\\\"severity\\\": \\\"suggestion\\\", \\\"path\\\": \\\"example.txt\\\", \\\"line\\\": 1, \\\"title\\\": \\\"Clarify the label\\\", \\\"body\\\": \\\"Use a more specific label.\\\"}]}\"\n      }\n    },\n    {\n      \"type\": \"turn.completed\",\n      \"usage\": {\n        \"input_tokens\": 30,\n        \"cached_input_tokens\": 0,\n        \"cache_write_input_tokens\": 0,\n        \"output_tokens\": 12,\n        \"reasoning_output_tokens\": 0\n      }\n    }\n  ],\n  \"reported_settings\": {\n    \"model\": null,\n    \"effort\": null\n  }\n}\n```\n\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "example-review[bot]"
+    }
+  },
+  {
+    "number": 2,
+    "id": 3,
+    "commit_id": "0000000000000000000000000000000000000003",
+    "body": "<!-- loopzero:review v=1 head=0000000000000000000000000000000000000003 kind=delta source=model -->\n**approve**\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\n  \"type\": \"codex_exec_result\",\n  \"session_id\": \"startup-3\",\n  \"token_usage\": {\n    \"input_tokens\": 30,\n    \"cached_input_tokens\": 0,\n    \"cache_write_input_tokens\": 0,\n    \"output_tokens\": 12,\n    \"reasoning_output_tokens\": 0\n  },\n  \"final_message\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": []}\",\n  \"events\": [\n    {\n      \"type\": \"thread.started\",\n      \"thread_id\": \"startup-3\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"error\",\n        \"id\": \"startup\",\n        \"message\": \"Code Mode is unavailable because failed to spawn code-mode host /opt/example/codex/0.164.0/bin/codex-code-mode-host: executable not found. Code mode will fail closed.\"\n      }\n    },\n    {\n      \"type\": \"turn.started\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"agent_message\",\n        \"id\": \"final\",\n        \"text\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": []}\"\n      }\n    },\n    {\n      \"type\": \"turn.completed\",\n      \"usage\": {\n        \"input_tokens\": 30,\n        \"cached_input_tokens\": 0,\n        \"cache_write_input_tokens\": 0,\n        \"output_tokens\": 12,\n        \"reasoning_output_tokens\": 0\n      }\n    }\n  ],\n  \"reported_settings\": {\n    \"model\": null,\n    \"effort\": null\n  }\n}\n```\n\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "example-review[bot]"
+    }
+  },
+  {
+    "number": 3,
+    "id": 4,
+    "commit_id": "0000000000000000000000000000000000000004",
+    "body": "<!-- loopzero:review v=1 head=0000000000000000000000000000000000000004 kind=primary source=model -->\n**request_changes**\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\n  \"type\": \"codex_exec_result\",\n  \"session_id\": \"startup-4\",\n  \"token_usage\": {\n    \"input_tokens\": 30,\n    \"cached_input_tokens\": 0,\n    \"cache_write_input_tokens\": 0,\n    \"output_tokens\": 12,\n    \"reasoning_output_tokens\": 0\n  },\n  \"final_message\": \"{\\\"verdict\\\": \\\"request_changes\\\", \\\"findings\\\": [{\\\"severity\\\": \\\"important\\\", \\\"path\\\": \\\"example.txt\\\", \\\"line\\\": 1, \\\"title\\\": \\\"Restore the heading\\\", \\\"body\\\": \\\"The heading identifies the example.\\\"}, {\\\"severity\\\": \\\"important\\\", \\\"path\\\": \\\"example.txt\\\", \\\"line\\\": 2, \\\"title\\\": \\\"Keep the example\\\", \\\"body\\\": \\\"The example illustrates the format.\\\"}]}\",\n  \"events\": [\n    {\n      \"type\": \"thread.started\",\n      \"thread_id\": \"startup-4\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"error\",\n        \"id\": \"startup\",\n        \"message\": \"Code Mode is unavailable because failed to spawn code-mode host /opt/example/codex/0.163.0/bin/codex-code-mode-host: executable not found. Code mode will fail closed.\"\n      }\n    },\n    {\n      \"type\": \"turn.started\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"agent_message\",\n        \"id\": \"final\",\n        \"text\": \"{\\\"verdict\\\": \\\"request_changes\\\", \\\"findings\\\": [{\\\"severity\\\": \\\"important\\\", \\\"path\\\": \\\"example.txt\\\", \\\"line\\\": 1, \\\"title\\\": \\\"Restore the heading\\\", \\\"body\\\": \\\"The heading identifies the example.\\\"}, {\\\"severity\\\": \\\"important\\\", \\\"path\\\": \\\"example.txt\\\", \\\"line\\\": 2, \\\"title\\\": \\\"Keep the example\\\", \\\"body\\\": \\\"The example illustrates the format.\\\"}]}\"\n      }\n    },\n    {\n      \"type\": \"turn.completed\",\n      \"usage\": {\n        \"input_tokens\": 30,\n        \"cached_input_tokens\": 0,\n        \"cache_write_input_tokens\": 0,\n        \"output_tokens\": 12,\n        \"reasoning_output_tokens\": 0\n      }\n    }\n  ],\n  \"reported_settings\": {\n    \"model\": null,\n    \"effort\": null\n  }\n}\n```\n\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "example-review[bot]"
+    }
+  },
+  {
+    "number": 3,
+    "id": 5,
+    "commit_id": "0000000000000000000000000000000000000005",
+    "body": "<!-- loopzero:review v=1 head=0000000000000000000000000000000000000005 kind=delta source=model -->\n**approve**\n\n<details><summary>Raw reviewer output</summary>\n\n```\n{\n  \"type\": \"codex_exec_result\",\n  \"session_id\": \"startup-5\",\n  \"token_usage\": {\n    \"input_tokens\": 30,\n    \"cached_input_tokens\": 0,\n    \"cache_write_input_tokens\": 0,\n    \"output_tokens\": 12,\n    \"reasoning_output_tokens\": 0\n  },\n  \"final_message\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": []}\",\n  \"events\": [\n    {\n      \"type\": \"thread.started\",\n      \"thread_id\": \"startup-5\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"error\",\n        \"id\": \"startup\",\n        \"message\": \"Code Mode is unavailable because failed to spawn code-mode host /opt/example/codex/0.164.0/bin/codex-code-mode-host: executable not found. Code mode will fail closed.\"\n      }\n    },\n    {\n      \"type\": \"turn.started\"\n    },\n    {\n      \"type\": \"item.completed\",\n      \"item\": {\n        \"type\": \"agent_message\",\n        \"id\": \"final\",\n        \"text\": \"{\\\"verdict\\\": \\\"approve\\\", \\\"findings\\\": []}\"\n      }\n    },\n    {\n      \"type\": \"turn.completed\",\n      \"usage\": {\n        \"input_tokens\": 30,\n        \"cached_input_tokens\": 0,\n        \"cache_write_input_tokens\": 0,\n        \"output_tokens\": 12,\n        \"reasoning_output_tokens\": 0\n      }\n    }\n  ],\n  \"reported_settings\": {\n    \"model\": null,\n    \"effort\": null\n  }\n}\n```\n\n</details>",
+    "state": "COMMENTED",
+    "user": {
+      "login": "example-review[bot]"
+    }
+  }
+]
