@@ -117,7 +117,16 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
-    _git(repo_root, "fetch", "--quiet", "origin", base_branch)
+    try:
+        _git(repo_root, "fetch", "--quiet", "origin", base_branch)
+    except GitError:
+        if "origin" not in _git(repo_root, "remote").splitlines():
+            raise WorktreeError(
+                "no Git remote named 'origin'. Add it with `git remote add origin <url>` "
+                "using the URL for the repository in `[repo] name`, or rename that remote "
+                "with `git remote rename <name> origin`."
+            ) from None
+        raise
     base_ref = f"origin/{base_branch}"
     base = _git(repo_root, "rev-parse", base_ref)
     if existing:
