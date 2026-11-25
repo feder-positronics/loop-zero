@@ -555,15 +555,42 @@ def test_gh_error_tail_joins_stderr_and_stdout(gh: FakeGh) -> None:
 ])
 def test_gh_errors_keep_remediation_after_redaction(gh: FakeGh, failure: str, remedy: str) -> None:
     token = "ghs_FAKE000"
-    gh.fail("api user", f"{failure}: {token}")
+    gh.fail("api user", f"{failure}: {token}\ntoken:")
 
     with pytest.raises(github.GhError) as info:
         github._gh("api", "user", "-f", f"value={token}", token=token)
 
     assert remedy in str(info.value)
+    if failure.startswith("HTTP"):
+        assert "Rate limited:" in str(info.value)
     assert token not in str(info.value)
     assert token not in info.value.tail
     assert all(token not in arg for arg in info.value.command)
+
+
+@pytest.mark.parametrize("scheme", ["Basic", "Bearer", "token"])
+def test_gh_errors_redact_authorization_header(gh: FakeGh, scheme: str) -> None:
+    header = f"Authorization: {scheme} opaque-synthetic-value"
+    gh.fail("api user", f"HTTP 401\n{header}")
+
+    with pytest.raises(github.GhError, match="HTTP 401") as info:
+        github._gh("api", "user", "-H", header)
+
+    assert "opaque-synthetic-value" not in str(info.value)
+    assert "opaque-synthetic-value" not in info.value.tail
+    assert "opaque-synthetic-value" not in " ".join(info.value.command)
+
+
+def test_invalid_gh_json_keeps_redacted_diagnostic(gh: FakeGh, monkeypatch) -> None:
+    token = "synthetic-app-credential"
+    monkeypatch.setattr(github, "app_token", lambda: token)
+    gh.respond("api user", {"stdout": f"proxy refused {token}", "exit": 0})
+
+    with pytest.raises(github.GhError, match="invalid JSON from gh: proxy refused") as info:
+        github._gh_json("api", "user")
+
+    assert token not in str(info.value)
+    assert token not in info.value.tail
 
 
 def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:

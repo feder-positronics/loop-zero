@@ -177,9 +177,11 @@ def _redact_tokens(value: str, token: str = "") -> str:
                    os.environ.get("GITHUB_TOKEN", "")):
         if secret:
             value = value.replace(secret, "[REDACTED]")
-    value = re.sub(r"(?i)\bBearer\s+[^\s,;]+", "Bearer [REDACTED]", value)
+    value = re.sub(r"(?i)\b(authorization)[ \t]*[:=][ \t]*"
+                   r"(?:(?:basic|bearer|token)[ \t]+)?[^\s,;]+", r"\1=[REDACTED]", value)
+    value = re.sub(r"(?i)\bBearer[ \t]+[^\s,;]+", "Bearer [REDACTED]", value)
     value = _GITHUB_TOKEN_RE.sub("[REDACTED]", value)
-    value = re.sub(r"(?i)\b(access_token|auth_token|token|authorization)\s*[:=]\s*"
+    value = re.sub(r"(?i)\b(access_token|auth_token|token)[ \t]*[:=][ \t]*"
                    r"[^\s,;]+", r"\1=[REDACTED]", value)
     value = re.sub(r"(?i)(https?://[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
     return re.sub(r"(?<!\S)(/[^?\s]+)\?[^\s]+", r"\1?[REDACTED]", value)
@@ -254,6 +256,13 @@ def _transient_error(tail: str, retry_idempotent: bool) -> bool:
     )
 
 
+def _selected_token(token: str | None, read_only: bool) -> str:
+    if token is not None or not read_only:
+        return token or ""
+    scope = _read_scope.get()
+    return scope[1] if scope else app_token()
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
@@ -265,8 +274,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    selected = token if token is not None else (
-        scope[1] if scope else (app_token() if read_only else ""))
+    selected = _selected_token(token, read_only)
     deadline = scope[0] if scope else None
     for delay in ((None,) if deadline is not None else (*RETRY_DELAYS, None)):
         if deadline is not None:
@@ -352,11 +360,13 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
 
 
 def _gh_json(*args: str, token: str | None = None) -> object:
-    out = _gh(*args, token=token)
+    selected = _selected_token(token, _read_only(args))
+    out = _gh(*args, token=selected)
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError:
-        raise GhError(("gh", *args), "invalid JSON from gh", token=token or "") from None
+        detail = _redact_tokens(out, selected).strip()[-500:]
+        raise GhError(("gh", *args), f"invalid JSON from gh: {detail}", token=selected) from None
 
 
 def _paged(endpoint: str, key: str = "check_runs") -> list:
