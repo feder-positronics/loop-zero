@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -74,19 +76,27 @@ def run(
     argv = [str(part) for part in argv]
     started = time.monotonic()
     try:
-        proc = subprocess.run(
+        with subprocess.Popen(
             argv,
             cwd=str(cwd),
             env=build_env(env_allowlist, extra_env),
-            **({"input": input} if input is not None else {"stdin": subprocess.DEVNULL}),
+            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
             text=True,
             encoding=encoding,
             errors="replace",
-            timeout=timeout,
-            check=False,
-        )
+            start_new_session=os.name == "posix",
+        ) as proc:
+            try:
+                stdout, stderr = proc.communicate(input, timeout=timeout)
+            except BaseException:
+                if os.name == "posix":
+                    with suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                else:
+                    proc.kill()
+                raise
     except FileNotFoundError as exc:
         if exc.filename == str(cwd):
             raise FileNotFoundError(f"working directory {cwd} does not exist") from exc
@@ -104,7 +114,7 @@ def run(
         ) from exc
     return Completed(
         exit_code=proc.returncode,
-        stdout=proc.stdout or "",
-        stderr=proc.stderr or "",
+        stdout=stdout or "",
+        stderr=stderr or "",
         duration_s=time.monotonic() - started,
     )

@@ -257,6 +257,9 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     return "delta", reviewed
 
 
+MERGEABILITY_PENDING = "GitHub is computing mergeability"
+
+
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
@@ -295,9 +298,7 @@ def _readiness(
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
-        result = github.Readiness(
-            not reasons, reasons, result.waitable_failures, result.stale_verdicts
-        )
+        result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
     if result.reasons == (github.MISSING_REVIEW_REASON,):
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
@@ -305,6 +306,8 @@ def _readiness(
                 f"review cap spent (primary + delta) and {head[:12]} has no eligible review. "
                 "Open a new PR for the changes that need review",
             ))
+    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
+        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     return result
 
 
@@ -399,7 +402,7 @@ def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
                          re.DOTALL | re.MULTILINE)
     match = pattern.search(body)
     if match is None:
-        return f"{body.rstrip()}\n\n## Validation\n{block}\n"
+        return _validate_pr_body_size(f"{body.rstrip()}\n\n## Validation\n{block}\n")
     content = match.group(1)
     if _CHECKS_START in content or _CHECKS_END in content:
         if (content.count(_CHECKS_START) != 1 or content.count(_CHECKS_END) != 1
@@ -416,7 +419,17 @@ def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
             "", content, flags=re.MULTILINE,
         )
         content = block + "\n" + ("\n" + content.lstrip("\n") if content.strip() else "\n")
-    return body[:match.start()] + "## Validation\n" + content + body[match.end():]
+    return _validate_pr_body_size(body[:match.start()] + "## Validation\n" + content + body[match.end():])
+
+
+def _validate_pr_body_size(body: str) -> str:
+    limit = 65_536
+    if len(body) > limit:
+        raise CliError(
+            f"generated PR body is {len(body)} characters; GitHub allows {limit}. "
+            "Shorten the PR description or validation text and rerun the command."
+        )
+    return body
 
 
 def _sync_task_narrative(wt: Path, existing: str) -> str:
@@ -569,12 +582,16 @@ def cmd_pr(args: argparse.Namespace) -> int:
     _require_task_branch(config, branch)
     _require_clean(wt)
     _require_pr_details(wt)
-    pr = github.merged_pr_for_branch(config.repo, branch) or github.pr_for_branch(config.repo, branch)
+    pr = github.merged_pr_for_branch(config.repo, branch)
+    if pr is None:
+        pr = github.pr_for_branch(config.repo, branch, open_only=True)
     if pr is not None and pr.state == "MERGED":
         raise CliError(
             f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
             "run `loopzero start <new-task-slug>` for a new task"
         )
+    existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
+    body = _pr_body(wt, head, existing)
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
     if force_lease:
@@ -594,12 +611,11 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
         raise
     if pr is not None and pr.state == "OPEN":
-        body = _pr_body(wt, head, _sync_task_narrative(wt, pr.body or ""))
         if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
-            config.repo, branch, config.base_branch, _pr_title(wt, branch), _pr_body(wt, head)
+            config.repo, branch, config.base_branch, _pr_title(wt, branch), body
         )
     print(pr.url)
     return 0
@@ -635,12 +651,8 @@ def _require_review_pr(config: Config, branch: str, *, repost: bool) -> github.P
                 f"Could not read PR #{number}. Verify that PR and its branch {branch!r}, "
                 f"then rerun `{retry}`. {exc}"
             ) from exc
-        if endpoint.startswith(f"{pulls}?") and github.app_token():
-            raise CliError(
-                f"GitHub App could not access pull requests for {config.repo} (HTTP 404). "
-                "Check that the GitHub App installation includes this repository, "
-                f"then rerun `{retry}`."
-            ) from exc
+        if exc.tail.endswith(github.PR_APP_INSTALLATION_HINT):
+            raise CliError(f"{exc}\nThen rerun `{retry}`.") from exc
         raise
 
 
@@ -798,15 +810,17 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
 
-def _review_formats(result: ReviewResult) -> list[tuple[str, bool, bool]]:
+def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettingsLayout, bool]]:
     old_settings = "requested_settings" not in result.provenance
-    formats = [(False, False)]
+    formats: list[tuple[github.ReviewSettingsLayout, bool]] = [("current", False)]
     if runners.codex_evidence(result) is None:
-        formats.append((False, True))
+        formats.append(("current", True))
         if old_settings:
-            formats.append((True, True))
+            formats.append(("summary", True))
+    if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
+        formats.append(("requested-reported", True))
     if result.family == "codex" and old_settings:
-        formats.append((True, False))
+        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
@@ -834,7 +848,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
-            raise CliError("conflicting or ambiguous review publication")
+            hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
+                    if expected is None else "")
+            raise CliError(f"conflicting or ambiguous review publication{hint}")
         comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
@@ -1069,14 +1085,14 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if waiting:
         github.mark_ready(config.repo, pr.number)
         if args.wait is None:
-            print(f"marked ready; waiting for required checks: {', '.join(waiting)}; {NEXT_WAIT}")
+            pending = f"; {MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
+            print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
                                   shown=readiness.reasons if kicked else ())
         if waited is None:
-            print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
         pr, readiness, kicked = waited
     if readiness.ready and pr.is_draft and not kicked:
@@ -1084,14 +1100,13 @@ def cmd_ready(args: argparse.Namespace) -> int:
         if args.wait is not None:
             waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started)
             if waited is None:
-                print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
                 return 3
             pr, readiness, kicked = waited
     for reason in readiness.reasons:
         print(f"not ready: {reason}")
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
-            print(f"not ready: required checks pending or missing; {NEXT_WAIT}")
+            print(NEXT_WAIT)
         return 1
     print(f"ready: {pr.url}")
     return 0
@@ -1100,22 +1115,23 @@ def cmd_ready(args: argparse.Namespace) -> int:
 def _draft_checks_waiting(
     config: Config, pr: github.PR, readiness: github.Readiness
 ) -> tuple[str, ...]:
-    if not pr.is_draft or not readiness.reasons:
+    reasons = set(readiness.reasons) - {MERGEABILITY_PENDING}
+    if not pr.is_draft or not reasons:
         return ()
     expected: dict[str, str] = {}
     for name in config.required_ci:
         expected[f"required check '{name}' missing on {pr.head_sha[:12]}"] = name
         expected[f"required check '{name}' is skipped"] = name
-    if not all(reason in expected for reason in readiness.reasons):
+    if not reasons <= expected.keys():
         return ()
-    blocked = {expected[reason] for reason in readiness.reasons}
+    blocked = {expected[reason] for reason in reasons}
     return tuple(name for name in config.required_ci if name in blocked)
 
 
 def _pending_checks(
     config: Config, pr: github.PR, readiness: github.Readiness, kicked: bool = False
 ) -> tuple[str, ...]:
-    """Reasons worth waiting on: every blocker is a required check that may still turn green.
+    """Reasons worth waiting on: mergeability or required checks can still settle.
 
     `kicked` also accepts `skipped`: this run just marked the draft ready, and the
     skipped result belongs to the draft until GitHub replaces it.
@@ -1123,6 +1139,7 @@ def _pending_checks(
     states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if kicked else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
     waitable.update(readiness.waitable_failures)
+    waitable.add(MERGEABILITY_PENDING)
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
@@ -1153,6 +1170,7 @@ def _wait_for_checks(
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
+    current = pr
     stale_notice = False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
@@ -1167,7 +1185,7 @@ def _wait_for_checks(
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
                                     shown=readiness.reasons)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
-            return None  # A post-transition read cannot grant success beyond the original deadline.
+            break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
         if not pending:
             return current, readiness, kicked
@@ -1186,13 +1204,17 @@ def _wait_for_checks(
         if (
             elapsed >= MISSING_RUN_GRACE
             and all(" missing on " in r for r in pending)
-            and "pending" not in github.check_runs(config.repo, pr.head_sha).values()
+            and not readiness.has_pending_checks
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
+    if current.mergeable == "UNKNOWN":
+        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
+    else:
+        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
     return None
 
 
@@ -1255,6 +1277,15 @@ MERGIFY_DEQUEUE_HINT = (
 )
 
 
+def _mergify_departure(
+    config: Config, pr: github.PR, queue: str, closed: list[github.GhError],
+) -> str | None:
+    sha = _landed(config, pr, closed)
+    if not sha and not closed:
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    return sha
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1264,6 +1295,7 @@ def _wait_for_mergify(
     queue = config.mergify_queue
     assert queue is not None
     state = None
+    deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = _landed(config, pr, closed)
@@ -1272,20 +1304,19 @@ def _wait_for_mergify(
         if not mergify.configured(config.repo, config.base_branch, queue):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
-        sha = _landed(config, pr, closed)
-        if sha:
+        deferred_landing_read = confirmed and state is not None and not closed
+        if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            sha = _landed(config, pr, closed)
-            if sha:
+            if sha := _mergify_departure(config, pr, queue, closed):
                 return sha
-            if closed:
-                continue
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    # A queued, open PR normally gets its next landing read on the next tick.
+    if deferred_landing_read and (sha := _landed(config, pr, closed)):
+        return sha
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
@@ -1368,7 +1399,6 @@ def cmd_merge(args: argparse.Namespace) -> int:
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=False, started=started)
         if waited is None:
-            print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
             return 3
         pr, readiness, _ = waited
     if readiness is None:
