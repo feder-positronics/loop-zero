@@ -10,6 +10,7 @@ import os
 import re
 import resource
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -47,6 +48,31 @@ class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
 
 
+class _CheckTerminated(BaseException):
+    """Unwind the active check before exiting from SIGTERM."""
+
+
+def _terminate_check(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise _CheckTerminated
+
+
+@contextmanager
+def _unwind_on_sigterm():
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
+        yield
+        return
+    try:
+        with ExitStack() as handler:
+            handler.callback(signal.signal, signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGTERM, _terminate_check)
+            yield
+    except _CheckTerminated:
+        signal.raise_signal(signal.SIGTERM)
+        raise
+
+
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
@@ -74,7 +100,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with ExitStack() as stack:
+    with _unwind_on_sigterm(), ExitStack() as stack:
         prefix = []
         if not config.check_runner:
             home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))

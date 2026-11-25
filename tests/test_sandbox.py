@@ -3,19 +3,26 @@ from __future__ import annotations
 import itertools
 import json
 import os
+import re
 import resource
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import traceback
+from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from pathlib import Path
+from select import select
 
 import pytest
 
 from loopzero import sandbox
 from loopzero.cli import _save_report
-from loopzero.types import Config, ResourceLimits
+from loopzero.types import CheckReport, CheckResult, Config, ResourceLimits
 
 from .conftest import git
 
@@ -216,16 +223,6 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
         return communicate(process, input, timeout)
 
     monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
-
-
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
-    inject_check_timeout(monkeypatch, b"x" * 20_000 + b"partial")
-    report = sandbox.run_checks(
-        make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
-    )
-    (first,) = report.results
-    assert (first.exit_code, len(first.tail.encode("utf-8"))) == (sandbox.TIMEOUT_EXIT, 16 * 1024)
-    assert "partial\n[loopzero] timed out" in first.tail and not report.ok
 
 
 def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
@@ -491,17 +488,12 @@ def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
 def test_silent_stage_reports_live_metadata_then_completion(
     git_repo, bwrap_log, monkeypatch, exit_code
 ):
-    import re
-    import time
-
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
     events = []
     monkeypatch.setenv("LZ_KEEP", "credential-value")
     command = f'sleep 0.3; echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
     cfg = make_config(checks=(command, "echo next"))
-    report = sandbox.run_checks(
-        cfg, git_repo, progress=lambda command: events.append(command), status=events.append
-    )
+    report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=events.append)
     assert report.results[0].exit_code == exit_code
     assert report.results[0].tail == "credential-value\nprivate-stderr"
     statuses = [event for event in events if event not in cfg.checks]
@@ -538,9 +530,9 @@ def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log
     assert not report.ok
 
 
-def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, monkeypatch):
-    import threading
-
+@pytest.mark.parametrize("output", [None, b"private\n", b"x" * 20_000 + b"partial"],
+                         ids=["keyboard-interrupt", "timeout", "oversized-timeout"])
+def test_cancel_or_timeout_stops_heartbeat(git_repo, bwrap_log, monkeypatch, output):
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
     observed, events, reporters = threading.Event(), [], []
 
@@ -553,38 +545,55 @@ def test_timeout_stops_heartbeat_and_retains_failure_tail(git_repo, bwrap_log, m
             assert reporters and all(not reporter.is_alive() for reporter in reporters)
 
     def wait_for_heartbeat():
-        assert observed.wait(5), "no running heartbeat before timeout"
-
-    inject_check_timeout(monkeypatch, b"private\n", wait_for_heartbeat)
-    report = sandbox.run_checks(
-        make_config(checks=("echo private", "echo never")), git_repo,
-        timeout=0.2, status=status,
-    )
-    assert any("running" in event for event in events)
-    assert events[-1].startswith("stage 1/2: exit 124 (")
-    assert all("private" not in event for event in events)
-    assert len(report.results) == 1 and not report.ok
-    assert report.results[0].tail == "private\n\n[loopzero] timed out after 0.2s"
-
-
-def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_log, monkeypatch):
-    import threading
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
-    observed, events, reporters = threading.Event(), [], []
-
-    def heartbeat(message):
-        events.append(message)
-        reporters.append(threading.current_thread())
-        observed.set()
-
-    def cancel(*args):
         assert observed.wait(5), "no running heartbeat before cancellation"
-        raise KeyboardInterrupt
-    monkeypatch.setattr(sandbox, "_run_one", cancel)
-    with pytest.raises(KeyboardInterrupt):
-        sandbox.run_checks(make_config(), git_repo, status=heartbeat)
-    assert events and all("running" in event for event in events)
-    assert all(not reporter.is_alive() for reporter in reporters)
+        if output is None:
+            raise KeyboardInterrupt
+
+    inject_check_timeout(monkeypatch, output, wait_for_heartbeat)
+    config = make_config(checks=("echo private", "echo never"))
+    with pytest.raises(KeyboardInterrupt) if output is None else nullcontext():
+        report = sandbox.run_checks(config, git_repo, timeout=0.2, status=status)
+    assert reporters and all(not reporter.is_alive() for reporter in reporters)
+    assert all("private" not in event for event in events)
+    if output is None:
+        assert events and all("running" in event for event in events)
+    else:
+        (result,) = report.results
+        expected = output.decode() + "\n[loopzero] timed out after 0.2s"
+        assert result.exit_code == sandbox.TIMEOUT_EXIT and not report.ok
+        assert result.tail == expected[-16 * 1024:]
+        assert events[-1].startswith("stage 1/2: exit 124 (")
+
+
+def test_sigterm_cleans_only_the_cancelled_checks_private_directories(git_repo, bwrap_log, tmp_path):
+    script = """
+from tests.test_sandbox import Path, _save_report, make_config, sandbox
+sandbox.HEARTBEAT_INTERVAL = 0.03
+repo = Path.cwd()
+report = sandbox.run_checks(make_config(checks=("exec sleep 30",)), repo,
+                            status=lambda message: print(message, flush=True))
+_save_report(repo, report)
+"""
+    with ExitStack() as processes:
+        def start_check():
+            process = processes.enter_context(subprocess.Popen(
+                [sys.executable, "-c", script], cwd=git_repo, stdout=subprocess.PIPE,
+                env={**os.environ, "TMPDIR": str(tmp_path), "PYTHONPATH": str(Path.cwd())}, text=True,
+            ))
+            processes.callback(process.terminate)
+            assert select([process.stdout], [], [], 5)[0] and "running" in process.stdout.readline()
+            return process
+
+        cancelled = start_check()
+        cancelled_dirs = set(tmp_path.glob("loopzero-*"))
+        concurrent = start_check()
+        concurrent_dirs = set(tmp_path.glob("loopzero-*")) - cancelled_dirs
+        assert len(cancelled_dirs) == len(concurrent_dirs) == 2
+        cancelled.terminate()
+        assert cancelled.wait(timeout=5) == -signal.SIGTERM
+        assert set(tmp_path.glob("loopzero-*")) == concurrent_dirs
+        assert concurrent.poll() is None
+        assert not (git_repo / ".loopzero/checks.json").exists()
 
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
@@ -662,8 +671,6 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
 
 @pytest.mark.parametrize('symlink', [False, True])
 def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink):
-    from loopzero.types import CheckReport, CheckResult
-
     command = 'echo stage-ran; exit 7'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
     key = sandbox._input_key(cfg, git_repo, command)
