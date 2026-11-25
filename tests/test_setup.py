@@ -30,3 +30,7 @@ def test_agent_skill_links_install_and_upgrade_without_gnu_mv(tmp_path):
         for agent in (".agents", ".claude"):
             assert (home / agent / "skills/example").resolve(strict=True) == skill
         assert sorted(entry.name for entry in first_checkout.iterdir()) == ["core"]
+
+    reference = SETUP.parent / "core/skills/work-issue/reference.md"
+    reentry = reference.read_text().split("## Re-entry\n", 1)[1].split("\n## ", 1)[0]
+    assert "(../../CONTRACT.md#the-six-steps)" in reentry

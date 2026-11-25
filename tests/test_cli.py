@@ -60,7 +60,7 @@ reviewers = ["claude", "codex"]
 
 @pytest.fixture(scope="session")
 def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Prepare the checkout and bare origin that each case copies."""
+    """Prepare the clean and task checkouts and their bare origin."""
     seed = tmp_path_factory.mktemp("git-seed")
     checkout = init_git_repo(seed / "repo")
     (checkout / "workflow.toml").write_text(WORKFLOW)
@@ -70,16 +70,31 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
     git(checkout, "remote", "add", "origin", str(origin))
     git(checkout, "push", "-q", "origin", "main")
+    prepared = seed / "prepared"
+    shutil.copytree(checkout, prepared)
+    path = cli.worktree.start(prepared, "t1", "main")
+    (path / "feature.py").write_text("print('hi')\n")
+    task = cli.worktree.task_file(path)
+    for field, value in (
+        ("Goal", "The feature prints its greeting."),
+        ("Problem", "The feature is missing."),
+        ("Context", "The feature module is part of the sample application."),
+    ):
+        task.write_text(re.sub(rf"(?m)^(- \*\*{field}:\*\* )<.*>$", rf"\g<1>{value}", task.read_text()))
+    shutil.move(task.parent, seed / ".loopzero")
+    git(path, "add", "feature.py")
+    git(path, "commit", "-q", "-m", "add feature")
+    git(prepared, "worktree", "remove", str(path))
     return seed
 
 
 @pytest.fixture
-def repo(git_seed: Path, tmp_path: Path, fake_tool) -> Path:
+def repo(git_seed: Path, tmp_path: Path, fake_tool, request: pytest.FixtureRequest) -> Path:
     """A private copy of both Git repositories and a per-case fake bwrap."""
     checkout = tmp_path / "repo"
-    origin = tmp_path / "origin.git"
-    shutil.copytree(git_seed / "repo", checkout)
-    shutil.copytree(git_seed / "origin.git", origin)
+    seed_checkout = "prepared" if "wt" in request.fixturenames else "repo"
+    shutil.copytree(git_seed / seed_checkout, checkout)
+    origin = shutil.copytree(git_seed / "origin.git", tmp_path / "origin.git")
     git(checkout, "remote", "set-url", "origin", str(origin))
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
     return checkout
@@ -120,7 +135,7 @@ def test_start_reports_handoff_publication_failure(repo, monkeypatch, capsys, li
 
 @pytest.fixture
 def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Replay only GitHub CLI requests in-process for the polling cases."""
+    """Replay GitHub CLI requests in-process while keeping real Git commands."""
     run_process = github.run
 
     def run(argv, *, cwd, env_allowlist, extra_env=None, **kwargs):
@@ -135,25 +150,10 @@ def replay_gh(gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-def wt(repo: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> Path:
-    """A started worktree with one commit on top of base; cwd is inside it."""
-    monkeypatch.chdir(repo)
-    assert cli.main(["start", "t1"]) == 0
-    path = Path(capsys.readouterr().out.strip())
-    assert path == repo / ".worktrees" / "t1"
-    (path / "feature.py").write_text("print('hi')\n")
-    task = path / ".loopzero" / "task.md"
-    task.write_text(
-        task.read_text()
-        .replace(
-            "<plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>",
-            "The feature module is part of the sample application.",
-        )
-        .replace("<one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>", "The feature is missing.")
-        .replace("<one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>", "The feature prints its greeting.")
-    )
-    git(path, "add", "feature.py")
-    git(path, "commit", "-q", "-m", "add feature")
+def wt(repo: Path, git_seed: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    path = cli.worktree.worktree_dir(repo, "t1")
+    git(repo, "worktree", "add", "-q", str(path), "lz/t1")
+    shutil.copytree(git_seed / ".loopzero", cli.worktree.task_file(path).parent)
     monkeypatch.chdir(path)
     return path
 
@@ -881,25 +881,33 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
+@pytest.mark.parametrize("hook_fails", [False, True])
 def test_pr_uses_lease_for_rewritten_open_pr(
-    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys
+    wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, hook_fails: bool
 ) -> None:
     old = head_of(wt)
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     git(wt, "reset", "-q", "--soft", "HEAD~1")
     git(wt, "commit", "-q", "-m", "rebased feature")
     head = head_of(wt)
+    if hook_fails:
+        hook = fake_tool("pre-push", "echo 'lint failed in widget.py' >&2\nexit 1\n")
+        git(wt, "config", "core.hooksPath", str(hook.parent))
     pushes = trace_pushes(fake_tool, tmp_path)
     gh.respond_pr_list([pr_json(headRefOid=old)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
 
     code, out, err = run(capsys, "pr")
 
-    assert (code, out, err) == (0, URL + "\n", "")
+    if hook_fails:
+        assert (code, out) == (1, "") and "lint failed in widget.py" in err
+        assert "remote moved" not in err and all("PATCH" not in call["argv"] for call in gh.calls)
+    else:
+        assert (code, out, err) == (0, URL + "\n", "")
     assert pushes.read_text().strip() == (
-        f"push -u origin --force-with-lease=lz/t1:{old} lz/t1"
+        f"push -u origin --porcelain --force-with-lease=lz/t1:{old} lz/t1"
     )
-    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == head
+    assert git(repo.parent / "origin.git", "rev-parse", "refs/heads/lz/t1").strip() == (old if hook_fails else head)
 
 
 def test_pr_reports_rejected_lease_without_overwriting_remote(
@@ -1494,7 +1502,7 @@ def test_review_delta_refuses_base_merge_since_primary(wt, repo, gh, fake_bin, c
     assert f"merge commit {merge[:12]} since the reviewed head {reviewed[:12]}" in err
     assert f"`git reset --hard {reviewed}`" in err
     assert "cherry-pick any later fixes" in err
-    assert "run `loopzero review` before merging main again" in err
+    assert "run `loopzero pr`, then `loopzero review` before merging main again" in err
 
 
 def test_review_delta_replays_fixes_when_reviewed_head_is_second_parent(
@@ -1524,6 +1532,7 @@ def test_review_delta_refuses_rewritten_primary(wt, gh, fake_bin, capsys):
     assert code == 1 and not out and not (fake_bin / "claude.stdin").exists()
     assert f"reviewed head {reviewed[:12]} is not an ancestor" in err
     assert "git reflog" in err and "open a new PR" in err
+    assert "run `loopzero pr`, then `loopzero review` before merging main" in err
 
 
 def test_review_appends_line_after_existing_review(wt: Path, gh: FakeGh, fake_bin, capsys, head) -> None:
@@ -1583,7 +1592,35 @@ def test_review_publisher_check_uses_app_identity(
         assert "not a configured review publisher" in err
 
 
-@pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN), (["app", ""], "app[bot]")])
+@pytest.mark.parametrize("after_review", ["app[bot]", "other[bot]", "helper fails"])
+def test_review_reminted_app_token_keeps_publisher(
+    wt: Path, gh: FakeGh, fake_bin: Path, tmp_path: Path, monkeypatch, capsys, after_review: str,
+) -> None:
+    helper = tmp_path / "app-token"
+    counter = tmp_path / "helper-calls"
+    fail = f"[ $(wc -l < {counter}) -eq 1 ] || exit 1\n" if after_review == "helper fails" else ""
+    helper.write_text(f"#!/bin/sh\necho called >> {counter}\n{fail}echo synthetic-token-$(wc -l < {counter})\n")
+    helper.chmod(0o755)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    wall, run_review = [1_000_000.0], cli._run_review
+    monkeypatch.setattr(github.time, "time", lambda: wall[0])
+    monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), wall.append(wall.pop() + 3601))[0])
+    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
+    git(wt, "commit", "-qam", "configure publisher")
+    git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
+    head = prepare_review(wt, gh, fake_bin, post_id=3)
+    gh.respond("api graphql viewer", {"data": {"viewer": {"login": "app[bot]"}}},
+               {"data": {"viewer": {"login": after_review}}})
+    code, _, err = run(capsys, "review")
+    posts = [c["token"] for c in gh.calls if "/reviews" in " ".join(c["argv"]) and "POST" in c["argv"]]
+    if after_review == "app[bot]":
+        assert code == 0 and posts == ["synthetic-token-2"]
+    else:
+        assert code == 1 and "could not refresh the app token" in err and "--repost" in err and posts == []
+        assert cli._review_file(wt, head, "primary").is_file()
+
+
+@pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN)])  # app -> unavailable: reminted test
 def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys, tokens, publisher):
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
     monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
@@ -1794,7 +1831,7 @@ def test_review_falls_back_after_timeout(wt: Path, gh: FakeGh, capsys, monkeypat
     ("APPROVED", "approve", "ahead", False, False, "clean"),
 ])
 def test_ready_after_primary_reviewed_head(
-    wt, gh, capsys, monkeypatch, fake_tool, state, verdict, comparison, resolved, ready, history, reposted,
+    wt, gh, capsys, monkeypatch, fake_tool, replay_gh, state, verdict, comparison, resolved, ready, history, reposted,
 ):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
@@ -2773,6 +2810,51 @@ def test_merge_wait_preserves_deadline_and_terminal_failure(wt, gh, capsys, monk
         assert code == 1 and failed in err
 
 
+@pytest.mark.parametrize("wait", [False, True])
+@pytest.mark.parametrize("outcome", ["open", "changed", "closed", "invalid", "merged"])
+def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeypatch, wait, outcome):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    detail = f"api repos/{REPO}/pulls/7"
+    merged_sha = "e" * 40
+    snapshots = {
+        "open": rest_pr_json(pr_json(headRefOid=head, isDraft=False)),
+        "changed": merge_json(head="f" * 40),
+        "closed": merge_json(state="CLOSED", head=head),
+        "invalid": {"state": "open", "head": {"sha": head}},
+        "merged": merge_json(state="MERGED", head=head, sha=merged_sha),
+    }
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, outcome == "open"))
+
+    def membership(*_):
+        gh.append(detail, snapshots[outcome])
+        return mergify.Membership()
+
+    monkeypatch.setattr(mergify, "membership", membership)
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: pytest.fail("unexpected confirmation"))
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("unexpected request"))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+    gh.respond("api -X", "")
+
+    code, out, err = run(capsys, "merge", *(["--wait=1"] if wait else []))
+
+    calls = [c["argv"][:2] for c in gh.calls]
+    assert calls.count(LOOKUP_CALLS[0]) == 1
+    assert calls.count(detail.split()) == 2
+    if outcome == "merged":
+        assert (code, err) == (0, "") and out.splitlines()[-1] == merged_sha
+        assert not wt.exists()
+    elif outcome == "open":
+        assert (code, err) == (3 if wait else 0, "")
+        assert wt.exists()
+    else:
+        diagnostic = {"changed": "head changed", "closed": "closed without", "invalid": "invalid PR"}
+        assert code == 1 and diagnostic[outcome] in err
+        assert wt.exists()
+
+
 def test_mergify_admission_lookups_count_against_the_deadline(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
@@ -3637,7 +3719,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
-        assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 2
+        assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged", "worktree_removed"}:

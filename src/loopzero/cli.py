@@ -75,6 +75,17 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
     return done.stdout.strip()
 
 
+def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
+    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
+                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    if done.exit_code != 0:
+        detail = _proc.tail(done.stderr)[-2000:]
+        if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
+                               for line in done.stdout.splitlines()):
+            detail += "\nremote moved since PR lookup; fetch and retry"
+        raise CliError(f"git {' '.join(args)} failed: {detail.strip()}")
+
+
 def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
 
@@ -630,14 +641,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        push.append(f"--force-with-lease={branch}:{pr.head_sha}")
+        push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
-    try:
-        _git(wt, *push, timeout=PUSH_TIMEOUT)
-    except CliError as exc:
-        if force_lease:
-            raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
-        raise
+    _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
         if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
@@ -779,6 +785,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     if args.repost:
         prefix = _repost_prefix(result)
     _save_review(wt, result, {"repo": config.repo, "number": pr.number, "publisher": publisher})
+    token = _refresh_publisher_token(token, publisher)
     try:
         github.post_review(
             config.repo, pr.number, head, result, body_prefix=prefix, pr=pr, token=token,
@@ -803,6 +810,16 @@ def cmd_review(args: argparse.Namespace) -> int:
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
+
+
+def _refresh_publisher_token(token: str, publisher: str) -> str:
+    """The review may outlive the app token: re-mint it, but only for the same publisher."""
+    if not token or (fresh := github.app_token()) == token:
+        return token
+    if not fresh or github.login(token=fresh).casefold() != publisher.casefold():
+        raise CliError(f"could not refresh the app token for review publisher {publisher}; the review "
+                       "is saved: fix the app token helper, then run `loopzero review --repost`")
+    return fresh
 
 
 def _review_verdict(result: ReviewResult) -> int:
@@ -908,8 +925,8 @@ def _run_review(
         raise CliError(
             f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
             "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
-            "`git reset --hard <original-tip>` and replay any later fixes. Push the restored head "
-            f"and run `loopzero review` before merging {config.base_branch}, or open a new PR "
+            "`git reset --hard <original-tip>` and replay any later fixes. To publish the restored "
+            f"head, run `loopzero pr`, then `loopzero review` before merging {config.base_branch}, or open a new PR "
             "from the current branch"
         )
     if kind == "delta" and (merges := worktree.merges_since(wt, since)):
@@ -917,7 +934,8 @@ def _run_review(
         raise CliError(
             f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
             f"merged-in changes in the delta material. To recover, {recovery}. "
-            f"Push the recovered head and run `loopzero review` before merging {config.base_branch} again"
+            f"To publish the recovered head, run `loopzero pr`, then `loopzero review` "
+            f"before merging {config.base_branch} again"
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)
@@ -1411,7 +1429,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    config: Config, branch: str, pr: github.PR,
+    config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
@@ -1428,11 +1446,8 @@ def _merge_with_mergify(
         config.repo, pr.number, pr.head_sha, queue
     )
     state = mergify.membership(config.repo, pr.number, queue)
-    current = _require_pr(config, branch, allow_merged=True)
-    if current.head_sha != pr.head_sha:
-        raise CliError(
-            f"PR head changed during Mergify lookup: {pr.head_sha[:12]} to {current.head_sha[:12]}"
-        )
+    if sha := github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha):
+        return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
@@ -1494,7 +1509,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, branch, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
