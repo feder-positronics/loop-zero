@@ -2660,6 +2660,23 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+@pytest.mark.parametrize("base_sensitive", [False, True])
+def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
+    if base_sensitive:
+        publish_workflow(wt, WORKFLOW.replace('[delivery]', '[checks.inputs]\n"*" = ["."]\n\n[delivery]'))
+    args = SimpleNamespace(command="ready", config=None)
+    config = cli._load_config(args, wt, pin_checks=True)
+    head = head_of(wt)
+    git(repo, "commit", "-qm", "advance base without editing policy", "--allow-empty")
+    git(repo, "push", "-q", "origin", "main")
+
+    if base_sensitive:
+        with pytest.raises(cli.CliError, match="check base changed while waiting; run loopzero check"):
+            cli._verify_wait_snapshot(args, wt, config, head, head)
+    else:
+        cli._verify_wait_snapshot(args, wt, config, head, head)
+
+
 @pytest.mark.parametrize("fixed", [False, True])
 def test_ready_matches_effective_inherited_check_environment(
     wt, gh, capsys, head, tmp_path, monkeypatch, fixed,

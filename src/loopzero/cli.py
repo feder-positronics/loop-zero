@@ -1230,11 +1230,18 @@ def _verify_wait_snapshot(
 ) -> None:
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
-    if args is None or (latest := _load_config(args, wt, pin_checks=True)) == config:
+    if args is None:
         return
+    latest = _load_config(args, wt, pin_checks=True)
+    changed = "workflow settings"
+    if latest == config:
+        if (latest.trusted_base_revision == config.trusted_base_revision
+                or not (config.check_runner or config.inputs)):
+            return
+        changed = "check base"
     if _current_check_report(wt, latest, head) is None:
-        raise CliError("workflow settings changed while waiting; run loopzero check and retry")
-    raise CliError("workflow settings changed while waiting; retry with the current settings")
+        raise CliError(f"{changed} changed while waiting; run loopzero check and retry")
+    raise CliError(f"{changed} changed while waiting; retry with the current settings")
 
 
 def _wait_for_checks(
