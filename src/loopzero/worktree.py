@@ -118,7 +118,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", base_branch)
+        _git(repo_root, "fetch", "--quiet", "origin", f"refs/heads/{base_branch}")
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -128,7 +128,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
             ) from None
         raise
     base_ref = f"origin/{base_branch}"
-    base = _git(repo_root, "rev-parse", base_ref)
+    base = _git(repo_root, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
