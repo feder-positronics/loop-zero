@@ -255,6 +255,29 @@ def test_start_prints_only_worktree_path(repo: Path, monkeypatch, capsys) -> Non
     assert (repo / ".worktrees" / "hello" / ".loopzero" / "task.md").exists()
 
 
+def test_start_uses_fetched_base_in_single_branch_clone(repo, tmp_path, monkeypatch, capsys):
+    feature = "feature/ci+release"
+    git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{feature}")
+    git(repo, "commit", "-qm", "advance main", "--allow-empty")
+    git(repo, "push", "-q", "origin", "main")
+    origin = tmp_path / "origin.git"
+    base = git(origin, "rev-parse", "--verify", "refs/heads/main").strip()
+    checkout = tmp_path / "single-branch"
+    git(repo, "clone", "-q", "--single-branch", "--branch", feature,
+        origin.as_uri(), str(checkout))
+    assert not git(checkout, "for-each-ref", "--format=%(refname)",
+                   "refs/heads/main", "refs/remotes/origin/main").strip()
+    monkeypatch.chdir(checkout)
+
+    code, out, err = run(capsys, "start", "example")
+
+    assert (code, err) == (0, "")
+    task = Path(out.strip())
+    assert task == checkout / ".worktrees" / "example"
+    assert head_of(task) == base
+    assert f"Base: {base}" in (task / ".loopzero/task.md").read_text().splitlines()
+
+
 def test_start_rejects_bad_slug_on_stderr(repo: Path, monkeypatch, capsys) -> None:
     monkeypatch.chdir(repo)
     code, out, err = run(capsys, "start", "../x")
