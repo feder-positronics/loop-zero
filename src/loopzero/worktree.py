@@ -129,9 +129,9 @@ def head(wt: Path) -> str:
 
 
 def branch(wt: Path) -> str:
-    name = _git(Path(wt), "symbolic-ref", "--quiet", "--short", "HEAD")
+    name = _git(Path(wt), "branch", "--show-current")
     if not name:
-        raise WorktreeError(f"detached HEAD in {wt}")
+        raise WorktreeError("HEAD is detached. Switch to a branch and retry.")
     return name
 
 

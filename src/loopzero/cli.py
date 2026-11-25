@@ -1389,10 +1389,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     wt = _toplevel()
     config = _load_config(args, wt, pin_checks=True)
-    branch = _git(wt, "branch", "--show-current")
-    if not branch:
-        raise CliError("HEAD is detached. Switch to a branch and retry.")
-    head = worktree.head(wt)
+    branch, head = worktree.branch(wt), worktree.head(wt)
     print(f"worktree: {wt}")
     print(f"branch:   {branch}")
     print(f"head:     {head}")
