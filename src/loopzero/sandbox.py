@@ -10,6 +10,7 @@ import os
 import re
 import resource
 import shutil
+import signal
 import tempfile
 import threading
 import time
@@ -47,6 +48,73 @@ class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
 
 
+class _CheckTerminated(BaseException):
+    """Unwind the active check before exiting from SIGTERM."""
+
+
+def _terminate_check(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise _CheckTerminated
+
+
+@contextmanager
+def _unwind_on_sigterm():
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
+        yield
+        return
+    try:
+        try:
+            signal.signal(signal.SIGTERM, _terminate_check)
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    except _CheckTerminated:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.raise_signal(signal.SIGTERM)
+        raise
+
+
+@contextmanager
+def _defer_check_sigterm():
+    """Finish a private directory operation before unwinding the check."""
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) is not _terminate_check):
+        yield
+        return
+    pending = False
+
+    def remember_signal(_signum, _frame):
+        nonlocal pending
+        pending = True
+
+    signal.signal(signal.SIGTERM, remember_signal)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, _terminate_check)
+        if pending:
+            _terminate_check(signal.SIGTERM, None)
+
+
+@contextmanager
+def _check_directories():
+    with ExitStack() as stack:
+        try:
+            yield stack
+        finally:
+            # Keep the stack's own exit as a fallback if SIGTERM arrives before deferral.
+            with _defer_check_sigterm():
+                stack.close()
+
+
+def _enter_check_directory(stack: ExitStack, prefix: str) -> Path:
+    with _defer_check_sigterm():
+        directory = tempfile.TemporaryDirectory(prefix=prefix)
+        stack.callback(directory.cleanup)
+    return Path(directory.name)
+
+
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
@@ -74,13 +142,11 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with ExitStack() as stack:
+    with _unwind_on_sigterm(), _check_directories() as stack:
         prefix = []
         if not config.check_runner:
-            home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-home-")))
-            scratch_root = Path(
-                stack.enter_context(tempfile.TemporaryDirectory(prefix="loopzero-scratch-"))
-            )
+            home = _enter_check_directory(stack, "loopzero-home-")
+            scratch_root = _enter_check_directory(stack, "loopzero-scratch-")
             private_parent = Path(commonpath((home, scratch_root)))
             for exposed in (*config.sandbox_ro, *config.writable):
                 if private_parent.is_relative_to(Path(exposed).resolve()):
@@ -191,11 +257,15 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
     reporter = threading.Thread(target=heartbeat, daemon=True) if status else None
     if reporter:
         reporter.start()
+    join_reporter = True
     try:
         yield
+    except _CheckTerminated:
+        join_reporter = False
+        raise
     finally:
         stopped.set()
-        if reporter:
+        if reporter and join_reporter:
             reporter.join()
 
 
@@ -457,11 +527,12 @@ def _dispatch_one(
         if not executable:
             raise ValueError("Stage runner executable missing")
         argv = (executable, *config.check_runner[1:])
-        with tempfile.TemporaryDirectory(prefix="loopzero-runner-") as cwd:
-            if any((Path(cwd) / path).resolve().is_relative_to(worktree.resolve())
+        with _check_directories() as stack:
+            cwd = _enter_check_directory(stack, "loopzero-runner-")
+            if any((cwd / path).resolve().is_relative_to(worktree.resolve())
                    or (not Path(path).is_absolute() and ".." in Path(path).parts
-                       and not (Path(cwd) / path).resolve().is_relative_to(Path(cwd)))
-                   for arg in (*argv, cwd)
+                       and not (cwd / path).resolve().is_relative_to(cwd))
+                   for arg in (*argv, str(cwd))
                    for value in (arg, arg.partition("=")[2],
                                  arg[2:] if arg.startswith("-") and not arg.startswith("--") else "")
                    for path in {value, *value.split(":")}
