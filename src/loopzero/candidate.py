@@ -325,7 +325,8 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                     while process.poll() is None:
                         _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
                         _require(time.monotonic() < deadline, "Git time bound exceeded")
-                        time.sleep(0.02)
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            process.wait(timeout=0.02)
                     _require(process.returncode == 0,
                              f"git {args[0]} exited {process.returncode}: objects unavailable, "
                              "resource bound hit, or integration conflict")

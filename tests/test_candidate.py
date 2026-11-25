@@ -17,6 +17,7 @@ from os import environ
 
 import pytest
 
+from loopzero import candidate
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from loopzero.types import LoopZeroError
 
@@ -751,3 +752,45 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
             run()
         assert len(reads) <= 7 and sum(sleeps) <= 90
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
+
+
+@pytest.mark.parametrize("exceeds_bound", [False, True])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_bound):
+    waits = []
+    killed = []
+
+    class Child:
+        pid = 123
+        returncode = 0
+
+        def __init__(self, argv, cwd, **kwargs):
+            self.root = cwd
+            self.running = "test-command" in argv
+
+        def poll(self):
+            return None if self.running else self.returncode
+
+        def wait(self, timeout=None):
+            if self.running:
+                waits.append(timeout)
+                if timeout is not None and exceeds_bound:
+                    (self.root / "oversized").write_bytes(b"x" * 65)
+                    raise subprocess.TimeoutExpired("test-command", timeout)
+                self.running = False
+            return self.returncode
+
+    monkeypatch.setenv("GH_TOKEN", "test-token")
+    monkeypatch.setattr(candidate, "_TREE_BYTES", 64)
+    monkeypatch.setattr(subprocess, "Popen", Child)
+    monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
+
+    with candidate.fetched_git("owner/repo", []) as git:
+        if exceeds_bound:
+            with pytest.raises(CandidateError, match="Git object/size bound exceeded"):
+                git("test-command")
+        else:
+            assert git("test-command") == ""
+
+    assert waits == ([0.02, None] if exceeds_bound else [0.02])
+    assert killed == ([(123, candidate.signal.SIGKILL)] if exceeds_bound else [])
