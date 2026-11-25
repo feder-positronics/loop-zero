@@ -525,8 +525,6 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
     for result in report.results:
-        print(f"exit {result.exit_code:<3} {result.duration_s:7.1f}s  {result.command}")
-    for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
@@ -740,8 +738,9 @@ def cmd_review(args: argparse.Namespace) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        github.update_body(config.repo, pr.number, _append_review(pr.body or _pr_body(wt, head), result))
-    except (github.GhError, OSError, ValueError) as exc:
+        live = github.pr_view(config.repo, pr.number)
+        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+    except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
