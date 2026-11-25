@@ -275,6 +275,43 @@ the contract's [six steps](core/CONTRACT.md#the-six-steps). Run `loopzero status
 to see the next step. See [Blockers](core/CONTRACT.md#blockers) for how to
 resolve review findings.
 
+## Removing an abandoned task worktree
+
+For a merged PR, run `loopzero merge` from its task worktree to retry cleanup.
+For a closed, unmerged PR outside the host retention job's scope, the task owner
+can remove the worktree manually after confirming it is abandoned and no session
+or job still uses it. In GitHub, verify the closed PR belongs to this repository
+and task branch, and copy its full head SHA. Preserve any delivery evidence
+required by the contract and inspect ignored files for local work or evidence
+before removing the tree. Resolve any shared stash or uncertain ownership first.
+
+Save the following as a shell script outside the task worktree. Run it from
+the primary checkout with `sh /path/to/script <task-slug> <pr-head-sha>`.
+It checks the worktree's branch, local head, live origin head and cleanliness
+before removal.
+
+```sh
+(
+    set -eu
+    slug=$1
+    pr_head=$2
+    branch="refs/heads/lz/$slug"
+    tree=".worktrees/$slug"
+    test "$(git -C "$tree" symbolic-ref --quiet HEAD)" = "$branch"
+    test "$(git -C "$tree" rev-parse HEAD)" = "$pr_head"
+    published=$(git ls-remote --exit-code origin "$branch")
+    test "$published" = "$(printf '%s\t%s' "$pr_head" "$branch")"
+    stash=$(git stash list)
+    test -z "$stash"
+    changes=$(git -C "$tree" status --porcelain --untracked-files=all --ignore-submodules=none)
+    test -z "$changes"
+    git worktree remove -- "$tree"
+)
+```
+
+If any check fails, leave the worktree in place. The command keeps both the
+local and published branches.
+
 ## Merging under a merge queue
 
 When the base branch uses a GitHub merge queue, `loopzero merge` enqueues the
