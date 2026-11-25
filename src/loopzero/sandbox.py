@@ -194,8 +194,8 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str]) -> 
                  "loopzero-alternate", alternate],
                 cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT,
             )
-        except _proc.ProcTimeout as exc:
-            raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from exc
+        except _proc.ProcTimeout:
+            raise SandboxUnavailable(f"Git alternate visibility probe timed out. {remedy}") from None
         if result.exit_code != 0:
             raise SandboxUnavailable(remedy)
 
@@ -285,15 +285,14 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
             f"bwrap binary missing while starting the namespace probe: {exc}\n"
             "sudo apt install bubblewrap"
         ) from exc
-    except _proc.ProcTimeout as exc:
-        raise SandboxUnavailable(f"bwrap namespace creation timed out: {exc}") from exc
+    except _proc.ProcTimeout:
+        raise SandboxUnavailable(f"bwrap namespace creation timed out after {GIT_TIMEOUT:g}s") from None
     if probe.exit_code != 0:
-        reason = _proc.tail(probe.stderr, 1) or f"exit {probe.exit_code}"
         remedy = ""
         probe_error = probe.stderr.lower()
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
             remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-        raise SandboxUnavailable(f"bwrap namespace creation failed: {reason}{remedy}")
+        raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
 
 
 def bwrap_argv(

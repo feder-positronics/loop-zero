@@ -7,6 +7,7 @@ import resource
 import shutil
 import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 
 import pytest
@@ -268,10 +269,37 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
     with pytest.raises(sandbox.SandboxUnavailable) as denied:
         sandbox.run_checks(make_config(), git_repo)
     assert "namespace creation failed" in str(denied.value)
-    assert "No permissions to create new namespace" in str(denied.value)
+    assert "exit 1" in str(denied.value)
+    assert "No permissions to create new namespace" not in str(denied.value)
     assert (
         "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in str(denied.value)
     )
+
+
+def test_probe_timeout_reports_only_the_timeout(git_repo, monkeypatch):
+    def timed_out(*args, **kwargs):
+        raise sandbox._proc.ProcTimeout("private probe diagnostic")
+
+    monkeypatch.setattr(sandbox._proc, "run", timed_out)
+    with pytest.raises(sandbox.SandboxUnavailable) as info:
+        sandbox.probe(make_config(), git_repo, ["bwrap", "--"])
+
+    assert str(info.value) == f"bwrap namespace creation timed out after {sandbox.GIT_TIMEOUT:g}s"
+    assert info.value.__suppress_context__
+
+
+def test_alternate_probe_timeout_traceback_omits_process_diagnostics(git_repo, monkeypatch):
+    def timed_out(*args, **kwargs):
+        raise sandbox._proc.ProcTimeout("private alternate probe diagnostic")
+
+    monkeypatch.setattr(sandbox, "_git", lambda *_: "alternate: /tmp/objects\n")
+    monkeypatch.setattr(sandbox._proc, "run", timed_out)
+    with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
+        sandbox._preflight_alternates(make_config(), git_repo, ["bwrap", "--"])
+
+    rendered = "".join(traceback.format_exception(info.value))
+    assert "private alternate probe diagnostic" not in rendered
+    assert "Create a standalone clone" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
