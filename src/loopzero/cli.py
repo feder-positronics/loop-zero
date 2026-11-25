@@ -823,7 +823,7 @@ def _repost_prefix(result: ReviewResult) -> str:
 
 def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult,
                     publisher: str, token: str) -> tuple[bool, list[dict]]:
-    with github.bounded_reads(30, token=token):
+    with github.bounded_reads(time.monotonic() + 30, token=token):
         reviews = _pr_reviews(config.repo, pr.number)
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
@@ -1115,16 +1115,16 @@ def cmd_ready(args: argparse.Namespace) -> int:
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
-        waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                  shown=readiness.reasons if kicked else (), args=args)
+        waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
+                                     shown=readiness.reasons if kicked else (), args=args)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
     if readiness.ready and pr.is_draft and not kicked:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
-            waited = _wait_for_checks(wt, config, pr, args.wait, kicked=True, started=started,
-                                      args=args)
+            waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
+                                         args=args)
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
@@ -1178,15 +1178,56 @@ def _merge_check_hint(config: Config, pr: github.PR, readiness: github.Readiness
     return ""
 
 
-def _poll_until(started: float, timeout: float) -> Iterator[None]:
+def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Iterator[None]:
     delay = WAIT_INTERVAL
     while True:
-        yield  # Observe immediately, including --wait=0, and once at the deadline.
+        yield  # Observe immediately, including --wait=0.
         remaining = timeout - (time.monotonic() - started)
         if remaining <= 0:
             return
-        _sleep(min(remaining, delay * random.uniform(0.9, 1.0)))
+        pause = delay * random.uniform(0.9, 1.0)
+        if bounded and remaining <= pause:
+            # Leave part of the final interval for the last observation to complete.
+            _sleep(remaining / 2)
+            yield
+            remaining = timeout - (time.monotonic() - started)
+            if remaining > 0:
+                _sleep(remaining)
+            return
+        _sleep(min(remaining, pause))
         delay = min(120.0, delay * 2)
+
+
+def _wait_with_deadline(
+    wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
+    started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
+) -> tuple[github.PR, github.Readiness, bool] | None:
+    started = time.monotonic() if started is None else started
+    if timeout == 0:
+        return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
+                                shown=shown, args=args)
+    deadline = started + timeout
+    if time.monotonic() >= deadline:
+        _print_check_wait_timeout(pr)
+        return None
+    reported_timeout = False
+    try:
+        with github.bounded_reads(deadline, token=None, retry=True):
+            waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
+                                      shown=shown, args=args, bounded=True)
+            reported_timeout = waited is None
+    except github.ReadDeadline:
+        if not reported_timeout:
+            _print_check_wait_timeout(pr)
+        return None
+    return waited
+
+
+def _print_check_wait_timeout(pr: github.PR) -> None:
+    if pr.mergeable == "UNKNOWN":
+        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
+    else:
+        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
 
 
 def _verify_wait_config(
@@ -1202,14 +1243,14 @@ def _verify_wait_config(
 def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
-    args: argparse.Namespace | None = None,
+    args: argparse.Namespace | None = None, bounded: bool = False,
 ) -> tuple[github.PR, github.Readiness, bool] | None:
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
     current = pr
     stale_notice = False
-    for _ in _poll_until(started, timeout):
+    for _ in _poll_until(started, timeout, bounded=bounded):
         current = github.pr_view(config.repo, pr.number)
         if current.head_sha != pr.head_sha:
             raise CliError(
@@ -1221,7 +1262,7 @@ def _wait_for_checks(
             github.mark_ready(config.repo, pr.number)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
-                                    shown=readiness.reasons, args=args)
+                                    shown=readiness.reasons, args=args, bounded=bounded)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
         pending = _pending_checks(config, current, readiness, kicked)
@@ -1249,10 +1290,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
-    if current.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
+    _print_check_wait_timeout(current)
     return None
 
 
