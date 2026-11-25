@@ -30,6 +30,7 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
         fake_tool("git", 'if [ "$1" = show ]; then case "$2" in */a.py) exit 1;; esac; fi\n'
                   f'exec {shutil.which("git")} "$@"\n')
     done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
+                          env={**os.environ, "PYTHON": sys.executable},
                           capture_output=True, text=True, check=False)
     assert bool(done.returncode) is (failure == "show")
     if failure != "show":
@@ -60,6 +61,7 @@ def test_complexity_ratchet(git_repo, case, expected_rc):
         src.write_text(_branchy("hot", 12))  # CC = 13 > 12
 
     done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
+                          env={**os.environ, "PYTHON": sys.executable},
                           capture_output=True, text=True, check=False)
     assert done.returncode == expected_rc, done.stdout + done.stderr
     assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
@@ -82,6 +84,7 @@ def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo):
     git(git_repo, "add", ".")
     base = git(git_repo, "write-tree").strip()
     done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
+                          env={**os.environ, "PYTHON": sys.executable},
                           capture_output=True, text=True, check=False)
     assert done.returncode == 0, done.stdout + done.stderr
     assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
@@ -124,5 +127,6 @@ def test_markdown_doc_budgets(git_repo, path, cap, grew, expected_rc):
     if grew:
         doc.write_text("line\n" * (cap + 6))
     done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
+                          env={**os.environ, "PYTHON": sys.executable},
                           capture_output=True, text=True, check=False)
     assert done.returncode == expected_rc, done.stdout + done.stderr
