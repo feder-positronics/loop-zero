@@ -367,11 +367,10 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
                          "-F", f"page={page}")
         if isinstance(chunk, dict):
             chunk = chunk.get(key)
-        if _read_scope.get() is not None and (
-                not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk)):
+        if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        items += chunk or []
-        if len(chunk or []) < PAGE:
+        items += chunk
+        if len(chunk) < PAGE:
             return items
         page += 1
 
