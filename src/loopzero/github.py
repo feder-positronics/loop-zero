@@ -237,7 +237,7 @@ def app_token() -> str:
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
     try:
-        result = run([str(APP_TOKEN_HELPER)], cwd=Path.cwd(), env_allowlist=GH_ENV, timeout=10)
+        result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=10)
     except (ToolMissing, ProcTimeout, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
@@ -261,6 +261,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
     if diagnostic_api and not {"--include", "-i"} & set(args):
         request_args = (*args, "--include")
     argv = ("gh", *request_args)
+    cwd = cwd or Path("/")
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
@@ -274,7 +275,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                 raise GhError(argv, "publication read-back deadline exceeded")
             timeout = min(timeout, remaining)
         try:
-            done = run(list(argv), cwd=cwd or Path.cwd(), env_allowlist=GH_ENV,
+            done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None, timeout=timeout)
         except ToolMissing as exc:
             raise GhMissing(argv, f"{exc}\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
@@ -285,7 +286,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             continue
         tail = "\n".join(part for part in (done.stderr, done.stdout) if part)
         if done.exit_code and re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE):
-            reset = _graphql_reset(args, tail, cwd or Path.cwd(), selected)
+            reset = _graphql_reset(args, tail, cwd, selected)
             if diagnostic_api or patch_error:
                 detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                            message_tail=None if diagnostic_api else tail)
