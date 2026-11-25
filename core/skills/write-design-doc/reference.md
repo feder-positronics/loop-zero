@@ -26,7 +26,8 @@ task worktree.
 Use repository paths, templates, frontmatter, terminology, and labels.
 Without a convention, choose and explain a descriptive Markdown path in the
 documentation tree; avoid a new hierarchy for one document.
-Link sources of truth instead of copying them.
+Link sources of truth instead of copying them. When replacing instructions with
+a link, point to the section that carries the same rule for the same actor.
 
 ## Design Contract
 
