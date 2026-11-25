@@ -37,74 +37,22 @@ def closed_history_row(data: dict) -> dict:
 
 # `respond` preserves the original key-based fake. New tests use `expect`, which
 # consumes complete argv interactions in order and never repeats a response.
-FAKE_GH = """#!{python}
-import json, os, sys
-argv = sys.argv[1:]
-calls, scenario = {calls!r}, {scenario!r}
-key = " ".join(argv[:2])
-record = {{"argv": argv, "token": os.environ.get("GH_TOKEN")}}
-input_files = {{}}
-for flag in ("--input", "--body-file"):
-    if flag in argv:
-        content = open(argv[argv.index(flag) + 1]).read()
-        record[flag] = content
-        input_files[flag] = content
-record["input_files"] = input_files
-log = json.loads(open(calls).read()) if os.path.exists(calls) else []
-log.append(record)
-open(calls, "w").write(json.dumps(log))
-plan = json.load(open(scenario))
-strict = plan.get("strict")
-if strict is not None:
-    index = len(log) - 1
-    if index >= len(strict):
-        sys.stderr.write("fake gh: exhausted after %d interactions; got %r\\n" %
-                         (len(strict), argv))
-        sys.exit(97)
-    expected = strict[index]
-    normalized = list(argv)
-    for flag in ("--input", "--body-file"):
-        if flag in normalized:
-            normalized[normalized.index(flag) + 1] = "<temp-file>"
-    if normalized != expected["argv"]:
-        sys.stderr.write("fake gh: unexpected argv\\nexpected: %r\\nactual:   %r\\n" %
-                         (expected["argv"], normalized))
-        sys.exit(97)
-    if expected.get("input_files", {{}}) != input_files:
-        sys.stderr.write("fake gh: unexpected input files\\nexpected: %r\\nactual:   %r\\n" %
-                         (expected.get("input_files", {{}}), input_files))
-        sys.exit(97)
-    resp = expected
-else:
-    def response_key(args):
-        basic = " ".join(args[:2])
-        if basic == "api graphql" and any("viewer {{ login }}" in arg for arg in args):
-            basic += " viewer"
-        method = args[args.index("--method") + 1] if "--method" in args else ""
-        specific = basic + " --method " + method
-        return specific if specific in plan.get("compat", {{}}) else basic
-    key = response_key(argv)
-    responses = plan.get("compat", {{}}).get(key)
-    if responses is None:
-        sys.stderr.write("fake gh: no response for " + key + "\\n")
-        sys.exit(97)
-    idx = sum(1 for c in log[:-1] if response_key(c["argv"]) == key)
-    resp = responses[min(idx, len(responses) - 1)]
-sys.stdout.write(resp.get("stdout", ""))
-sys.stderr.write(resp.get("stderr", ""))
-sys.exit(resp.get("exit_code", resp.get("exit", 0)))
-"""
-
-
 class FakeGh:
     def __init__(self, fake_bin: Path, tmp_path: Path) -> None:
         self.calls_file = tmp_path / "gh-calls.json"
         self.scenario_file = tmp_path / "gh-scenario.json"
         self.scenario_file.write_text(json.dumps({"compat": {}}))
         script = fake_bin / "gh"
-        script.write_text(FAKE_GH.format(
-            python=sys.executable, calls=str(self.calls_file), scenario=str(self.scenario_file)
-        ))
+        replay_source = Path(__file__).with_name("fake_gh.py").read_text()
+        script.write_text(
+            f"#!{sys.executable}\n{replay_source}\n"
+            "import sys\n"
+            f"code, stdout, stderr = replay(sys.argv[1:], {str(self.calls_file)!r}, "
+            f"{str(self.scenario_file)!r}, os.getcwd(), os.environ.get('GH_TOKEN'))\n"
+            "sys.stdout.write(stdout)\n"
+            "sys.stderr.write(stderr)\n"
+            "sys.exit(code)\n"
+        )
         script.chmod(0o755)
 
     def respond(self, key: str, *responses: object, exit: int = 0, stderr: str = "") -> None:
