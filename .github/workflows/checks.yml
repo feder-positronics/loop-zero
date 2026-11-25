@@ -19,8 +19,8 @@ jobs:
           version: "0.11.28"
       - name: Lint
         run: |
-          uv run --python 3.14 --group dev ruff check src tests
-          uv run --python 3.14 --group dev tach check
+          uv run --python 3.14 --locked --group dev ruff check src tests
+          uv run --python 3.14 --locked --group dev tach check
       - name: Architecture docs and size budget
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
@@ -41,7 +41,7 @@ jobs:
           command -v bwrap >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Tests
-        run: uv run --python 3.14 --group dev pytest -q
+        run: uv run --python 3.14 --locked --group dev pytest -q
       - name: Wheel builds and CLI runs
         run: |
           uv build --wheel -q
