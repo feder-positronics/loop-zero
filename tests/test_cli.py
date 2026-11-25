@@ -2676,6 +2676,51 @@ def test_merge_wait_reports_terminal_failure_seen_after_the_deadline(
     assert code == 1 and failed in err and wt.exists()
 
 
+@pytest.mark.parametrize("wait", [False, True])
+@pytest.mark.parametrize("outcome", ["open", "changed", "closed", "invalid", "merged"])
+def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeypatch, wait, outcome):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
+    detail = f"api repos/{REPO}/pulls/7"
+    merged_sha = "e" * 40
+    snapshots = {
+        "open": rest_pr_json(pr_json(headRefOid=head, isDraft=False)),
+        "changed": merge_json(head="f" * 40),
+        "closed": merge_json(state="CLOSED", head=head),
+        "invalid": {"state": "open", "head": {"sha": head}},
+        "merged": merge_json(state="MERGED", head=head, sha=merged_sha),
+    }
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, outcome == "open"))
+
+    def membership(*_):
+        gh.append(detail, snapshots[outcome])
+        return mergify.Membership()
+
+    monkeypatch.setattr(mergify, "membership", membership)
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: pytest.fail("unexpected confirmation"))
+    monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("unexpected request"))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+    gh.respond("api -X", "")
+
+    code, out, err = run(capsys, "merge", *(["--wait=1"] if wait else []))
+
+    calls = [c["argv"][:2] for c in gh.calls]
+    assert calls.count(LOOKUP_CALLS[0]) == 1
+    assert calls.count(detail.split()) == 2
+    if outcome == "merged":
+        assert (code, err) == (0, "") and out.splitlines()[-1] == merged_sha
+        assert not wt.exists()
+    elif outcome == "open":
+        assert (code, err) == (3 if wait else 0, "")
+        assert wt.exists()
+    else:
+        diagnostic = {"changed": "head changed", "closed": "closed without", "invalid": "invalid PR"}
+        assert code == 1 and diagnostic[outcome] in err
+        assert wt.exists()
+
+
 def test_mergify_admission_lookups_count_against_the_deadline(
     wt: Path, gh: FakeGh, capsys, monkeypatch
 ) -> None:
@@ -3518,7 +3563,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     if outcome == "timeout":
         assert f"following Mergify queue main; head {head[:12]}; waiting up to 250s" in out
         assert sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
-        assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 2
+        assert sum(c["argv"][:2] == LOOKUP_CALLS[0] for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
     assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
     if outcome in {"merged", "already_merged", "worktree_removed"}:

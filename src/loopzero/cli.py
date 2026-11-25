@@ -1318,7 +1318,7 @@ class _AdmissionDeadline(Exception):
 
 
 def _merge_with_mergify(
-    config: Config, branch: str, pr: github.PR,
+    config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
     """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
@@ -1335,11 +1335,8 @@ def _merge_with_mergify(
         config.repo, pr.number, pr.head_sha, queue
     )
     state = mergify.membership(config.repo, pr.number, queue)
-    current = _require_pr(config, branch, allow_merged=True)
-    if current.head_sha != pr.head_sha:
-        raise CliError(
-            f"PR head changed during Mergify lookup: {pr.head_sha[:12]} to {current.head_sha[:12]}"
-        )
+    if sha := github.merged_sha(config.repo, pr.number, expected_head=pr.head_sha):
+        return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
@@ -1400,7 +1397,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, branch, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
