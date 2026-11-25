@@ -16,6 +16,8 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 @pytest.mark.parametrize('body,verdict,tails', [
     ('print(json.dumps(r))', True, ['ok', 'ok']),
     ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
+    ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
+     ['Ω' * 8188 + ' newest']),
     ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
     ('r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
     *[(body, False, None) for body in [
@@ -72,24 +74,6 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     assert _load_report(git_repo) == report
     receipt = json.loads((git_repo / '.loopzero/checks.json').read_text())
     assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
-
-
-def test_runner_bounds_multibyte_tail_without_changing_exit_code(git_repo):
-    git(git_repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-    script = """import json, sys
-row = json.load(sys.stdin)
-row.pop("env")
-row.update(exit_code=7, duration_s=0.1, not_started=False, tail="Ω" * 10_000 + " newest")
-print(json.dumps(row))
-"""
-    config = make_config(check_runner=(sys.executable, "-c", script))
-
-    (result,) = sandbox.run_checks(config, git_repo).results
-
-    assert result.exit_code == 7
-    assert len(result.tail.encode("utf-8")) == 16 * 1024 - 1
-    assert result.tail.endswith("Ω newest")
-    assert "\ufffd" not in result.tail
 
 
 @pytest.mark.parametrize('dirty', [True, False])

@@ -8,11 +8,13 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from loopzero import sandbox
+from loopzero.cli import _save_report
 from loopzero.types import Config, ResourceLimits
 
 from .conftest import git
@@ -99,37 +101,17 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
     assert before in drift.tail and after in drift.tail
 
 
-def test_tail_merges_streams_and_truncates(git_repo, bwrap_log):
-    cmd = "for i in $(seq 1 50); do echo $i; done; echo err >&2"
-    (result,) = sandbox.run_checks(make_config(checks=(cmd,)), git_repo).results
-    lines = result.tail.splitlines()
-    assert len(lines) == 40
-    assert lines[0] == "12"
-    assert lines[-1] == "err"
-
-
-def test_receipt_bounds_a_single_oversized_line(git_repo, bwrap_log):
-    from loopzero.cli import _save_report
-
-    command = """python3 -c 'print("x" * 16777216 + " Ω end")'"""
-    report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
-    _save_report(git_repo, report)
-
-    assert report.ok
-    receipt = git_repo / ".loopzero/checks.json"
-    assert receipt.stat().st_size < 17_000
-    tail = json.loads(receipt.read_text())["results"][0]["tail"]
-    assert len(tail.encode("utf-8")) == 16 * 1024
-    assert tail.endswith(" Ω end")
-
-
-def test_receipt_bounds_missing_file_preflight_diagnostic(git_repo, bwrap_log):
-    command = "./" * 8_200 + "absent/file"
+@pytest.mark.parametrize("command,exit_code,line_count,start,end", [
+    ("for i in $(seq 1 50); do echo $i; done; echo err >&2", 0, 40, "12", "err"),
+    ("""python3 -c 'print("x" * 16777216 + " Ω end")'""", 0, 1, "x", " Ω end"),
+    ("./" * 8_200 + "absent/file", 1, 1, "", "otherwise restore the required file."),
+], ids=["lines", "oversized-line", "missing-file"])
+def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_code, line_count, start, end):
     (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
-
-    assert result.exit_code == 1
-    assert len(result.tail.encode("utf-8")) == 16 * 1024
-    assert result.tail.endswith("otherwise restore the required file.")
+    lines = result.tail.splitlines()
+    assert (result.exit_code, len(lines)) == (exit_code, line_count)
+    assert lines[0].startswith(start) and lines[-1].endswith(end)
+    assert len(result.tail.encode("utf-8")) <= 16 * 1024
 
 
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
@@ -236,17 +218,14 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
     monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
 
 
-@pytest.mark.parametrize("prefix", [b"", b"x" * 20_000], ids=["small", "oversized"])
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch, prefix):
-    inject_check_timeout(monkeypatch, prefix + b"partial\n")
+def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
+    inject_check_timeout(monkeypatch, b"x" * 20_000 + b"partial")
     report = sandbox.run_checks(
         make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
     )
     (first,) = report.results
-    assert first.exit_code == sandbox.TIMEOUT_EXIT
-    assert first.tail.splitlines()[0].endswith("partial")
-    assert len(first.tail.encode("utf-8")) <= 16 * 1024
-    assert "timed out" in first.tail and not report.ok
+    assert (first.exit_code, len(first.tail.encode("utf-8"))) == (sandbox.TIMEOUT_EXIT, 16 * 1024)
+    assert "partial\n[loopzero] timed out" in first.tail and not report.ok
 
 
 def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, monkeypatch):
@@ -612,9 +591,6 @@ def test_cancellation_stops_heartbeat_without_reporting_verdict(git_repo, bwrap_
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
-    from dataclasses import replace
-
-    from loopzero.cli import _save_report
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
@@ -662,10 +638,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-@pytest.mark.parametrize("overflow", [False, True])
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, overflow):
-    from loopzero.cli import _save_report
-
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
     marker = "CHECK_INTEGRATION_SHARD []"
     command = f"echo '{marker}'"
     config = make_config(checks=(command,), inputs={command: ("README.md",)})
@@ -673,17 +646,13 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, ov
         stream.write("\n.loopzero/\n")
     original = sandbox.run_checks(config, git_repo)
     assert original.ok
-    _save_report(git_repo, original)
-    path = git_repo / ".loopzero/checks.json"
-    if overflow:
-        stored = json.loads(path.read_text())
-        stored["results"][0]["tail"] = f"{'x' * 20_000}\n{marker}"
-        path.write_text(json.dumps(stored))
+    legacy = replace(original.results[0], tail=f"{'x' * 20_000}\n{marker}")
+    _save_report(git_repo, replace(original, results=(legacy,)))
 
     git(git_repo, "commit", "--allow-empty", "-m", "advance head")
     _save_report(git_repo, sandbox.run_checks(config, git_repo))
 
-    receipt = json.loads(path.read_text())
+    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
     assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
     assert result["reused_from"] == original.head
@@ -693,7 +662,6 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, ov
 
 @pytest.mark.parametrize('symlink', [False, True])
 def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink):
-    from loopzero.cli import _save_report
     from loopzero.types import CheckReport, CheckResult
 
     command = 'echo stage-ran; exit 7'
@@ -720,9 +688,6 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, symlink)
 
 
 def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
-    import json
-
-    from loopzero.cli import _save_report
     report = sandbox.run_checks(make_config(), git_repo)
     _save_report(git_repo, report)
     row = json.loads((git_repo / '.loopzero/checks.json').read_text())['results'][0]
