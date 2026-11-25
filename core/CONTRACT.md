@@ -111,9 +111,9 @@ holds also block the owner queue route below.
 - An unresolved `critical`/`important` review thread, unless GitHub marks it
   outdated and its marker names another head. When relying on an ancestor review,
   every unresolved blocking thread counts, including outdated threads.
-- Missing eligible review of the current head or an ancestor covered by an
-  approved primary, an eligible delta review, or a request_changes primary
-  whose blocking findings are resolved and followed only by clean base merges.
+- Missing eligible review of the current head. An ancestor review qualifies only
+  across verified clean merges from the configured base. A request_changes
+  primary also requires resolution of its blocking findings.
 - A target other than configured `repo.base`.
 - `BEHIND`, unless configured Mergify integration is verified
   source-preserving. Its separate integration candidate preserves authored-head
@@ -220,11 +220,11 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
 - After round two, the owner merges once every finding is fixed or rejected
   with reasons and readiness passes, or splits the PR. A head that needs another review goes in a new PR. No escalation is required.
 - After an approved primary or a delta review, take base changes by merging the
-  base into the existing branch. Readiness can inherit that review when GitHub
-  reports the new head is ahead of the reviewed commit. A request_changes
-  primary whose blocking findings are all resolved carries only across clean
-  merges of the base; an own commit or a conflicted merge needs a delta. A rebase that rewrites
-  the reviewed commit breaks ancestry even if it preserves the patch.
+  base into the existing branch. Readiness and hosted eligibility can inherit
+  coverage only across proven clean base merges. A request_changes primary
+  additionally requires resolution of every blocking finding. Source commits,
+  modified merges, and rebases that rewrite the reviewed commit require
+  review coverage for the new head.
 - Reviewer runs yielding no verdict (missing tool, authentication failure,
   unparseable output) consume no budget; the CLI tries the next eligible
   configured family and reports reasons/nonzero if all fail. Only
