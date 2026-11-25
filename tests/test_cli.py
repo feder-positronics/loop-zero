@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import cli, github, mergify
+from loopzero import cli, config, github, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git, init_git_repo
@@ -176,16 +176,17 @@ def arm_check_runs(gh: FakeGh, head: str, *runs) -> None:
 
 def arm_readiness(
     gh: FakeGh, head: str, wt: Path, *, threads=(), conclusion: str = "success",
-    local_exit: int = 0, dirty: bool = False,
+    local_exit: int | None = 0, dirty: bool = False,
 ) -> None:
     gh.respond("api graphql", threads_json(*threads))
     arm_check_runs(gh, head, [
         {"name": "checks", "status": "completed", "conclusion": conclusion}])
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
-    cli._save_report(
-        wt, CheckReport(head, dirty, tuple(
-            CheckResult(command, local_exit, 0.1, "") for command in ("echo ok", "test -f README.md")))
-    )
+    if local_exit is not None:
+        cli._save_report(
+            wt, CheckReport(head, dirty, tuple(
+                CheckResult(command, local_exit, 0.1, "") for command in ("echo ok", "test -f README.md")))
+        )
 
 
 def without_accepted_receipt(out: str) -> str:
@@ -231,7 +232,7 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert lines[2].startswith("stage 1/2: exit 0 (")
     assert lines[3] == "running: test -f README.md"
     assert lines[4].startswith("stage 2/2: exit 0 (")
-    assert lines[5].startswith("exit 0") and lines[5].endswith("  echo ok")
+    assert sum("exit 0" in line for line in lines) == 2
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
     assert report["dirty"] is False
@@ -395,7 +396,9 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     code, out, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
     assert code == 1 and out.endswith("FAIL\n")
     assert out.startswith("checks are unpinned because --config was provided\n")
-    assert f"exit {exit_code}" in out and "README.md" not in out
+    assert sum(line.startswith(("stage 1/2: exit ", "exit "))
+               for line in out.splitlines()) == 1
+    assert f"stage 1/2: exit {exit_code} (" in out and "README.md" not in out
     assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
@@ -456,7 +459,7 @@ def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
     code, out, err = run(capsys, "check")
     assert code == 0 and err == ""
-    assert "  echo ok" in out and "  test -f README.md" in out
+    assert "running: echo ok\n" in out and "running: test -f README.md\n" in out
     assert "  true" not in out
 
 
@@ -473,7 +476,7 @@ def test_check_uses_worktree_checks_when_base_has_no_workflow(
     code, out, err = run(capsys, "check")
 
     assert code == 0 and err == ""
-    assert "  echo worktree" in out
+    assert "running: echo worktree\n" in out
     assert not out.startswith("checks pinned")
 
 
@@ -483,7 +486,7 @@ def test_check_uses_task_base_when_remote_ref_is_missing(wt: Path, capsys) -> No
     code, out, err = run(capsys, "check")
 
     assert code == 0 and err == ""
-    assert "  echo ok" in out and out.startswith("checks pinned to origin/main@")
+    assert "running: echo ok\n" in out and out.startswith("checks pinned to origin/main@")
 
 
 def test_primary_review_diffs_from_merge_base_not_base_tip(
@@ -1672,6 +1675,36 @@ def test_ready_marks_draft_ready(wt: Path, gh: FakeGh, capsys, head, branch) -> 
     assert f"head={head}" in out and "environment=unknown" in out
 
 
+def test_late_check_keeps_current_passing_receipt(wt, gh, capsys, monkeypatch):
+    old_head = head_of(wt)
+    receipt = wt / ".loopzero/checks.json"
+    run_stage = cli.sandbox._run_one
+    refreshed = []
+    passing_receipt = []
+    monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
+
+    def finish_new_check_first(*args):
+        monkeypatch.setattr(cli.sandbox, "_run_one", run_stage)
+        git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
+        assert run(capsys, "check")[0] == 0
+        passing_receipt.append(receipt.read_bytes())
+        return run_stage(*args)
+
+    monkeypatch.setattr(cli.sandbox, "_run_one", finish_new_check_first)
+    code, _, err = run(capsys, "check")
+    head = head_of(wt)
+    assert code == 1
+    assert f"HEAD before: {old_head}; HEAD after: {head}" in err
+    assert receipt.read_bytes() == passing_receipt[0]
+    assert refreshed == [head]
+
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None})
+    gh.respond("pr ready", "")
+    code, out, err = run(capsys, "ready")
+    assert (code, err) == (0, "")
+    assert "receipt accepted:" in out
+
+
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
     arm_approved_pr_with_check_result(gh, head, wt, "failure", reviews=[])
     arm_check_runs(gh, head, [{
@@ -1811,9 +1844,16 @@ def test_ready_wait_tracks_the_replacement_workflow(
         {"id": 2, "check_suite_id": 20, "workflow_id": 7, "head_sha": head,
          "status": "in_progress", "created_at": "2026-09-23T21:54:21Z"},
     ]})
+    elapsed = 0.0
+    monkeypatch.setattr(cli.time, "monotonic", lambda: elapsed)
     if replacement != "pending":
-        monkeypatch.setattr(cli, "_sleep", lambda _: arm_check_runs(gh, head, [
-            {"id": 101, "name": "checks", "status": "completed", "conclusion": replacement}]))
+        def sleep(seconds: float) -> None:
+            nonlocal elapsed
+            elapsed += seconds
+            arm_check_runs(gh, head, [
+                {"id": 101, "name": "checks", "status": "completed", "conclusion": replacement}])
+
+        monkeypatch.setattr(cli, "_sleep", sleep)
     code, out, err = run(capsys, "ready", "--wait=0" if replacement == "pending" else "--wait=1")
     assert (code, err) == (expected, "")
     assert f"waiting: required check 'checks' is {old_conclusion}" in out
@@ -2514,6 +2554,19 @@ def test_second_merge_retries_remote_branch_cleanup(
     assert second[0] == 0 and second[2] == ""
     deletes = [call for call in gh.calls if call["argv"][:2] == ["api", "-X"]]
     assert len(deletes) == 2
+
+
+def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    bad_config = git_repo / "bad.toml"
+    bad_config.write_text('[repo]\nname = "example/repo"\n[checks]\nscratch = ["./"]\n')
+
+    code, _, err = run(capsys, "--config", "bad.toml", "status")
+    assert code == 1
+    assert "bad.toml: checks.scratch entries must be relative, got './'" in err
+
+    bad_config.write_text(bad_config.read_text().replace('"./"', '"./.venv"'))
+    assert config.load(bad_config).scratch == ("./.venv",)
 
 
 def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:

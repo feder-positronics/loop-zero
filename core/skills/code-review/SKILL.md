@@ -54,4 +54,7 @@ Any blocking finding requires `request_changes`; otherwise approve, with
 suggestions or an empty list.
 
 Anchor findings precisely. `path` and `line` may be `null` when no precise
-location exists; `loopzero review` anchors such blocking findings on a changed file.
+location exists. `loopzero review` anchors unlocated blocking findings on a
+commentable diff line. If none exists, as in a binary-only PR, publication fails
+with `PR has no diff hunks`. Keep the verdict and report the publication error to
+the delivery owner.

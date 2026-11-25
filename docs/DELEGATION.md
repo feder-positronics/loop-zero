@@ -39,7 +39,9 @@ directly or through the parent; owners reconstruct delivery from live remote
 state, revalidate recipients and carried decisions, and report what they cannot
 confirm as a blocker.
 
-**Provider-portable handoff.** If an owner's provider is exhausted or unavailable,
+### Provider-portable handoff
+
+If an owner's provider is exhausted or unavailable,
 move the role to a new thread on another provider or model only within an
 explicit standing route; preserve commissioned choices and runtime permissions.
 Otherwise report the unavailable route and wait for owner direction. Confirm the
