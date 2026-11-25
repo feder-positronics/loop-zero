@@ -13,6 +13,7 @@ from tests.test_cli import post_key, prepare_review, run
 from tests.test_runners import APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review
 
 repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
+git_seed = test_cli.git_seed
 fake_bwrap = test_runners.fake_bwrap
 
 RECEIPTS = [row for size in ("five", "six") for row in json.loads(

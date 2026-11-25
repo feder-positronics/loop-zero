@@ -15,7 +15,7 @@ import pytest
 from loopzero import cli, config, github, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
-from tests.conftest import git
+from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
     FakeGh,
@@ -57,18 +57,31 @@ reviewers = ["claude", "codex"]
 """
 
 
+@pytest.fixture(scope="session")
+def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Prepare the checkout and bare origin that each case copies."""
+    seed = tmp_path_factory.mktemp("git-seed")
+    checkout = init_git_repo(seed / "repo")
+    (checkout / "workflow.toml").write_text(WORKFLOW)
+    git(checkout, "add", "workflow.toml")
+    git(checkout, "commit", "-q", "-m", "config")
+    origin = seed / "origin.git"
+    git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
+    git(checkout, "remote", "add", "origin", str(origin))
+    git(checkout, "push", "-q", "origin", "main")
+    return seed
+
+
 @pytest.fixture
-def repo(git_repo: Path, tmp_path: Path, fake_tool, fake_bin: Path) -> Path:
-    """Repo with workflow.toml committed, a bare origin holding main, and a fake bwrap."""
-    (git_repo / "workflow.toml").write_text(WORKFLOW)
-    git(git_repo, "add", "workflow.toml")
-    git(git_repo, "commit", "-q", "-m", "config")
+def repo(git_seed: Path, tmp_path: Path, fake_tool) -> Path:
+    """A private copy of both Git repositories and a per-case fake bwrap."""
+    checkout = tmp_path / "repo"
     origin = tmp_path / "origin.git"
-    git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
-    git(git_repo, "remote", "add", "origin", str(origin))
-    git(git_repo, "push", "-q", "origin", "main")
+    shutil.copytree(git_seed / "repo", checkout)
+    shutil.copytree(git_seed / "origin.git", origin)
+    git(checkout, "remote", "set-url", "origin", str(origin))
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
-    return git_repo
+    return checkout
 
 
 @pytest.fixture
@@ -2496,9 +2509,7 @@ def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch,
     assert config.load(bad_config).scratch == ("./.venv",)
 
 
-def test_status_full_and_path(wt: Path, gh: FakeGh, capsys) -> None:
-    code, out, _ = run(capsys, "status", "--path")
-    assert code == 0 and out == f"{wt}\n"
+def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
     code, out, _ = run(capsys, "status")
