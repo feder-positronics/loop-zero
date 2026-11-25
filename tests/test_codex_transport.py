@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import cli, eligibility, github, runners
-from loopzero.types import CheckReport, Config
+from loopzero.types import CheckReport, CheckResult, Config
 from tests import test_cli, test_runners
 from tests.conftest import git
 
@@ -358,7 +358,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
 
     result = native[0]()
     repo = "acme/widgets"
-    cfg = Config(repo, "main", (), (), "squash", ("codex",), review_publishers=("bot",))
+    cfg = Config(repo, "main", ("true",), (), "squash", ("codex",), review_publishers=("bot",))
     if kind.startswith("delta"):
         reviewed, merge_base = result.head, native[1]["base"]
         (native[2] / "delta.txt").write_text("delta only\n")
@@ -408,7 +408,8 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     gitdir.write_text(gitdir.read_text() + "\n.loopzero/\n")
     cli._save_review(native[2], result)
     cli._save_report(
-        native[2], CheckReport(head, False, (), cli.sandbox.settings_fingerprint(cfg, native[2]))
+        native[2], CheckReport(head, False, (CheckResult("true", 0, 0, ""),),
+                               cli.sandbox.settings_fingerprint(cfg, native[2]))
     )
     pr = github.pr_view(repo, 7)
     assert (

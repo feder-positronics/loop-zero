@@ -121,6 +121,11 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
     if args.command == "check":
+        if not config.checks:
+            raise config_mod.ConfigError(
+                f"origin/{config.base_branch}:workflow.toml: checks.commands must list "
+                "at least one command to run checks"
+            )
         print(f"checks pinned to origin/{config.base_branch}@{revision}")
     return config
 
@@ -286,7 +291,9 @@ def _readiness(
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)
-    review = eligibility.readiness_review(reviews, head, publishers, repo=config.repo, number=pr.number)
+    review = eligibility.readiness_review(
+        reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
+    )
     review_at = review.get("submitted_at") if review else None
     # GitHub's review timestamp is in UTC and predates this process.
     review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
@@ -574,6 +581,8 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    if not config.checks:
+        raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
