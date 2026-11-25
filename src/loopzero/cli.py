@@ -521,8 +521,6 @@ def cmd_check(args: argparse.Namespace) -> int:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
     for result in report.results:
-        print(f"exit {result.exit_code:<3} {result.duration_s:7.1f}s  {result.command}")
-    for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
