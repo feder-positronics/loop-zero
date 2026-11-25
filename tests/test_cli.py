@@ -2842,6 +2842,40 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert message in out + err
 
 
+@pytest.mark.parametrize(("check_state", "detail"), [
+    ("pending", "still queued in main at last check, candidate PR #42. "
+                "Required checks are 0 done, 1 pending, 0 failed. Rerun `loopzero merge --wait`."),
+    ("success", "still queued in main at last check, candidate PR #42. "
+                "Required checks are 1 done, 0 pending, 0 failed. Rerun `loopzero merge --wait`."),
+    ("failure", "still queued in main at last check, candidate PR #42. "
+                "Required checks are 0 done, 0 pending, 1 failed. Investigate `checks`."),
+    (None, "not queued in main at last check. Check the Mergify queue request."),
+])
+def test_mergify_landing_timeout_reports_last_membership(wt, gh, capsys, monkeypatch, check_state, detail):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
+    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
+    payload = {
+        "number": 7, "queue_rule_name": "main", "queued_at": "now", "position": 1,
+        "mergeability_check": {
+            "queue_pull_request_number": 42,
+            "checks": [{"name": "checks", "state": check_state},
+                       {"name": "optional", "state": "failure"}],
+        },
+    }
+    # Admission can see no membership yet. Report the wait loop's newer observation.
+    responses = iter([None, payload if check_state else None])
+    monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
+
+    code, out, err = run(capsys, "merge", "--wait=0")
+
+    assert (code, err) == (3, "")
+    assert f"timed out waiting for Mergify to land PR #7\n{detail}\n" in out
+
+
 @pytest.mark.parametrize("queue_state", ["unsafe", "error", "safe", "becomes_unsafe"])
 @pytest.mark.parametrize("check_state", ["missing", "skipped"])
 def test_mergify_ready_draft_requires_safe_queue_before_ci_activation(

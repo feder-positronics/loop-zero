@@ -1128,6 +1128,25 @@ def _wait_for_merge(config: Config, pr: github.PR, timeout: float) -> str | None
     return None
 
 
+def _mergify_timeout_detail(
+    queue: str, state: mergify.Membership | None, required_ci: tuple[str, ...]
+) -> str:
+    if state is None:
+        return f"not queued in {queue} at last check. Check the Mergify queue request."
+    queued = f"still queued in {queue} at last check"
+    if state.candidate_number is not None:
+        queued += f", candidate PR #{state.candidate_number}"
+    retry = "Rerun `loopzero merge --wait`."
+    if state.checks is None:
+        return f"{queued}. Candidate check status unavailable. {retry}"
+    required = {name: state.checks.get(name, "pending") for name in required_ci}
+    done = sum(result == "success" for result in required.values())
+    failed = [f"`{name}`" for name, result in required.items() if result not in {"success", "pending"}]
+    pending = len(required) - done - len(failed)
+    next_step = f"Investigate {', '.join(failed)}." if failed else retry
+    return f"{queued}. Required checks are {done} done, {pending} pending, {len(failed)} failed. {next_step}"
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1136,6 +1155,7 @@ def _wait_for_mergify(
     closed: list[github.GhError] = []
     queue = config.mergify_queue
     assert queue is not None
+    state = None
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = _landed(config, pr, closed)
@@ -1161,6 +1181,8 @@ def _wait_for_mergify(
                            f"post `@mergifyio queue` as the whole PR comment (same login), then rerun `loopzero merge --wait`")
     if closed:
         raise closed[0]
+    print(f"timed out waiting for Mergify to land PR #{pr.number}")
+    print(_mergify_timeout_detail(queue, state, config.required_ci))
     return None
 
 
@@ -1258,10 +1280,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
         if sha is None:
-            if args.wait is not None:
-                print(f"timed out waiting for Mergify to land PR #{pr.number}")
-                return 3
-            return 0
+            return 3 if args.wait is not None else 0
     else:
         if not readiness.ready:
             hint = "; next: loopzero merge --wait" if _pending_checks(config, pr, readiness) else ""
