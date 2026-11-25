@@ -428,6 +428,21 @@ def _runner_executable(config: Config) -> str | None:
     return executable if Path(executable).is_absolute() else shutil.which(executable)
 
 
+def _stage_frame(stdout: str, binding: dict) -> dict:
+    frame = json.loads(stdout, object_pairs_hook=_unique_fields)
+    if (not isinstance(frame, dict)
+            or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
+            or any(frame[key] != value for key, value in binding.items())
+            or type(frame["network"]) is not bool
+            or type(frame["exit_code"]) is not int
+            or type(frame["duration_s"]) not in (int, float)
+            or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
+            or type(frame["not_started"]) is not bool
+            or not isinstance(frame["tail"], str)):
+        raise ValueError("invalid or mismatched stage result")
+    return frame
+
+
 def _dispatch_one(
     config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
 ) -> CheckResult:
@@ -454,17 +469,12 @@ def _dispatch_one(
                 raise ValueError("Stage runner references task worktree")
             done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
-        frame = json.loads(done.stdout, object_pairs_hook=_unique_fields)
-        if (done.exit_code != 0 or not isinstance(frame, dict)
-                or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
-                or any(frame[key] != value for key, value in binding.items())
-                or type(frame["network"]) is not bool
-                or type(frame["exit_code"]) is not int
-                or type(frame["duration_s"]) not in (int, float)
-                or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
-                or type(frame["not_started"]) is not bool
-                or not isinstance(frame["tail"], str)):
-            raise ValueError("invalid or mismatched stage result")
+        if done.exit_code:
+            stderr = _proc.tail(done.stderr)[-2000:]
+            detail = f"Stage runner failed: process exit {done.exit_code}"
+            return CheckResult(command, done.exit_code, done.duration_s,
+                               f"{detail}\n{stderr}".rstrip())
+        frame = _stage_frame(done.stdout, binding)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
         if frame["not_started"]:
