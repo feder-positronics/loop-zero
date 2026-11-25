@@ -568,11 +568,15 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "that cache.",
                     file=sys.stderr,
                 )
-    if report.head == worktree.head(wt):
-        _save_report(wt, report)
-        if report.ok and not report.dirty:
-            _print_receipt(wt, report, "produced")
-        _refresh_pr_checks(wt, config)
+    current_head = worktree.head(wt)
+    if report.head != current_head:
+        print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
+              file=sys.stderr)
+        return 1
+    _save_report(wt, report)
+    if report.ok and not report.dirty:
+        _print_receipt(wt, report, "produced")
+    _refresh_pr_checks(wt, config)
     print("PASS" if report.ok else "FAIL")
     return 0 if report.ok else 1
 
@@ -800,15 +804,17 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         return _confirm_review(wt, config, pr, result, publisher, reviews), reviews
 
 
-def _review_formats(result: ReviewResult) -> list[tuple[str, bool, bool]]:
+def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettingsLayout, bool]]:
     old_settings = "requested_settings" not in result.provenance
-    formats = [(False, False)]
+    formats: list[tuple[github.ReviewSettingsLayout, bool]] = [("current", False)]
     if runners.codex_evidence(result) is None:
-        formats.append((False, True))
+        formats.append(("current", True))
         if old_settings:
-            formats.append((True, True))
+            formats.append(("summary", True))
+    if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
+        formats.append(("requested-reported", True))
     if result.family == "codex" and old_settings:
-        formats.append((True, False))
+        formats.append(("summary", False))
     return [(prefix, settings, display)
             for prefix in (review_marker(result.head, result.kind, "model"), _repost_prefix(result))
             for settings, display in formats]
@@ -836,7 +842,9 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
                 or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
-            raise CliError("conflicting or ambiguous review publication")
+            hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
+                    if expected is None else "")
+            raise CliError(f"conflicting or ambiguous review publication{hint}")
         comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
@@ -1263,6 +1271,15 @@ MERGIFY_DEQUEUE_HINT = (
 )
 
 
+def _mergify_departure(
+    config: Config, pr: github.PR, queue: str, closed: list[github.GhError],
+) -> str | None:
+    sha = _landed(config, pr, closed)
+    if not sha and not closed:
+        raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    return sha
+
+
 def _wait_for_mergify(
     config: Config, pr: github.PR, timeout: float, confirmed: bool
 ) -> str | None:
@@ -1272,6 +1289,7 @@ def _wait_for_mergify(
     queue = config.mergify_queue
     assert queue is not None
     state = None
+    deferred_landing_read = False
     print(f"PR #{pr.number} following Mergify queue {queue}; head {pr.head_sha[:12]}; waiting up to {timeout:g}s")
     for _ in _poll_until(started, timeout):
         sha = _landed(config, pr, closed)
@@ -1280,20 +1298,19 @@ def _wait_for_mergify(
         if not mergify.configured(config.repo, config.base_branch, queue):
             raise CliError("Mergify queue configuration became unsafe or unavailable while waiting")
         state = mergify.membership(config.repo, pr.number, queue)
-        sha = _landed(config, pr, closed)
-        if sha:
+        deferred_landing_read = confirmed and state is not None and not closed
+        if not deferred_landing_read and (sha := _landed(config, pr, closed)):
             return sha
         if state is not None and not confirmed:
             mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
             confirmed = True
             print(f"PR #{pr.number} confirmed in Mergify queue {queue}; waiting")
         elif state is None and confirmed:
-            sha = _landed(config, pr, closed)
-            if sha:
+            if sha := _mergify_departure(config, pr, queue, closed):
                 return sha
-            if closed:
-                continue
-            raise CliError(f"PR #{pr.number} left Mergify queue {queue} unmerged. {MERGIFY_DEQUEUE_HINT}")
+    # A queued, open PR normally gets its next landing read on the next tick.
+    if deferred_landing_read and (sha := _landed(config, pr, closed)):
+        return sha
     if closed:
         raise closed[0]
     print(f"timed out waiting for Mergify to land PR #{pr.number}")
