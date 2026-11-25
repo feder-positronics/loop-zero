@@ -230,17 +230,21 @@ def _pr_markers(reviews: list[dict], head: str,
     return found
 
 
+def _review_cap_spent(markers: list[Marker]) -> bool:
+    return len({m.head for m in markers}) >= 2 or {m.kind for m in markers} >= {"primary", "delta"}
+
+
 def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
     """Return (kind, reviewed_head) or raise when the PR's review budget is spent."""
-    primaries = [m for m in markers if m.kind == "primary"]
-    if len({m.head for m in markers}) >= 2 or (primaries and any(m.kind == "delta" for m in markers)):
+    if _review_cap_spent(markers):
         raise CliError(
             "review cap reached (2 rounds per PR): fix or reject the findings "
             "(resolve-findings) and run `loopzero ready`, or split the PR"
         )
-    if not primaries:
+    primary = next((m for m in markers if m.kind == "primary"), None)
+    if primary is None:
         return "primary", None
-    reviewed = primaries[0].head
+    reviewed = primary.head
     if head.startswith(reviewed) or reviewed.startswith(head):
         raise CliError(f"head {head[:12]} already has a primary review; run `loopzero ready`, or push fixes for the delta")
     return "delta", reviewed
@@ -250,10 +254,10 @@ def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
 ) -> github.Readiness:
-    review = eligibility.readiness_review(
-        reviews if reviews is not None else _pr_reviews(config.repo, pr.number),
-        head, config.review_publishers or (github.login(),), repo=config.repo, number=pr.number,
-    )
+    if reviews is None:
+        reviews = _pr_reviews(config.repo, pr.number)
+    publishers = config.review_publishers or (github.login(),)
+    review = eligibility.readiness_review(reviews, head, publishers, repo=config.repo, number=pr.number)
     review_at = review.get("submitted_at") if review else None
     # GitHub's UTC submission time predates this process; monotonic time cannot date it.
     review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
@@ -287,6 +291,13 @@ def _readiness(
         result = github.Readiness(
             not reasons, reasons, result.waitable_failures, result.stale_verdicts
         )
+    if result.reasons == (github.MISSING_REVIEW_REASON,):
+        markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
+        if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
+            result = dataclasses.replace(result, reasons=(
+                f"review cap spent (primary + delta) and {head[:12]} has no eligible review. "
+                "Open a new PR for the changes that need review",
+            ))
     return result
 
 
@@ -799,6 +810,14 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
     return True
 
 
+def _delta_merge_recovery(wt: Path, reviewed: str, merge: str) -> str:
+    pre_merge = _git(wt, "rev-parse", f"{merge}^1")
+    if not _is_ancestor(wt, reviewed, pre_merge):
+        return f"replay the fixes on the reviewed head {reviewed[:12]}"
+    return (f"save the current tip on a backup branch, use `git reset --hard {pre_merge}`, "
+            "and cherry-pick any later fixes from the backup")
+
+
 def _run_review(
     wt: Path, config: Config, head: str, kind: str, reviewed: str | None,
     model: str | None = None, effort: str | None = None, *, runtime_source: str = "",
@@ -807,12 +826,19 @@ def _run_review(
     lineage_base = _primary_base(wt, config)
     since = reviewed if kind == "delta" else lineage_base
     if kind == "delta" and not _is_ancestor(wt, since, head):
-        raise CliError("delta review requires the primary as an ancestor; restore its history or split the PR")
+        raise CliError(
+            f"reviewed head {since[:12]} is not an ancestor of this branch. Find the original "
+            "branch tip with `git reflog`. Save the current tip on a backup branch, then use "
+            "`git reset --hard <original-tip>` and replay any later fixes. Push the restored head "
+            f"and run `loopzero review` before merging {config.base_branch}, or open a new PR "
+            "from the current branch"
+        )
     if kind == "delta" and (merges := worktree.merges_since(wt, since)):
+        recovery = _delta_merge_recovery(wt, since, merges[0])
         raise CliError(
             f"merge commit {merges[0][:12]} since the reviewed head {since[:12]} would put the "
-            "merged-in changes in the delta material; delta review needs the reviewed head as an "
-            "ancestor without base merges"
+            f"merged-in changes in the delta material. To recover, {recovery}. "
+            f"Push the recovered head and run `loopzero review` before merging {config.base_branch} again"
         )
     diff = worktree.diff_since(wt, since)
     task = worktree.task_text(wt)

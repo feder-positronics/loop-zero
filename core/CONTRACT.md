@@ -232,7 +232,7 @@ Freeze new work on Codex evidence projections. Simplify or delete them when they
 - Batch substantive and mechanical repairs into one head for the delta.
   Preserve the approved head; optional suggestions do not justify edits.
 - After round two, the owner merges once every finding is fixed or rejected
-  with reasons and readiness passes, or splits the PR. No escalation is required.
+  with reasons and readiness passes, or splits the PR. A head that needs another review goes in a new PR. No escalation is required.
 - After an approved primary or a delta review, take base changes by merging the
   base into the existing branch. Readiness can inherit that review when GitHub
   reports the new head is ahead of the reviewed commit. A request_changes
