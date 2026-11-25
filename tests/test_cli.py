@@ -232,7 +232,7 @@ def test_check_pass_writes_report(wt: Path, capsys) -> None:
     assert lines[2].startswith("stage 1/2: exit 0 (")
     assert lines[3] == "running: test -f README.md"
     assert lines[4].startswith("stage 2/2: exit 0 (")
-    assert lines[5].startswith("exit 0") and lines[5].endswith("  echo ok")
+    assert sum("exit 0" in line for line in lines) == 2
     report = json.loads((wt / ".loopzero" / "checks.json").read_text())
     assert report["head"] == head_of(wt)
     assert report["dirty"] is False
@@ -396,7 +396,9 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     code, out, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
     assert code == 1 and out.endswith("FAIL\n")
     assert out.startswith("checks are unpinned because --config was provided\n")
-    assert f"exit {exit_code}" in out and "README.md" not in out
+    assert sum(line.startswith(("stage 1/2: exit ", "exit "))
+               for line in out.splitlines()) == 1
+    assert f"stage 1/2: exit {exit_code} (" in out and "README.md" not in out
     assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
@@ -457,7 +459,7 @@ def test_check_uses_base_commands_when_worktree_weakens_them(wt: Path, capsys) -
     (wt / "workflow.toml").write_text(WORKFLOW.replace('"echo ok", "test -f README.md"', '"true"'))
     code, out, err = run(capsys, "check")
     assert code == 0 and err == ""
-    assert "  echo ok" in out and "  test -f README.md" in out
+    assert "running: echo ok\n" in out and "running: test -f README.md\n" in out
     assert "  true" not in out
 
 
@@ -474,7 +476,7 @@ def test_check_uses_worktree_checks_when_base_has_no_workflow(
     code, out, err = run(capsys, "check")
 
     assert code == 0 and err == ""
-    assert "  echo worktree" in out
+    assert "running: echo worktree\n" in out
     assert not out.startswith("checks pinned")
 
 
@@ -484,7 +486,7 @@ def test_check_uses_task_base_when_remote_ref_is_missing(wt: Path, capsys) -> No
     code, out, err = run(capsys, "check")
 
     assert code == 0 and err == ""
-    assert "  echo ok" in out and out.startswith("checks pinned to origin/main@")
+    assert "running: echo ok\n" in out and out.startswith("checks pinned to origin/main@")
 
 
 def test_primary_review_diffs_from_merge_base_not_base_tip(
