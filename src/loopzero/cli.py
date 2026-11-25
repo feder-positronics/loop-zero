@@ -1140,9 +1140,11 @@ def cmd_ready(args: argparse.Namespace) -> int:
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
-    if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
+    if args.wait is not None and (
+        waiting or _pending_checks(config, pr, readiness, allow_skipped=not pr.is_draft)
+    ):
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=kicked, started=started,
-                                     shown=readiness.reasons if kicked else (), args=args)
+                                     shown=readiness.reasons if kicked else (), args=args, allow_skipped=True)
         if waited is None:
             return 3
         pr, readiness, kicked = waited
@@ -1151,7 +1153,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
         github.mark_ready(config.repo, pr.number)
         if args.wait is not None:
             waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
-                                         args=args)
+                                         args=args, allow_skipped=True)
             if waited is None:
                 return 3
             pr, readiness, kicked = waited
@@ -1183,14 +1185,13 @@ def _draft_checks_waiting(
 
 
 def _pending_checks(
-    config: Config, pr: github.PR, readiness: github.Readiness, kicked: bool = False
+    config: Config, pr: github.PR, readiness: github.Readiness, *, allow_skipped: bool = False
 ) -> tuple[str, ...]:
     """Reasons worth waiting on: mergeability or required checks can still settle.
 
-    `kicked` also accepts `skipped`: this run just marked the draft ready, and the
-    skipped result belongs to the draft until GitHub replaces it.
+    An explicit ready wait can observe a skipped result left over from draft CI.
     """
-    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if kicked else [])]
+    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
     waitable.update(readiness.waitable_failures)
     waitable.add(MERGEABILITY_PENDING)
@@ -1229,12 +1230,12 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
-    allow_merged: bool = False,
+    allow_merged: bool = False, allow_skipped: bool = False,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     started = time.monotonic() if started is None else started
     if timeout == 0:
         return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args, allow_merged=allow_merged)
+                                shown=shown, args=args, allow_merged=allow_merged, allow_skipped=allow_skipped)
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1243,7 +1244,7 @@ def _wait_with_deadline(
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
             waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged)
+                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged, allow_skipped=allow_skipped)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1275,6 +1276,7 @@ def _wait_for_checks(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
     started: float | None = None, shown: tuple[str, ...] = (),
     args: argparse.Namespace | None = None, bounded: bool = False, allow_merged: bool = False,
+    allow_skipped: bool = False,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
     """Poll the same head until it settles, omitting readiness for an allowed merge."""
     grace_started = time.monotonic()
@@ -1295,7 +1297,9 @@ def _wait_for_checks(
                                     allow_merged=allow_merged)
         if kicked and readiness.ready and timeout > 0 and time.monotonic() - started > timeout:
             break  # A post-transition read cannot grant success beyond the original deadline.
-        pending = _pending_checks(config, current, readiness, kicked)
+        pending = _pending_checks(
+            config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
+        )
         if not pending:
             return current, readiness, kicked
         if pending != shown:
