@@ -100,7 +100,9 @@ def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = Fal
     base_checks = config_mod.load_base(root, config.base_branch)
     if base_checks is None:
         return config_mod.load(path)
-    config = config_mod.load(path, checks=base_checks)
+    config = config_mod.load(
+        path, checks=base_checks, validation_source=f"origin/{config.base_branch}:workflow.toml",
+    )
     delivery = config_mod.load_base(root, config.base_branch, "delivery") or {}
     config = dataclasses.replace(config, review_publishers=config_mod._strings(
         "delivery.review_publishers", delivery.get("review_publishers", [])))
@@ -128,7 +130,10 @@ def _review_launch_config(args: argparse.Namespace, wt: Path, config: Config) ->
         raise CliError("native review needs a base workflow.toml; supply --config for bootstrap")
     delivery = config_mod.load_base(wt, config.base_branch, "delivery", revision=revision) or {}
     pinned = dataclasses.replace(
-        config_mod.load(wt / "workflow.toml", checks=checks),
+        config_mod.load(
+            wt / "workflow.toml", checks=checks,
+            validation_source=f"origin/{config.base_branch}:workflow.toml",
+        ),
         review_publishers=config_mod._strings(
             "delivery.review_publishers", delivery.get("review_publishers", [])),
         reviewer_ro_paths=config_mod._host_paths(
