@@ -1031,7 +1031,8 @@ def cmd_ready(args: argparse.Namespace) -> int:
         github.mark_ready(config.repo, pr.number)
         print(f"marked ready; waiting for required checks: {', '.join(waiting)}")
         if args.wait is None:
-            print(f"waiting for required checks; {NEXT_WAIT}")
+            pending = f"{MERGEABILITY_PENDING}\n" if pr.mergeable == "UNKNOWN" else ""
+            print(f"{pending}waiting for required checks; {NEXT_WAIT}")
             return 3
     if args.wait is not None and (waiting or _pending_checks(config, pr, readiness)):
         waited = _wait_for_checks(wt, config, pr, args.wait, kicked=kicked, started=started)
@@ -1058,15 +1059,16 @@ def cmd_ready(args: argparse.Namespace) -> int:
 def _draft_checks_waiting(
     config: Config, pr: github.PR, readiness: github.Readiness
 ) -> tuple[str, ...]:
-    if not pr.is_draft or not readiness.reasons:
+    reasons = set(readiness.reasons) - {MERGEABILITY_PENDING}
+    if not pr.is_draft or not reasons:
         return ()
     expected: dict[str, str] = {}
     for name in config.required_ci:
         expected[f"required check '{name}' missing on {pr.head_sha[:12]}"] = name
         expected[f"required check '{name}' is skipped"] = name
-    if not all(reason in expected for reason in readiness.reasons):
+    if not reasons <= expected.keys():
         return ()
-    blocked = {expected[reason] for reason in readiness.reasons}
+    blocked = {expected[reason] for reason in reasons}
     return tuple(name for name in config.required_ci if name in blocked)
 
 
@@ -1078,10 +1080,7 @@ def _pending_checks(
     `kicked` also accepts `skipped`: this run just marked the draft ready, and the
     skipped result belongs to the draft until GitHub replaces it.
     """
-    draft_waiting = pr.is_draft and pr.mergeable == "UNKNOWN"
-    states = [f"missing on {pr.head_sha[:12]}", "is pending"]
-    if kicked or draft_waiting:
-        states.append("is skipped")
+    states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if kicked else [])]
     waitable = {f"required check '{n}' {state}" for n in config.required_ci for state in states}
     waitable.update(readiness.waitable_failures)
     waitable.add(MERGEABILITY_PENDING)
@@ -1107,6 +1106,7 @@ def _wait_for_checks(
     """Poll readiness for the same head until only non-waitable state remains; None on timeout."""
     grace_started = time.monotonic()
     started = grace_started if started is None else started
+    current = pr
     shown, stale_notice = None, False
     for _ in _poll_until(started, timeout):
         current = github.pr_view(config.repo, pr.number)
@@ -1146,7 +1146,7 @@ def _wait_for_checks(
                 f"triggers and permissions for head {pr.head_sha[:12]}; after correcting the cause, "
                 "rerun the same `--wait` command"
             )
-    if shown and MERGEABILITY_PENDING in shown:
+    if current.mergeable == "UNKNOWN":
         print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
     else:
         print(f"timed out waiting for required checks on {pr.head_sha[:12]}")

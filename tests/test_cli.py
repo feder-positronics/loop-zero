@@ -1865,6 +1865,19 @@ def test_ready_waits_for_checks_on_original_head(
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
 
 
+@pytest.mark.parametrize("wait", [False, True])
+def test_pending_mergeability_does_not_delay_draft_checks(wt, gh, capsys, head, wait):
+    arm_approved_pr_with_check_result(gh, head, wt, "skipped", mergeable="UNKNOWN")
+    gh.respond("pr ready", "")
+
+    code, out, err = run(capsys, "ready", *(["--wait=0"] if wait else []))
+
+    assert (code, err) == (3, "")
+    assert "marked ready; waiting for required checks: checks" in out
+    assert "GitHub is computing mergeability" in out
+    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 1
+
+
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("settled", ["CONFLICTING", "MERGEABLE", "UNKNOWN"])
 def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled):
