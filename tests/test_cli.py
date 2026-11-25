@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from loopzero import cli, github, mergify
+from loopzero import cli, config, github, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, ReviewResult
 from tests.conftest import git, init_git_repo
@@ -2545,6 +2545,19 @@ def test_second_merge_retries_remote_branch_cleanup(
     assert second[0] == 0 and second[2] == ""
     deletes = [call for call in gh.calls if call["argv"][:2] == ["api", "-X"]]
     assert len(deletes) == 2
+
+
+def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):
+    monkeypatch.chdir(git_repo)
+    bad_config = git_repo / "bad.toml"
+    bad_config.write_text('[repo]\nname = "example/repo"\n[checks]\nscratch = ["./"]\n')
+
+    code, _, err = run(capsys, "--config", "bad.toml", "status")
+    assert code == 1
+    assert "bad.toml: checks.scratch entries must be relative, got './'" in err
+
+    bad_config.write_text(bad_config.read_text().replace('"./"', '"./.venv"'))
+    assert config.load(bad_config).scratch == ("./.venv",)
 
 
 def test_status_full(wt: Path, gh: FakeGh, capsys) -> None:
