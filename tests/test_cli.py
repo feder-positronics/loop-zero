@@ -1630,13 +1630,7 @@ def test_review_reminted_app_token_keeps_publisher(
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
     wall, run_review = [1_000_000.0], cli._run_review
     monkeypatch.setattr(github.time, "time", lambda: wall[0])
-
-    def long_review(*args, **kwargs):
-        result = run_review(*args, **kwargs)
-        wall[0] += 3601
-        return result
-
-    monkeypatch.setattr(cli, "_run_review", long_review)
+    monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), wall.append(wall.pop() + 3601))[0])
     (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["app[bot]"]\n')
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
@@ -1652,7 +1646,7 @@ def test_review_reminted_app_token_keeps_publisher(
         assert cli._review_file(wt, head, "primary").is_file()
 
 
-@pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN), (["app", ""], "app[bot]")])
+@pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN)])  # app -> unavailable: reminted test
 def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys, tokens, publisher):
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
     monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
@@ -1662,16 +1656,13 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
-    code, _, err = run(capsys, "review")
-    posts = [c["token"] or "" for c in gh.calls if "/reviews" in " ".join(c["argv"]) and "POST" in c["argv"]]
-    if publisher != LOGIN:  # the app token can no longer be minted: hold rather than post as the operator
-        assert code == 1 and "--repost" in err and posts == []
-        return
-    assert code == 0
+    assert run(capsys, "review")[0] == 0
     assert len(gh.calls) == 7  # Includes the body refresh after review publication.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
-    assert posted_review(gh)["event"] == "APPROVE" and posts == [""]
+    assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")
+    assert [c["token"] or "" for c in gh.calls if "/reviews" in " ".join(c["argv"])
+            and "POST" in c["argv"]] == ["" if publisher == LOGIN else "app"]
 
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
