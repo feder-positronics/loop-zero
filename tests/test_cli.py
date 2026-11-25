@@ -1108,6 +1108,43 @@ def test_review_saves_result_and_repost_skips_model(wt: Path, gh: FakeGh, fake_b
     assert [c["body"].split("\n")[-1] for c in payload["comments"]] == ["Off by one."]
 
 
+@pytest.mark.parametrize("repost", [False, True], ids=["first-save", "repost"])
+def test_interrupted_review_save_preserves_previous_receipt(wt, gh, fake_bin, capsys, monkeypatch, repost):
+    head = prepare_review(wt, gh, fake_bin)
+    saved = wt / ".loopzero" / f"review-{head[:12]}-primary.json"
+    if repost:
+        gh.fail(post_key(), "HTTP 500 server error")
+        code, _, err = run(capsys, "review")
+        assert code == 1 and f"review saved at {saved}" in err
+        original = saved.read_bytes()
+        (fake_bin / "claude.stdin").unlink()
+        gh.respond(post_key(), {"id": 5})
+        args = ["review", "--repost"]
+    else:
+        args = ["review"]
+    calls_before = len(gh.calls)
+    encode = json.dumps
+
+    def interrupt_encoding(value, *args, **kwargs):
+        if isinstance(value, dict) and "publication" in value:
+            raise KeyboardInterrupt
+        return encode(value, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(json, "dumps", interrupt_encoding)
+        assert cli.main(args) == 130
+    assert all(call["argv"][:2] != post_key().split() for call in gh.calls[calls_before:])
+
+    if repost:
+        assert saved.read_bytes() == original
+        assert run(capsys, "review", "--repost")[0] == 0
+        assert saved.read_bytes() == original
+        assert saved.stat().st_mode & 0o777 == 0o600
+        assert not (fake_bin / "claude.stdin").exists()
+    else:
+        assert not saved.exists()
+
+
 def test_repost_refuses_retired_paired_review(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys
 ) -> None:
