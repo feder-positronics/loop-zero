@@ -246,6 +246,12 @@ def app_token() -> str:
     return token
 
 
+def _transient_error(tail: str, retry_idempotent: bool) -> bool:
+    return bool(TRANSIENT_RE.search(tail)) or (
+        retry_idempotent and "something went wrong while executing your query" in tail.lower()
+    )
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
@@ -288,11 +294,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                               "GitHub's reset or Retry-After; no automatic retry.")
             raise GhError(argv, tail + reset + "\nRate limited: retry after GitHub's reset or Retry-After; "
                           "No automatic retry.")
-        if done.exit_code == 0 or delay is None or not retryable:
-            break
-        if not (TRANSIENT_RE.search(tail) or (
-            retry_idempotent and "something went wrong while executing your query" in tail.lower()
-        )):
+        if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
         _retry_sleep(delay)
     if done.exit_code != 0:
