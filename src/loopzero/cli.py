@@ -75,6 +75,17 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
     return done.stdout.strip()
 
 
+def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
+    done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
+                     extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
+    if done.exit_code != 0:
+        detail = _proc.tail(done.stderr)[-2000:]
+        if force_lease and any(line.startswith("!\t") and line.endswith("\t[rejected] (stale info)")
+                               for line in done.stdout.splitlines()):
+            detail += "\nremote moved since PR lookup; fetch and retry"
+        raise CliError(f"git {' '.join(args)} failed: {detail.strip()}")
+
+
 def _toplevel() -> Path:
     return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
 
@@ -630,14 +641,9 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(
                 f"PR head {pr.head_sha[:12]} is not in this worktree; fetch and integrate it first"
             )
-        push.append(f"--force-with-lease={branch}:{pr.head_sha}")
+        push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
-    try:
-        _git(wt, *push, timeout=PUSH_TIMEOUT)
-    except CliError as exc:
-        if force_lease:
-            raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
-        raise
+    _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
         if body != (pr.body or "").replace("\r\n", "\n"):
             github.update_body(config.repo, pr.number, body)
