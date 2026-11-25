@@ -910,6 +910,39 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
 
 
+@pytest.mark.parametrize("refresh_fails", [False, True])
+def test_review_summary_uses_body_edited_during_review(wt, gh, fake_bin, capsys, monkeypatch, refresh_fails):
+    head = prepare_review(wt, gh, fake_bin)
+    detail_key = f"api repos/{REPO}/pulls/7"
+    live = "# T1\n\n## Notes\nEdited during review\n\n## Validation\nNew check results\n"
+    run_review = cli._run_review
+
+    def change_body_during_review(*args, **kwargs):
+        result = run_review(*args, **kwargs)
+        if refresh_fails:
+            gh.respond(detail_key, {}, exit=1, stderr="body read failed")
+        else:
+            detail = rest_pr_json({**pr_json(headRefOid=head), "body": live})
+            gh.respond(detail_key, detail)
+        return result
+
+    monkeypatch.setattr(cli, "_run_review", change_body_during_review)
+    code, out, err = run(capsys, "review")
+    assert code == 0 and f"primary review by claude on {head[:12]}: approve" in out
+    posted_review(gh)
+    post_index = next(i for i, call in enumerate(gh.calls) if call["argv"][:2] == post_key().split())
+    assert gh.calls[post_index + 1]["argv"] == detail_key.split()
+    patches = [call for call in gh.calls if "PATCH" in call["argv"]]
+    if refresh_fails:
+        assert not patches
+        assert "could not append PR review summary" in err and "body read failed" in err
+    else:
+        assert len(patches) == 1 and not err
+        assert json.loads(patches[0]["--input"])["body"] == (
+            f"{live}\n## Review\n- primary, claude, {head[:12]}, approve\n"
+        )
+
+
 @pytest.mark.parametrize("source", ["task", "base", "override", "missing_ref", "bootstrap"])
 def test_review_runtime_paths_use_only_verified_base(
     wt: Path, gh: FakeGh, fake_bin: Path, capsys, tmp_path: Path, source: str,
@@ -1368,7 +1401,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
     prepare_review(wt, gh, fake_bin, post_id=3)
     gh.respond("api graphql viewer", {"data": {"viewer": {"login": publisher}}})
     assert run(capsys, "review")[0] == 0
-    assert len(gh.calls) == 6
+    assert len(gh.calls) == 7  # Includes the body refresh after review publication.
     assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 1
     assert not any("/files" in c["argv"][1] for c in gh.calls)
     assert posted_review(gh)["event"] == ("APPROVE" if publisher == LOGIN else "COMMENT")

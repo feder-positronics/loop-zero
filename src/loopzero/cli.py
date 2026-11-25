@@ -736,8 +736,9 @@ def cmd_review(args: argparse.Namespace) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        github.update_body(config.repo, pr.number, _append_review(pr.body or _pr_body(wt, head), result))
-    except (github.GhError, OSError, ValueError) as exc:
+        live = github.pr_view(config.repo, pr.number)
+        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+    except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
