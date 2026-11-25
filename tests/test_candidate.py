@@ -348,24 +348,28 @@ def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate):
 def test_candidate_transport_configuration_is_scoped_to_fetch(tree_candidate, monkeypatch):
     attest, _, _, _, _, source, _ = tree_candidate
     popen = subprocess.Popen
+    seen = set()
     proxy = "http://proxy.invalid:8080"
     monkeypatch.setenv("HTTPS_PROXY", proxy)
 
     def check_environment(argv, **kwargs):
-        if argv[0] == "prlimit":
+        if "git" in argv:
             env = kwargs["env"]
             if "fetch" in argv:
+                seen.add("fetch")
                 assert env["HTTPS_PROXY"] == proxy
                 assert env["GIT_CONFIG_COUNT"] == "1"
                 assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
                 header = env["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
                 assert base64.b64decode(header) == b"x-access-token:secret-token"
             else:
+                seen.add("non-fetch")
                 assert not {"HTTPS_PROXY", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"} & env.keys()
         return popen(argv, **kwargs)
 
     monkeypatch.setattr(subprocess, "Popen", check_environment)
     assert attest() == [{"number": 102, "head_sha": source}]
+    assert seen == {"fetch", "non-fetch"}
 
 
 @pytest.mark.parametrize("mutation", ["replaced", "withdrawn", "extra", "tampered", "missing"])
