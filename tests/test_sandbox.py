@@ -108,6 +108,21 @@ def test_tail_merges_streams_and_truncates(git_repo, bwrap_log):
     assert lines[-1] == "err"
 
 
+def test_receipt_bounds_a_single_oversized_line(git_repo, bwrap_log):
+    from loopzero.cli import _save_report
+
+    command = """python3 -c 'print("x" * 16777216 + " Ω end")'"""
+    report = sandbox.run_checks(make_config(checks=(command,)), git_repo)
+    _save_report(git_repo, report)
+
+    assert report.ok
+    receipt = git_repo / ".loopzero/checks.json"
+    assert receipt.stat().st_size < 17_000
+    tail = json.loads(receipt.read_text())["results"][0]["tail"]
+    assert len(tail.encode("utf-8")) == 16 * 1024
+    assert tail.endswith(" Ω end")
+
+
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
@@ -212,13 +227,16 @@ def inject_check_timeout(monkeypatch, output, before_timeout=None):
     monkeypatch.setattr(subprocess.Popen, "communicate", communicate_with_timeout)
 
 
-def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch):
-    inject_check_timeout(monkeypatch, b"partial\n")
+@pytest.mark.parametrize("prefix", [b"", b"x" * 20_000])
+def test_timeout_is_recorded_not_raised(git_repo, bwrap_log, monkeypatch, prefix):
+    inject_check_timeout(monkeypatch, prefix + b"partial\n")
     report = sandbox.run_checks(
         make_config(checks=("echo partial", "echo after")), git_repo, timeout=0.3
     )
     (first,) = report.results
-    assert (first.exit_code, first.tail.splitlines()[0]) == (sandbox.TIMEOUT_EXIT, "partial")
+    assert first.exit_code == sandbox.TIMEOUT_EXIT
+    assert first.tail.splitlines()[0].endswith("partial")
+    assert len(first.tail.encode("utf-8")) <= 16 * 1024
     assert "timed out" in first.tail and not report.ok
 
 
@@ -635,7 +653,8 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, change):
     assert report.head == git(git_repo, 'rev-parse', 'HEAD').strip()
 
 
-def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
+@pytest.mark.parametrize("overflow", [False, True])
+def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, overflow):
     from loopzero.cli import _save_report
 
     marker = "CHECK_INTEGRATION_SHARD []"
@@ -646,15 +665,21 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log):
     original = sandbox.run_checks(config, git_repo)
     assert original.ok
     _save_report(git_repo, original)
+    path = git_repo / ".loopzero/checks.json"
+    if overflow:
+        stored = json.loads(path.read_text())
+        stored["results"][0]["tail"] = f"{'x' * 20_000}\n{marker}"
+        path.write_text(json.dumps(stored))
 
     git(git_repo, "commit", "--allow-empty", "-m", "advance head")
     _save_report(git_repo, sandbox.run_checks(config, git_repo))
 
-    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    receipt = json.loads(path.read_text())
     assert receipt["head"] == git(git_repo, "rev-parse", "HEAD").strip()
     [result] = receipt["results"]
     assert result["reused_from"] == original.head
     assert marker in result["tail"].splitlines()
+    assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
 @pytest.mark.parametrize('symlink', [False, True])

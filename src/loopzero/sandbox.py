@@ -26,6 +26,7 @@ from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exi
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
+CHECK_TAIL_BYTES = 16 * 1024
 HEARTBEAT_INTERVAL = 30.0
 SANDBOX_HOME = "/tmp/home"
 # Only these system directories are exposed read-only by default; home tool paths
@@ -104,7 +105,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             old = previous.get(command)
             if (key and old and old.get("input_key") == key
                     and is_check_exit_code(old.get("exit_code")) and old["exit_code"] == 0):
-                result = CheckResult(command, 0, 0.0, old.get("tail", ""), key, old["head"])
+                result = CheckResult(command, 0, 0.0, _check_tail(old.get("tail", "")), key, old["head"])
                 if status:
                     status(f"reused {old['head'][:8]}")
             else:
@@ -139,7 +140,8 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
         if (data["dirty"] is not False or not isinstance(data["head"], str)
                 or data.get("settings_sha256") != settings_sha256):
             return {}
-        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]}
+        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]
+                if isinstance(r.get("tail", ""), str)}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
@@ -271,6 +273,13 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
     return requested if hard == resource.RLIM_INFINITY else min(requested, hard)
 
 
+def _check_tail(text: str) -> str:
+    suffix = text.rstrip("\n")[-CHECK_TAIL_BYTES:]
+    encoded = suffix.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
+    # A byte cut can start inside a multibyte character.
+    return _proc.tail(encoded.decode("utf-8", errors="ignore"))
+
+
 def _run_one(
     config: Config, worktree: Path, prefix: list[str], command: str, timeout: float
 ) -> CheckResult:
@@ -288,8 +297,8 @@ def _run_one(
         )
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
-                           _proc.tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
-    return CheckResult(command, done.exit_code, done.duration_s, _proc.tail(done.stdout))
+                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(done.stdout))
 
 
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
@@ -467,10 +476,10 @@ def _dispatch_one(
                 raise ValueError("Local fallback failed")
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
-                           _proc.tail(frame["tail"]))
+                           _check_tail(frame["tail"]))
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT,
                            exc.duration_s if exc.duration_s is not None else timeout,
-                           _proc.tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        return CheckResult(command, 1, 0.0, f"Stage runner failed: {exc}")
+        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {exc}"))
