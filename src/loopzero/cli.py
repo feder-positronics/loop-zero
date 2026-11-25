@@ -295,9 +295,7 @@ def _readiness(
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
-        result = github.Readiness(
-            not reasons, reasons, result.waitable_failures, result.stale_verdicts
-        )
+        result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
     if result.reasons == (github.MISSING_REVIEW_REASON,):
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
@@ -1177,7 +1175,7 @@ def _wait_for_checks(
         if (
             elapsed >= MISSING_RUN_GRACE
             and all(" missing on " in r for r in pending)
-            and "pending" not in github.check_runs(config.repo, pr.head_sha).values()
+            and not readiness.has_pending_checks
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
