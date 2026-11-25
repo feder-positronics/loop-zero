@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fcntl
 import hashlib
 import importlib.metadata
 import io
@@ -17,6 +18,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -345,6 +347,18 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         return
 
 
+@contextmanager
+def _lock_task_state(wt: Path) -> Iterator[None]:
+    directory = wt / ".loopzero"
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _save_report(wt: Path, report: CheckReport) -> None:
     path = wt / CHECKS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -479,10 +493,14 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
     return prefix + content.lstrip("\n")
 
 
-def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
-    body = _pr_body(wt, head, pr.body)
-    if body != (pr.body or "").replace("\r\n", "\n"):
-        github.update_body(config.repo, pr.number, body)
+def _update_pr_checks(wt: Path, head: str, config: Config, branch: str) -> None:
+    with _lock_task_state(wt):
+        live = github.pr_for_branch(config.repo, branch)
+        if live is None or live.state != "OPEN" or live.head_sha != head:
+            return
+        body = _pr_body(wt, head, live.body)
+        if body != live.body.replace("\r\n", "\n"):
+            github.update_body(config.repo, live.number, body)
 
 
 _REQUIRED_TASK_LINES = ("Context", "Problem", "Goal")
@@ -526,9 +544,7 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         return
     try:
         branch, head = worktree.branch(wt), worktree.head(wt)
-        pr = github.pr_for_branch(config.repo, branch)
-        if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
-            _update_pr_checks(wt, head, config, pr)
+        _update_pr_checks(wt, head, config, branch)
     except (github.GhError, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
@@ -618,7 +634,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
             f"task branch {branch} already merged as PR #{pr.number} ({pr.url}); "
             "run `loopzero start <new-task-slug>` for a new task"
         )
-    existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
+    existing = _sync_task_narrative(wt, pr.body) if pr is not None else None
     body = _pr_body(wt, head, existing)
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
@@ -639,8 +655,13 @@ def cmd_pr(args: argparse.Namespace) -> int:
             raise CliError(f"{exc}; remote moved since PR lookup; fetch and retry") from exc
         raise
     if pr is not None and pr.state == "OPEN":
-        if body != (pr.body or "").replace("\r\n", "\n"):
-            github.update_body(config.repo, pr.number, body)
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            if live.state != "OPEN":
+                raise CliError(f"PR #{pr.number} closed during publication")
+            body = _pr_body(wt, head, _sync_task_narrative(wt, live.body))
+            if body != live.body.replace("\r\n", "\n"):
+                github.update_body(config.repo, pr.number, body)
     else:
         pr = github.create_draft_pr(
             config.repo, branch, config.base_branch, _pr_title(wt, branch), body
@@ -798,8 +819,9 @@ def cmd_review(args: argparse.Namespace) -> int:
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
     try:
-        live = github.pr_view(config.repo, pr.number)
-        github.update_body(config.repo, pr.number, _append_review(live.body, result))
+        with _lock_task_state(wt):
+            live = github.pr_view(config.repo, pr.number)
+            github.update_body(config.repo, pr.number, _append_review(live.body, result))
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)

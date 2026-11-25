@@ -367,7 +367,9 @@ def test_repeated_pr_does_not_rewrite_unchanged_body(wt: Path, gh: FakeGh, capsy
     before = len(gh.calls)
     assert run(capsys, "pr")[0] == 0
     assert [c["argv"][:2] for c in gh.calls[before:]] == [
-        ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS]
+        ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS,
+        ["api", f"repos/{REPO}/pulls/7"],
+    ]
 
 
 def test_check_does_not_rewrite_when_only_duration_changes(wt: Path, gh: FakeGh, capsys) -> None:
@@ -413,6 +415,25 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
         if text in body:
             assert text in updated
+
+
+def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, capsys, monkeypatch):
+    head = prepare_review(wt, gh, fake_bin)
+    body = "# PR\n\n## Notes\nHuman evidence.\n"
+    gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    update = cli._update_pr_checks
+
+    def delay(path, sha, config, pr):
+        assert run(capsys, "review")[0] == 0
+        live = json.loads(gh.calls[-1]["--input"])["body"]
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=live)))
+        update(path, sha, config, pr)
+
+    monkeypatch.setattr(cli, "_update_pr_checks", delay)
+    assert run(capsys, "check")[0] == 0
+    final = json.loads(gh.calls[-1]["--input"])["body"]
+    assert all(text in final for text in ("Human evidence.", "Recorded for", "- primary, claude"))
 
 
 @pytest.mark.parametrize("command,exit_code", [("check", 0), ("pr", 1)])
@@ -877,7 +898,9 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     assert code == 0 and out == URL + "\n"
     assert [c["argv"][:2] for c in gh.calls] == [
         ["api", branch_history_key().split(" ", 1)[1]], *LOOKUP_CALLS,
-                                                ["api", f"repos/{REPO}/pulls/7"]]
+        ["api", f"repos/{REPO}/pulls/7"],
+        ["api", f"repos/{REPO}/pulls/7"],
+    ]
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
