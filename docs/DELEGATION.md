@@ -91,6 +91,15 @@ After the wait, a missing `LOG.exit` means the job was killed, timed out or
 cancelled. To cancel, check `LOG.exit` first and run `systemctl --user stop NAME`
 if the file is absent.
 
+### Leftover cleanup
+
+The named retention job must confirm a pushed branch, merged or closed PR,
+retention of any evidence required by the delivery contract, clean tracked/untracked
+Git state, an empty shared stash, inactivity, no unarchived T3 thread binding
+where T3 is used, and its host age/size policy with a 24-hour mtime/ctime idle
+floor. Honor host execution approval rules; use dry run until execution is
+authorized.
+
 ## Team roles
 
 A long-running team gives each role one current owner. Owners read state from
@@ -532,7 +541,9 @@ its PR against the producer branch once its checks pass, is reviewed there and
 is retargeted when the producer merges. Retarget stacked PRs before deleting
 their base.
 
-For a stack, agree the configuration with the coordinator: copy the trusted
+### Stacked delivery
+
+Agree the configuration with the coordinator: copy the trusted
 base's complete `workflow.toml` to `.loopzero/stack-workflow.toml` and change
 only `[repo].base` to the producer branch (for example `base = "lz/producer"`).
 Keep every check, required CI name, publisher and reviewer setting intact;
@@ -546,8 +557,8 @@ loopzero --config .loopzero/stack-workflow.toml review
 ```
 
 `--config` uses explicitly supplied settings instead of trusted-base pinning;
-the coordinator must verify the copy and its one-field difference. Do not
-retarget to main just to launch review. After the producer lands, retarget the
+the coordinator must verify the copy and its one-field difference. Keep the
+producer as the base through primary review. After the producer lands, retarget the
 consumer to main and return to the canonical configuration. Before readiness and
 merge, follow the [local check receipt rules](../core/CONTRACT.md#gate-execution-and-delivery-priority)
 and [review budget](../core/CONTRACT.md#review-budget).

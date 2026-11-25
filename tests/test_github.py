@@ -436,15 +436,13 @@ def test_post_review_payload(gh: FakeGh, raw: str, prefix: str, family: str) -> 
     assert "**request_changes** (1 critical, 2 important, 2 suggestion)" in body
     assert loose.title in body and loose.body in body
     assert len(body.encode("utf-8")) < 65_536 and result.raw == raw
-    if family == "claude":
-        assert ("Transcript truncated" in body) == (len(raw.encode("utf-8")) > 30_000)
-        tail = raw.encode("utf-8")[-30_000:].decode("utf-8", errors="ignore")
-        assert tail + "\n```\n</details>" in body
-    else:
-        assert "Transcript truncated" not in body and "restricted local review receipt" in body
+    assert "Transcript truncated" not in body and "restricted local review receipt" in body
+    if raw:
+        assert raw not in body
+    if family == "codex":
         assert hashlib.sha256(raw.encode()).hexdigest() in body
-        if raw:
-            assert raw not in body
+    else:
+        assert "Raw reviewer output" not in body
     assert "Global concern" not in body, "blocking finding was anchored, not listed"
     assert all("subject_type" not in c for c in comments)
 
@@ -547,6 +545,66 @@ def test_gh_error_tail_joins_stderr_and_stdout(gh: FakeGh) -> None:
     with pytest.raises(github.GhError) as info:
         github.mark_ready(REPO, 7)
     assert info.value.tail == 'gh: HTTP 422\n\n{"message": "detail on stdout"}'
+
+
+@pytest.mark.parametrize(("failure", "remedy"), [
+    ("not logged in", github.GH_AUTH_REMEDY),
+    ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After"),
+])
+def test_gh_errors_keep_remediation_after_redaction(gh: FakeGh, failure: str, remedy: str) -> None:
+    token = "ghs_FAKE000"
+    gh.fail("api user", f"{failure}: {token}\ntoken:")
+
+    with pytest.raises(github.GhError) as info:
+        github._gh("api", "user", "-f", f"value={token}", token=token)
+
+    assert remedy in str(info.value)
+    if failure.startswith("HTTP"):
+        assert "Rate limited:" in str(info.value)
+    assert token not in str(info.value)
+    assert token not in info.value.tail
+    assert all(token not in arg for arg in info.value.command)
+
+
+@pytest.mark.parametrize("label", [
+    "Authorization: Basic", "Authorization: Bearer", "Authorization: token",
+    "Bearer", "access_token:", "auth_token:", "token:",
+])
+@pytest.mark.parametrize("gap", [" ", "\n  "])
+def test_gh_errors_redact_labeled_credentials(gh: FakeGh, label: str, gap: str) -> None:
+    header = f"{label}{gap}opaque-synthetic-value"
+    gh.fail("api user", f"HTTP 401\n{header}")
+
+    with pytest.raises(github.GhError, match="HTTP 401") as info:
+        github._gh("api", "user", "-H", header)
+
+    assert "opaque-synthetic-value" not in str(info.value)
+    assert "opaque-synthetic-value" not in info.value.tail
+    assert "opaque-synthetic-value" not in " ".join(info.value.command)
+
+
+def test_invalid_gh_json_reports_location_without_response_content(gh: FakeGh) -> None:
+    gh.respond("api user", {"stdout": '{"access_token":"opaque-synthetic-value"', "exit": 0})
+
+    with pytest.raises(github.GhError, match="invalid JSON from gh at line 1, column") as info:
+        github._gh_json("api", "user")
+
+    assert "opaque-synthetic-value" not in str(info.value)
+    assert "opaque-synthetic-value" not in info.value.tail
+
+
+def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
+    token = "ghs_FAKE000"
+
+    def timeout(*args, **kwargs):
+        raise github.ProcTimeout(f"gh timed out: {token}", token, stderr=token)
+
+    monkeypatch.setattr(github, "run", timeout)
+    with pytest.raises(github.ProcTimeout, match="gh timed out: \\[REDACTED\\]") as info:
+        github._gh("api", "user", "--method", "POST", token=token)
+
+    assert info.value.stdout == info.value.stderr == "[REDACTED]"
+    assert info.value.__suppress_context__
 
 
 @pytest.mark.parametrize("verdict", ["approve", "request_changes"])

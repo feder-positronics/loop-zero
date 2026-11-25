@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,8 +12,12 @@ from tests.conftest import git
 
 
 @pytest.fixture
-def repo(git_repo: Path, tmp_path: Path) -> Path:
+def repo(git_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """`git_repo` wired to a bare origin that already holds `main`."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
     origin = tmp_path / "origin.git"
     git(git_repo, "init", "-q", "--bare", "-b", "main", str(origin))
     git(git_repo, "remote", "add", "origin", str(origin))
@@ -53,6 +58,38 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path) -> None:
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
+
+
+@pytest.mark.parametrize("dirty", [False, True])
+def test_start_retries_after_git_creates_worktree(repo, monkeypatch, dirty):
+    base = commit_on_origin(repo, "base-change")
+    wt = repo / ".worktrees" / "my-task"
+    run_git = worktree._git
+
+    def interrupt_after_add(cwd, *args, **kwargs):
+        output = run_git(cwd, *args, **kwargs)
+        if args[:2] == ("worktree", "add"):
+            raise KeyboardInterrupt
+        return output
+
+    with monkeypatch.context() as patch:
+        patch.setattr(worktree, "_git", interrupt_after_add)
+        with pytest.raises(KeyboardInterrupt):
+            worktree.start(repo, "my-task", "main")
+    task = worktree.task_file(wt)
+    assert worktree.branch(wt) == "lz/my-task" and worktree.head(wt) == base
+    assert not task.exists()
+    if dirty:
+        (wt / "untracked").write_text("work in progress")
+        with pytest.raises(worktree.WorktreeError):
+            worktree.start(repo, "my-task", "main")
+        assert not task.exists()
+        return
+
+    assert worktree.start(repo, "my-task", "main") == wt
+    assert worktree.base_sha(wt) == base
+    assert task.read_text().startswith("# My task\n")
+    assert task.read_text().endswith("(filled by `loopzero review`)\n")
 
 
 def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
@@ -101,6 +138,19 @@ def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
     assert worktree.branch_name(repo, "ok-1.2_x") == "lz/ok-1.2_x"
     with pytest.raises(worktree.WorktreeError):
         worktree.branch_name(repo, "has~tilde")
+
+
+@pytest.mark.parametrize("change", [("remove", "origin"), ("rename", "origin", "upstream")])
+def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> None:
+    git(repo, "remote", *change)
+
+    with pytest.raises(worktree.WorktreeError, match="no Git remote named 'origin'") as info:
+        worktree.start(repo, "my-task", "main")
+
+    assert "git remote add origin <url>" in str(info.value)
+    assert "git remote rename <name> origin" in str(info.value)
+    assert git(repo, "branch", "--list", "lz/my-task") == ""
+    assert not worktree.worktree_dir(repo, "my-task").exists()
 
 
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
@@ -156,3 +206,35 @@ def test_cleanup_refuses_dirty(repo: Path) -> None:
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
         worktree.cleanup(repo / ".worktrees" / "ghost")
+
+
+@pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
+def test_abandoned_worktree_guide(repo: Path, state: str) -> None:
+    wt = worktree.start(repo, "abandoned", "main")
+    git(wt, "commit", "--allow-empty", "-m", "published task")
+    head = worktree.head(wt)
+    if state != "unpublished":
+        git(wt, "push", "-u", "origin", "lz/abandoned")
+    if state == "dirty":
+        (wt / "untracked.txt").write_text("keep my work")
+    if state == "divergent":
+        git(wt, "commit", "--allow-empty", "-m", "local follow-up")
+    if state == "remote-moved":
+        git(repo, "push", "--force", "origin", "main:refs/heads/lz/abandoned")
+
+    if state == "stash":
+        (repo / "README.md").write_text("keep my stashed work")
+        git(repo, "stash", "push")
+
+    setup = (Path(__file__).resolve().parents[1] / "SETUP.md").read_text()
+    _, heading, section = setup.partition("## Removing an abandoned task worktree")
+    assert heading, "the guide must cover closed, unmerged tasks outside retention"
+    commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
+    result = subprocess.run(
+        ["sh", "-c", commands, "cleanup-guide", "abandoned", head],
+        cwd=repo, capture_output=True, text=True, check=False,
+    )
+
+    assert (result.returncode == 0) == (state == "clean"), result.stderr
+    assert wt.exists() == (state != "clean")
+    assert git(repo, "show-ref", "--verify", "refs/heads/lz/abandoned")
