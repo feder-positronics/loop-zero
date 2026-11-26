@@ -55,7 +55,10 @@ the job's scope, give the owner the
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head.
-Suggestions must not expand scope.
+Keep review suggestions within scope. Finish planned test, documentation and
+generated-file edits before primary review.
+After approval, defer optional polish to a follow-up. Fix new evidence of an
+acceptance failure and get review coverage for the changed head.
 Before the check and draft push for primary review, rebase your own commits onto `origin/<base>` using
 `[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
