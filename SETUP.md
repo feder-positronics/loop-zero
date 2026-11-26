@@ -39,6 +39,21 @@ As a dev dependency of your repository:
 uv add --dev "loopzero @ git+https://github.com/feder-positronics/loop-zero@<sha>"
 ```
 
+For a verified CI install, check out the full commit SHA and run these commands
+from its repository root. The build constraints verify Hatchling and its build dependencies.
+The lock export supplies the hashes for the runtime dependencies.
+
+```sh
+install_dir=$(mktemp -d)
+uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel --out-dir "$install_dir"
+uv export --locked --no-dev --no-emit-project -o "$install_dir/runtime.txt"
+uv venv --python 3.14 "$install_dir/venv"
+python="$install_dir/venv/bin/python"
+uv pip install --python "$python" --require-hashes -r "$install_dir/runtime.txt"
+uv pip install --python "$python" --no-deps "$install_dir"/*.whl
+"$install_dir/venv/bin/loopzero" --help
+```
+
 Installing the CLI does not provision API keys or install agent skills. Continue
 with agent setup, repository configuration, and the optional credential setup
 below. For an existing installation, keep its working credentials; upgrading
