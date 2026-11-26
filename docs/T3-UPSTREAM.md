@@ -35,13 +35,9 @@ The primary upstream references are:
 
 - [Agent orchestration instructions](https://github.com/pingdotgg/t3code/blob/main/packages/provider-core/src/server/orchestrationInstructions.ts):
   compact usage guidance supplied to agents.
-- [MCP guide](https://github.com/pingdotgg/t3code/blob/main/docs/orchestration-v2/orchestrator-mcp-server.md),
-  [tool definitions](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/mcp/toolkits/orchestrator/tools.ts)
+- [Tool definitions](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/mcp/toolkits/orchestrator/tools.ts)
   and [API contracts](https://github.com/pingdotgg/t3code/blob/main/packages/contracts/src/orchestratorMcp.ts):
   task/thread distinction, parameters, options, results and completion semantics.
-- [V2 documentation index](https://github.com/pingdotgg/t3code/tree/main/docs/orchestration-v2),
-  especially feature lifecycles, lineage/context transfer and provider
-  capabilities. Respect sections labelled target behavior or proposed work.
 - [User documentation](https://github.com/pingdotgg/t3code/tree/main/docs/user):
   provider setup, outside agents, remote environments and thread behavior.
 - [Theo's published skills](https://github.com/t3dotgg/tstack): examples of task
