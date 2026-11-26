@@ -4685,6 +4685,39 @@ def test_receipt_print_failure_preserves_verdict(wt, gh, capsys, head, monkeypat
     assert run(capsys, command)[0] == 0
 
 
+@pytest.mark.parametrize("command", [("ready",), ("merge", "--wait")])
+@pytest.mark.parametrize("invalid, diagnostic", [
+    ("missing", "run loopzero check at this head"),
+    ("stale", "check receipt is for aaaaaaaaaaaa"),
+    ("red", "check receipt records a failed stage"),
+    ("dirty", "check receipt was recorded in a dirty worktree"),
+    ("commands", "check receipt's plan differs from the trusted workflow"),
+])
+def test_invalid_receipt_skips_remote_gates(wt, gh, capsys, head, invalid, diagnostic, command, monkeypatch):
+    commit_mergify_configuration(wt)
+    arm_approved_ready_pr(gh, head, wt)
+    monkeypatch.setattr(mergify, "configured", lambda *_: pytest.fail("unexpected queue lookup"))
+    path = wt / ".loopzero/checks.json"
+    data = json.loads(path.read_text())
+    if invalid == "missing":
+        path.unlink()
+    elif invalid == "stale":
+        data["head"] = "a" * 40
+    elif invalid == "dirty":
+        data["dirty"] = True
+    elif invalid == "red":
+        data["results"][0]["exit_code"] = 1
+    else:
+        data["results"][0]["command"] = "changed"
+    if invalid != "missing":
+        path.write_text(json.dumps(data))
+    code, out, err = run(capsys, *command)
+    assert code == 1 and diagnostic in out + err
+    assert "receipt accepted:" not in out
+    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS
+    assert not any("--method" in call["argv"] or "--input" in call for call in gh.calls)
+
+
 @pytest.mark.parametrize("exit_code,ok", [(False, None), (True, None), (0, True), (1, False)])
 def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok):
     path = wt / ".loopzero/checks.json"

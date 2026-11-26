@@ -114,7 +114,9 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
-   target branch and required CI. The receipt must record a clean passing run
+   target branch and required CI. Ready and merge stop on an invalid receipt
+   after checking the pushed head and merge-authority hold. Status still gathers
+   remote gates for its diagnostics. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
    digest covers execution and stage reuse settings without recording raw

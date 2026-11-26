@@ -282,10 +282,14 @@ MERGEABILITY_PENDING = "GitHub is computing mergeability"
 
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
-    *, workflow_wait: bool = False, announce_receipt: bool = False,
+    *, workflow_wait: bool = False, announce_receipt: bool = False, diagnose_all: bool = False,
 ) -> github.Readiness:
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
+    report = _load_report(wt)
+    receipt_problem = _check_report_problem(report, wt, config, head)
+    if receipt_problem and not diagnose_all:
+        return github.Readiness(False, (receipt_problem,))
     if reviews is None:
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)
@@ -309,8 +313,6 @@ def _readiness(
         ),
         publishers=publishers,
     )
-    report = _load_report(wt)
-    receipt_problem = _check_report_problem(report, wt, config, head)
     if receipt_problem:
         result = github.Readiness(
             ready=False,
@@ -319,13 +321,7 @@ def _readiness(
     elif announce_receipt:
         _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        behind = github.behind_reason(pr, head if review else None)
-        reasons = result.reasons
-        if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
-            reasons = tuple(reason for reason in reasons if reason != behind)
-        else:
-            reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
-        result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
+        result = _queue_readiness(config, result, github.behind_reason(pr, head if review else None))
     if github.MISSING_REVIEW_REASON in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
@@ -339,6 +335,15 @@ def _readiness(
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     return result
+
+
+def _queue_readiness(config: Config, result: github.Readiness, behind: str) -> github.Readiness:
+    reasons = result.reasons
+    if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
+        reasons = tuple(reason for reason in reasons if reason != behind)
+    else:
+        reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
+    return dataclasses.replace(result, ready=not reasons, reasons=reasons)
 
 
 # --------------------------------------------------------------------------- checks report
@@ -1918,7 +1923,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"review:   {latest.kind} on {latest.head[:12]} ({latest.state.lower() or 'posted'})")
     else:
         print("review:   none on this PR")
-    readiness = _readiness(wt, config, pr, head, reviews)
+    readiness = _readiness(wt, config, pr, head, reviews, diagnose_all=True)
     print(f"ready:    {'yes' if readiness.ready else 'no'}")
     for reason in readiness.reasons:
         print(f"  - {reason}")
