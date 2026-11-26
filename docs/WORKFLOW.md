@@ -34,7 +34,7 @@ is described in [MERGIFY.md](MERGIFY.md).
 flowchart TD
     A["First full review<br/><sub>primary</sub>"] -->|approved| Z["Done: continue to ready"]
     A -->|fixes needed| B["Make all fixes in one batch"]
-    B --> C["One review of only the new changes<br/><sub>delta, at most one</sub>"]
+    B --> C["One review of only the new changes<br/><sub>delta</sub>"]
     C -->|approved| Z
     C -->|findings remain| D["Owner fixes or rejects findings with reasons"]
     D -->|ready| Z

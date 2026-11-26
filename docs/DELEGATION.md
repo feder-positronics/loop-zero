@@ -410,7 +410,7 @@ Acceptance evidence: <observable proof for each criterion>
 Model/effort: <resolved from the task repository's models.toml>
 Effort policy: Children inherit this policy; return to the parent before raising effort or launching a stronger model.
 Launch and waiting: Children inherit this rule: never approval-required; follow host rules for launch checks and blocking waits. Every ended turn wakes the parent: end it only with a final result, a blocker or a question, never with a progress note while your own job runs.
-Output: <Coordinator rollover caps. Select GitHub REST fields with `--jq`.>
+Output: <host output limits. Select GitHub REST fields with `--jq`.>
 Shell commands: Keep cleanup/removal and commit operations separate and simple; do not hide commands in scripts to evade approval review.
 Verification: <focused owning tests and coverage; available proof methods and their task-scoped authorization within runtime permissions>
 Integration executor: <named executor for returned heads and one owner of any readiness/merge waiter; parent retains acceptance responsibility>
@@ -420,7 +420,9 @@ Return: <authorized finish: evidence, readiness, or merge; deployment needs its 
 Report: Final message to the parent, which posts it on the owning PR or issue (post directly only when the delegate has GitHub access): changed files, evidence, check results, deviations, open questions and next action. Message the parent mid-task only for a blocker.
 ```
 
-Follow the [Worker role](#team-roles) for blockers.
+Follow the [Worker role](#team-roles) for blockers. An owner continues the
+work a pending decision does not block and reports the blocker and next owner;
+silence is not approval.
 
 Before each preassigned follow-up, re-read live issue/PR state and dispatch
 ownership, record the finished item's current head and evidence directly on its

@@ -1,5 +1,5 @@
 # loop-zero configuration. Copy to workflow.toml at the repository root.
-# Every key below is read by `loopzero`; there are no other config files.
+# Every key below is read by `loopzero`.
 
 [repo]
 # GitHub repository in owner/name form. Used for every `gh` call.
@@ -82,5 +82,5 @@ reviewers = ["claude", "codex"]
 # Unlisted commands reuse only when "*" includes "." (the whole tree).
 # A partial "*" adds shared tooling only to listed commands. CI/merge-queue runs fresh.
 # [checks.inputs]
-# "uv run pytest -q" = ["src/**", "tests/**"]
+# "uv run --group dev pytest -q" = ["src/**", "tests/**"]
 # "*" = ["uv.lock", "pyproject.toml"]
