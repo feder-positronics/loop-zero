@@ -2130,7 +2130,7 @@ def test_review_fallback_after_independent_attempt(wt, gh, fake_bin, fake_tool, 
         if codex_ok:
             assert code == 0 and "review by codex" in out
             return
-        assert code == 4 and "same-family fallback:" not in err
+        assert code == 4 and "same-family fallback:" not in err and "reviewer codex unavailable:" not in err
         assert_contains(err, "Please run codex login", "effort 'high' is not allowed for claude")
         assert not (fake_bin / "claude.argv").exists()
         return
