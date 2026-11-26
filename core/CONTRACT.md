@@ -154,8 +154,9 @@ runner reliability or speed) go to the front of the merge line, ahead of feature
 work, through the repository's queue priority if it has one. Infra-only fixes
 may use the infra-only route above.
 
-Finish planned base updates before starting checks. Wait for an identical check
-already queued or running at the same head and fingerprint. Before a fallback
+Finish planned base updates before starting checks. Reuse an identical check
+already queued or running at the same head and fingerprint. A second local
+check times out after 60 seconds if the first still holds the task lock. Before a fallback
 check on a published head, run `loopzero ready` and reuse any receipt it accepts.
 The builder runs each full local gate once and records its command, exact head SHA,
 environment fingerprint (from consumer AGENTS.md/docs), result, time and log path.

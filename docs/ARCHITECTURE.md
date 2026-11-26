@@ -556,7 +556,9 @@ every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. Checks lock the task state directory
 through execution and receipt publication. A waiter can reuse a newly published
-passing receipt when HEAD, settings and declared inputs match. Writers recheck
+passing receipt when it acquires the lock within 60 seconds and HEAD, settings
+and declared inputs match. Private review receipts use atomic replacement
+without the check lock. Check receipt writers recheck
 HEAD and atomically replace the receipt from a synced sibling temporary file.
 Successful keyed stages are checkpointed in the same receipt for reuse.
 A successful stage checkpoint preserves a clean pass for the same head,
