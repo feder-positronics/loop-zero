@@ -93,7 +93,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
 
 
-@pytest.mark.parametrize("interruption", ["sigint", "timeout"])
+@pytest.mark.parametrize("interruption", ["sigint", "timeout", "changed", "backlink"])
 def test_start_retries_after_interruption_during_git_checkout(repo, tmp_path, monkeypatch, interruption):
     repo = repo.rename(repo.with_name("repo\r"))
     (repo / ".gitattributes").write_text("README.md filter=interrupt\n")
@@ -103,9 +103,18 @@ def test_start_retries_after_interruption_during_git_checkout(repo, tmp_path, mo
     git(repo, "push", "-q", "origin", "main")
     pid_file, entered = tmp_path / "starter.pid", tmp_path / "checkout-entered"
     slug = "interrupted\u00a0"
+    wt = worktree.worktree_dir(repo, slug)
     ref_lock = repo / ".git" / "refs" / "heads" / "lz" / f"{slug}.lock"
-    interrupt = (f': > {shlex.quote(str(ref_lock))}\nkill -INT "$(cat {shlex.quote(str(pid_file))})"\n'
-                 if interruption == "sigint" else "")
+    interrupt = f': > {shlex.quote(str(ref_lock))}\n'
+    if interruption == "backlink":
+        sibling = tmp_path / "sibling"
+        git(repo, "worktree", "add", "--detach", str(sibling), "HEAD")
+        sibling_admin = repo / ".git" / "worktrees" / "sibling"
+        (sibling_admin / "index.lock").touch()
+        interrupt = f"cat {shlex.quote(str(sibling / '.git'))} > {shlex.quote(str(wt / '.git'))}\n"
+    interrupt += f'kill -INT "$(cat {shlex.quote(str(pid_file))})"\n'
+    if interruption == "timeout":
+        interrupt = ""
     smudge = f"cat >/dev/null\n: > {shlex.quote(str(entered))}\n{interrupt}exec sleep 30\n"
     git(repo, "config", "filter.interrupt.smudge", smudge)
     start = """
@@ -126,13 +135,21 @@ raise SystemExit(cli.main(sys.argv[3:]))
     command = [sys.executable, "-c", start, str(pid_file), interruption, *args]
     stopped = subprocess.run(command, cwd=repo, timeout=10, capture_output=True, text=True)
     assert entered.is_file()
-    assert stopped.returncode == (130 if interruption == "sigint" else 1)
-    assert ("checkout rollback" if interruption == "sigint" else "timed out") in stopped.stderr
-    ref_lock.unlink(missing_ok=interruption == "timeout")
+    assert stopped.returncode == (1 if interruption == "timeout" else 130)
+    if interruption != "backlink":
+        assert ("timed out" if interruption == "timeout" else "checkout rollback") in stopped.stderr
+    ref_lock.unlink(missing_ok=interruption in {"timeout", "backlink"})
     git(repo, "config", "--unset", "filter.interrupt.smudge")
     monkeypatch.chdir(repo)
+    if interruption in {"changed", "backlink"}:
+        if interruption == "changed":
+            (wt / "user-data").write_text("keep")
+        assert cli.main(args) == 1
+        assert git(repo, "rev-parse", f"refs/heads/lz/{slug}") == git(repo, "rev-parse", "HEAD")
+        assert ((wt / "user-data").read_text() == "keep" if interruption == "changed"
+                else not (sibling_admin / "locked").exists())
+        return
     assert cli.main(args) == 0
-    wt = worktree.worktree_dir(repo, slug)
     assert (wt / "README.md").read_text() == "hello\n"
     assert worktree.task_file(wt).is_file() and not worktree.is_dirty(wt)
 

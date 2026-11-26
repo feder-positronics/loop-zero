@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import errno
 import fcntl
+import hashlib
 import os
 import re
 import stat
@@ -197,7 +198,7 @@ def _rollback_checkout(
         if interrupted_base is not None:
             wt.rmdir()
         return False
-    if interrupted_base is None and not _rollback_base(_worktree_fields(repo_root, wt)):
+    if interrupted_base is None and not _rollback_record(_worktree_fields(repo_root, wt)):
         return False
     common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
     if (_git(wt, *common_dir, preserve_whitespace=True)
@@ -207,18 +208,26 @@ def _rollback_checkout(
     fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if os.path.samestat(os.fstat(fd), git_dir.stat()):
+        if (os.path.samestat(os.fstat(fd), git_dir.stat())
+                and _checkout_backlink_matches(wt, git_dir)):
             return _rollback_registered_checkout(repo_root, wt, branch_name, git_dir, interrupted_base)
     finally:
         os.close(fd)
     return False
 
 
-def _rollback_base(fields: list[str]) -> str | None:
+def _checkout_backlink_matches(wt: Path, git_dir: Path) -> bool:
+    backlink = (git_dir / "gitdir").read_bytes().removesuffix(b"\n")
+    return bool(backlink) and (git_dir / os.fsdecode(backlink)).resolve() == wt.resolve() / ".git"
+
+
+def _rollback_record(fields: list[str]) -> tuple[str, str] | None:
     if len(fields) == 4:
-        match = re.fullmatch(rf"locked {_ROLLBACK_REASON}([0-9a-f]{{40}}|[0-9a-f]{{64}})", fields[3])
+        match = re.fullmatch(
+            rf"locked {_ROLLBACK_REASON}([0-9a-f]{{40}}|[0-9a-f]{{64}}) ([0-9a-f]{{64}})", fields[3],
+        )
         if match:
-            return match[1]
+            return match[1], match[2]
     return None
 
 
@@ -232,14 +241,17 @@ def _rollback_registered_checkout(
     ref = f"refs/heads/{branch_name}"
     if len(fields) != 4 or fields[2] != f"branch {ref}" or not (git_dir / "index.lock").is_file():
         return False
-    base = _rollback_base(fields)
+    record = _rollback_record(fields)
     if interrupted_base is not None and fields[1:] == [
         f"HEAD {interrupted_base}", f"branch {ref}", "locked initializing",
     ]:
-        base = interrupted_base
-        _record_checkout_rollback(git_dir, base)
-    if base is None:
+        record = interrupted_base, _checkout_snapshot(wt)
+        _record_checkout_rollback(git_dir, *record)
+    if record is None:
         return False
+    base, snapshot = record
+    if _checkout_snapshot(wt) != snapshot:
+        raise WorktreeError(f"interrupted checkout changed since rollback was recorded: {wt}")
     # Keep Git's registration until the exact branch deletion succeeds. If the
     # process stops between the two steps, Git reports the deleted branch as unborn.
     if fields[1] != f"HEAD {'0' * len(base)}":
@@ -248,13 +260,28 @@ def _rollback_registered_checkout(
     return True
 
 
-def _record_checkout_rollback(git_dir: Path, base: str) -> None:
+def _checkout_snapshot(wt: Path) -> str:
+    digest = hashlib.sha256()
+    pending = [wt]
+    while pending:
+        path = pending.pop()
+        info = path.lstat()
+        # Include ignored files and symlinks, without traversing symlink targets.
+        record = (str(path.relative_to(wt)), info.st_mode, info.st_dev, info.st_ino,
+                  info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        digest.update(repr(record).encode("utf-8", errors="surrogateescape"))
+        if stat.S_ISDIR(info.st_mode):
+            pending.extend(sorted(path.iterdir(), reverse=True))
+    return digest.hexdigest()
+
+
+def _record_checkout_rollback(git_dir: Path, base: str, snapshot: str) -> None:
     # Replace Git's existing initialization lock with a recoverable reason.
     locked = git_dir / "locked"
     temp = locked.with_name(f".locked-{uuid4().hex}")
     with temp.open("x", encoding="utf-8") as stream:
         try:
-            stream.write(f"{_ROLLBACK_REASON}{base}\n")
+            stream.write(f"{_ROLLBACK_REASON}{base} {snapshot}\n")
             stream.close()
             temp.replace(locked)
         finally:
