@@ -4452,22 +4452,22 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
-@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None])
+@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many"])
 def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     head = commit_mergify_configuration(wt)
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
-    monkeypatch.setattr(mergify, "markers", lambda *_: (True, False))
-    monkeypatch.setattr(mergify, "mark_confirmed", lambda *_: None)
-    responses = iter([None, MERGIFY_QUEUE_FIXTURE["candidate_responses"][result or "missing"]])
-    monkeypatch.setattr(mergify, "api_get", lambda *_: next(responses))
-
+    monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
+    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if result in {"long", "many"} else result or "missing"]
+    if extra := {"long": 1, "many": 30}.get(result, 0):
+        conditions = payload["mergeability_check"]["conditions_evaluation"]
+        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [{"match": False, "label": "界" * 3000}] * extra)
+    monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
     code, out, err = run(capsys, "merge", "--wait=0")
-
-    assert (code, err) == (3, "")
-    assert f"https://github.com/{REPO}/pull/42" in out
-    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) is (result == "blocking")
+    assert (code, err) == (3, "") and f"https://github.com/{REPO}/pull/42" in out
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result in {"blocking", "long", "many"})
     assert "failed" not in out and "check-success = checks" not in out
+    assert len(out.encode()) < 2048 and ("27 more" in out) == (extra == 30)
 
 
 @pytest.mark.parametrize("queue_state", ["unsafe", "error", "safe", "becomes_unsafe"])
