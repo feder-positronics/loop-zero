@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
+import resource
 import shutil
+import signal
 import subprocess
-import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -28,35 +31,19 @@ from tests.test_github import (
 REAL_GH = shutil.which("gh")
 
 
-def test_api_removes_payload_when_staging_fails(tmp_path):
-    script = """
-import errno
-import resource
-import signal
-import tempfile
-
-from loopzero import github
-
-def unexpected_dispatch(*args, **kwargs):
-    raise AssertionError("failed payload must not be dispatched")
-
-github._gh_json = unexpected_dispatch
-tempfile.gettempdir()
-signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-_, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
-resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
-try:
-    github._api("repos/example/project/issues", {"body": "synthetic"})
-except OSError as exc:
-    assert exc.errno == errno.EFBIG
-else:
-    raise AssertionError("payload staging should fail")
-"""
-    done = subprocess.run(
-        [sys.executable, "-c", script], env={**os.environ, "TMPDIR": str(tmp_path)},
-        capture_output=True, text=True, check=False,
-    )
-    assert done.returncode == 0, done.stderr
+def test_api_removes_payload_when_staging_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(github, "_gh_json", lambda *args, **kwargs: pytest.fail("unexpected dispatch"))
+    original_limit = resource.getrlimit(resource.RLIMIT_FSIZE)
+    handler = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    try:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, original_limit[1]))
+        with pytest.raises(OSError) as failure:
+            github._api("repos/example/project/issues", {"body": "synthetic"})
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, original_limit)
+        signal.signal(signal.SIGXFSZ, handler)
+    assert failure.value.errno == errno.EFBIG
     assert not list(tmp_path.glob("*.loopzero"))
 
 
