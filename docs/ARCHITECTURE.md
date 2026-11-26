@@ -33,7 +33,9 @@ local-receipt exceptions. Merge authority permits merging by default outside
 reserved classes.
 
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
-reviews, finding threads, check statuses and merge state. CI and branch protection
+reviews, finding threads, check statuses and merge state. Within a task worktree,
+PR body writers lock the state directory from the live read through the update.
+CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
 and branch protection remains essential.
@@ -82,8 +84,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    [Setup](../SETUP.md) defines the recognized command forms and cache remedy.
 3. Branch PR lookup starts with the remote head and GitHub's commit-to-PR
    endpoint. It matches the source branch and repository, then re-reads PR
-   detail. Other commands prefer open PRs, then the newest closed PR, with
-   pull-list fallback when the branch or a matching open PR is absent. Before pushing
+   detail. Lookup falls back to listing open PRs if the branch or matching open
+   PR is absent, then checks the newest closed PR when requested. Check refresh
+   is open-only. Before pushing
    or writing, `pr` requires a confirmed merge or a complete closed-history read
    through GitHub REST. A confirmed merge completes that branch even when a
    newer duplicate exists. If the head commit cannot prove completion, the
@@ -153,11 +156,11 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-At native review launch the CLI pins checks, publishers and
-`delivery.reviewer_ro_paths` to one remote PR-base revision. A missing remote ref
-or workflow blocks launch. Bootstrap requires an explicit `--config`, which
-still undergoes validation. Reposts and other commands retain their fallback
-policy. Runners validate the complete mount plan against private review state and
+Check, review, ready, merge, and status use the workflow at one remote-tracking
+delivery revision selected by the workflow at Git's local `origin/HEAD`.
+Missing trusted refs or workflows block these commands. An explicit
+`--config` supplies validated policy for bootstrap or operator overrides.
+Runners validate the complete mount plan against private review state and
 known standard/custom native state roots. Existing file-backed auth mounts remain
 explicit exceptions. Claude's environment routes are `ANTHROPIC_API_KEY` and
 `CLAUDE_CODE_OAUTH_TOKEN`: a nonempty value (whitespace included) is forwarded
@@ -250,11 +253,15 @@ Historical transcript rendering is available only for exact read-back matching.
 Local publication, saved-result replay and exact confirmation regenerate these
 facts from complete raw, never the public transcript tail or a saved summary.
 The restricted receipt stays in the task worktree until completion.
+The review command locks the worktree’s Git directory from round selection
+through publication to reserve the round across overlapping local invocations.
 
 After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
-step, and a moved ref is left in place with a warning. GitHub REST uses separate
-read and delete requests, so the ref can still change between those requests.
+step, and a moved ref is left in place with a warning. The Git push lease
+checks the expected SHA at deletion time even if the ref changes after the REST read.
+The push uses a temporary bare repository and ignores local, global, and system
+Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
@@ -434,12 +441,16 @@ leaving this guide evergreen.
 
 ## Check stage runners
 
+Local stages run in Bash POSIX mode with pipefail enabled. A pipeline returns
+the status of its rightmost failed member, or zero when all members succeed.
+The local shell is part of the receipt and stage reuse fingerprints.
+
 `[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
 from a fresh temporary directory outside the task worktree. Delegation does not
 require local bwrap. Its executable must
 be an absolute path or a bare PATH command; later arguments may be relative.
 Execute the configured path (or PATH lookup result) without resolving symlinks.
-For containment only, resolve the executable, absolute arguments, joined short
+For runner containment, resolve the executable, absolute arguments, joined short
 option paths, `--opt=/path` values and colon-separated path lists: none may
 reference task-tree files, including through symlinks. Relative parent traversal
 must remain inside the fresh runner directory. The runner program and its argv
@@ -464,9 +475,12 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. It flushes and syncs a sibling temporary
-file before replacing the receipt atomically. Runners cannot select stages or
-mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
+the authoritative `checks.json` receipt. Writers lock the task state directory
+while rechecking HEAD and atomically replacing the receipt from a synced sibling
+temporary file. Successful keyed stages are checkpointed in the same receipt
+for reuse. The checkpoint cannot satisfy readiness before final worktree
+validation. Runners cannot select stages or mint receipts. Stage admission
+belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
@@ -481,7 +495,10 @@ either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
-Only this worktree's clean passing keyed receipt is eligible; dirty trees run
-fresh. A tracked receipt is never eligible for reuse.
+Reuse only successful keyed stages from this worktree's clean receipt or
+checkpoint. Dirty trees run fresh. A tracked receipt is never eligible for reuse.
 Receipts that use saved stage results bind the current head and check settings.
+For delegated checks, both the receipt and the stage key bind the runner's launch
+path, resolved executable path and executable bytes. Unavailable runner identity
+prevents receipt reuse.
 CI and merge-queue candidates run fresh without a local worktree receipt.

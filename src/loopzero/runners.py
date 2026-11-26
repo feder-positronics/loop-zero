@@ -6,6 +6,7 @@ Host authentication is bound read-write into the sandbox HOME so OAuth refreshes
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import hashlib
 import json
@@ -1396,13 +1397,13 @@ def split_diff(diff: str, budget: int) -> list[str]:
 def _summarize_deleted(block: str) -> str:
     if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
         return block
-    match = re.match(r"diff --git a/(.+?) b/(.+?)\n", block)
-    path = match.group(2) if match else "(unknown file)"
-    deleted = sum(
-        1 for line in block.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    )
-    return f"diff --git a/{path} b/{path}\n{path}: deleted, {deleted} lines\n"
+    header = block.partition("\n")[0]
+    match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)
+    path = match[2] if match else "(unknown file)"
+    if match and match[1]:
+        path = codecs.escape_decode(path.encode())[0].decode(errors="replace")
+    deleted = sum(line.startswith("-") and not line.startswith("---") for line in block.splitlines())
+    return f"{header}\n{path}: deleted, {deleted} lines\n"
 
 
 def _split_bytes(text: str, budget: int) -> list[str]:

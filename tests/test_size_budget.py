@@ -11,6 +11,29 @@ from tests.conftest import git
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/size_budget.sh"
 
 
+def test_executable_scripts_keep_lf_in_autocrlf_checkout(git_repo, tmp_path):
+    root = SCRIPT.parents[1]
+    paths = ("scripts/size_budget.sh", "scripts/retro_metrics.py", "scripts/ai-accounts/ai-accounts")
+    for name in (*paths, ".gitattributes"):
+        source = root / name
+        if source.is_file():
+            target = git_repo / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+    git(git_repo, "add", ".")
+    git(git_repo, "commit", "-m", "add scripts")
+    checkout = tmp_path / "Windows checkout"
+    git(tmp_path, "clone", "-c", "core.autocrlf=true", str(git_repo), str(checkout))
+
+    done = subprocess.run(["scripts/size_budget.sh"], cwd=checkout,
+                          env={**os.environ, "PYTHON": sys.executable},
+                          capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr
+    eol = git(checkout, "ls-files", "--eol", "--", *paths).splitlines()
+    assert len(eol) == len(paths)
+    assert all(line.split()[1] == "w/lf" for line in eol)
+
+
 def _branchy(name: str, branches: int) -> str:
     body = "".join(f"    if x == {i}:\n        return {i}\n" for i in range(branches))
     return f"def {name}(x):\n{body}    return -1\n"
@@ -18,7 +41,7 @@ def _branchy(name: str, branches: int) -> str:
 
 @pytest.mark.parametrize("failure", [None, "deleted", "show"])
 def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_tool, failure):
-    source = git_repo / "src/loopzero" / ("a.py" if failure else "é space\nname.py")
+    source = git_repo / "src/loopzero" / ("a.py" if failure else os.fsdecode(b"\xc3\xa9 space\nname.py"))
     source.parent.mkdir(parents=True)
     source.write_text("one\ntwo\n")
     source.with_name("z.py").write_text("three\n")
