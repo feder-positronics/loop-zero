@@ -280,7 +280,7 @@ def test_task_helpers_errors(repo: Path) -> None:
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    worktree.cleanup(wt)  # #439: no cleanup git runs in (or -C) the primary checkout
+    worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
@@ -291,13 +291,13 @@ def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
     wt = worktree.start(repo, "dirty", "main")
     (wt / file).write_text("x")
     with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, worktree.head(wt))
     assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost")
+        worktree.cleanup(repo / ".worktrees" / "ghost", worktree.head(repo))
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
