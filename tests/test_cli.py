@@ -2616,7 +2616,7 @@ def test_ready_explains_trusted_policy_blocker(wt, gh, capsys, head, retargeted,
 def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_named_check(gh, head, status="in_progress")
-    out, err = expect_cli(capsys, 1, command)
+    out, err = expect_cli(capsys, 3 if command == "ready" else 1, command)
     out = without_accepted_receipt(out)
     reason = "required check 'checks' is pending"
     if command == "ready":
@@ -4492,6 +4492,50 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
             wait()
         assert polls == [0]
         assert not clock.sleeps
+
+
+def test_merge_wait_refuses_a_green_draft(wt, gh, capsys, monkeypatch, queue_requests):
+    stub_mergify_admission(monkeypatch)
+    head = commit_mergify_configuration(wt, "mergify delivery")
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=True)
+    _, err = expect_cli(capsys, 1, "merge", "--wait=0")
+    assert "PR #7 is still a draft; next: loopzero ready --wait" in err
+    assert not queue_requests
+
+
+@pytest.mark.parametrize("mergify_queue", [False, True])
+@pytest.mark.parametrize("lands", [False, True])
+def test_merge_wait_rechecks_closed_pr_once(monkeypatch, mergify_queue, lands):
+    pr = github.pr_from_rest(open_pr_snapshot("a" * 40))
+    config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
+    calls = []
+
+    def merged_sha(*_args, **_kwargs):
+        calls.append(None)
+        if lands and len(calls) >= 2:
+            return "b" * 40
+        raise github.ClosedUnmerged(("gh",), "PR closed without a verified merge")
+
+    monkeypatch.setattr(github, "merged_sha", merged_sha)
+    monkeypatch.setattr(github, "merge_pending", lambda *_: True)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "membership", lambda *_: mergify.Membership())
+    polls = []
+
+    def poll(*_args, **_kwargs):
+        for tick in range(4):
+            polls.append(tick)
+            yield
+
+    monkeypatch.setattr(cli, "_poll_until", poll)
+    wait = cli._wait_for_mergify if mergify_queue else cli._wait_for_merge
+    args = (config, pr, 5400, True) if mergify_queue else (config, pr, 5400)
+    if lands:
+        assert wait(*args) == "b" * 40
+    else:
+        with pytest.raises(github.ClosedUnmerged):
+            wait(*args)
+        assert polls == [0, 1]
 
 
 @pytest.mark.parametrize("confirmed", [True, False])
