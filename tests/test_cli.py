@@ -2408,32 +2408,32 @@ def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypat
     ]
 
 
-@pytest.mark.parametrize("settles", [True, False])
-def test_ready_wait_resumes_after_draft_transition(wt, gh, capsys, monkeypatch, head, settles):
+@pytest.mark.parametrize("settles,fault", [(True, "interrupt"), (False, "interrupt"), (True, "lost"), (True, "retry"), (False, "moved")])
+def test_ready_wait_resumes_after_draft_transition(wt, gh, capsys, monkeypatch, head, settles, fault):
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
     gh.respond("pr ready", "")
-    original_mark_ready = github.mark_ready
-
-    def interrupt_after_mark_ready(*args):
-        original_mark_ready(*args)
-        arm_pr(gh, head, isDraft=False)
-        raise KeyboardInterrupt
-
-    monkeypatch.setattr(github, "mark_ready", interrupt_after_mark_ready)
-    snapshots = ("skipped", "skipped", "skipped", "pending", "success") if settles else ("skipped",)
-    arm_check_progress(gh, head, *snapshots)
+    original, attempts, pauses = github.mark_ready, [], []
+    def activate(*args):
+        original(*args)
+        attempts.append(args)
+        if fault != "retry" or len(attempts) == 2:
+            arm_pr(gh, "b" * 40 if fault == "moved" else head, isDraft=False)
+        if len(attempts) == 1:
+            raise KeyboardInterrupt if fault == "interrupt" else github.ProcTimeout("lost activation reply")
+    monkeypatch.setattr(github, "mark_ready", activate)
+    monkeypatch.setattr(github, "_retry_sleep", pauses.append)
+    arm_check_progress(gh, head, *(("skipped", "skipped", "skipped", "pending", "success") if settles else ("skipped",)))
     monkeypatch.setattr(cli, "WAIT_INTERVAL", 1.0)
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
-    wait = "--wait=30" if settles else "--wait=0"
-
-    assert run(capsys, "ready", wait)[0] == 130
+    wait = "--wait=30" if settles or fault == "moved" else "--wait=0"
+    if fault == "interrupt":
+        assert run(capsys, "ready", wait)[0] == 130
     code, out, err = run(capsys, "ready", wait)
-
-    assert err == ""
-    assert code == (0 if settles else 3)
+    assert (code, "head changed" in err) == ((1, True) if fault == "moved" else (0 if settles else 3, False))
     assert ("waiting: required check 'checks' is pending" in out) == settles
-    assert ("timed out waiting for required checks" in out) != settles
-    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == 1
+    assert ("timed out waiting for required checks" in out) == (not settles and fault == "interrupt")
+    assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == len(attempts) == (2 if fault == "retry" else 1)
+    assert pauses == ([5] if fault == "retry" else [])
 
 
 @pytest.mark.parametrize("settled", ["success", "skipped"])

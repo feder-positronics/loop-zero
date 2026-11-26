@@ -1174,6 +1174,40 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
+def _activate_draft(wt: Path, config: Config, pr: github.PR, deadline: float | None,
+                    args: argparse.Namespace | None) -> None:
+    try:
+        github.mark_ready(config.repo, pr.number)
+        return
+    except (github.GhUnavailable, _proc.ProcTimeout) as exc:
+        if deadline is None:
+            raise
+        failure = f"Draft activation unconfirmed for PR #{pr.number}: {exc}"
+        retryable = isinstance(exc, _proc.ProcTimeout) or github._transient_error(exc.tail, False)
+    def observe() -> github.PR:
+        current = github.pr_view(config.repo, pr.number)
+        _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
+        if current.state != "OPEN" or current.number != pr.number:
+            raise CliError(f"no open PR #{pr.number} to activate")
+        return current
+
+    try:
+        with github.bounded_reads(deadline, token=None):
+            if not observe().is_draft:
+                return
+            if not retryable or not github._retry_pause(github.RETRY_DELAY, 120):
+                raise CliError("retry is unavailable in this ready wait")
+            current = observe()
+            if not current.is_draft:
+                return
+            readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
+            if not (readiness.ready or _draft_checks_waiting(config, current, readiness)):
+                raise CliError("; ".join(readiness.reasons))
+            github.mark_ready(config.repo, pr.number)
+    except (CliError, github.GhError, _proc.ProcTimeout, OSError) as exc:
+        raise CliError(f"{failure} | recovery: {exc}") from exc
+
+
 def cmd_ready(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     pr, readiness = _pr_readiness(wt, config, workflow_wait=args.wait is not None)
@@ -1181,8 +1215,9 @@ def cmd_ready(args: argparse.Namespace) -> int:
     waiting = _draft_checks_waiting(config, pr, readiness)
     kicked = bool(waiting)
     started = time.monotonic()
+    deadline = None if args.wait is None else started + args.wait
     if waiting:
-        github.mark_ready(config.repo, pr.number)
+        _activate_draft(wt, config, pr, deadline, args)
         if args.wait is None:
             pending = f"; {MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
@@ -1199,7 +1234,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
         pr, readiness, kicked = waited
     assert readiness is not None
     if readiness.ready and pr.is_draft and not kicked:
-        github.mark_ready(config.repo, pr.number)
+        _activate_draft(wt, config, pr, deadline, args)
         if args.wait is not None:
             waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=True, started=started,
                                          args=args, allow_skipped=True)
@@ -1352,7 +1387,7 @@ def _wait_for_checks(
                 return current, None, kicked
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
         if not kicked and _draft_checks_waiting(config, current, readiness):
-            github.mark_ready(config.repo, pr.number)
+            _activate_draft(wt, config, current, started + timeout, args)
             print("marked ready; " + "; ".join(readiness.reasons))
             return _wait_for_checks(wt, config, pr, timeout, kicked=True, started=started,
                                     shown=readiness.reasons, args=args, bounded=bounded,
