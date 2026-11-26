@@ -4022,14 +4022,20 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "dispatch failed"])
-def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, outcome) -> None:
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "retry", "unknown"])
+def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
-    listing = threads_json({**finding_pr, "path": "src/Łódź.py"})
+    listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
                listing if outcome == "remaining" else threads_json())
-    gh.respond("api -X", "", exit=int(outcome == "dispatch failed"), stderr="HTTP 403")
+    transient = outcome in {"applied", "retry", "unknown"}
+    gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
+    monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
+    runs = [] if outcome == "retry" else [{"display_title": "Refresh eligibility for PR #7" if outcome == "applied" else "unknown"}]
+    monkeypatch.setattr(github.time, "time", lambda: 1795640554)
+    endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
+    gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs)})
     title = r"\u0141\xf3d\u017a" if outcome == "refreshed" else "Łódź"
     expect_cli(capsys, 0, "resolve", stderr="", stdout=f"0b9b59e7  important  src/{title}.py:3  {title}\n")
     assert not any("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls)
@@ -4040,15 +4046,14 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
     assert "addPullRequestReviewThreadReply" in calls[0][3] and "resolveReviewThread" in calls[1][3]
     assert "body=Fixed in abc1234: loop bound corrected." in calls[0] and "thread=THREAD_1" in calls[1]
     dispatches = [c["argv"] for c in gh.calls if ELIGIBILITY_DISPATCH in c["argv"]]
-    if outcome == "remaining":
-        assert (code, err, dispatches, len(out.splitlines())) == (0, "", [], 1)
+    assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]] * {"remaining": 0, "retry": 2}.get(outcome, 1)
+    assert backoffs == ([5] if transient else [])
+    if outcome in {"denied", "unknown"}:
+        assert code == 1 and "is resolved." in err and ("HTTP 403" if outcome == "denied" else "identify all recent refresh runs") in err
+        assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
-        assert dispatches == [["api", "-X", "POST", ELIGIBILITY_DISPATCH, "-f", "ref=main", "-f", "inputs[pr]=7", "--include"]]
-        if outcome == "refreshed":
-            assert (code, err) == (0, "") and out.splitlines()[-1] == "refreshed Loop-zero Eligibility for PR #7"
-        else:
-            assert code == 1 and "HTTP 403" in err
-            assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
+        assert (code, err) == (0, "")
+        assert out.splitlines()[1:] == ([] if outcome == "remaining" else ["refreshed Loop-zero Eligibility for PR #7"])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
