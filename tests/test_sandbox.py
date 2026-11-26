@@ -358,7 +358,7 @@ def _real_bwrap_works() -> bool:
 
 @pytest.mark.skipif(not _real_bwrap_works(), reason="real bwrap cannot create sandboxes here")
 class TestRealSandbox:
-    @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode", "resolved"))
+    @pytest.mark.parametrize("layout", ("shared", "relative", "linked", "transitive", "local-head", "spaces", "unicode"))
     def test_real_sandbox_rejects_hidden_git_alternates_before_checks(self, git_repo, tmp_path, layout):
         shared = tmp_path / "shared"
         git(git_repo, "clone", "-q", "--shared", "-c", "core.quotepath=false", str(git_repo), str(shared))
@@ -384,7 +384,7 @@ class TestRealSandbox:
         started = []
 
         with pytest.raises(sandbox.SandboxUnavailable) as failure:
-            sandbox.run_checks(config, worktree, progress=started.append, _resolved=layout == "resolved")
+            sandbox.run_checks(config, worktree, progress=started.append)
 
         assert started == []
         message = str(failure.value)
@@ -925,52 +925,3 @@ def test_tracked_forged_receipt_runs_failing_stage(git_repo, bwrap_log, fetched_
     assert not report.results[0].reused_from
 
 
-def test_input_key_and_receipt_distinguish_runners(git_repo, fetched_base, tmp_path, monkeypatch):
-    paths = (tmp_path / "runner-a", tmp_path / "runner-b")
-    keys, receipts = set(), set()
-    local = make_config(inputs={"echo one": ("*.md",)})
-    keys.add(sandbox._input_key(local, git_repo, "echo one", fetched_base))
-    for path in paths:
-        path.touch()
-        monkeypatch.setattr(sandbox.shutil, "which", lambda _, resolved=path: str(resolved))
-        runner = replace(local, check_runner=("runner",), env_allowlist=())
-        keys.add(sandbox._input_key(runner, git_repo, "echo one", fetched_base))
-        receipts.add(sandbox.settings_fingerprint(runner))
-    assert None not in keys | receipts
-    assert len(keys) == 3 and len(receipts) == 2
-
-
-@pytest.mark.parametrize("change", ["target", "content"])
-def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, change, cache_check):
-    def write_runner(path, exit_code):
-        path.write_text(
-            f"#!{sys.executable}\n"
-            "import json, sys\n"
-            "frame = json.load(sys.stdin)\n"
-            "del frame['env']\n"
-            f"frame.update(exit_code={exit_code}, duration_s=0, not_started=False, tail='')\n"
-            "print(json.dumps(frame))\n"
-        )
-        path.chmod(0o755)
-
-    runner = tmp_path / "runner"
-    original = tmp_path / "runner-a"
-    write_runner(original, 0)
-    runner.symlink_to(original)
-    config = make_config(check_runner=(str(runner),), inputs={"echo hello": (".",)})
-    report = cache_check(config, verify_reuse=True)
-    assert _current_check_report(git_repo, config, report.head)
-
-    if change == "target":
-        replacement = tmp_path / "runner-b"
-        write_runner(replacement, 17)
-        new_link = tmp_path / "runner-new"
-        new_link.symlink_to(replacement)
-        new_link.replace(runner)
-    else:
-        write_runner(original, 17)
-
-    assert _current_check_report(git_repo, config, report.head) is None
-    result = sandbox.run_checks(config, git_repo).results[0]
-    assert result.exit_code == 17
-    assert not result.reused_from

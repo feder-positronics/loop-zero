@@ -359,11 +359,9 @@ access to the configured GitHub repository even before a PR exists. See the
 Use one pinned CLI revision and the same effective settings for `check`,
 `ready`, and `merge`. If a shared install can change mid-task, use the
 [isolated install](#install). The coordinator runs in the task worktree and
-writes the receipt. For remote stages, configure an operator-trusted
-`[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
+writes the receipt.
 
-Without a stage adapter, run the whole check locally. Use a local slot if the
-host requires one. On miki, if you used the isolated install, run these from
+Run the whole check locally. Use a local slot if the host requires one. On miki, if you used the isolated install, run these from
 the task worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
