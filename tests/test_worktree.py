@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,7 +94,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
 
 
-@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
+@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
 def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     repo = repo.rename(repo.with_name("repo\rreturn"))
     base = commit_on_origin(repo, "base-change")
@@ -101,7 +103,8 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
-        if args[:2] == ("worktree", "add"):
+        interrupted_step = ("worktree", "add") if state == "detached" else ("switch", "--quiet")
+        if args[:2] == interrupted_step:
             raise KeyboardInterrupt
         return output
 
@@ -110,9 +113,10 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
-    assert (worktree.branch(wt), worktree.head(wt)) == ("lz/my-task", base)
+    current_branch = git(wt, "branch", "--show-current").strip()
+    assert (current_branch, worktree.head(wt)) == ("" if state == "detached" else "lz/my-task", base)
     assert not task.exists()
-    if state == "same-base":
+    if state in {"same-base", "detached"}:
         assert worktree.start(repo, "my-task", "main") == wt
         assert worktree.base_sha(wt) == base
         text = task.read_text()
@@ -335,3 +339,24 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
         assert git(repo, "ls-remote", "origin", "refs/heads/lz/abandoned").split() == [
             head, "refs/heads/lz/abandoned"
         ]
+
+
+def test_start_retries_after_git_checkout_interrupt(repo, tmp_path):
+    (repo / ".gitattributes").write_text("README.md filter=paused\n")
+    (repo / "workflow.toml").write_text('[repo]\nname="owner/repo"\n')
+    git(repo, "add", ".gitattributes", "workflow.toml")
+    git(repo, "commit", "-qm", "add checkout barrier")
+    git(repo, "push", "-q", "origin", "main")
+    pid_file, entered = tmp_path / "starter.pid", tmp_path / "checkout-entered"
+    git(repo, "config", "filter.paused.smudge",
+        f'cat >/dev/null; : > {shlex.quote(str(entered))}; '
+        f'kill -INT "$(cat {shlex.quote(str(pid_file))})"; exec sleep 30')
+    start = ("import os, sys; from pathlib import Path; from loopzero.cli import main; "
+             "Path(sys.argv[1]).write_text(str(os.getpid())); sys.exit(main(['start', 'paused']))")
+    command = [sys.executable, "-c", start, str(pid_file)]
+    first = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    assert entered.exists() and first.returncode in (-2, 130)
+    git(repo, "config", "--unset", "filter.paused.smudge")
+    resumed = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    assert resumed.returncode == 0, resumed.stderr
+    assert worktree.task_file(worktree.worktree_dir(repo, "paused")).is_file()

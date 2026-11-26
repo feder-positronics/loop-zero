@@ -16,7 +16,7 @@ from pathlib import Path
 from select import select
 from uuid import uuid4
 
-from loopzero._proc import build_env, run, run_git_paths
+from loopzero._proc import build_env, defer_sigterm, run, run_git_paths
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -59,13 +59,16 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120,
-         preserve_whitespace: bool = False, preserve_newlines: bool = False) -> str:
+def _git(
+    cwd: Path, *args: str, timeout: float = 120,
+    preserve_whitespace: bool = False, preserve_newlines: bool = False, graceful_interrupt: bool = False,
+) -> str:
     argv = ("git", *args)
     if preserve_whitespace:
         done = run_git_paths(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
     else:
-        done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout, preserve_newlines=preserve_newlines)
+        done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+                   preserve_newlines=preserve_newlines, graceful_interrupt=graceful_interrupt)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
     return done.stdout if preserve_newlines or preserve_whitespace else done.stdout.strip()
@@ -260,36 +263,58 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
     base = _fetch_base(repo_root, base_branch)
+    detached = not existing
     if existing:
-        existing_head = _resumable_head(repo_root, wt, branch)
-        if existing_head is None:
+        checkout = _resumable_checkout(repo_root, wt, branch)
+        if checkout is None:
             raise WorktreeError(refusal)
+        existing_head, detached = checkout
         if existing_head != base:
             raise WorktreeError(
                 f"cannot resume start at {wt}: existing HEAD {existing_head} does not match "
                 f"origin/{base_branch} at {base}; run loopzero start with a new slug"
             )
     _ensure_excludes(repo_root)
-    if not existing:
-        wt.parent.mkdir(parents=True, exist_ok=True)
-        _git(repo_root, "worktree", "add", "--quiet", "-b", branch, str(wt), base)
+    _prepare_checkout(repo_root, wt, branch, base, existing=existing, detached=detached)
     _initialize_task(task, _TASK_TEMPLATE.format(
         title=title_from_slug(slug), base_branch=base_branch, base=base))
     return wt
 
 
-def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | None:
+def _prepare_checkout(repo_root: Path, wt: Path, branch: str, base: str, *, existing: bool, detached: bool) -> None:
+    if not existing:
+        wt.parent.mkdir(parents=True, exist_ok=True)
+        # Let Git clean up the interrupted checkout before creating the final branch.
+        _git(repo_root, "worktree", "add", "--quiet", "--detach", str(wt), base, graceful_interrupt=True)
+    if detached:
+        with defer_sigterm():
+            _git(wt, "switch", "--quiet", "-c", branch, graceful_interrupt=True)
+
+
+def _resumable_checkout(repo_root: Path, wt: Path, expected_branch: str) -> tuple[str, bool] | None:
     registered = _git(repo_root, "worktree", "list", "--porcelain", "-z", preserve_whitespace=True).split("\0\0")
     path_field = f"worktree {wt.resolve()}\0"
     fields = next((item for item in registered if item.startswith(path_field)), "").split("\0")
-    if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
+    if (len(fields) != 3 or fields[2] not in ("detached", f"branch refs/heads/{expected_branch}")
             or not (wt / ".git").is_file()):
         return None
     common = _git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)
-    if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common or branch(wt, native=True) != expected_branch:
+    if _git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True) != common:
+        return None
+    detached = fields[2] == "detached"
+    if detached:
+        admin = Path(_git(wt, "rev-parse", "--absolute-git-dir", preserve_whitespace=True))
+        try:
+            backlink = os.fsdecode((admin / "gitdir").read_bytes().removesuffix(b"\n"))
+        except OSError:
+            return None
+        if ((wt / ".git").is_symlink() or (admin / backlink).resolve() != (wt / ".git").resolve()
+                or _branch_exists(repo_root, expected_branch)):
+            return None
+    elif branch(wt, native=True) != expected_branch:
         return None
     current_head = head(wt)
-    return current_head if fields[1] == f"HEAD {current_head}" and not is_dirty(wt) else None
+    return (current_head, detached) if fields[1] == f"HEAD {current_head}" and not is_dirty(wt) else None
 
 
 def _initialize_task(task: Path, text: str) -> None:
