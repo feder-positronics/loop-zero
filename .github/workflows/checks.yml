@@ -42,7 +42,7 @@ jobs:
           command -v bwrap >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Tests
-        run: uv run --python 3.14 --locked --group dev pytest -q
+        run: uv run --python 3.14 --locked --group dev pytest
       - name: Wheel builds and CLI runs
         run: |
           uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel -q

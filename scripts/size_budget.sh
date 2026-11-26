@@ -8,10 +8,7 @@
 # it under the cap.
 # Usage: scripts/size_budget.sh [BASE]   (default: merge-base with origin/main)
 set -euo pipefail
-# Measured 2026-11-26: 7494 source lines.
-# Measured 2026-11-25: 12289 test lines.
-# Measured 2026-11-25: 1406 core Markdown / 600 delegation Markdown lines.
-# Allow ~10% growth, rounded up, so small fixes do not require cap changes.
+# Each run prints current totals and headroom against these caps.
 SRC_CAP=8250
 TESTS_CAP=13850
 CORE_DOCS_CAP=1500
