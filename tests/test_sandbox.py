@@ -395,7 +395,8 @@ class TestRealSandbox:
         message = str(failure.value)
         assert str(objects) in message
         assert "alternate" in message.lower() and "sandbox" in message.lower()
-        assert "standalone clone" in message.lower() and "loopzero start" in message
+        assert "transfer this task branch" in message.lower() and "standalone clone" in message.lower()
+        assert "rerun loopzero check at the same commit" in message.lower()
 
     @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
     def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):

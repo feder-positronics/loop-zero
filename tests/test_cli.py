@@ -681,7 +681,7 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     git(wt, "push", "-q", "-u", "origin", "lz/t1")
     body = "# PR\n\n## Validation\n<!-- loopzero:checks:start -->\nHuman evidence.\n"
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
-    out, _ = expect_cli(capsys, exit_code, command, stderr_contains=("malformed loopzero checks block",))
+    out, _ = expect_cli(capsys, exit_code, command, stderr_contains=("malformed loopzero checks block", "PR description on GitHub"))
     history = HISTORY_CALLS if command == "pr" else []
     assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS + (LOOKUP_CALLS[-1:] if command == "check" else [])
     if command == "check":
@@ -1442,6 +1442,15 @@ def arm_pr_base(gh, head, base):
 def arm_empty_primary_review_history(gh: FakeGh, head: str, *, branch="lz/t1") -> None:
     arm_pr(gh, head, branch=branch)
     gh.respond(reviews_key(), [])
+
+
+def test_review_context_mismatch_names_the_recovery(wt, gh, capsys, head, monkeypatch):
+    arm_empty_primary_review_history(gh, head)
+    result = ReviewResult("claude", head, "primary", "approve", (), "")
+    monkeypatch.setattr(cli, "_run_review", lambda *_args, **_kwargs: result)
+    monkeypatch.setattr(cli, "_matches_publication", lambda *_: False)
+    expect_cli(capsys, 1, "review", stderr_contains=("run loopzero review", "configured publisher"))
+    assert not any(call["argv"][:2] == post_key().split() for call in gh.calls)
 
 
 def arm_empty_primary_review_post(
@@ -3119,13 +3128,16 @@ def test_ready_wait_stops_if_pr_head_moves(wt, gh, capsys, monkeypatch, head):
                stderr_contains=(f"PR head changed while waiting: {head[:12]} to {moved[:12]}",))
 
 
-@pytest.mark.parametrize("running", [None, "upstream", "required-sibling"])
+@pytest.mark.parametrize("running", [None, "upstream", "required-sibling", "workflow"])
 def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, head, running):
     # #189: an upstream job can be running before the required job appears.
     if running == "required-sibling":
         publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "Backend Tests"]'))
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    arm_check_runs(gh, head, [{"name": "Backend Tests", "status": "in_progress"}] if running else [])
+    arm_check_runs(gh, head, [{"name": "Backend Tests", "status": "in_progress"}] if running and running != "workflow" else [])
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}", {
+        "workflow_runs": [{"head_sha": head, "status": "queued"}] if running == "workflow" else [],
+    })
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
 
     wait = "--wait=0" if running else "--wait"

@@ -452,7 +452,7 @@ def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -
     if start or _CHECKS_END in content:
         _, end, suffix = after.partition(_CHECKS_END)
         if not end or _CHECKS_END in before or _CHECKS_END in suffix or _CHECKS_START in after:
-            raise CliError("malformed loopzero checks block in PR Validation; repair its markers")
+            raise CliError("malformed loopzero checks block: fix the marker pair in Validation in the PR description on GitHub")
         content = before + block + suffix
     else:
         # Migrate our old report/placeholder only, retaining behavioral evidence.
@@ -820,7 +820,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             )
     try:
         if not _matches_publication(result, publication_context):
-            raise CliError("native publication context changed; HOLD")
+            raise CliError("native publication context changed. To recover, run loopzero review from the intended PR worktree with its configured publisher.")
     except runners.RunnerBadOutput:
         _save_review(wt, result)
         raise
@@ -1549,12 +1549,14 @@ def _wait_for_checks(
                 + ", ".join(readiness.stale_verdicts)
             )
             stale_notice = True
-        # Missing check runs do not prove that no workflow was scheduled. Diagnose only
-        # when no visible pending check explains why the required jobs have not appeared.
+        # An active workflow may not have created its check runs yet.
         if (
             elapsed >= MISSING_RUN_GRACE
             and all(" missing on " in r for r in pending)
-            and not readiness.has_pending_checks
+            and not _read_wait_poll(
+                partial(github.has_check_activity, config.repo, pr.head_sha, readiness),
+                started + timeout,
+            )
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "

@@ -129,6 +129,8 @@ def _run(cfg: Config) -> int:
     except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
         print(f"Eligibility pending: evidence unavailable ({exc}); rerun this workflow", file=sys.stderr)
         return 1
+    except _SourcePolicyRejection as exc:
+        state, message = "failure", str(exc)
     except (Exception, Terminated) as exc:
         _mark_refresh_failed(cfg.repo, head, exc)
         raise
