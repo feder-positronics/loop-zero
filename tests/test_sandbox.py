@@ -749,10 +749,13 @@ def cache_check(git_repo):
 
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
-                                    'dirty_tree', 'legacy'])
+                                    'dirty_tree', 'legacy', 'grant'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change):
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
+    if change == 'grant':
+        cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))
+        monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "2")
     for inputs in ({}, {'*': ()}, {'*': ('uv.lock',)}):
         assert sandbox._input_key(replace(cfg, inputs=inputs), git_repo, 'unlisted', fetched_base) is None
     whole = replace(cfg, inputs={'*': ('.',)})
@@ -776,6 +779,12 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         cfg = replace(cfg, network=True)
     elif change == 'environment':
         monkeypatch.setenv('LZ_KEEP', 'changed')
+        assert _current_check_report(git_repo, cfg, fetched_base) is None
+    elif change == 'grant':
+        monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "4")
+        assert _current_check_report(git_repo, cfg, fetched_base) is not None
+        monkeypatch.delenv("HEAVY_SLOT_GRANTED_CORES")
+        assert _current_check_report(git_repo, cfg, fetched_base) is not None
     elif change == 'version':
         monkeypatch.setattr(sandbox, '__version__', 'new')
     else:
