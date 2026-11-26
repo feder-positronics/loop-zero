@@ -661,7 +661,7 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
                     "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
                 )
     if (current_head := _save_report(wt, report, locked_fd=locked_fd)) is not None:
-        print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
+        print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}; rerun loopzero check",
               file=sys.stderr)
         return 1
     fcntl.flock(locked_fd, fcntl.LOCK_UN)
@@ -718,7 +718,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
         with github.pr_lock(config.repo, pr.number):
             live = github.pr_view(config.repo, pr.number)
             if live.state != "OPEN":
-                raise CliError(f"PR #{pr.number} closed during publication")
+                raise CliError(f"PR #{pr.number} closed during publication; reopen it before retrying loopzero pr")
             body = _pr_body(wt, head, config, _sync_task_narrative(wt, live.body or ""))
             if body != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
@@ -843,7 +843,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         if final_head != head or final_dirty:
             raise CliError(
                 f"worktree changed during review: HEAD before {head}, HEAD after {final_head}; "
-                f"dirty before False, dirty after {final_dirty}"
+                f"dirty after {final_dirty}; finish the changes, then run loopzero check and review again"
             )
     try:
         if not _matches_publication(result, publication_context):
@@ -1477,7 +1477,7 @@ def _verify_wait_snapshot(
     previous: Config,
 ) -> Config:
     if current_head != head:
-        raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
+        raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}; sync the branch and run loopzero ready")
     latest = _load_config(args, wt, pin_checks=True, previous=previous, refresh=True)
     if latest == config:
         return latest
@@ -1753,8 +1753,6 @@ def _merge_with_mergify(
 
 
 def cmd_merge(args: argparse.Namespace) -> int:
-    if args.cancel and args.wait is not None:
-        raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args)
     branch = worktree.branch(wt)
     if args.cancel:

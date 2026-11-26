@@ -850,7 +850,7 @@ def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> Non
     fake_tool("bwrap", "echo 'bwrap: No permissions' >&2\nexit 1\n")
     code, out, err = run(capsys, "check")
     assert code == 2 and out.startswith("checks pinned to origin/main@")
-    assert_contains(err, "namespace creation failed: exit 1", "kernel.apparmor_restrict_unprivileged_userns=0")
+    assert_contains(err, "namespace creation failed: exit 1", "ask the host operator to allow user namespaces for bwrap")
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
@@ -1397,6 +1397,13 @@ def test_cli_info_leaves_delivery_backends_unloaded(flag, pattern):
         done = subprocess.run([sys.executable, "-X", "importtime", *entry, flag], capture_output=True, text=True)
         assert done.returncode == 0 and re.match(pattern, done.stdout), done
         assert not re.search(r"loopzero\.(github|mergify|runners|sandbox)\b", done.stderr)
+
+
+def test_merge_cancel_and_wait_conflict_is_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["merge", "--cancel", "--wait"])
+    assert exc.value.code == 2
+    assert "merge --cancel cannot be combined with --wait" in capsys.readouterr().err
 
 
 # --- review ---------------------------------------------------------------------------
@@ -3796,7 +3803,7 @@ def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypa
     contents = contents.replace("false", '["true"]')
     for active in (contents, contents.replace('"example/repo"', "false")):
         workflow.write_text(active)
-        expect_cli(capsys, 1, "status", stderr_contains=("origin/main:workflow.toml: checks.commands must be a list",))
+        expect_cli(capsys, 1, "status", stderr_contains=("origin/main:workflow.toml: checks.commands must be an array",))
 
 
 def test_status_rejects_scratch_path_naming_worktree_root(git_repo, monkeypatch, capsys):

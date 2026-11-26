@@ -309,7 +309,7 @@ def test_bwrap_missing_or_probe_failure(git_repo, fake_bin, fake_tool, monkeypat
     if denied:
         assert "namespace creation failed" in diagnosis and "exit 1" in diagnosis
         assert "No permissions to create new namespace" not in diagnosis
-        assert "sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0" in diagnosis
+        assert "ask the host operator to allow user namespaces for bwrap" in diagnosis
     else:
         assert "bwrap binary missing" in diagnosis and "sudo apt install bubblewrap" in diagnosis
 
@@ -749,7 +749,11 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         monkeypatch.delenv("HEAVY_SLOT_GRANTED_CORES")
         assert _current_check_report(git_repo, cfg, fetched_base) is not None
     elif change == 'version':
-        monkeypatch.setattr(sandbox, '__version__', 'new')
+        dist = Mock(version="2.0.0a0")
+        monkeypatch.setattr("importlib.metadata.distribution", lambda _name: dist)
+        dist.read_text.return_value = json.dumps({"vcs_info": {"commit_id": "a" * 40}})
+        cache_check(cfg, clean=True)
+        dist.read_text.return_value = json.dumps({"vcs_info": {"commit_id": "b" * 40}})
     else:
         data = json.loads(receipt_path.read_text())
         if change in {'failed', 'boolean_exit_code'}:

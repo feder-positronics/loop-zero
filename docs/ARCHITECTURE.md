@@ -488,7 +488,8 @@ existing local execution path is unchanged.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
 Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
-command, version, sandbox configuration and the resolved base SHA. A stage runs
+command, installed version and pinned source revision, sandbox configuration and
+the resolved base SHA. A stage runs
 fresh when a matched path cannot be identified as a readable regular file.
 A base advance prevents reuse in a fresh check. Readiness can still accept
 the existing passing receipt at the same task head if its settings match.

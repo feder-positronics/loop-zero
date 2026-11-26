@@ -270,7 +270,7 @@ tail, name the cause or stage safely, and stop on terminal failures or quota err
 `check` exits 0 when stages pass, including local dirty runs that cannot satisfy
 readiness. Exit 1 can mean a failed stage, a discarded or unverified result, or
 a command error. Read the diagnostic and verify the receipt before classifying
-the failure. Exit 2 covers invalid arguments and sandbox unavailability in
+the failure. Exit 2 covers usage errors and sandbox unavailability in
 `check` or fresh `review`.
 
 Exit 3 means waiting or timeout. Review exits 4 when no configured

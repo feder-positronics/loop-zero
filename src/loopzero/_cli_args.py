@@ -65,22 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _version() -> str:
-    """Package version plus the pinned source revision when installed from Git."""
-    import json
-    from importlib.metadata import distribution
-
-    dist = distribution("loopzero")
-    try:
-        commit = json.loads(dist.read_text("direct_url.json") or "{}")["vcs_info"]["commit_id"]
-    except (KeyError, TypeError, json.JSONDecodeError):
-        commit = "unknown revision (not installed from a Git URL)"
-    return f"loopzero {dist.version} {commit}"
-
-
 class _VersionAction(argparse.Action):
     def __call__(self, parser, _namespace, _values, _option_string=None):
-        print(_version())
+        from . import installed_version
+
+        print(f"loopzero {installed_version()}")
         parser.exit()
 
 
@@ -95,4 +84,6 @@ def parse_args(parser: argparse.ArgumentParser, argv: list[str] | None) -> argpa
         conflicts = [f"--{name}" for name in ("model", "effort") if getattr(args, name) is not None]
         if conflicts:
             parser.error(f"review --repost cannot be combined with {' or '.join(conflicts)}")
+    if args.command == "merge" and args.cancel and args.wait is not None:
+        parser.error("merge --cancel cannot be combined with --wait")
     return args
