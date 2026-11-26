@@ -183,12 +183,12 @@ def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
         checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
 
 
-def _untracked_task_state(config: Config, worktree: Path) -> bool:
+def has_untracked_task_state(config: Config, worktree: Path) -> bool:
     return not _git(config, worktree, "ls-files", "--", ".loopzero")
 
 
 def receipt_checkout_matches(config: Config, worktree: Path, report: CheckReport) -> bool:
-    if not _stage_unchanged(config, worktree, report.head) or not _untracked_task_state(config, worktree):
+    if not _stage_unchanged(config, worktree, report.head):
         return False
     base = _check_base(config, worktree)
     return all(
@@ -198,7 +198,7 @@ def receipt_checkout_matches(config: Config, worktree: Path, report: CheckReport
 
 
 def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
-    if not _untracked_task_state(config, worktree):
+    if not has_untracked_task_state(config, worktree):
         return {}
     try:
         data = json.loads((worktree / ".loopzero/checks.json").read_text())

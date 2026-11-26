@@ -625,10 +625,12 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 
 def _reusable_check_report(wt: Path, config: Config) -> CheckReport | None:
-    if worktree.is_dirty(wt):
+    if not (wt / CHECKS_FILE).is_file() or worktree.is_dirty(wt):
         return None
     head = worktree.head(wt)
     with suppress(OSError):
+        if not sandbox.has_untracked_task_state(config, wt):
+            return None
         report = _current_check_report(wt, config, head)
         if report is not None and sandbox.receipt_checkout_matches(config, wt, report):
             return report
