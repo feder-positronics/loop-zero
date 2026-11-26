@@ -2392,14 +2392,14 @@ def test_skipped_required_check_activates_only_on_ready(wt, gh, capsys, head, dr
     assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
 
 
-def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head):
+def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypatch, head, git_calls):
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
     arm_check_progress(gh, head, "skipped", "skipped", "pending", "success")
     gh.respond("pr ready", "")
-
+    git_calls.clear()
     monkeypatch.setattr(cli, "_sleep", lambda _: None)
     code, out, err = run(capsys, "ready", "--wait")
-
+    assert sum(call[0] == "show" and call[-1].endswith(":workflow.toml") for call in git_calls) == 1
     assert (code, err) == (0, "")
     assert out.count("receipt accepted:") == 1
     assert without_accepted_receipt(out).splitlines() == [
