@@ -22,10 +22,10 @@ security-path downgrades need requester authority. For conflicting findings,
 reconcile their acceptance and impact. New critical evidence requires a separate
 authorized PR review thread rather than silently expanding this batch.
 
-After the delta, follow the contract's [round-two rule](../../CONTRACT.md#review-budget).
-Return accepted repairs to delivery: fixing findings does not finish the task
-until the fixed head is delivered.
-
-Then continue the task you were given as far as it authorizes, or hand over
-what is left of its acceptance. If two repairs have failed, the route is
-probably wrong, so reconsider it before a third.
+Before requesting the delta, compare the full repair with the primary-reviewed
+head. Identify affected callers and guarantees for each repaired behavior. Use
+existing test seams to exercise the failing case and any success, failure or
+timing behavior the repair can change. Apply [security-review](../security-review/SKILL.md)
+to changed trust boundaries. Record the evidence with the repair, run the
+existing checks and follow the contract's [review budget](../../CONTRACT.md#review-budget)
+through delivery or handoff of remaining acceptance.

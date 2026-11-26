@@ -507,10 +507,9 @@ boundary or replace this publisher with a dedicated GitHub App and bind the
 required status check to that App's integration ID. Do not describe the Actions
 publisher as protection from a malicious repository writer.
 
-The evaluator preserves COMMENT model reviews with resolved blocking findings,
-and the existing outdated-thread policy: outdated findings on other SHAs do not
-block, but unresolved current critical/important findings do. Suggestions do not
-block. Dismissing the latest review cannot restore an earlier approval.
+The evaluator preserves COMMENT model reviews with resolved blocking findings.
+See [Blockers](core/CONTRACT.md#blockers) for the outdated-thread rule. Suggestions
+do not block. Dismissing the latest review cannot restore an earlier approval.
 
 Before queue adoption, wire source pushes, review submissions/edits/dismissal,
 review-comment edits/deletions and an explicit refresh to this publisher.
