@@ -151,11 +151,11 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
             return super().construct_mapping(node, deep=deep)
 
     repo_path = f"repos/{repo}"
-    metadata = github.api_get(repo_path)
+    metadata = github.conditional_get(repo_path)
     if not isinstance(metadata, dict) or metadata.get("default_branch") != branch:
         return False
     path = f"{repo_path}/contents/.mergify.yml?ref={quote('refs/heads/' + branch, safe='')}"
-    blob = github.api_get(path)
+    blob = github.conditional_get(path)
     try:
         if (blob["type"] != "file" or blob["encoding"] != "base64"
                 or not isinstance(blob["sha"], str) or len(blob["sha"]) != 40
@@ -177,8 +177,8 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     except (KeyError, TypeError, ValueError, yaml.YAMLError, RecursionError):
         return False
     # File identity, not main's commit: unrelated merges must not invalidate this proof.
-    current = github.api_get(path)
-    metadata = github.api_get(repo_path)
+    current = github.conditional_get(path)
+    metadata = github.conditional_get(repo_path)
     return (isinstance(current, dict) and current.get("sha") == blob["sha"]
             and isinstance(metadata, dict) and metadata.get("default_branch") == branch)
 

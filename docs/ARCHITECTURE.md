@@ -114,6 +114,9 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    that requested changes also requires resolved findings at the reviewed head.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
+   Selected REST reads in `ready` and `merge` retain ETags and responses for
+   the command, keyed by the credential and complete request. Each observation
+   still contacts GitHub and can reuse a body only after a matching HTTP 304.
    This is best-effort observation: an immediate green read may precede
    asynchronous CI scheduling, there is no unconditional delay, and merge
    admission checks readiness again. Missing-run diagnosis keeps its two-minute

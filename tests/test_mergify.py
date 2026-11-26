@@ -10,7 +10,8 @@ import urllib.request
 
 import pytest
 
-from loopzero import mergify
+from loopzero import github, mergify
+from loopzero._proc import Completed
 
 
 class Response(io.BytesIO):
@@ -96,7 +97,7 @@ def queue_api(monkeypatch):
             reads += 1
             return {"type": "file", "encoding": "base64", "sha": str(reads if changed else 1)*40,
                     "content": base64.b64encode(text.encode()).decode()}
-        monkeypatch.setattr(mergify.github, "api_get", get)
+        monkeypatch.setattr(github, "conditional_get", get)
     return github_config
 
 
@@ -108,6 +109,61 @@ ONE_CHECK = SAFE_CONFIG.replace("checks: 3", "checks: 1")  # in place unless bat
 def test_configured_accepts_documented_speculation_despite_raw_inplace_default(queue_api, text):
     queue_api(text)
     assert mergify.configured("acme/widgets", "main", "main")
+
+
+@pytest.mark.parametrize("scenario", ["stable", "no-etag", "orphan", "error", "sha", "branch"])
+def test_configured_revalidates_both_observations(queue_api, monkeypatch, scenario):
+    credential = "synthetic-token"
+    monkeypatch.setenv("GH_TOKEN", credential)
+    monkeypatch.setenv("GH_HOST", "github.com")
+    statuses = []
+    metadata = "repos/acme/widgets"
+    contents = f"{metadata}/contents/.mergify.yml?ref=refs%2Fheads%2Fmain"
+    blob = {"type": "file", "encoding": "base64", "sha": "a" * 40,
+            "content": base64.b64encode(SAFE_CONFIG.encode()).decode()}
+
+    def run(argv, *, extra_env, **_):
+        assert extra_env == {"GH_TOKEN": credential}
+        endpoint = argv[2]
+        assert endpoint in (metadata, contents)
+        data = {"default_branch": "main"} if endpoint == metadata else blob
+        etag = "" if scenario == "no-etag" else f'ETag: "{endpoint}"\r\n'
+        status = 200
+        if "-H" in argv:
+            assert argv[argv.index("-H") + 1] == f'If-None-Match: "{endpoint}"'
+            status = 304
+            if endpoint == contents and scenario == "error":
+                status = 403
+            if endpoint == contents and scenario == "sha":
+                status, data = 200, {**blob, "sha": "b" * 40}
+            if endpoint == metadata and scenario == "branch":
+                status, data = 200, {"default_branch": "other"}
+        elif scenario == "orphan":
+            status = 304
+        statuses.append(status)
+        body = json.dumps(data) if status == 200 else ""
+        return Completed(int(status != 200), f"HTTP/2 {status}\r\n{etag}\r\n{body}", "", 0)
+
+    monkeypatch.setattr(github, "run", run)
+    with github.conditional_reads():
+        if scenario in ("orphan", "error"):
+            with pytest.raises(github.GhError):
+                mergify.configured("acme/widgets", "main", "main")
+        elif scenario in ("sha", "branch"):
+            assert not mergify.configured("acme/widgets", "main", "main")
+        else:
+            assert mergify.configured("acme/widgets", "main", "main")
+            assert mergify.configured("acme/widgets", "main", "main")
+            assert statuses == ([200] * 8 if scenario == "no-etag" else [200, 200] + [304] * 6)
+            if scenario == "stable":
+                credential = "rotated-token"
+                monkeypatch.setenv("GH_TOKEN", credential)
+                assert mergify.configured("acme/widgets", "main", "main")
+                assert statuses[-4:] == [200, 200, 304, 304]
+    if scenario == "stable":
+        with github.conditional_reads():
+            assert mergify.configured("acme/widgets", "main", "main")
+            assert statuses[-4:] == [200, 200, 304, 304]
 
 
 @pytest.mark.parametrize("text", [
@@ -142,13 +198,13 @@ def test_configured_still_requires_vendor_queue_identity(queue_api, monkeypatch)
                                         ("sha", None), ("sha", "z"*40), ("content", None), ("content", "!")])
 def test_configured_rejects_malformed_github_file(queue_api, monkeypatch, field, value):
     queue_api(SAFE_CONFIG)
-    original = mergify.github.api_get
+    original = github.conditional_get
     def malformed(path):
         data = original(path)
         if "/contents/" in path:
             data[field] = value
         return data
-    monkeypatch.setattr(mergify.github, "api_get", malformed)
+    monkeypatch.setattr(github, "conditional_get", malformed)
     assert not mergify.configured("acme/widgets", "main", "main")
 
 

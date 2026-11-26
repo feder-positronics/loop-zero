@@ -119,6 +119,9 @@ RETRY_DELAYS = (5.0, 20.0, 60.0)
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
+_conditional_cache: ContextVar[dict[tuple[str, str], tuple[str, object]] | None] = (
+    ContextVar("github_conditional_cache", default=None)
+)
 _HTTP_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})(?:\s+(.*))?$", re.IGNORECASE)
 _GITHUB_TOKEN_RE = re.compile(
     r"\b(?:github_pat_[A-Za-z0-9_]+|gh[pousr]_[A-Za-z0-9_]{10,})\b"
@@ -156,6 +159,16 @@ def api_error_diagnostics():
         yield
     finally:
         _api_error_diagnostics.reset(scope)
+
+
+@contextmanager
+def conditional_reads():
+    """Retain conditional GET responses only for this command."""
+    scope = _conditional_cache.set({})
+    try:
+        yield
+    finally:
+        _conditional_cache.reset(scope)
 
 
 def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
@@ -320,7 +333,7 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
-        token: str | None = None, retry_idempotent: bool = False) -> str:
+        token: str | None = None, retry_idempotent: bool = False, include_response: bool = False) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
     rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
     patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
@@ -354,9 +367,10 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             continue
         status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
                                  else (None, {}, done.stdout))
+        failed = done.exit_code and not (include_response and status == "304" and done.exit_code == 1)
         tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
-        if done.exit_code and ((rest_api and status == "429")
-                               or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
+        if failed and ((rest_api and status == "429")
+                       or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
             guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
                         else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
             if diagnostic_api or patch_error:
@@ -364,10 +378,10 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
                                            message_tail=None if diagnostic_api else tail)
                 raise GhError(("GitHub API request",), detail, token=selected, guidance=guidance)
             raise GhError(argv, tail, token=selected, guidance=guidance)
-        if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
+        if not failed or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
             break
         _retry_sleep(_read_timeout(delay) if scope else delay)
-    if done.exit_code != 0:
+    if failed:
         error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                         message_tail=None if diagnostic_api else tail)
@@ -376,7 +390,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
         raise GhError(error_command, error_tail, token=selected, guidance=guidance)
-    return body
+    return done.stdout if include_response else body
 
 
 def _rest_rate_limit(headers: dict[str, str]) -> str:
@@ -453,12 +467,15 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
 
 
 def _gh_json(*args: str, token: str | None = None) -> object:
-    out = _gh(*args, token=token)
+    return _decode_json(_gh(*args, token=token), args, token or "")
+
+
+def _decode_json(out: str, args: tuple[str, ...], token: str) -> object:
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
         raise GhError(("gh", *args), f"invalid JSON from gh at line {exc.lineno}, column {exc.colno}",
-                      token=token or "") from None
+                      token=token) from None
 
 
 def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
@@ -491,6 +508,40 @@ def _with_file(content: str) -> Path:
 def api_get(endpoint: str) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
     return _gh_json("api", endpoint)
+
+
+def conditional_get(endpoint: str) -> object:
+    """Refresh a REST GET, reusing a body only after an authenticated 304."""
+    args = ("api", endpoint)
+    cache = _conditional_cache.get()
+    if cache is None or os.environ.get("GH_HOST", "github.com") != "github.com":
+        return _gh_json(*args)
+    credential = (_select_token(None, _read_scope.get(), True) or os.environ.get("GH_TOKEN")
+                  or os.environ.get("GITHUB_TOKEN"))
+    if not credential:
+        try:
+            credential = _gh("auth", "token", "--hostname", "github.com", timeout=_read_timeout(10)).strip()
+        except GhError:
+            return _gh_json(*args)
+    if not credential:
+        return _gh_json(*args)
+
+    key = (credential, endpoint)
+    cached = cache.pop(key, None)
+    headers = ("-H", f"If-None-Match: {cached[0]}") if cached else ()
+    status, response_headers, body = _included_response(
+        _gh(*args, *headers, token=credential, include_response=True)
+    )
+    if status == "304":
+        if cached is None:
+            raise GhError(("gh", *args), "HTTP 304 without a matching conditional response")
+        cache[key] = cached
+        return cached[1]
+    data = _decode_json(body, args, credential)
+    etag = response_headers.get("etag", "")
+    if status == "200" and re.fullmatch(r'(?:W/)?"[\x21\x23-\x7e]*"', etag):
+        cache[key] = (etag, data)
+    return data
 
 
 def auth_token() -> str:

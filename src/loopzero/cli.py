@@ -1824,6 +1824,9 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"review --repost cannot be combined with {' or '.join(conflicts)}")
     try:
         with _proc.unwind_on_sigterm():
+            if args.command in ("ready", "merge"):
+                with github.conditional_reads():
+                    return args.func(args)
             return args.func(args)
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
