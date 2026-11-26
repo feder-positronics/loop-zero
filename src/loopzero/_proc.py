@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,55 @@ class ProcTimeout(LoopZeroError):
         self.stdout = stdout
         self.stderr = stderr
         self.duration_s = duration_s
+
+
+class Terminated(BaseException):
+    """Unwind the active operation before exiting from SIGTERM."""
+
+
+def _request_unwind(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise Terminated
+
+
+@contextmanager
+def unwind_on_sigterm():
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
+        yield
+        return
+    try:
+        try:
+            signal.signal(signal.SIGTERM, _request_unwind)
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    except Terminated:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.raise_signal(signal.SIGTERM)
+        raise
+
+
+@contextmanager
+def defer_sigterm():
+    """Finish a private directory operation before unwinding."""
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) is not _request_unwind):
+        yield
+        return
+    pending = False
+
+    def remember_signal(_signum, _frame):
+        nonlocal pending
+        pending = True
+
+    signal.signal(signal.SIGTERM, remember_signal)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, _request_unwind)
+        if pending:
+            _request_unwind(signal.SIGTERM, None)
 
 
 @dataclass(frozen=True)
@@ -107,8 +157,7 @@ def run(
             raise FileNotFoundError(f"working directory {cwd} does not exist") from exc
         raise ToolMissing(f"{argv[0]}: executable not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
-        out = out or ""
+        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
         elapsed = time.monotonic() - started
         raise ProcTimeout(
