@@ -1085,6 +1085,30 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
     assert pages == ["page=1", "page=2"]
 
 
+@pytest.mark.parametrize(("replacement_fields", "waitable"), [
+    ({}, True),
+    ({"workflow_id": 8}, False),
+    ({"head_sha": "b" * 40}, False),
+])
+def test_readiness_recovers_workflow_producer_at_search_limit(
+    gh: FakeGh, replacement_fields: dict, waitable: bool,
+) -> None:
+    arm_workflow_check(gh, failed_check())
+    runs = [
+        replacement_run() | replacement_fields,
+        *(producing_run(id=i, check_suite_id=i, workflow_id=99) for i in range(100, 1099)),
+    ]
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
+               *({"workflow_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+    gh.respond(f"api repos/{REPO}/actions/runs?check_suite_id=10",
+               {"workflow_runs": [producing_run()]})
+
+    result = readiness(workflow_wait=True)
+
+    assert not result.ready
+    assert result.waitable_failures == (result.reasons if waitable else ())
+
+
 def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:
     arm_workflow_check(gh, failed_check())
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
