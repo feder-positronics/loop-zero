@@ -31,7 +31,8 @@ DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
 CHECK_SHELL = ("/bin/bash", "--posix", "-o", "pipefail", "-c")
 CHECK_TAIL_BYTES = 16 * 1024
-HEARTBEAT_INTERVAL = 30.0
+FIRST_HEARTBEAT_DELAY = 30.0
+HEARTBEAT_INTERVAL = 300.0
 SANDBOX_HOME = "/tmp/home"
 # Only these system directories are exposed read-only by default; home tool paths
 # require explicit `[checks] ro_paths`. Host homes, sockets and processes stay hidden.
@@ -346,9 +347,11 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
     started = time.monotonic()
 
     def heartbeat():
-        while not stopped.wait(HEARTBEAT_INTERVAL):
+        delay = FIRST_HEARTBEAT_DELAY
+        while not stopped.wait(delay):
             status(f"stage {ordinal}/{total}: running "
                    f"({time.monotonic() - started:.1f}s elapsed)")
+            delay = HEARTBEAT_INTERVAL
 
     reporter = threading.Thread(target=heartbeat, daemon=True) if status else None
     if reporter:

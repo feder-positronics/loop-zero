@@ -533,7 +533,7 @@ def _pairs(argv: list[str], flag: str) -> list[tuple[str, str]]:
 
 @pytest.fixture
 def heartbeat_log(monkeypatch):
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
+    monkeypatch.setattr(sandbox, "FIRST_HEARTBEAT_DELAY", 0.03)
     observed, events, reporters = Event(), [], set()
 
     def status(message):
@@ -591,7 +591,6 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
 
 def test_early_failure_reports_actual_exit_without_heartbeat(git_repo, bwrap_log, monkeypatch):
-    monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 30.0)
     events = []
     report = sandbox.run_checks(
         make_config(checks=("echo secret; exit 17", "echo never")), git_repo,
@@ -676,7 +675,7 @@ def status(message):
     if mode == "blocked-heartbeat":
         threading.Event().wait()
 
-sandbox.HEARTBEAT_INTERVAL = 0.03
+sandbox.FIRST_HEARTBEAT_DELAY = 0.03
 repo = Path.cwd()
 command = "echo complete" if mode in {"dispatch", "removal"} else "exec sleep 30"
 report = sandbox.run_checks(make_config(checks=(command,)), repo, status=status)
