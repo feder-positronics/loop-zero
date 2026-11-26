@@ -414,46 +414,35 @@ def test_start_without_config(git_repo: Path, monkeypatch, capsys) -> None:
 
 @pytest.mark.parametrize("move_head", [False, True])
 def test_check_pass_writes_and_reuses_report(wt, gh, capsys, monkeypatch, move_head):
-    code, out, _ = run(capsys, "check")
+    out, _ = expect_cli(capsys, 0, "check")
     pin, first, first_exit, second, second_exit, receipt, verdict = out.splitlines()
-    assert code == 0 and verdict == "PASS" and not gh.calls
-    assert pin.startswith("checks pinned to origin/main@")
+    assert verdict == "PASS" and not gh.calls and pin.startswith("checks pinned to origin/main@")
     assert (first, second) == ("running: echo ok", "running: test -f README.md")
     assert first_exit.startswith("stage 1/2: exit 0 (") and second_exit.startswith("stage 2/2: exit 0 (")
     path = wt / ".loopzero/checks.json"
     report = json.loads(original := path.read_bytes())
     assert report["head"] == head_of(wt) and report["dirty"] is False
-    assert receipt.startswith(f"receipt produced: head={report['head']} content=")
-    assert "config=commands-sha256:" in receipt and "environment=unknown" in receipt
-    first_result, second_result = report["results"]
-    assert (first_result["command"], first_result["exit_code"], first_result["tail"]) == ("echo ok", 0, "ok")
-    assert (second_result["command"], second_result["exit_code"]) == ("test -f README.md", 0)
-    run_checks, lock = cli.sandbox.run_checks, cli._lock_task_state
-    monkeypatch.setattr(cli.sandbox, "run_checks", Mock(side_effect=AssertionError("stages ran")))
-    code, out, err = run(capsys, "check")
+    assert receipt.startswith(f"receipt produced: head={report['head']} content=") and "environment=unknown" in receipt
+    assert "config=commands-sha256:" in receipt
+    assert [(r["command"], r["exit_code"]) for r in report["results"]] == [("echo ok", 0), ("test -f README.md", 0)]
+    assert report["results"][0]["tail"] == "ok"
     reused = receipt.replace("receipt produced", "receipt reused from .loopzero/checks.json", 1)
-    assert (code, out.splitlines(), err, path.read_bytes()) == (0, [pin, reused, "PASS"], "", original)
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.sandbox, "run_checks", Mock(side_effect=AssertionError("stages ran")))
+        expect_cli(capsys, 0, "check", stdout=f"{pin}\n{reused}\nPASS\n", stderr="")
+    assert path.read_bytes() == original
 
-    def edit_during_lock_wait(worktree):
+    def change_checkout(*args, lock=cli._lock_task_state):
+        if move_head:
+            git(wt, "commit", "-qm", "advance HEAD", "--allow-empty")
+            return True
         (wt / "README.md").write_text("edited while waiting\n")
-        monkeypatch.setattr(cli, "_lock_task_state", lock)
-        return lock(worktree)
+        return lock(*args)
 
-    validate_checkout = cli.sandbox.receipt_checkout_matches
-
-    def advance_after_validation(*args):
-        matches = validate_checkout(*args)
-        git(wt, "commit", "-qm", "advance HEAD", "--allow-empty")
-        return matches
-
-    if move_head:
-        monkeypatch.setattr(cli.sandbox, "receipt_checkout_matches", advance_after_validation)
-    else:
-        monkeypatch.setattr(cli, "_lock_task_state", edit_during_lock_wait)
-    monkeypatch.setattr(cli.sandbox, "run_checks", run_checks)
+    target, hook = (cli.sandbox, "receipt_checkout_matches") if move_head else (cli, "_lock_task_state")
+    monkeypatch.setattr(target, hook, change_checkout)
     expect_cli(capsys, 0, "check", stdout_contains=("running: echo ok",))
-    report = json.loads(path.read_bytes())
-    assert report["head"] == head_of(wt) and report["dirty"] is not move_head
+    assert (updated := json.loads(path.read_bytes()))["head"] == head_of(wt) and updated["dirty"] is not move_head
 
 
 @pytest.mark.parametrize("state", [None, "CLOSED", "MERGED"])
@@ -2260,8 +2249,7 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
     monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
     if phase != "stage":
         expect_cli(capsys, 0, "check")
-        saved_receipt = receipt.read_bytes().replace(b'"settings_sha256"', b'"obsolete_settings_sha256"')
-        receipt.write_bytes(saved_receipt)
+        receipt.write_bytes(saved_receipt := receipt.read_bytes().replace(b'"settings_sha256"', b'"obsolete_settings_sha256"'))
     run_stage, run_checks, save_report = cli.sandbox._run_one, cli.sandbox.run_checks, cli._save_report
     def advance_head(*, rerun=True):
         nonlocal saved_receipt

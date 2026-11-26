@@ -520,7 +520,7 @@ existing local execution path is unchanged.
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.
 Keys bind committed paths/blob IDs, the bytes of the checked-out regular files,
 command, version, sandbox configuration and the resolved base SHA. A stage runs
-fresh when a matched path cannot be identified as a readable regular file.
+fresh when a declared pattern has no matches or a matched file cannot be hashed.
 The receipt fingerprint also binds the base SHA when reuse
 is configured, so advancing the base invalidates a pass at the same task head.
 With explicit `--config`, reuse can fall back to the recorded task base if the

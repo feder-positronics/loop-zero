@@ -193,7 +193,7 @@ def receipt_checkout_matches(config: Config, worktree: Path, report: CheckReport
     base = _check_base(config, worktree)
     return all(
         result.input_key is not None and result.input_key == _input_key(config, worktree, result.command, base)
-        for result in report.results if _has_inputs(config, result.command)
+        for result in report.results if result.command in config.inputs or "*" in config.inputs
     ) and _stage_unchanged(config, worktree, report.head)
 
 
@@ -300,14 +300,17 @@ def _input_key(config: Config, worktree: Path, command: str, base: str, *,
     if not base and status is None:
         return None
     entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
+    paths = tuple(path for group in entries.values() for path in group)
     try:
-        blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+        blobs = _input_blobs(config, worktree, paths)
+        if blobs and len(paths) > 1 and not all(_input_blobs(config, worktree, (path,)) for path in paths):
+            blobs = ""
     except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
         if not base:
             return None
         raise
     if blobs == "" and status:
-        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
+        status(f"{workflow}: checks.inputs for {command!r} is empty or has a pathspec that matches no files in HEAD. "
                f"Correct these entries: {entries!r}. Running the check fresh.")
     if not blobs or not base:
         return None

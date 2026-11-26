@@ -26,7 +26,7 @@ from loopzero import cli, sandbox
 from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
-from .conftest import git
+from .conftest import commit_file, git
 
 FAKE_BWRAP = '''#!/usr/bin/python3
 import os
@@ -745,6 +745,7 @@ def cache_check(git_repo, receipt_path):
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy', 'grant'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
+    commit_file(git_repo, "shared", "initial", "add shared input")
     cfg = make_config(checks=('echo one', 'echo two'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     if change == 'grant':
@@ -755,7 +756,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
     whole = replace(cfg, inputs={'*': ('.',)})
     key = sandbox._input_key(whole, git_repo, 'unlisted', fetched_base)
     assert key is not None
-    cache_check(cfg, clean=True)
+    initial_head = cache_check(cfg, clean=True).head
     if change in {'other', 'input', 'shared', 'dirty_tree'}:
         path = 'README.md' if change in {'input', 'dirty_tree'} else 'src.py' if change == 'other' else change
         (git_repo / path).write_text('new content')
@@ -769,12 +770,12 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
         cfg = replace(cfg, network=True)
     elif change == 'environment':
         monkeypatch.setenv('LZ_KEEP', 'changed')
-        assert _current_check_report(git_repo, cfg, fetched_base) is None
+        assert _current_check_report(git_repo, cfg, initial_head) is None
     elif change == 'grant':
         monkeypatch.setenv("HEAVY_SLOT_GRANTED_CORES", "4")
-        assert _current_check_report(git_repo, cfg, fetched_base) is not None
+        assert _current_check_report(git_repo, cfg, initial_head) is not None
         monkeypatch.delenv("HEAVY_SLOT_GRANTED_CORES")
-        assert _current_check_report(git_repo, cfg, fetched_base) is not None
+        assert _current_check_report(git_repo, cfg, initial_head) is not None
     elif change == 'version':
         monkeypatch.setattr(sandbox, '__version__', 'new')
     else:
@@ -800,7 +801,7 @@ def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, ch
 @pytest.mark.parametrize("case", ["typo", "empty", "dirty", "no_base"])
 def test_unmatched_inputs_run_fresh(git_repo, bwrap_log, fetched_base, case, cache_check):
     command = 'test "$(cat README.md)" = hello'
-    paths = () if case == "empty" else ("ipnut.txt",)
+    paths = {"empty": (), "typo": ("README.md", "ipnut.txt")}.get(case, ("ipnut.txt",))
     config = make_config(checks=(command,), inputs={command: paths})
     cache_check(config)
     (git_repo / "README.md").write_text("fail\n")
@@ -831,12 +832,12 @@ def test_input_diagnostic_failure_does_not_block_dirty_check(
     assert report.ok and report.dirty and report.results[0].command == command
 
 
-def test_local_check_reuse_tracks_checkout_bytes(git_repo, bwrap_log, fetched_base, cache_check, monkeypatch):
+@pytest.mark.parametrize("partial_wildcard", [False, True])
+def test_local_check_reuse_tracks_checkout_bytes(git_repo, fetched_base, cache_check, monkeypatch, partial_wildcard):
     path = git_repo / "README.md"
     command = "python3 -c 'from pathlib import Path; exit(13 in Path(\"README.md\").read_bytes())'"
-    config = make_config(checks=(command,), inputs={command: ("README.md",)})
-    assert path.read_bytes() == b"hello\n"
-    assert cache_check(config, clean=True, verify_reuse=True).head == fetched_base
+    config = make_config(checks=(command,), inputs={"*" if partial_wildcard else command: ("README.md",)})
+    assert cache_check(config, clean=True, verify_reuse=not partial_wildcard).head == fetched_base
     monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
     git(git_repo, "config", "core.autocrlf", "true")
     path.unlink()
