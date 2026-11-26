@@ -1433,7 +1433,7 @@ def readiness(
 
 
 def mark_ready(repo: str, number: int) -> None:
-    _gh("pr", "ready", str(number), "--repo", repo)
+    _gh("pr", "ready", str(number), "--repo", repo, retry_idempotent=True)  # Repeating is harmless.
 
 
 _QUEUE_QUERY = (

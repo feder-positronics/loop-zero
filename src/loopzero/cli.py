@@ -1310,7 +1310,10 @@ def _warn_queue_size(
 
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
     _require_receipt(wt, config, head)
-    github.mark_ready(config.repo, number)
+    try:
+        github.mark_ready(config.repo, number)
+    except github.GhUnavailable as exc:
+        raise CliError(f"{exc}\nThe PR is still a draft; rerun the same command once GitHub recovers.") from exc
 
 
 def cmd_ready(args: argparse.Namespace) -> int:

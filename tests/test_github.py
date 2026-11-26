@@ -229,6 +229,13 @@ def test_auth_failure_is_gh_auth(gh: FakeGh) -> None:
     assert "required token scope: repo" in info.value.tail
 
 
+def test_mark_ready_retries_a_transient_failure(gh: FakeGh, monkeypatch) -> None:
+    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
+    gh.respond("pr ready", {"stdout": "", "stderr": "gh: HTTP 502: Bad Gateway\n", "exit": 1}, "")
+    github.mark_ready(REPO, 7)  # r7-d4-1: one GraphQL 502 no longer ends ready/merge --wait.
+    assert sum(call["argv"][:2] == ["pr", "ready"] for call in gh.calls) == 2
+
+
 @pytest.mark.parametrize("stdout", ["", '{"message": "detail on stdout"}'])
 def test_generic_failure_carries_command_and_tail(gh: FakeGh, stdout: str) -> None:
     gh.respond("pr ready", {"stdout": stdout, "stderr": "gh: HTTP 422\n", "exit": 1})
