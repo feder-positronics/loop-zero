@@ -1227,8 +1227,7 @@ def _pr_readiness(
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     head = worktree.head(wt)
     _require_task_branch(config, branch)
-    with github.bounded_reads(float("inf"), token=None):
-        pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=True)
+    pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=True)
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
@@ -1745,6 +1744,7 @@ def _merge_with_mergify(
         return sha
     confirmed = state is not None
     if confirmed and not confirmed_marker:
+        _require_receipt(wt, config, pr.head_sha)
         mergify.mark_confirmed(config.repo, pr.number, pr.head_sha, queue)
     if not confirmed and confirmed_marker:
         closed: list[github.GhError] = []

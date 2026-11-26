@@ -3058,7 +3058,7 @@ def test_ready_draft_with_open_blocking_finding_does_not_mark_ready(
     ("legacy", "check receipt is missing its settings fingerprint."),
     ("incompatible", "check receipt has an incompatible settings fingerprint."),
     ("empty", "check receipt is incomplete."), ("checkpoint", "check receipt is incomplete."),
-    ("during-gates", "run loopzero check at this head"),
+    ("during-gates", "run loopzero check at this head"), ("transient", "run loopzero check at this head"),
 ])
 def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, command, condition, reason):
     head = commit_mergify_configuration(wt) if command == "merge" else head
@@ -3075,8 +3075,11 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
             return readiness(*args, **kwargs)
 
         monkeypatch.setattr(github, "readiness", replace_receipt)
-    elif condition == "missing":
+    elif condition in {"missing", "transient"}:
         path.unlink()
+        if condition == "transient":
+            monkeypatch.setattr(github, "_retry_sleep", lambda _: None)
+            gh.respond(pr_list_key(), {"stdout": "", "exit_code": 1, "stderr": "HTTP 503"}, [{"number": 7}])
     else:
         results = report["results"]
         report.update({
@@ -3091,7 +3094,8 @@ def test_delivery_requires_current_receipt(wt, gh, capsys, head, monkeypatch, co
     assert reason in out + err and "receipt accepted:" not in out
     assert all(github._read_only(tuple(c["argv"])) for c in gh.calls)
     if condition != "during-gates":
-        assert [c["argv"][:2] for c in gh.calls] == LOOKUP_CALLS[1:]
+        expected = [PR_LIST_READ, *LOOKUP_CALLS[1:]] if condition == "transient" else LOOKUP_CALLS[1:]
+        assert [c["argv"][:2] for c in gh.calls] == expected
 
 
 @pytest.fixture
@@ -3113,10 +3117,9 @@ def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, h
 
     new_config = config.replace('CHECK_POLICY = "old"', 'CHECK_POLICY = "new"')
     if wait_for:
-        arm_check_runs(gh, head, [{"name": "checks", "status": "in_progress"}])
+        arm_check_progress(gh, head, "pending")
 
         def change_policy(_seconds):
-            assert config_path.read_text() == config
             config_path.write_text(new_config)
             if fresh:
                 cfg = cli._load_config(SimpleNamespace(config=config_path, command=wait_for), wt, pin_checks=True)
@@ -3126,14 +3129,11 @@ def test_ready_requires_receipt_from_current_check_environment(wt, gh, capsys, h
         monkeypatch.setattr(cli, "_sleep", change_policy)
         hint = "retry with the current settings" if fresh else "run loopzero check"
         expect_cli(capsys, 1, *args, wait_for, "--wait", stderr_contains=(f"workflow settings changed while waiting; {hint}",))
-        if fresh:
-            return
-        arm_check_runs(gh, head, [
-            {"name": "checks", "status": "completed", "conclusion": "success"}])
+        arm_check_progress(gh, head, "success")
     else:
         config_path.write_text(new_config)
-    out, _ = expect_cli(capsys, 1, *args, "ready")
-    assert "not ready: check receipt has an incompatible settings fingerprint." in out
+    out, _ = expect_cli(capsys, int(not fresh), *args, "ready")
+    assert ("not ready: check receipt has an incompatible settings fingerprint." in out) is not fresh
     assert run(capsys, *args, "check")[0] == 1
 
 
