@@ -1558,7 +1558,7 @@ def test_readiness_requires_check_run_evidence_for_status_success_at_suite_cap(
                *({"check_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
 
     result = github.readiness(REPO, github._pr_from_rest(rest_pr_json(pr_json())),
-                              "main", ("required-ci",), HEAD)
+                              "main", ("required-ci",), HEAD, publishers=PUBLISHERS)
 
     assert result.ready == (reason is None)
     assert result.reasons == ((reason,) if reason else ())
