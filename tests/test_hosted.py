@@ -117,6 +117,19 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
         assert statuses[-1]["description"] == expected
 
 
+@pytest.mark.parametrize("change,reason", [
+    ({"headRefOid": "b" * 40}, "source changed during eligibility refresh"),
+    ({"mergeable": "UNKNOWN"}, github.MERGEABILITY_PENDING),
+])
+def test_live_eligibility_rejects_changes_during_refresh(publisher, change, reason):
+    publisher.respond(f"api repos/{REPO}/pulls/7", fixtures.rest_pr_json(pr_json()),
+                      fixtures.rest_pr_json(pr_json(**change)))
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval()])
+    readiness = hosted.eligibility.evaluate(REPO, 7, HEAD, "main", ("trusted-publisher",))
+    assert not readiness.ready
+    assert readiness.reasons == (reason,)
+
+
 @pytest.mark.parametrize("phase,expected", [("evaluate", "failure"), ("publish", "success")])
 def test_sigterm_does_not_strand_or_overwrite_eligibility(publisher, phase, expected):
     script = """

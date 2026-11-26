@@ -155,7 +155,7 @@ def write_local_state(
     wt: Path, name: str, text: str, *, private: bool = False, exclusive: bool = False,
     expected_head: str | None = None, preserve: Callable[[], bool] | None = None, locked_fd: int | None = None,
 ) -> str | None:
-    lock = locked_fd is None and (private or expected_head is not None or preserve is not None)
+    lock = locked_fd is None and (expected_head is not None or preserve is not None)
     with _local_state_directory(wt, create=True, lock=lock) as fd:
         if locked_fd is not None and not os.path.samestat(os.fstat(fd), os.fstat(locked_fd)):
             raise WorktreeError("local state directory changed during check")
