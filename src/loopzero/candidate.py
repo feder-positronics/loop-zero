@@ -216,11 +216,14 @@ def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     head = source.get("head")
     base = source.get("base")
     base_repo = base.get("repo") if isinstance(base, dict) else None
+    labels = source.get("labels", [])
+    if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
+        raise CandidateError("invalid source PR labels")
     return (
         source.get("number"),
         source.get("merged"),
         source.get("mergeable") is False,
-        tuple(label["name"] for label in source.get("labels", [])),
+        tuple(label["name"] for label in labels),
         source.get("state"),
         source.get("draft"),
         source.get("body"),

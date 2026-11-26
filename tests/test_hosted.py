@@ -160,7 +160,7 @@ def test_final_status_lost_reply(publisher, monkeypatch, state, readback):
     assert written_states(publisher) == ["pending", state]
 
 
-@pytest.mark.parametrize("error", ["api", "recover", "head", "metadata", "publication", "config", "before"])
+@pytest.mark.parametrize("error", ["api", "recover", "head", "metadata", "merged", "publication", "config", "before"])
 def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, capsys, error):
     sleeps = []
     monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
@@ -169,22 +169,22 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     if error in {"api", "recover", "before"}:
         fault = {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n{\"message\":\"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ\"}", "exit": 1}
         publisher.respond(endpoint, fault, approval if error == "recover" else fault)
-    elif error in {"head", "metadata"}:
-        changed = pr_json(headRefOid="b" * 40) if error == "head" else pr_json(labels=[{"name": "hold"}])
-        publisher.respond_pr_view(changed)
+    elif error in {"head", "metadata", "merged"}:
+        changes = {"head": {"headRefOid": "b" * 40}, "metadata": {"labels": [{"name": "hold"}]}, "merged": {"state": "MERGED"}}
+        publisher.respond_pr_view(pr_json(**changes[error]))
         publisher.respond(endpoint, approval)
     elif error == "publication":
         publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {}, {"stdout": "", "exit": 1, "stderr": "invalid description (HTTP 422)"})
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", [{"context": "other"}])
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
-    if error in {"api", "recover", "before"}:
-        assert hosted.main() == (1 if error == "before" else 0) and sleeps == [5]
-        assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error != "recover")
+    if error in {"api", "recover", "before", "merged"}:
+        assert hosted.main() == (1 if error == "before" else 0) and sleeps == ([] if error == "merged" else [5])
+        assert ("status=503 request_id=GHREQ-8774 message=Service unavailable [REDACTED]" in capsys.readouterr().err) == (error in {"api", "before"})
     else:
         with pytest.raises(hosted.LoopZeroError, match="invalid description" if error == "publication" else None):
             hosted.main()
-    states = {"before": [], "config": [], "head": ["pending", "failure"], "metadata": ["pending", "failure"], "api": ["pending"], "recover": ["pending", "success"]}
+    states = {"before": [], "config": [], "head": ["pending", "failure"], "metadata": ["pending", "failure"], "merged": ["pending"], "api": ["pending"], "recover": ["pending", "success"]}
     assert written_states(publisher) == states.get(error, ["pending", "pending"])
 
 

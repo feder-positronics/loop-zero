@@ -100,7 +100,8 @@ def _run(cfg: Config) -> int:
             result = eligibility.evaluate(cfg.repo, number, head, cfg.base_branch, cfg.review_publishers,
                                           snapshot=snapshot)
             ready, message = result.ready, "; ".join(result.reasons) or "Reviewed source head"
-        _verify_publication_snapshot(cfg.repo, number, head, snapshot)
+        if _landed_before_publication(cfg.repo, number, head, snapshot):
+            return 0
         state = "success" if ready else "failure"
         if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
             message = "Awaiting trusted review of current source head"
@@ -116,12 +117,16 @@ def _run(cfg: Config) -> int:
     return 0 if ready or state == "pending" else 1
 
 
-def _verify_publication_snapshot(repo: str, number: int, head: str, snapshot: github.PR | None) -> None:
+def _landed_before_publication(repo: str, number: int, head: str, snapshot: github.PR | None) -> bool:
     current = github.pr_view(repo, number)
     if current.head_sha != head:
         raise LoopZeroError("head changed before publication; refresh eligibility")
-    if snapshot is not None and eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
-        raise LoopZeroError("source metadata changed before publication; refresh eligibility")
+    if snapshot is not None:
+        if current.state == "MERGED":
+            return True
+        if eligibility.source_fingerprint(current) != eligibility.source_fingerprint(snapshot):
+            raise LoopZeroError("source metadata changed before publication; refresh eligibility")
+    return False
 
 
 def _publish_verdict(repo: str, head: str, state: str, description: str) -> None:
