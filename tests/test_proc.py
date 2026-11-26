@@ -44,15 +44,6 @@ def run_python(tmp_path):
     return run
 
 
-def test_run_strips_environment_to_allowlist(run_python, monkeypatch):
-    monkeypatch.delenv("LZ_ABSENT", raising=False)
-    monkeypatch.setenv("LZ_SECRET", "nope")
-    monkeypatch.setenv("LZ_KEEP", "yes")
-    done = run_python("import os; print(sorted(k for k in os.environ if k.startswith('LZ_')))",
-                      env_allowlist=("PATH", "LZ_KEEP", "LZ_ABSENT"), extra_env={"LZ_EXTRA": "1"})
-    assert done.stdout.strip() == "['LZ_EXTRA', 'LZ_KEEP']"
-
-
 def test_run_raises_tool_missing(tmp_path):
     with pytest.raises(_proc.ToolMissing, match="definitely-not-a-tool"):
         _proc.run(["definitely-not-a-tool"], cwd=tmp_path, env_allowlist=("PATH",), timeout=30)
@@ -122,14 +113,21 @@ def test_timeout_stops_descendant_and_preserves_output(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("merge,stderr", [(True, ""), (False, "b\n")])
-def test_run_captures_exit_duration_cwd_and_streams(tmp_path, run_python, merge, stderr):
+def test_run_captures_streams_and_allowlisted_environment(tmp_path, run_python, monkeypatch, merge, stderr):
+    monkeypatch.delenv("LZ_ABSENT", raising=False)
+    monkeypatch.setenv("LZ_SECRET", "nope")
+    monkeypatch.setenv("LZ_KEEP", "yes")
     done = run_python(
-        "import os,sys; print(os.getcwd()); print('b', file=sys.stderr); print(sys.argv[1]); sys.exit(3)",
-        unbuffered=True, merge_output=merge, env_allowlist=(), args=("argument with spaces",),
+        "import os,sys; print(os.getcwd()); print('b', file=sys.stderr); print(sys.argv[1]); "
+        "print(sorted(k for k in os.environ if k.startswith('LZ_'))); sys.exit(3)",
+        unbuffered=True, merge_output=merge, args=("argument with spaces",),
+        env_allowlist=("PATH", "LZ_KEEP", "LZ_ABSENT"), extra_env={"LZ_EXTRA": "1"},
     )
     assert (done.exit_code, done.stderr) == (3, stderr)
     assert done.duration_s >= 0
-    assert done.stdout.splitlines() == [str(tmp_path.resolve()), *(["b"] if merge else []), "argument with spaces"]
+    assert done.stdout.splitlines() == [
+        str(tmp_path.resolve()), *(["b"] if merge else []), "argument with spaces", "['LZ_EXTRA', 'LZ_KEEP']",
+    ]
 
 
 def test_tail_keeps_last_lines():
@@ -138,7 +136,7 @@ def test_tail_keeps_last_lines():
     assert _proc.tail("", 3) == ""
 
 
-def test_explicit_utf8_input_under_ascii_parent_locale(tmp_path):
+def test_explicit_utf8_input_under_ascii_parent_locale(run_python):
     source = str(Path(_proc.__file__).resolve().parents[1])
     script = r"""
 import locale, sys
@@ -150,10 +148,8 @@ assert _proc.run(argv, input='ascii', **options).stdout.strip() == '6173636969'
 assert _proc.run(argv, input='\u03a9', **options).stdout.strip() == '3f'
 print(_proc.run(argv, input='\u03a9\r\n\u2028\r', encoding='utf-8', **options).stdout.strip())
 """
-    done = _proc.run(
-        [sys.executable, "-c", script], cwd=tmp_path, env_allowlist=(), timeout=30,
-        extra_env={"PYTHONPATH": source, "LC_ALL": "C", "PYTHONUTF8": "0",
-                   "PYTHONCOERCECLOCALE": "0"},
-    )
+    done = run_python(script, env_allowlist=(), extra_env={
+        "PYTHONPATH": source, "LC_ALL": "C", "PYTHONUTF8": "0", "PYTHONCOERCECLOCALE": "0",
+    })
     assert done.exit_code == 0, done.stderr
     assert done.stdout.strip() == "Ω\r\n\u2028\r".encode("utf-8").hex()
