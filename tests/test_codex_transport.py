@@ -33,7 +33,6 @@ def native(git_repo, fake_tool):
 import json,pathlib,subprocess,sys,uuid
 args=sys.argv[1:]
 if args == ['--version']: print('codex-cli 0.164.0');sys.exit()
-if args == ['exec','--help']: print('--ignore-user-config');sys.exit()
 cwd=args[args.index('--cd')+1]
 session='session-'+str(uuid.uuid4());usage={'input_tokens':1,'output_tokens':2}
 print(json.dumps({'type':'thread.started','thread_id':session,'session_id':session}))

@@ -540,7 +540,7 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, tmp_
         assert "local check [REDACTED] output" in report["results"][0]["tail"]
         assert "ghs_FAKE0123" not in err
     if refresh_timeout:
-        assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
+        assert f"warning: could not refresh PR checks: PATCH {endpoint} timed out" in err
     if pushed and not refresh_timeout:
         body = json.loads(gh.calls[-1]["--input"])["body"]
         assert body.count("## Validation") == 1
@@ -4094,9 +4094,9 @@ def test_mergify_checks_current_target_before_queueing_or_resumes(
     code, out, err = run(capsys, *args)
     assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
     if queue:
-        assert code == 0 and not err
-        assert ("warning: projected size budget after #1146, #1219:\nsrc=6 (base 2, delta 4, cap 5" in out
-                if queue == "ordered" else "warning: projected size budget" not in out)
+        assert code == 0 and (queue == "unavailable") == ("could not project the queue size budget" in err)
+        assert ("warning: projected size budget after #1146, #1219:\nsrc=6 (base 2, delta 4, cap 5" in err
+                if queue == "ordered" else "warning: projected size budget" not in out + err)
         return
     if command != "resume":
         assert code == 1 and "src=4 (base 2, delta 2, cap 3" in err and "loaded candidate module" not in err
@@ -4362,10 +4362,12 @@ def test_resolve_groups_arguments_before_loading_context(monkeypatch, capsys, ar
 
 @pytest.mark.parametrize("failure,code", [(KeyError("headRefOid"), 1), (KeyboardInterrupt, 130)])
 def test_unexpected_and_interrupt_exit_codes(wt, capsys, monkeypatch, failure, code):
-    monkeypatch.setattr(cli.github, "pr_for_branch", Mock(side_effect=failure))
+    def fail(*_):
+        raise failure
+    monkeypatch.setattr(cli.github, "pr_for_branch", fail)
     _, err = expect_cli(capsys, code, "status")
-    if code == 1:
-        assert err == "loopzero status: unexpected response: 'headRefOid'\n"
+    if code == 1:  # a programming error names its location
+        assert re.fullmatch(r"loopzero status: unexpected response \(KeyError at test_cli\.py:\d+\): 'headRefOid'\n", err)
 
 
 @pytest.mark.parametrize("detached", [False, True])
@@ -4410,7 +4412,7 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
     assert not eligibility.evaluate(REPO, 7, head, "main", (LOGIN,)).ready
 
 
-def test_queue_size_projection_git_failure_stays_advisory(monkeypatch, tmp_path):
+def test_queue_size_projection_git_failure_stays_advisory(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(cli.mergify, "queue_predecessors", lambda *_: [5])
     def fail(*_args, **_kwargs):
         raise cli.worktree.GitError(("git", "fetch"), "fatal: couldn't find remote ref")
@@ -4418,6 +4420,17 @@ def test_queue_size_projection_git_failure_stays_advisory(monkeypatch, tmp_path)
     config = SimpleNamespace(repo=REPO, base_branch="main", mergify_queue="main")
     cli._warn_queue_size(config, SimpleNamespace(number=7), tmp_path, "origin", "a" * 40,
                          fail, lambda _: pytest.fail("projection must stop at the git failure"))
+    assert "warning: could not project the queue size budget: git fetch failed" in capsys.readouterr().err
+
+
+def test_eligibility_main_reports_github_failure_without_traceback(wt, gh, head, capsys):
+    from loopzero import eligibility
+    cfg = wt / ".loopzero" / "hosted.toml"
+    cfg.write_text(WORKFLOW + f'\nreview_publishers = ["{LOGIN}"]\n')
+    gh.fail(f"api repos/{REPO}/pulls/7", "HTTP 404: Not Found")
+    assert eligibility.main(["--config", str(cfg), "--pr", "7", "--head", head]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and len(err.splitlines()) == 1 and "HTTP 404" in err
 
 
 def test_eligibility_rejects_non_object_review_row(gh, head):

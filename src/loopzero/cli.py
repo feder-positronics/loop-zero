@@ -20,6 +20,7 @@ import shlex
 import sys
 import tempfile
 import time
+import traceback
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, suppress
 from functools import partial, wraps
@@ -32,7 +33,7 @@ from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroEr
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
-HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
+HANDLED = (LoopZeroError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
 # --wait: poll interval, default timeout, and how long a required check may stay
 # missing before GitHub is assumed to have dropped the event for this head.
@@ -366,8 +367,8 @@ def _require_receipt(wt: Path, config: Config, head: str) -> None:
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
     """Best-effort transcript identity; never authority or environment attestation."""
-    with suppress(Exception):
-        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}").strip()
+    with suppress(LoopZeroError, OSError):
+        content = _git(wt, "rev-parse", f"{report.head}^{{tree}}")
         commands = json.dumps([r.command for r in report.results], separators=(",", ":"))
         digest = hashlib.sha256(commands.encode()).hexdigest()
         print(f"receipt {action}: head={report.head} content={content} "
@@ -545,8 +546,8 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
             body = _pr_body(wt, head, config, live.body)
             if body != live.body.replace("\r\n", "\n"):
                 github.update_body(config.repo, pr.number, body)
-    except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError, worktree.WorktreeError) as exc:
-        print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
+    except (LoopZeroError, OSError, ValueError) as exc:
+        print(f"warning: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
 
 
 _SECTIONS = {
@@ -851,7 +852,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             live = github.pr_view(config.repo, pr.number)
             github.update_body(config.repo, pr.number, _append_review(live.body, result))
         except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
-            print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
+            print(f"warning: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
 
 
@@ -1210,7 +1211,7 @@ def _cleanup(wt: Path, pr: github.PR) -> None:
         _repo_root(wt)
         name = worktree.branch(wt)
         worktree.cleanup(wt, pr.head_sha)
-    except (worktree.WorktreeError, CliError, OSError, _proc.ProcTimeout) as exc:
+    except (LoopZeroError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
         if not retry and name is not None:
             retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
@@ -1281,11 +1282,12 @@ def _warn_queue_size(
             integrated = git("-c", "user.name=loopzero", "-c", "user.email=loopzero@localhost",
                              "commit-tree", tree, "-p", integrated, "-p", source, "-m", "Queue size projection")
         result = evaluate(integrated)
-    except (LoopZeroError, worktree.WorktreeError, OSError):
+    except (LoopZeroError, OSError) as exc:  # best effort: never blocks ready
+        print(f"warning: could not project the queue size budget: {_one_line(exc)}", file=sys.stderr)
         return
     if result.exit_code and "size budget: FAIL" in result.stdout:
         predecessors = ", ".join(f"#{number}" for number in numbers)
-        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}")
+        print(f"warning: projected size budget after {predecessors}:\n{result.stdout.rstrip()}", file=sys.stderr)
 
 
 def _mark_ready(wt: Path, config: Config, number: int, head: str) -> None:
@@ -1850,7 +1852,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
         current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
-    except (CliError, worktree.WorktreeError, OSError, _proc.ProcTimeout) as exc:
+    except (LoopZeroError, OSError) as exc:
         print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 
@@ -1950,7 +1952,10 @@ def _run(args: argparse.Namespace) -> int:
         if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
-        prefix = "unexpected response: " if isinstance(exc, UNEXPECTED) else ""
+        prefix = ""
+        if isinstance(exc, UNEXPECTED):
+            where = traceback.extract_tb(exc.__traceback__)[-1]
+            prefix = f"unexpected response ({type(exc).__name__} at {Path(where.filename).name}:{where.lineno}): "
         print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

@@ -1,6 +1,6 @@
 """Attest a live Mergify candidate around a caller-owned source policy.
 
-The caller owns API transport and source eligibility. This module only binds an
+The caller owns API reads and source eligibility. This module only binds an
 authenticated temporary candidate to stable, current source PR heads without
 checking out or executing candidate code.
 """
@@ -22,6 +22,9 @@ from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote
 
+from loopzero import github
+from loopzero.types import LoopZeroError, is_sha
+
 MERGIFY_APP_ID = 10562
 MERGIFY_APP_OWNER = "Mergifyio"
 MERGIFY_APP_URL = "https://github.com/apps/mergify"
@@ -30,7 +33,6 @@ MERGIFY_BOT_LOGIN = "mergify[bot]"
 QUEUE_BRANCH_PREFIX = "mergify/merge-queue/"
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_SHA = re.compile(r"^[0-9a-f]{40}$")
 _ATTEST_ATTEMPTS = 3
 _ATTEST_SECONDS = 30
 _ATTEST_DELAY = 2
@@ -64,7 +66,7 @@ MergifyStatus = Callable[[str, str, str], JsonObject]
 SourcePolicy = Callable[[int, JsonObject], None]
 
 
-class CandidateError(RuntimeError):
+class CandidateError(LoopZeroError):
     """Candidate identity, membership, history, or source policy failed closed."""
 
 
@@ -228,7 +230,7 @@ def _attest_source(
         f"source PR #{number} does not target this repository's {base_branch} branch",
     )
     source_sha = head.get("sha")
-    _require(_matches(_SHA, source_sha), f"source PR #{number} has an invalid head")
+    _require(is_sha(source_sha), f"source PR #{number} has an invalid head")
     comparison = _object(
         github_get(f"/repos/{repository['full_name']}/compare/{source_sha}...{candidate_sha}"),
         "GitHub compare returned an invalid payload",
@@ -247,8 +249,6 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
     if operation == "merge-base" and returncode == 1:
         raise _MissingMergeHistory("Git history does not prove the requested merge base or ancestry")
     if operation == "fetch" and returncode:
-        from loopzero import github
-
         output.seek(0)
         diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
         if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
@@ -258,8 +258,6 @@ def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None
 
 
 def _fetch_token() -> str:
-    from loopzero import github
-
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         try:
@@ -396,7 +394,7 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
         for source in reversed(reverse_order):
             git("merge-base", "--all", integrated, source)
             tree = git("merge-tree", "--write-tree", integrated, source)
-            _require(_SHA.fullmatch(tree) is not None, "invalid integration tree")
+            _require(is_sha(tree), "invalid integration tree")
             integrated = git("commit-tree", tree, "-p", integrated, "-p", source,
                              "-m", "Candidate tree attestation")
         _require(git("rev-parse", f"{integrated}^{{tree}}") ==
@@ -475,7 +473,7 @@ def _attest_candidate_once(
     candidate_number = event_pr.get("number")
     candidate_sha = event_head.get("sha")
     _require(isinstance(candidate_number, int) and candidate_number > 0, "Candidate PR number is invalid")
-    _require(_matches(_SHA, candidate_sha), "Candidate head SHA is invalid")
+    _require(is_sha(candidate_sha), "Candidate head SHA is invalid")
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
     def recheck_candidate(message: str = "GitHub candidate lookup returned an invalid payload") -> None:
         candidate = _object(github_get(candidate_path), message)
@@ -530,7 +528,7 @@ def _attest_candidate_once(
         try:
             base_ref = _object(base_before, f"{base_branch} ref unavailable")
             base_sha = _object(base_ref.get("object"), f"{base_branch} object unavailable").get("sha")
-            _require(_matches(_SHA, base_sha), f"invalid {base_branch} head")
+            _require(is_sha(base_sha), f"invalid {base_branch} head")
             _verify_tree(full_name, base_sha, candidate_sha,
                          [snapshot[0] for snapshot in source_snapshots.values()])
             _require(

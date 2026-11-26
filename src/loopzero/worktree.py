@@ -17,6 +17,7 @@ from select import select
 from uuid import uuid4
 
 from loopzero._proc import build_env, defer_sigterm, run, run_git_paths
+from loopzero.types import LoopZeroError
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -48,7 +49,7 @@ Base: {base}
 """
 
 
-class WorktreeError(Exception):
+class WorktreeError(LoopZeroError):
     """Raised for refused operations or failing git commands."""
 
 
