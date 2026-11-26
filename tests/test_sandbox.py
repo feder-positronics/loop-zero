@@ -865,19 +865,65 @@ def test_no_inputs_preserves_receipt(git_repo, bwrap_log):
     assert set(row) == {'command', 'exit_code', 'duration_s', 'tail'}
 
 
-def test_input_key_distinguishes_runners(git_repo, fetched_base):
+def test_input_key_distinguishes_runners(git_repo, fetched_base, tmp_path):
+    runners = [tmp_path / name for name in ("runner-a", "runner-b")]
+    for runner in runners:
+        runner.touch()
     keys = {
         sandbox._input_key(make_config(inputs={'echo one': ('*.md',)}, check_runner=runner),
                            git_repo, 'echo one', fetched_base)
-        for runner in ((), ('runner-a',), ('runner-b',))
+        for runner in ((), *((str(path),) for path in runners))
     }
     assert None not in keys
     assert len(keys) == 3
 
 
-def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch):
+def test_receipt_settings_distinguish_runner_paths(git_repo, monkeypatch, tmp_path):
     cfg = make_config(check_runner=("runner",), env_allowlist=())
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/first/runner")
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.touch()
+    second.touch()
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(first))
     original = sandbox.settings_fingerprint(cfg, git_repo, base="base")
-    monkeypatch.setattr(sandbox.shutil, "which", lambda _: "/second/runner")
+    monkeypatch.setattr(sandbox.shutil, "which", lambda _: str(second))
     assert sandbox.settings_fingerprint(cfg, git_repo, base="base") != original
+
+
+@pytest.mark.parametrize("change", ["target", "content"])
+def test_runner_upgrade_invalidates_pass(git_repo, fetched_base, tmp_path, change):
+    def write_runner(path, exit_code):
+        path.write_text(
+            f"#!{sys.executable}\n"
+            "import json, sys\n"
+            "frame = json.load(sys.stdin)\n"
+            "del frame['env']\n"
+            f"frame.update(exit_code={exit_code}, duration_s=0, not_started=False, tail='')\n"
+            "print(json.dumps(frame))\n"
+        )
+        path.chmod(0o755)
+
+    (git_repo / ".git/info/exclude").write_text(".loopzero/\n")
+    runner = tmp_path / "runner"
+    original = tmp_path / "runner-a"
+    write_runner(original, 0)
+    runner.symlink_to(original)
+    config = make_config(check_runner=(str(runner),), inputs={"echo hello": (".",)})
+    report = sandbox.run_checks(config, git_repo)
+    assert report.ok
+    _save_report(git_repo, report)
+    assert _current_check_report(git_repo, config, report.head)
+    assert sandbox.run_checks(config, git_repo).results[0].reused_from == report.head
+
+    if change == "target":
+        replacement = tmp_path / "runner-b"
+        write_runner(replacement, 17)
+        new_link = tmp_path / "runner-new"
+        new_link.symlink_to(replacement)
+        new_link.replace(runner)
+    else:
+        write_runner(original, 17)
+
+    assert _current_check_report(git_repo, config, report.head) is None
+    result = sandbox.run_checks(config, git_repo).results[0]
+    assert result.exit_code == 17
+    assert not result.reused_from
