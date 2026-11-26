@@ -1460,10 +1460,14 @@ MERGIFY_DEQUEUE_HINT = (
 )
 
 
-def _mergify_departure_hint(report: mergify.Departure | None) -> str:
+def _mergify_departure_hint(report: mergify.Departure | None, base: str) -> str:
     if report is None:
         return f"{MERGIFY_DEQUEUE_HINT} {MERGIFY_REQUEUE}"
     detail = f"Mergify report: {report.url}."
+    if report.attribution == "base_conflict":
+        return (f"The PR conflicts with {base}. Run `git fetch origin {base}` and resolve the base "
+                f"integration according to the PR's review state. Requeue only after resolving the "
+                f"conflict. {detail} {MERGIFY_REQUEUE}")
     if report.checks:
         detail += " Failing checks: " + ", ".join(repr(check) for check in report.checks) + "."
     guidance = {
@@ -1482,7 +1486,7 @@ def _mergify_departure(
     sha = _landed(config, pr, closed)
     if not sha and not closed:
         raise CliError(
-            f"PR #{pr.number} left Mergify queue {queue} unmerged. {_mergify_departure_hint(report)}"
+            f"PR #{pr.number} left Mergify queue {queue} unmerged. {_mergify_departure_hint(report, pr.base_ref)}"
         )
     return sha
 
