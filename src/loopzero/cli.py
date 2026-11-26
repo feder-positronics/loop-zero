@@ -370,7 +370,7 @@ def _check_report_problem(
         return ("check receipt's plan differs from the trusted workflow. "
                 "Run `loopzero check` with the current workflow.")
     recovery = ("Run loopzero check in this worktree at this head with the same current CLI and effective "
-                "settings as ready, using a local coordinator for delegated stages.")
+                "settings as ready.")
     if report.settings_sha256 is None:
         return f"check receipt is missing its settings fingerprint. {recovery}"
     if report.settings_sha256 != sandbox.settings_fingerprint(config):
@@ -667,16 +667,11 @@ def _finish_check(wt: Path, config: Config, report: CheckReport, locked_fd: int)
     fcntl.flock(locked_fd, fcntl.LOCK_UN)
     if shortened:
         print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
-    verified = not report.ok or report.settings_sha256 is not None
-    if not verified:
-        print("check stages passed but the receipt is unverified; rerun loopzero check from the task "
-              "worktree with a stable, readable configured runner before running ready", file=sys.stderr)
-    elif report.ok and not report.dirty:
+    if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
-    if verified:
-        print("PASS" if report.ok else "FAIL")
-    return 0 if report.ok and verified else 1
+    print("PASS" if report.ok else "FAIL")
+    return 0 if report.ok else 1
 
 
 def cmd_pr(args: argparse.Namespace) -> int:
@@ -1110,7 +1105,7 @@ def _run_review(
             try:
                 result = selected[family](diff=diff)
             except runners.RunnerPromptTooLong:
-                chunks = runners.split_diff(diff, config.review_chunk_bytes)
+                chunks = runners.split_diff(diff)
                 print(f"reviewer {family} rejected the full diff; reviewing {len(chunks)} chunks", file=sys.stderr)
                 chunk_results = [selected[family](diff=chunk, chunk=(index, len(chunks)))
                                  for index, chunk in enumerate(chunks, 1)]
