@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import git
+from tests.conftest import commit_file, git
 
 
 @pytest.fixture
@@ -29,9 +29,7 @@ def commit_on_origin(repo: Path, name: str) -> str:
     """Advance origin/main from a scratch clone so `start` has to fetch to see it."""
     clone = repo.parent / f"clone-{name}"
     git(repo, "clone", "-q", str(repo.parent / "origin.git"), str(clone))
-    (clone / name).write_text(name)
-    git(clone, "add", name)
-    git(clone, "commit", "-q", "-m", name)
+    commit_file(clone, name, name, name)
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD").strip()
 

@@ -20,7 +20,7 @@ import pytest
 from loopzero import cli, config, github, mergify
 from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
-from tests.conftest import git, init_git_repo
+from tests.conftest import commit_file, git, init_git_repo
 from tests.fake_gh import replay
 from tests.test_github import (
     FakeGh,
@@ -70,9 +70,7 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Prepare the clean and task checkouts and their bare origin."""
     seed = tmp_path_factory.mktemp("git-seed")
     checkout = init_git_repo(seed / "repo")
-    (checkout / "workflow.toml").write_text(WORKFLOW)
-    git(checkout, "add", "workflow.toml")
-    git(checkout, "commit", "-q", "-m", "config")
+    commit_file(checkout, "workflow.toml", WORKFLOW, "config")
     origin = seed / "origin.git"
     git(checkout, "init", "-q", "--bare", "-b", "main", str(origin))
     git(checkout, "remote", "add", "origin", str(origin))
@@ -486,9 +484,7 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     assert run(capsys, "check")[0] == 0
     first = json.loads(gh.calls[-1]["--input"])["body"]
     old_head = head_of(wt)
-    (wt / "feature.py").write_text("print('new')\n")
-    git(wt, "add", "feature.py")
-    git(wt, "commit", "-q", "-m", "new behavior")
+    commit_file(wt, "feature.py", "print('new')\n", "new behavior")
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=first)])
     assert run(capsys, "check")[0] == 0
     updated = json.loads(gh.calls[-1]["--input"])["body"]
@@ -618,9 +614,7 @@ def test_check_checkpoint_preserves_unreached_reusable_stages(wt, gh, capsys, mo
     assert run(capsys, "check")[0] == 0
     original_head = cli._load_report(wt).head
 
-    (wt / "feature.py").write_text("updated = True\n")
-    git(wt, "add", "feature.py")
-    git(wt, "commit", "-m", "Change the first two stages' inputs")
+    commit_file(wt, "feature.py", "updated = True\n", "Change the first two stages' inputs")
     interrupt = True
     assert run(capsys, "check")[0] == 130
     assert not cli._load_report(wt).ok
@@ -737,13 +731,9 @@ def test_privileged_commands_resolve_policy_independently_of_task(wt, command):
 
 def test_trusted_default_workflow_can_select_delivery_branch(wt, repo, capsys):
     release_policy = WORKFLOW.replace('base = "main"', 'base = "release"')
-    (repo / "workflow.toml").write_text(release_policy)
-    git(repo, "add", "workflow.toml")
-    git(repo, "commit", "-qm", "select release")
+    commit_file(repo, "workflow.toml", release_policy, "select release")
     git(repo, "push", "-q", "origin", "main")
-    (repo / "workflow.toml").write_text(release_policy.replace("echo ok", "echo release"))
-    git(repo, "add", "workflow.toml")
-    git(repo, "commit", "-qm", "release checks")
+    commit_file(repo, "workflow.toml", release_policy.replace("echo ok", "echo release"), "release checks")
     git(repo, "push", "-q", "origin", "HEAD:refs/heads/release")
 
     code, out, err = run(capsys, "check")
@@ -806,9 +796,7 @@ def test_primary_review_stops_when_shallow_history_hides_merge_base(
 def test_check_fails_when_base_workflow_is_malformed(
     wt: Path, repo: Path, capsys, workflow, error,
 ) -> None:
-    (repo / "workflow.toml").write_text(workflow)
-    git(repo, "add", "workflow.toml")
-    git(repo, "commit", "-q", "-m", "break workflow")
+    commit_file(repo, "workflow.toml", workflow, "break workflow")
     git(repo, "push", "-q", "origin", "main")
 
     code, out, err = run(capsys, "check")
@@ -1186,9 +1174,7 @@ def test_pr_reports_rejected_lease_without_overwriting_remote(
     mover = tmp_path / "mover"
     git(tmp_path, "clone", "-q", str(origin), str(mover))
     git(mover, "checkout", "-q", "-b", "lz/t1", "origin/lz/t1")
-    (mover / "remote.txt").write_text("moved\n")
-    git(mover, "add", "remote.txt")
-    git(mover, "commit", "-q", "-m", "remote move")
+    commit_file(mover, "remote.txt", "moved\n", "remote move")
     git(mover, "push", "-q", "origin", "lz/t1")
     moved = git(origin, "rev-parse", "refs/heads/lz/t1").strip()
     gh.respond_pr_list([pr_json(headRefOid=old)])
@@ -1280,9 +1266,7 @@ def arm_approved_pr_with_check_result(
 
 def publish_workflow(wt: Path, policy: str, message: str = "configure delivery") -> None:
     repo = wt.parent.parent
-    (repo / "workflow.toml").write_text(policy)
-    git(repo, "add", "workflow.toml")
-    git(repo, "commit", "-qm", message)
+    commit_file(repo, "workflow.toml", policy, message)
     git(repo, "push", "-q", "origin", "main")
 
 
@@ -1707,23 +1691,6 @@ def test_review_chunks_oversized_diff_with_same_family(
     assert len(saved["provenance"]["session_ids"]) == saved["chunk_count"]
 
 
-def test_review_with_every_supported_family_authoring_uses_disclosed_fallback(
-    wt: Path, gh: FakeGh, fake_bin: Path, capsys
-) -> None:
-    git(
-        wt, "commit", "-q", "--allow-empty", "-m",
-        "mixed-family\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
-        "Co-authored-by: Codex gpt-6.2-sol <noreply@openai.com>",
-    )
-    head = prepare_review(wt, gh, fake_bin)
-    code, out, err = run(capsys, "review")
-    assert code == 0 and "review by claude" in out
-    reason = "every configured family contributed (claude, codex)"
-    assert f"same-family fallback: {reason}" in err
-    assert f"Same-family fallback: {reason}. Cross-family review is preferred." in posted_review(gh)["body"]
-    assert cli._load_review(wt, head, "primary").fallback == reason
-
-
 @pytest.mark.parametrize("family,configured,note,code,diagnostic,no_post", [
     pytest.param("claude", None, "", 4, "saved reviewer family claude contributed", False, id="missing-fallback"),
     pytest.param("claude", None, "independent reviewers failed: codex: unavailable",
@@ -1764,9 +1731,7 @@ def test_review_repost_requires_valid_fallback(wt, gh, fake_bin, capsys, family,
 
 def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, capsys) -> None:
     first = head_of(wt)
-    (wt / "second.py").write_text("x = 2\n")
-    git(wt, "add", "second.py")
-    git(wt, "commit", "-q", "-m", "second")
+    commit_file(wt, "second.py", "x = 2\n", "second")
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
     task = (wt / ".loopzero/task.md").read_text()
@@ -1939,9 +1904,7 @@ def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys,
 
 @pytest.mark.parametrize("publisher", [LOGIN, "OTHER"])
 def test_review_refuses_same_head_twice(wt: Path, gh: FakeGh, capsys, publisher) -> None:
-    (wt / "workflow.toml").write_text(WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n')
-    git(wt, "add", "workflow.toml")
-    git(wt, "commit", "-qm", "configure trusted publishers")
+    commit_file(wt, "workflow.toml", WORKFLOW + '\nreview_publishers = ["lz-bot", "other"]\n', "configure trusted publishers")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")
     head = head_of(wt)
     arm_pr(gh, head)
@@ -2138,9 +2101,7 @@ def test_ready_after_reviewed_head(
 ):
     reviewed = head_of(wt)
     git(wt, "switch", "-c", "updated-base", "HEAD^")
-    (wt / "base.txt").write_text("new base content\n")
-    git(wt, "add", "base.txt")
-    git(wt, "commit", "-m", "update base")
+    commit_file(wt, "base.txt", "new base content\n", "update base")
     base = head_of(wt)
     git(wt, "switch", "-")
     if comparison == "ahead":
@@ -4457,35 +4418,35 @@ def test_mergify_cancel_does_not_require_healthy_queue_or_review(wt, gh, capsys,
     assert (code, err) == (0, "") and removals == [(REPO, 7)] and wt.exists()
 
 
-@pytest.mark.parametrize("lineage", ["two-head-trailers", "earlier-child", "delta"])
-def test_review_discloses_fallback_for_all_contributing_families(
-    wt: Path, gh: FakeGh, fake_bin: Path, capsys, lineage: str
-) -> None:
-    git(wt, "commit", "--amend", "-q", "-m",
-        "child patch\n\nCo-Authored-By: Codex <codex@openai.com>")
-    first = head_of(wt)
-    if lineage == "two-head-trailers":
-        git(wt, "commit", "--amend", "-q", "-m",
-            "patch\n\nCo-Authored-By: Codex <codex@openai.com>\n"
-            "Co-Authored-By: Claude <noreply@anthropic.com>")
+@pytest.mark.parametrize("lineage", ["two-head-trailers", "earlier-child", "delta", "mixed-case-trailers"])
+def test_review_discloses_fallback_for_all_contributing_families(wt, gh, fake_bin, capsys, lineage):
+    codex = "Co-Authored-By: Codex <codex@openai.com>"
+    claude = "Co-Authored-By: Claude <noreply@anthropic.com>"
+    history = []
+    if lineage == "mixed-case-trailers":
+        git(wt, "commit", "-q", "--allow-empty", "-m",
+            f"mixed-family\n\n{claude}\nCo-authored-by: Codex gpt-6.2-sol <noreply@openai.com>")
     else:
-        git(wt, "commit", "--allow-empty", "-q", "-m",
-            "repair\n\nCo-Authored-By: Claude <noreply@anthropic.com>")
-    head = head_of(wt)
-    arm_empty_primary_review_post(gh, head)
-    if lineage == "delta":
-        gh.respond(reviews_key(), [rev(first, "primary", state="CHANGES_REQUESTED",
-                                      verdict="request_changes")])
-    _fake_claude(fake_bin, _claude_envelope(APPROVE))
-    _fake_codex(fake_bin, json.dumps(APPROVE))
+        git(wt, "commit", "--amend", "-qm", f"child patch\n\n{codex}")
+        if lineage == "two-head-trailers":
+            git(wt, "commit", "--amend", "-qm", f"patch\n\n{codex}\n{claude}")
+        else:
+            if lineage == "delta":
+                history = [rev(head_of(wt), "primary", state="CHANGES_REQUESTED", verdict="request_changes")]
+            git(wt, "commit", "--allow-empty", "-qm", f"repair\n\n{claude}")
+        _fake_codex(fake_bin, json.dumps(APPROVE))
+    head = prepare_review(wt, gh, fake_bin, history=history)
 
     code, out, err = run(capsys, "review")
 
+    reason = "every configured family contributed (claude, codex)"
     assert code == 0 and "review by claude" in out, err
-    assert "same-family fallback: every configured family contributed (claude, codex)" in err
+    assert f"same-family fallback: {reason}" in err
     assert (fake_bin / "claude.stdin").exists()
     assert not (fake_bin / "codex.stdin").exists()
-    assert "Same-family fallback:" in posted_review(gh)["body"]
+    assert f"Same-family fallback: {reason}. Cross-family review is preferred." in posted_review(gh)["body"]
+    kind = "delta" if lineage == "delta" else "primary"
+    assert cli._load_review(wt, head, kind).fallback == reason
 
 
 def test_repost_rejects_saved_contributor_review(

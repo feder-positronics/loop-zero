@@ -37,6 +37,12 @@ def git(repo: Path, *args: str) -> str:
     ).stdout
 
 
+def commit_file(repo: Path, name: str, text: str, message: str) -> None:
+    (repo / name).write_text(text)
+    git(repo, "add", "--", name)
+    git(repo, "commit", "-qm", message)
+
+
 def init_git_repo(repo: Path) -> Path:
     """Initialize branch `main` with a single commit of README.md."""
     repo.mkdir()

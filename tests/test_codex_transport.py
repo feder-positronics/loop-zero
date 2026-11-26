@@ -12,7 +12,7 @@ import pytest
 from loopzero import cli, eligibility, github, runners
 from loopzero.types import CheckReport, CheckResult, Config
 from tests import test_cli, test_runners
-from tests.conftest import git
+from tests.conftest import commit_file, git
 
 fake_bwrap = test_runners.fake_bwrap
 gh = test_cli.gh
@@ -22,11 +22,8 @@ APPROVE = test_runners.APPROVE
 @pytest.fixture
 def native(git_repo, fake_bin, fake_tool):
     base = git(git_repo, "rev-parse", "HEAD").strip()
-    (git_repo / "large.txt").write_text(
-        "PRIVATE_CANARY /home/private/secret.txt\n" + "x" * 40000 + "Ω\n"
-    )
-    git(git_repo, "add", "large.txt")
-    git(git_repo, "commit", "-qm", "large synthetic source")
+    content = "PRIVATE_CANARY /home/private/secret.txt\n" + "x" * 40000 + "Ω\n"
+    commit_file(git_repo, "large.txt", content, "large synthetic source")
     head = git(git_repo, "rev-parse", "HEAD").strip()
     patch = git(git_repo, "diff", "--no-color", base, head).strip()
     script = """#!/usr/bin/env python3
@@ -85,6 +82,24 @@ def row(result, rendered=None):
     }
 
 
+def projection(result, rendered=None):
+    return eligibility.review_projection(row(result, rendered), result.head, "acme/widgets", 7)
+
+
+def eligible(*reviews):
+    return eligibility.eligible_review(
+        list(reviews), reviews[-1]["commit_id"], ("bot",), repo="acme/widgets", number=7
+    )
+
+
+def assert_invalid_native(result):
+    assert not runners.validate_runner_result(result)
+    with pytest.raises(runners.RunnerBadOutput):
+        runners.codex_evidence(result)
+    with pytest.raises(runners.RunnerBadOutput):
+        body(result)
+
+
 def rewrite(result, change):
     decoded = json.loads(result.raw)
     change(decoded)
@@ -120,11 +135,9 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, tmp_path
         secret not in rendered
         for secret in ("PRIVATE_CANARY", "/home/private", "git -C", str(native[2]))
     )
-    parsed = eligibility.review_projection(row(result), result.head, "acme/widgets", 7)
+    parsed = projection(result)
     assert parsed == (True, evidence)
-    assert eligibility.eligible_review(
-        [row(result)], result.head, ("bot",), repo="acme/widgets", number=7
-    )
+    assert eligible(row(result))
     cli._save_review(tmp_path, result)
     path = tmp_path / evidence["receipt"]
     assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
@@ -206,11 +219,7 @@ def test_full_native_attribution_and_fatal_controls(native, mutation):
         "after_verdict",
         "terminal_failure",
     ):
-        assert not runners.validate_runner_result(altered)
-        with pytest.raises(runners.RunnerBadOutput):
-            runners.codex_evidence(altered)
-        with pytest.raises(runners.RunnerBadOutput):
-            body(altered)
+        assert_invalid_native(altered)
     else:
         evidence = runners.codex_evidence(altered)
         assert evidence["calls"][0]["inspection"] == "unknown"
@@ -241,10 +250,7 @@ def test_complete_ordered_native_chunks(native, mutation):
         assert [c["index"] for c in evidence["calls"]] == [1, 2]
         assert all(c["inspection"] == "verified" for c in evidence["calls"])
         assert len({c["session"] for c in evidence["calls"]}) == 2
-        assert eligibility.review_projection(row(changed), changed.head, "acme/widgets", 7) == (
-            True,
-            evidence,
-        )
+        assert projection(changed) == (True, evidence)
     else:
         assert not runners.validate_runner_result(changed)
         with pytest.raises(runners.RunnerBadOutput):
@@ -282,9 +288,7 @@ def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, repl
     value = runners.decode_codex_evidence(line)
     update_evidence(value, path, replacement)
     latest = row(result, rendered.replace(line, packed(value)))
-    assert eligibility.eligible_review(
-        [row(result), latest], result.head, ("bot",), repo="acme/widgets", number=7
-    ) is None
+    assert eligible(row(result), latest) is None
 
 
 @pytest.mark.parametrize("mutation", [
@@ -312,9 +316,7 @@ def test_strict_transport_and_no_older_approval_revival(native, mutation):
         changed = rendered.replace(line, runners.CODEX_HEADER + "x" * 8192 + " -->")
     prior = row(result)
     latest = row(result, changed)
-    found = eligibility.eligible_review(
-        [prior, latest], result.head, ("bot",), repo="acme/widgets", number=7
-    )
+    found = eligible(prior, latest)
     if mutation == "after_prose":
         assert eligibility.review_projection(latest, result.head, "acme/widgets", 7) == (
             False,
@@ -347,9 +349,7 @@ def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evi
     if not include_evidence:
         del lines[1]
     review = row(result, "\n".join(lines))
-    assert eligibility.eligible_review(
-        [review], result.head, ("bot",), repo="acme/widgets", number=7
-    ) is None
+    assert eligible(review) is None
 
 
 @pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta"])
@@ -361,9 +361,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     cfg = Config(repo, "main", ("true",), (), "squash", ("codex",), review_publishers=("bot",))
     if kind.startswith("delta"):
         reviewed, merge_base = result.head, native[1]["base"]
-        (native[2] / "delta.txt").write_text("delta only\n")
-        git(native[2], "add", "delta.txt")
-        git(native[2], "commit", "-qm", "delta repair")
+        commit_file(native[2], "delta.txt", "delta only\n", "delta repair")
         head = git(native[2], "rev-parse", "HEAD").strip()
         git(native[2], "update-ref", "refs/remotes/origin/main", merge_base)
         task = native[2] / ".loopzero/task.md"
@@ -452,12 +450,7 @@ def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, locatio
         )
     changed = dataclasses.replace(result, raw=json.dumps(data))
     assert runners.codex_evidence(changed)["calls"][0]["inspection"] == "unknown"
-    assert (
-        eligibility.review_projection(row(changed), changed.head, "acme/widgets", 7)[1]["calls"][0][
-            "inspection"
-        ]
-        == "unknown"
-    )
+    assert projection(changed)[1]["calls"][0]["inspection"] == "unknown"
 
 
 @pytest.mark.parametrize("field,value", [
@@ -481,9 +474,7 @@ def test_legacy_toolfree_remains_unknown_without_projection(tmp_path):
     assert runners.validate_runner_result(legacy) and runners.codex_evidence(legacy) is None
     rendered = body(legacy)
     assert runners.CODEX_HEADER not in rendered
-    assert eligibility.eligible_review(
-        [row(legacy)], legacy.head, ("bot",), repo="acme/widgets", number=7
-    )
+    assert eligible(row(legacy))
     cli._save_review(tmp_path, legacy)
     assert cli._load_review(tmp_path, legacy.head, "primary").raw == legacy.raw
 
@@ -514,9 +505,7 @@ def test_leading_block_is_anchored_and_schema_complete(native, change):
         }[change]
         update_evidence(value, path, replacement)
         modified = rendered.replace(line, packed(value))
-    present, evidence = eligibility.review_projection(
-        row(result, modified), result.head, "acme/widgets", 7
-    )
+    present, evidence = projection(result, modified)
     assert evidence is None
     assert present is (change != "fence")
 
@@ -552,7 +541,7 @@ def test_frozen_synthetic_five_and_legacy_truncated_unknown():
         + "\n**approve**\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>",
     }
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
-    assert eligibility.eligible_review([legacy], head, ("bot",), repo="acme/widgets", number=7) is legacy
+    assert eligible(legacy) is legacy
 
 
 @pytest.mark.parametrize("identity", ["another-session", None, {}])
@@ -561,11 +550,7 @@ def test_contradictory_native_session_fields(native, identity):
     data = json.loads(result.raw)
     data["events"][2].update(thread_id=data["session_id"], session_id=identity)
     altered = dataclasses.replace(result, raw=json.dumps(data))
-    assert not runners.validate_runner_result(altered)
-    with pytest.raises(runners.RunnerBadOutput):
-        runners.codex_evidence(altered)
-    with pytest.raises(runners.RunnerBadOutput):
-        body(altered)
+    assert_invalid_native(altered)
 
 
 def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bin):
@@ -580,7 +565,7 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
     proof = runners.codex_evidence(merged)
     assert proof["complete"] and len({call["session"] for call in proof["calls"]}) == 2
     assert all(call["inspection"] == "unknown" for call in proof["calls"])
-    public = eligibility.review_projection(row(merged), merged.head, "acme/widgets", 7)[1]
+    public = projection(merged)[1]
     assert public == proof
 
 
@@ -592,9 +577,7 @@ def test_entire_leading_block_budget_includes_adjudication(native, monkeypatch):
     limit = len((marker + "\n" + header).encode())
     oversized = marker + "\n" + header + suffix + "\n**approve**"
     monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", limit)
-    assert eligibility.review_projection(
-        row(result, oversized), result.head, "acme/widgets", 7
-    ) == (True, None)
+    assert projection(result, oversized) == (True, None)
     with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
         github._review_body(result, [], marker + suffix)
 
@@ -615,13 +598,9 @@ def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow
     span = separator.join((padded, header, adjudication))
     assert len(span.encode("utf-8")) == 8192 + overflow
     rendered = span + separator + "**approve**"
-    present, evidence = eligibility.review_projection(
-        row(result, rendered), result.head, "acme/widgets", 7
-    )
+    present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
-    latest = eligibility.eligible_review(
-        [row(result), row(result, rendered)], result.head, ("bot",), repo="acme/widgets", number=7
-    )
+    latest = eligible(row(result), row(result, rendered))
     assert (latest is not None) is (overflow == 0)
     if separator == "\n":  # Publication stays LF; readers count every accepted separator verbatim.
         if overflow:
