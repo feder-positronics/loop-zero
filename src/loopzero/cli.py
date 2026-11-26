@@ -1308,7 +1308,7 @@ def _print_check_wait_timeout(pr: github.PR, args: argparse.Namespace | None) ->
     waiting_for = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
     command = ["loopzero", args.command if args else "ready", "--wait"]
     if args and args.config:
-        command[1:1] = ["--config", str(args.config)]
+        command.insert(1, f"--config={args.config}")
     print(
         f"timed out waiting for {waiting_for} on {pr.head_sha[:12]}. "
         f"Run `{shlex.join(command)}` to resume on this head."
