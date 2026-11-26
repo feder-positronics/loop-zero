@@ -112,6 +112,12 @@ The [CLI](../src/loopzero/cli.py) implements the contract's
    with the actual merge tree. Unavailable history blocks inherited coverage.
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
+   For check runs with the same name, numeric run IDs take precedence. Equal
+   or missing IDs fall back to the parsed start instant, with usable times ahead
+   of missing or invalid times. Ties keep API order. A retry of the same run
+   supersedes a failure for waiting purposes only when it starts strictly after
+   the failure completed. A different run of the same workflow compares creation
+   instants first, then numeric IDs when those instants are equal.
    After its own draft-to-ready write,
    `ready --wait` revalidates through the same waiter and original deadline.
    This is best-effort observation: an immediate green read may precede
