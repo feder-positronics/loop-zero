@@ -21,7 +21,6 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
-from datetime import UTC, datetime
 from functools import partial, wraps
 from pathlib import Path
 
@@ -198,11 +197,11 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _rest_rows(endpoint: str, what: str) -> list[dict]:
+def _rest_rows(endpoint: str, what: str, **kwargs) -> list[dict]:
     """Every row of a REST list, oldest first, following pages until a short one."""
     rows: list[dict] = []
     for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}")
+        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}", **kwargs)
         if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
             raise CliError(f"invalid GitHub {what} response")
         rows += batch
@@ -211,8 +210,8 @@ def _rest_rows(endpoint: str, what: str) -> list[dict]:
     raise CliError(f"GitHub {what} pagination limit exceeded")
 
 
-def _pr_reviews(repo: str, number: int) -> list[dict]:
-    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews")
+def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
+    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews", **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -316,26 +315,29 @@ def _readiness(
 ) -> github.Readiness:
     if problem := _readiness_precheck(wt, config, pr, head, diagnostics):
         return github.Readiness(False, (problem,))
-    if reviews is None:
-        reviews = _pr_reviews(config.repo, pr.number)
+    dates: list[str] = []
+    reviews = (_pr_reviews(config.repo, pr.number, **({"dates": dates} if workflow_wait else {}))
+               if reviews is None else reviews)
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
     )
-    review_at = review.get("submitted_at") if review else None
-    # GitHub's review timestamp is in UTC and predates this process.
-    review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
-                  .replace(tzinfo=UTC).timestamp()) if review_at else None
+    review_at = github.readiness_timestamp(review.get("submitted_at")) if review else None
+    server = github.response_date(dates[-1]) if dates else None
+    now = server.timestamp() if server else time.time()
+    review_age = now - review_at[0].timestamp() if review_at else None
+    if server and review_age is not None and -1 < review_age < 0:
+        review_age = 0  # HTTP Date rounds down to the second.
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
         head if review else None, review_at=review_at,
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
-        # Allow skew only for verdicts GitHub timestamps establish are stale.
+        # Allow host clock skew only when GitHub did not supply a usable Date.
         stale_verdict_grace=(
             workflow_wait and review_age is not None
-            and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
+            and (0 if server else -MAX_REVIEW_CLOCK_SKEW) <= review_age < STALE_VERDICT_GRACE
         ),
         publishers=publishers,
     )
@@ -885,11 +887,11 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
 
 
 def _require_open_review_round(config: Config, pr: github.PR, head: str, kind: str) -> None:
-    markers = _pr_markers(_pr_reviews(config.repo, pr.number), head, config.review_publishers,
-                          repo=config.repo, number=pr.number)
+    reviews = _pr_reviews(config.repo, pr.number)
+    markers = _pr_markers(reviews, head, config.review_publishers, repo=config.repo, number=pr.number)
     if any(marker.kind == kind and marker.head == head for marker in markers):
         raise CliError(f"the {kind} review round is already taken; run loopzero ready")
-    if _decide_kind(markers, head)[0] != kind:
+    if _select_review_round(config, pr, head, reviews)[0] != kind:
         raise CliError("review round changed during publication; run loopzero review again")
 
 

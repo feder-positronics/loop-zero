@@ -123,7 +123,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),
-   target branch and required CI. The receipt must record a clean passing run
+   target branch and required CI. Readiness compares parsed instants for verdict
+   freshness and uses a valid GitHub response Date during waits. The receipt must record a clean passing run
    at that head with the current commands and check settings digest. Ready and
    merge validate the PR, head and hold before checking the local receipt.
    An invalid receipt stops the command before it fetches remote readiness
