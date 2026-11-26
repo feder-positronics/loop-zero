@@ -532,6 +532,8 @@ def _append_review(body: str, result: ReviewResult) -> str:
     match = pattern.search(body)
     if not match:
         return f"{body.rstrip()}\n\n## Review\n{line}\n"
+    if line in match.group(2).splitlines():
+        return body
     existing = match.group(2).rstrip()
     if existing.startswith("(filled by `loopzero review`)"):
         existing = ""
@@ -796,7 +798,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             confirmed, reviews = _recover_review(wt, config, pr, result,
                                                  publication["publisher"], token)
             if confirmed:
-                return _review_verdict(result)
+                return _finish_review(wt, config, pr, result)
         else:
             reviews = _pr_reviews(config.repo, pr.number)
         # Exact read-back above may confirm an older published note; a new post needs the current form.
@@ -842,7 +844,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         path = _review_file(wt, head, kind)
         try:
             if _recover_review(wt, config, pr, result, publisher, token)[0]:
-                return _review_verdict(result)
+                return _finish_review(wt, config, pr, result)
         except (github.GhError, CliError, _proc.ProcTimeout) as recovery:
             raise CliError(f"{exc} | publication read-back blocked: {recovery}; "
                            f"review saved at {path}; retry `loopzero review --repost` "
@@ -851,10 +853,16 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
             f"{exc} | publication unconfirmed; review saved at {path}; "
             "inspect the cause and run `loopzero review --repost` to reconcile or explicitly retry"
         ) from exc
+    return _finish_review(wt, config, pr, result)
+
+
+def _finish_review(wt: Path, config: Config, pr: github.PR, result: ReviewResult) -> int:
     try:
         with _lock_task_state(wt):
             live = github.pr_view(config.repo, pr.number)
-            github.update_body(config.repo, pr.number, _append_review(live.body, result))
+            body = _append_review(live.body, result)
+            if body != live.body:
+                github.update_body(config.repo, pr.number, body)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError) as exc:
         print(f"note: could not append PR review summary: {_one_line(exc)}", file=sys.stderr)
     return _review_verdict(result)
