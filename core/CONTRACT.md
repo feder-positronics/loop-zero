@@ -74,7 +74,7 @@ and delegation templates' fields and apply these rules to their prose.
   to act. Include process only when it affects what to trust.
 - Name the decision owner, exact question, recommendation and default without
   an answer. Give alternatives for real choices.
-- Use [visual guidance](VISUALS.md) when structure, quantities or UI are harder
+- Include a [visual](VISUALS.md) when structure, quantities or UI are harder
   to scan in prose. Each visual must add information and the prose must stand
   alone. Omit visuals for small, straightforward text or code changes.
 - Stop when the reader can act. Restate the opening only if the delivery ending
