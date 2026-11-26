@@ -9,6 +9,7 @@ import re
 import shlex
 import tempfile
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -197,6 +198,15 @@ def _api_path(args: tuple[str, ...]) -> str:
     return "/" + path.lstrip("/")
 
 
+def redact_credentials(value: str) -> str:
+    value = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@", value)
+    value = re.sub(r"""(?i)(\bauthorization(?:\\?['"])?[ \t]*:[ \t]*)(\\?['"])(?:(?!\2)(?:\\.|[^\\\r\n]))+\2""",
+                   r"\1\2[REDACTED]\2", value)
+    return re.sub(r"""(?i)((?P<quote>['"])?\bauthorization[ \t]*:[ \t]*)"""
+                  r"""(?(quote)(?:\\.|(?!(?P=quote))[^\\\r\n])+|(?:[a-z][\w-]*[ \t]+)?(?:\\.|[^\\\s'"`])+)""",
+                  r"\1[REDACTED]", value)
+
+
 def _redact_tokens(value: str, token: str = "") -> str:
     for secret in (token, os.environ.get("GH_TOKEN", ""),
                    os.environ.get("GITHUB_TOKEN", "")):
@@ -257,10 +267,18 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _app_token_clock() -> float | None:
+    """Read elapsed time including suspend, when the OS provides it."""
+    if (clock := getattr(time, "CLOCK_BOOTTIME", None)) is not None:
+        with suppress(OSError):
+            return time.clock_gettime(clock)
+    return None
+
+
 def _cached_app_token() -> str:
-    # Installation tokens expire one hour after minting by wall clock, suspend included.
     token, minted = _app_token_cache
-    return token if token and 0 <= time.time() - minted < 3000 else ""
+    now = _app_token_clock() if token else None
+    return token if now is not None and 0 <= now - minted < 3000 else ""
 
 
 def app_token() -> str:
@@ -269,14 +287,17 @@ def app_token() -> str:
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
-    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
+    minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    _app_token_cache = (result.stdout.strip(), minted)
+    token = result.stdout.strip()
+    if minted is None:
+        return token  # no suspend-aware clock, so use this token only for this call
+    _app_token_cache = (token, minted)
     return _cached_app_token()
 
 
@@ -449,9 +470,8 @@ def _gh_json(*args: str, token: str | None = None, **kwargs) -> object:
                       token=token or "") from None
 
 
-def _paged(endpoint: str, key: str = "check_runs") -> list:
-    """Collect a list endpoint page by page until a short page."""
-    items: list = []
+def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
+    """Yield validated rows until the last page."""
     page = 1
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
@@ -460,10 +480,14 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
             chunk = chunk.get(key)
         if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
-        items += chunk
+        yield from chunk
         if len(chunk) < PAGE:
-            return items
+            return
         page += 1
+
+
+def _paged(endpoint: str, key: str = "check_runs") -> list:
+    return list(_iter_paged(endpoint, key))
 
 
 def _with_file(content: str) -> Path:
@@ -518,7 +542,10 @@ def _api(endpoint: str, payload: dict, method: str = "POST",
         path.unlink(missing_ok=True)
 
 
-MERGE_HOLD_MESSAGE = "has a merge-authority hold; ask the decisions owner to release it"
+def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
+    if "hold" in labels:
+        return f"PR #{number} has a merge-authority hold; ask the decisions owner to release it"
+    return None
 
 
 def _pr_labels(data: dict) -> tuple[str, ...]:
@@ -847,21 +874,12 @@ def _right_lines(patch: str) -> tuple[set[int], int | None]:
     return lines, first_added
 
 
-def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: list[dict],
-                                findings: tuple[Finding, ...]) -> None:
-    paths = {entry["filename"] for entry in entries}
-    missing = next(
-        (finding.path for finding in findings
-         if finding.severity in BLOCKING and finding.path and finding.path not in paths),
-        None,
-    )
-    if missing is None:
-        return
+def _require_complete_file_list(repo: str, number: int, head_sha: str, count: int, missing: str) -> None:
     pr, detail = _pr_detail(repo, number)
     request = ("gh", "api", f"repos/{repo}/pulls/{number}/files")
     if pr.head_sha != head_sha:
         raise GhError(request, f"PR #{number} head moved from {head_sha[:12]} to {pr.head_sha[:12]}; rerun review")
-    if detail.get("changed_files") != len(paths):
+    if detail.get("changed_files") != count:
         raise GhError(request,
                       f"cannot place finding on PR #{number} at {missing!r}: "
                       f"GitHub's {PR_FILE_LIMIT:,}-file limit prevents verifying the complete file list")
@@ -869,20 +887,26 @@ def _require_complete_file_list(repo: str, number: int, head_sha: str, entries: 
 
 def _diff_map(repo: str, number: int, head_sha: str,
               findings: tuple[Finding, ...]) -> tuple[dict[str, set[int]], dict | None]:
-    """Commentable lines per path, plus the anchor (first file with a hunk, first added line)."""
-    entries = _paged(f"repos/{repo}/pulls/{number}/files")
-    if len(entries) >= PR_FILE_LIMIT:
-        _require_complete_file_list(repo, number, head_sha, entries, findings)
+    blocking = tuple(f for f in findings if f.severity in BLOCKING)
+    remaining = {f.path for f in findings if f.path and (f.line or f.severity in BLOCKING)}
     commentable: dict[str, set[int]] = {}
     anchor: dict | None = None
-    for entry in entries:
+    rows = _iter_paged(f"repos/{repo}/pulls/{number}/files") if remaining or blocking else ()
+    count = 0
+    for entry in rows:
+        count += 1
+        path = entry["filename"]
         lines, first_added = _right_lines(entry.get("patch") or "")
-        if not lines:
-            continue
-        commentable[entry["filename"]] = lines
-        if anchor is None:
+        commentable[path] = lines
+        if lines and anchor is None:
             line = first_added if first_added is not None else min(lines)
-            anchor = {"path": entry["filename"], "line": line, "side": "RIGHT"}
+            anchor = {"path": path, "line": line, "side": "RIGHT"}
+        remaining.discard(path)
+        if not remaining and (not blocking or anchor is not None):
+            return commentable, anchor
+    missing = next((f.path for f in blocking if f.path in remaining), None)
+    if missing is not None and count >= PR_FILE_LIMIT:
+        _require_complete_file_list(repo, number, head_sha, len(commentable), missing)
     return commentable, anchor
 
 
@@ -895,8 +919,7 @@ def review_payload(repo: str, number: int, head_sha: str, result: ReviewResult,
 def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
                     formats: list[tuple[str, ReviewSettingsLayout, bool]]) -> list[dict]:
     """Place findings once for all exact body formats used in read-back."""
-    commentable, anchor = (_diff_map(repo, number, head_sha, result.findings)
-                           if result.findings else ({}, None))
+    commentable, anchor = _diff_map(repo, number, head_sha, result.findings)
     comments: list[dict] = []
     loose: list[Finding] = []
     for f in result.findings:
@@ -1200,7 +1223,7 @@ def _check_signals(
             continue
         if workflows is None:
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
-        if _has_active_replacement(cr, workflows, head_sha):
+        if _has_active_replacement(repo, cr, workflows, head_sha):
             superseded.append(name)
     capped = _check_suites_at_limit(runs)
     _discard_unverified_successes(states, latest_status.keys() - latest_runs.keys(), capped)
@@ -1230,11 +1253,15 @@ def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
     return f"required check '{name}' missing on {head_sha[:12]}"
 
 
-def _has_active_replacement(check: dict, workflows: list[dict], head_sha: str) -> bool:
+def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_sha: str) -> bool:
     """A producer can be superseded only by its own workflow on the same head."""
     suite_id = check["check_suite"]["id"]
-    producer = next((workflow for workflow in workflows if workflow.get("check_suite_id") == suite_id
-                     and workflow.get("head_sha") == head_sha), None)
+    def find_producer(runs: list[dict]) -> dict | None:
+        return next((run for run in runs if run.get("check_suite_id") == suite_id
+                     and run.get("head_sha") == head_sha), None)
+    producer = find_producer(workflows)
+    if producer is None and len(workflows) >= 1_000 and type(suite_id) is int:
+        producer = find_producer(_paged(f"repos/{repo}/actions/runs?check_suite_id={suite_id}", "workflow_runs"))
     if producer is None or not producer.get("workflow_id"):
         return False
     created = producer.get("created_at")
@@ -1357,8 +1384,8 @@ def merged_sha(
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
     elif not view["merged"] and view.get("state") == "open":
-        if check_hold and "hold" in _pr_labels(view):
-            raise GhError(argv, f"PR #{number} {MERGE_HOLD_MESSAGE}")
+        if check_hold and (hold := merge_hold(number, _pr_labels(view))):
+            raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
     if not view["merged"] and view.get("state") == "closed":
         raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
@@ -1474,6 +1501,14 @@ def commit_status(repo: str, head: str, context: str, state: str, description: s
                 "Push a fresh head and obtain review evidence for it before refreshing eligibility."
             ) from exc
         raise
+
+
+def status_matches(repo: str, head: str, context: str, state: str, description: str) -> bool:
+    statuses = _iter_paged(f"repos/{repo}/commits/{head}/statuses")
+    latest = next((row for row in statuses if row.get("context") == context), {})
+    creator = latest.get("creator")
+    return (isinstance(creator, dict) and creator.get("login") == "github-actions[bot]"
+            and (latest.get("state"), latest.get("description")) == (state, description))
 
 
 def _status_limit_reached(repo: str, head: str, context: str) -> bool:

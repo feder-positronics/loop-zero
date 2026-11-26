@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,55 @@ class ProcTimeout(LoopZeroError):
         self.stdout = stdout
         self.stderr = stderr
         self.duration_s = duration_s
+
+
+class Terminated(BaseException):
+    """Unwind the active operation before exiting from SIGTERM."""
+
+
+def _request_unwind(_signum, _frame):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise Terminated
+
+
+@contextmanager
+def unwind_on_sigterm():
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
+        yield
+        return
+    try:
+        try:
+            signal.signal(signal.SIGTERM, _request_unwind)
+            yield
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    except Terminated:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+        signal.raise_signal(signal.SIGTERM)
+        raise
+
+
+@contextmanager
+def defer_sigterm():
+    """Finish a private directory operation before unwinding."""
+    if (threading.current_thread() is not threading.main_thread()
+            or signal.getsignal(signal.SIGTERM) is not _request_unwind):
+        yield
+        return
+    pending = False
+
+    def remember_signal(_signum, _frame):
+        nonlocal pending
+        pending = True
+
+    signal.signal(signal.SIGTERM, remember_signal)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, _request_unwind)
+        if pending:
+            _request_unwind(signal.SIGTERM, None)
 
 
 @dataclass(frozen=True)
@@ -65,16 +115,21 @@ def run(
     merge_output: bool = False,
     input: str | None = None,
     encoding: str | None = None,
+    preserve_newlines: bool = False,
 ) -> Completed:
     """Run `argv` (never through a shell) with an environment stripped to the allowlist.
 
     `merge_output=True` sends stderr into stdout so interleaving is preserved.
     `input` is written to the child's stdin; without it stdin is /dev/null.
     `encoding` overrides the parent locale for text I/O; None retains subprocess defaults.
+    With `preserve_newlines`, decode without newline translation (UTF-8 by default)
+    and preserve undecodable stdout bytes via surrogateescape.
     Nonzero exit is reported in `Completed.exit_code`; callers decide whether to raise.
     """
     argv = [str(part) for part in argv]
     started = time.monotonic()
+    raw_encoding = encoding or "utf-8"
+    stdin = input.encode(raw_encoding) if preserve_newlines and input is not None else input
     try:
         with subprocess.Popen(
             argv,
@@ -83,13 +138,13 @@ def run(
             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT if merge_output else subprocess.PIPE,
-            text=True,
-            encoding=encoding,
-            errors="replace",
+            text=not preserve_newlines,
+            encoding=None if preserve_newlines else encoding,
+            errors=None if preserve_newlines else "replace",
             start_new_session=os.name == "posix",
         ) as proc:
             try:
-                stdout, stderr = proc.communicate(input, timeout=timeout)
+                stdout, stderr = proc.communicate(stdin, timeout=timeout)
             except BaseException:
                 if os.name == "posix":
                     with suppress(ProcessLookupError):
@@ -102,8 +157,7 @@ def run(
             raise FileNotFoundError(f"working directory {cwd} does not exist") from exc
         raise ToolMissing(f"{argv[0]}: executable not found on PATH") from exc
     except subprocess.TimeoutExpired as exc:
-        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout
-        out = out or ""
+        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
         err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
         elapsed = time.monotonic() - started
         raise ProcTimeout(
@@ -112,6 +166,10 @@ def run(
             stderr=err or "",
             duration_s=elapsed,
         ) from exc
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode(raw_encoding, errors="surrogateescape")
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode(raw_encoding, errors="replace")
     return Completed(
         exit_code=proc.returncode,
         stdout=stdout or "",

@@ -503,19 +503,43 @@ def test_post_review_fails_loud_when_nothing_to_anchor(gh: FakeGh) -> None:
     assert calls_for(gh, REVIEWS_KEY) == []
 
 
-def test_post_review_paginates_files(gh: FakeGh) -> None:
-    page1 = [{"filename": f"f{i}.py", "patch": f"@@ -1 +1 @@\n+l{i}"} for i in range(100)]
+@pytest.mark.parametrize("location", ["first-page", "second-page", "missing"])
+def test_post_review_reads_only_pages_needed_for_placement(gh: FakeGh, location: str) -> None:
+    unrelated = [{"filename": f"f{i}.py", "patch": "@@ -1 +1 @@\n+new"} for i in range(100)]
+    file = PR_FILES[0]
+    page1, page2 = ([file, *unrelated[:99]], unrelated[99:]) if location == "first-page" else (
+        unrelated, [file]
+    )
+    finding = FINDINGS[0] if location != "missing" else replace(FINDINGS[0], path="missing.py")
     arm_review(gh)
-    gh.respond(FILES_KEY, page1, PR_FILES)
-    github.post_review(REPO, 7, HEAD, review(findings=FINDINGS[:1]))
+    gh.respond(FILES_KEY, page1, page2)
+    github.post_review(REPO, 7, HEAD, review(findings=(finding,)))
+    pages = ["page=1"] if location == "first-page" else ["page=1", "page=2"]
+    assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == pages
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"], comment["side"]) == (
+        ("f0.py", 1, "RIGHT") if location == "missing" else ("src/a.py", 10, "RIGHT")
+    )
+    assert ("anchored here" in comment["body"]) == (location == "missing")
+
+
+def test_post_review_searches_later_pages_for_fallback_hunk(gh: FakeGh) -> None:
+    page1 = [{"filename": f"image{i}.png"} for i in range(100)]
+    arm_review(gh)
+    gh.respond(FILES_KEY, page1, PR_FILES[:1])
+    result = review(findings=(Finding("important", None, None, "Global concern", ""),))
+    github.post_review(REPO, 7, HEAD, result)
+
     assert [c["argv"][-2] for c in calls_for(gh, FILES_KEY)] == ["page=1", "page=2"]
-    assert comments_posted(gh)[0]["path"] == "src/a.py"
+    (comment,) = comments_posted(gh)
+    assert (comment["path"], comment["line"]) == ("src/a.py", 11)
 
 
 def test_post_review_approve_event(gh: FakeGh) -> None:
     arm_review(gh)
     result = ReviewResult("codex", HEAD, "primary", "approve", (), "RAW", duration_s=0.25)
     github.post_review(REPO, 7, HEAD, result)
+    assert calls_for(gh, FILES_KEY) == []
     payload = review_payloads(gh)[0]
     assert payload["event"] == "APPROVE" and payload["comments"] == []
     assert "0.2s: **approve**" in payload["body"]
@@ -709,8 +733,10 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-app-token\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    clock = [0.0]
-    monkeypatch.setattr(github.time, "time", lambda: clock[0])
+    wall_time = boot_time = 10_000.0
+    monkeypatch.setattr(github.time, "time", lambda: wall_time)
+    monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(github.time, "clock_gettime", lambda _: boot_time)
     monkeypatch.setattr(github.time, "monotonic", lambda: 100.0)  # stopped during host suspend
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
@@ -730,7 +756,8 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
         "operator-token", "operator-token", "operator-token",
     ]
     assert counter.read_text().splitlines() == ["called"]
-    clock[0] = 3601.0
+    boot_time += 3_620
+    wall_time += 2_620  # The wall clock stepped back by a thousand seconds.
     github.api_get("repos/acme/widgets")
     assert counter.read_text().splitlines() == ["called", "called"]
 
@@ -741,10 +768,10 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    wall, real_run = [1_000_000.0], github.run
-    suspend = lambda: wall.append(wall.pop() + 3601)  # noqa: E731
-    monkeypatch.setattr(github.time, "time", lambda: wall[0])
-    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), wall[0] == 1e6 and suspend())[0])
+    boot, real_run = [1_000_000.0], github.run
+    suspend = lambda: boot.append(boot.pop() + 3601)  # noqa: E731
+    monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
+    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), boot[0] == 1e6 and suspend())[0])
     monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.expect(["api", "repos/acme/widgets", "--include"], {})
@@ -1103,6 +1130,30 @@ def test_readiness_paginates_actions_runs_before_deferring_failure(gh: FakeGh) -
     assert result.waitable_failures == result.reasons
     pages = [c["argv"][-2] for c in gh.calls if "actions/runs" in c["argv"][1]]
     assert pages == ["page=1", "page=2"]
+
+
+@pytest.mark.parametrize(("replacement_fields", "waitable"), [
+    ({}, True),
+    ({"workflow_id": 8}, False),
+    ({"head_sha": "b" * 40}, False),
+])
+def test_readiness_recovers_workflow_producer_at_search_limit(
+    gh: FakeGh, replacement_fields: dict, waitable: bool,
+) -> None:
+    arm_workflow_check(gh, failed_check())
+    runs = [
+        replacement_run() | replacement_fields,
+        *(producing_run(id=i, check_suite_id=i, workflow_id=99) for i in range(100, 1099)),
+    ]
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}",
+               *({"workflow_runs": runs[i:i + 100]} for i in range(0, len(runs) + 1, 100)))
+    gh.respond(f"api repos/{REPO}/actions/runs?check_suite_id=10",
+               {"workflow_runs": [producing_run()]})
+
+    result = readiness(workflow_wait=True)
+
+    assert not result.ready
+    assert result.waitable_failures == (result.reasons if waitable else ())
 
 
 def test_readiness_actions_api_error_does_not_defer_failure(gh: FakeGh) -> None:

@@ -11,7 +11,6 @@ import os
 import re
 import resource
 import shutil
-import signal
 import stat
 import tempfile
 import threading
@@ -52,55 +51,6 @@ class SandboxUnavailable(LoopZeroError):
     """bubblewrap is missing or cannot create a sandbox on this host."""
 
 
-class _Terminated(BaseException):
-    """Unwind the active operation before exiting from SIGTERM."""
-
-
-def _request_unwind(_signum, _frame):
-    signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    raise _Terminated
-
-
-@contextmanager
-def _unwind_on_sigterm():
-    if (threading.current_thread() is not threading.main_thread()
-            or signal.getsignal(signal.SIGTERM) != signal.SIG_DFL):
-        yield
-        return
-    try:
-        try:
-            signal.signal(signal.SIGTERM, _request_unwind)
-            yield
-        finally:
-            signal.signal(signal.SIGTERM, signal.SIG_DFL)
-    except _Terminated:
-        signal.signal(signal.SIGTERM, signal.SIG_DFL)
-        signal.raise_signal(signal.SIGTERM)
-        raise
-
-
-@contextmanager
-def _defer_sigterm():
-    """Finish a private directory operation before unwinding."""
-    if (threading.current_thread() is not threading.main_thread()
-            or signal.getsignal(signal.SIGTERM) is not _request_unwind):
-        yield
-        return
-    pending = False
-
-    def remember_signal(_signum, _frame):
-        nonlocal pending
-        pending = True
-
-    signal.signal(signal.SIGTERM, remember_signal)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGTERM, _request_unwind)
-        if pending:
-            _request_unwind(signal.SIGTERM, None)
-
-
 @contextmanager
 def _private_directories():
     with ExitStack() as stack:
@@ -108,12 +58,12 @@ def _private_directories():
             yield stack
         finally:
             # Keep the stack's own exit as a fallback if SIGTERM arrives before deferral.
-            with _defer_sigterm():
+            with _proc.defer_sigterm():
                 stack.close()
 
 
 def _enter_private_directory(stack: ExitStack, prefix: str) -> Path:
-    with _defer_sigterm():
+    with _proc.defer_sigterm():
         directory = tempfile.TemporaryDirectory(prefix=prefix)
         stack.callback(directory.cleanup)
     return Path(directory.name)
@@ -122,7 +72,7 @@ def _enter_private_directory(stack: ExitStack, prefix: str) -> Path:
 @contextmanager
 def private_directory(prefix: str):
     """Keep a private directory scoped to an operation, including on SIGTERM."""
-    with _unwind_on_sigterm(), _private_directories() as stack:
+    with _proc.unwind_on_sigterm(), _private_directories() as stack:
         yield _enter_private_directory(stack, prefix)
 
 
@@ -130,7 +80,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
-               _resolved: bool = False) -> CheckReport:
+               workflow: str | Path = "workflow.toml", _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
     progress receives each command before launch, as before. Optional status receives
@@ -154,7 +104,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with _unwind_on_sigterm(), _private_directories() as stack:
+    with _proc.unwind_on_sigterm(), _private_directories() as stack:
         prefix = []
         if not config.check_runner:
             home = _enter_private_directory(stack, "loopzero-home-")
@@ -179,7 +129,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
         for index, command in enumerate(commands):
             if progress:
                 progress(command)
-            key = _input_key(config, worktree, command, base) if not dirty else None
+            key = _input_key(config, worktree, command, "" if dirty else base,
+                             status=status, workflow=workflow)
             old = previous.get(command)
             if key and old and old.input_key == key:
                 result = old
@@ -256,7 +207,7 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str,
 def _check_base(config: Config, worktree: Path) -> str:
     if config.check_runner or config.inputs:
         try:
-            return config_mod.base_revision(worktree, config.base_branch)
+            return config.trusted_base_revision or config_mod.base_revision(worktree, config.base_branch)
         except (config_mod.ConfigError, WorktreeError):
             if config.check_runner:
                 raise
@@ -303,19 +254,43 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
-def _input_key(config: Config, worktree: Path, command: str, base: str) -> str | None:
-    if not base or (command not in config.inputs and "." not in config.inputs.get("*", ())):
-        return None
-    paths = (*config.inputs.get(command, ()), *config.inputs.get("*", ()))
+def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str | None:
     # Empty pathspecs must not accidentally mean the whole tree.
+    if not paths:
+        return ""
     empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
     try:
-        blobs = _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
-                     "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths) if paths else ""
+        return _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
+                    "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths)
     except OSError as exc:
         if exc.errno == errno.E2BIG:
             return None
         raise
+
+
+def _input_key(config: Config, worktree: Path, command: str, base: str, *,
+               status: Callable[[str], None] | None = None,
+               workflow: str | Path = "workflow.toml") -> str | None:
+    if command not in config.inputs and "." not in config.inputs.get("*", ()):
+        return None
+    if not base and status is None:
+        return None
+    entries = {key: config.inputs[key] for key in (command, "*") if key in config.inputs}
+    try:
+        blobs = _input_blobs(config, worktree, tuple(path for paths in entries.values() for path in paths))
+    except (SandboxUnavailable, _proc.ProcTimeout, OSError, ValueError):
+        if not base:
+            return None
+        raise
+    if blobs == "" and status:
+        status(f"{workflow}: checks.inputs for {command!r} matches no files in HEAD. "
+               f"Correct these entries: {entries!r}. Running the check fresh.")
+    if not blobs or not base:
+        return None
+    return _hash_inputs(config, worktree, command, base, blobs)
+
+
+def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs: str) -> str | None:
     contents = []
     root = worktree.resolve()
     try:
@@ -354,7 +329,7 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
     join_reporter = True
     try:
         yield
-    except _Terminated:
+    except _proc.Terminated:
         join_reporter = False
         raise
     finally:

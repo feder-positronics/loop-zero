@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import sandbox
+from loopzero import runners, sandbox, worktree
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -29,6 +29,7 @@ from loopzero.runners import (
     build_prompt,
     codex_evidence,
     merge_reviews,
+    render_patch,
     review_with,
     split_diff,
 )
@@ -113,8 +114,17 @@ def _bwrap_argv(log: Path) -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def fake_bwrap(fake_tool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    for name in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"):
+def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
+    home = tmp_path_factory.mktemp("reviewer-home")
+    monkeypatch.setenv("HOME", str(home))
+    for name in (
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+        *runners.CLAUDE_AUTH_ENV,
+        *runners.CODEX_AUTH_ENV,
+    ):
         monkeypatch.delenv(name, raising=False)
     log = tmp_path / "review-bwrap.argv"
     fake_tool("bwrap", FAKE_BWRAP.format(log=log))
@@ -1186,6 +1196,25 @@ def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
     chunks = split_diff(deleted + added, 100)
     assert all(len(chunk.encode()) <= 100 for chunk in chunks)
     assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
+
+
+@pytest.mark.parametrize("name", ["zażółć gęślą.txt", "gone with spaces.txt", "gone.txt"])
+def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> None:
+    git(git_repo, "config", "core.quotePath", "true")
+    path = git_repo / name
+    path.write_text("deleted line\n" * 600)
+    git(git_repo, "add", "--", name)
+    git(git_repo, "commit", "-qm", "add file")
+    base = git(git_repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "rm", "--", name)
+    git(git_repo, "commit", "-qm", "delete file")
+    diff = render_patch(worktree.diff_since(git_repo, base))
+
+    chunks = split_diff(diff, 4096)
+
+    assert all(len(chunk.encode()) <= 4096 for chunk in chunks)
+    assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
+    assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
 
 
 # ----------------------------------------------------------------- family detection
