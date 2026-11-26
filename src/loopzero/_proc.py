@@ -149,6 +149,8 @@ def run(
                         os.killpg(proc.pid, signal.SIGKILL)
                 else:
                     proc.kill()
+                # Popen's context exit can skip reaping after KeyboardInterrupt.
+                proc.wait()
                 raise
     except FileNotFoundError as exc:
         if exc.filename == str(cwd):
