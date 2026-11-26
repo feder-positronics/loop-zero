@@ -316,8 +316,9 @@ def test_invalid_review_evidence_is_rejected(published_native, mutation):
         "fence": without_header + "\n```\n" + line + "\n```",
     }
     if mutation == "invalid_event_offset":
-        mutation = (("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1)
-    if isinstance(mutation, tuple):
+        update_evidence(value, ("calls", 0, "diff_event", "end"), value["raw_bytes"] + 1)
+        changed = rendered.replace(line, packed(value))
+    elif isinstance(mutation, tuple):
         update_evidence(value, *mutation)
         changed = rendered.replace(line, packed(value))
     elif mutation == "duplicate_key":

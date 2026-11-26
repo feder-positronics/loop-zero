@@ -156,7 +156,6 @@ def test_hosted_review_coverage_after_source_head_changes(
                  match="no review recorded")
 
 
-
 def test_merged_source_refresh_publishes_nothing(publisher):
     body = json.dumps({"head": {"sha": HEAD, "ref": "lz/task"}, "user": {"login": "author"}, "merged": True,
                        "title": "before\u2028after"}, ensure_ascii=False)

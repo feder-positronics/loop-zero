@@ -108,6 +108,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
+    assert (worktree.branch(wt), worktree.head(wt)) == ("lz/my-task", base)
     assert not task.exists()
     if state == "same-base":
         assert worktree.start(repo, "my-task", "main") == wt
@@ -123,8 +124,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(worktree.WorktreeError) as error:
             worktree.start(repo, "my-task", "main")
         assert all(detail in str(error.value) for detail in details)
-        assert not task.exists()
-    assert (worktree.branch(wt), worktree.head(wt)) == ("lz/my-task", base)
+        assert (worktree.branch(wt), worktree.head(wt), task.exists()) == ("lz/my-task", base, False)
 
 
 @pytest.mark.parametrize("case", ["regular", "file", "directory", "append", "replace"])
