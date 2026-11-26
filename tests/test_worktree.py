@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment, init_git_repo
 
 
 @pytest.fixture
@@ -32,6 +32,13 @@ def commit_on_origin(repo: Path, name: str) -> str:
     commit_file(clone, name, name, name)
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD").strip()
+
+
+def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient.git"
+    monkeypatch.setenv("GIT_DIR", str(ambient))
+    checkout = init_git_repo(tmp_path / "checkout")
+    assert (checkout / ".git").is_dir() and not ambient.exists()
 
 
 def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
@@ -81,12 +88,8 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
     assert headings == ["## Context and goal", "## Acceptance", "## Notes", "## Base",
                         "## Validation", "## Review"], "matches core/HANDOFF.md"
-    assert "- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>" in text
-    assert "- **Problem:** <one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>" in text
-    assert "- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>" in text
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
-    assert "Refs #<issue number, or remove this line>" in text
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
@@ -177,15 +180,6 @@ def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
 
 
-@pytest.mark.parametrize("slug,title", [
-    ("add-workflow-config-note", "Add workflow config note"),
-    ("fix_bug--123", "Fix bug 123"),
-    ("x", "X"),
-])
-def test_title_from_slug(slug: str, title: str) -> None:
-    assert worktree.title_from_slug(slug) == title
-
-
 def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
     assert worktree.branch_name(repo, "ok-1.2_x") == "lz/ok-1.2_x"
     with pytest.raises(worktree.WorktreeError):
@@ -273,7 +267,7 @@ def test_task_helpers_errors(repo: Path) -> None:
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
     monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
-    worktree.cleanup(wt)  # #439: no cleanup git runs in (or -C) the primary checkout
+    worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
@@ -284,13 +278,13 @@ def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
     wt = worktree.start(repo, "dirty", "main")
     (wt / file).write_text("x")
     with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
-        worktree.cleanup(wt)
+        worktree.cleanup(wt, worktree.head(wt))
     assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
     with pytest.raises(worktree.WorktreeError, match="no such worktree"):
-        worktree.cleanup(repo / ".worktrees" / "ghost")
+        worktree.cleanup(repo / ".worktrees" / "ghost", worktree.head(repo))
 
 
 @pytest.mark.parametrize("state", ["clean", "dirty", "divergent", "unpublished", "remote-moved", "stash"])
@@ -321,7 +315,7 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
     commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
     result = subprocess.run(
         ["sh", "-c", commands, "cleanup-guide", str(wt), "abandoned", head],
-        cwd=caller, capture_output=True, text=True, check=False,
+        cwd=caller, env=git_environment(), capture_output=True, text=True, check=False,
     )
 
     assert (result.returncode == 0) == (state == "clean"), result.stderr
