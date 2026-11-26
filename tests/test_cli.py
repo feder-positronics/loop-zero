@@ -4583,21 +4583,21 @@ def test_mergify_reports_current_queue_attempt(wt, gh, capsys, monkeypatch, conf
         assert (f"{URL}#issuecomment-43" in out) is (kind == "current")
 
 
-@pytest.mark.parametrize(("result", "extra"), [("blocking", 0), ("neutral", 0), ("skipped", 0), (None, 0), ("blocking", 1), ("blocking", 30)])
-def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result, extra):
+@pytest.mark.parametrize("result", ["blocking", "neutral", "skipped", None, "long", "many"])
+def test_mergify_timeout_reports_evaluated_candidate_conditions(wt, gh, capsys, monkeypatch, result):
     commit_mergify_configuration(wt)
-    arm_approved_ready_pr(gh, head_of(wt), wt, isDraft=False)
+    head = head_of(wt)
+    arm_approved_ready_pr(gh, head, wt, isDraft=False)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
     monkeypatch.setattr(mergify, "markers", lambda *_: (True, True))
-    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"][result or "missing"]
-    if extra:
+    payload = MERGIFY_QUEUE_FIXTURE["candidate_responses"]["blocking" if result in {"long", "many"} else result or "missing"]
+    if extra := {"long": 1, "many": 30}.get(result, 0):
         conditions = payload["mergeability_check"]["conditions_evaluation"]
-        label = {"match": False, "label": "界" * 3000}
-        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [label] * extra)
+        monkeypatch.setitem(conditions, "subconditions", conditions["subconditions"] + [{"match": False, "label": "界" * 3000}] * extra)
     monkeypatch.setattr(mergify, "api_get", lambda *_: payload)
     code, out, err = run(capsys, "merge", "--wait=0")
     assert (code, err) == (3, "") and f"https://github.com/{REPO}/pull/42" in out
-    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result == "blocking")
+    assert (MERGIFY_QUEUE_FIXTURE["candidate_condition"] in out) == (result in {"blocking", "long", "many"})
     assert "failed" not in out and "check-success = checks" not in out
     assert len(out.encode()) < 2048 and ("27 more" in out) == (extra == 30)
 
