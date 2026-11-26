@@ -298,7 +298,7 @@ def _review_cap_reason(config: Config, pr: github.PR, head: str, reviews: list[d
     )
 
 
-MERGEABILITY_PENDING = "GitHub is computing mergeability"
+MERGEABILITY_PENDING = github.MERGEABILITY_PENDING
 
 
 def _readiness_precheck(wt: Path, config: Config, pr: github.PR, head: str, diagnostics: bool) -> str | None:
@@ -355,8 +355,6 @@ def _readiness(
             result = dataclasses.replace(result, reasons=tuple(
                 exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
-    if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
-        result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
     report = _load_report(wt)
     receipt_problem = _check_report_problem(report, config, head)
     if receipt_problem:
@@ -1867,7 +1865,8 @@ def _print_display(text: str) -> None:
 
 def cmd_resolve(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)  # publishers come from the base, not the PR
-    pr = _require_pr(config, worktree.branch(wt))
+    branch = worktree.branch(wt)
+    pr = _require_pr(config, branch)
     if pr.base_ref != config.base_branch:  # trusted publishers belong to the configured base
         raise CliError(f"PR #{pr.number} targets {pr.base_ref}, configured base is {config.base_branch}")
     publishers = config.review_publishers or (github.login(),)
@@ -1891,7 +1890,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
             f"Then, if no findings remain, run `{retry}`."
         ) from exc
     if not remaining:
-        github.refresh_eligibility(config.repo, pr.number, config.base_branch)
+        github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
         print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
     return 0
 

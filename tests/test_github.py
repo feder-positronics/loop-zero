@@ -453,31 +453,17 @@ def test_publication_qualifies_each_call_from_native_evidence(gh, metadata):
         provenance["requested_settings"] = None
     result = replace(review(verdict="approve"), family="claude", raw=json.dumps(envelopes),
                      model="unqualified-model", effort="unqualified-effort", chunk_count=2,
-                     provenance=provenance)
+                     duration_s=0.25, provenance=provenance)
     github.post_review(REPO, 7, HEAD, result)
-    body = review_payloads(gh)[0]["body"]
+    payload = review_payloads(gh)[0]
+    assert payload["event"] == "APPROVE" and payload["comments"] == [] and not calls_for(gh, FILES_KEY)
+    body = payload["body"]
+    assert "0.2s: **approve**" in body
     requested = "requested-one" if metadata == "new" else "unknown"
     assert f"Call 1: requested model {requested} (effort {'medium' if metadata == 'new' else 'unknown'})" in body
     assert "CLI-reported model reported-one (effort unknown)" in body
     assert "Call 2: requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in body
     assert "unqualified-" not in body and "forged-" not in body
-
-
-def test_post_review_reroutes_findings_outside_diff(gh: FakeGh) -> None:
-    arm_review(gh)
-    findings = (
-        Finding("important", "src/a.py", 99, "Off diff", "line not in hunk"),
-        Finding("important", "src/zzz.py", 1, "Unknown file", "path not in PR"),
-        Finding("critical", "src/c.py", 7, "Deleted side", "line 7 was only on the left"),
-        Finding("suggestion", "src/a.py", 99, "Nit off diff", "stays loose"),
-    )
-    github.post_review(REPO, 7, HEAD, review(findings=findings))
-    payload = review_payloads(gh)[0]
-    comments = payload["comments"]
-    assert [(c["path"], c["line"]) for c in comments] == [("src/a.py", 11)] * 3
-    assert comments[0]["body"].split("\n")[1] == (
-        "Reviewer location src/a.py:99 is not in the diff; anchored here.")
-    assert "Nit off diff" in payload["body"]
 
 
 @pytest.mark.parametrize("separator", ["\u2028", "\u2029"])
@@ -544,36 +530,6 @@ def test_post_review_reads_only_pages_needed_for_placement(gh, location):
         assert ("anchored here" in comment["body"]) == (location == "missing")
 
 
-def test_post_review_approve_event(gh: FakeGh) -> None:
-    arm_review(gh)
-    result = ReviewResult("codex", HEAD, "primary", "approve", (), "RAW", duration_s=0.25)
-    github.post_review(REPO, 7, HEAD, result)
-    assert calls_for(gh, FILES_KEY) == []
-    payload = review_payloads(gh)[0]
-    assert payload["event"] == "APPROVE" and payload["comments"] == []
-    assert "0.2s: **approve**" in payload["body"]
-    assert "requested model unknown (effort unknown); CLI-reported model unknown (effort unknown)" in payload["body"]
-
-
-@pytest.mark.parametrize("verdict,msg", [
-    ("approve", "Can not approve your own pull request"),
-    ("request_changes", "Can not request changes on your own pull request"),
-])
-def test_post_review_falls_back_to_comment_for_own_pr(gh: FakeGh, verdict: str, msg: str) -> None:
-    """Hand fake: recording the 422 would require a forbidden write to the reference PR."""
-    arm_review(gh)
-    body = {"message": "Unprocessable Entity", "errors": [{"message": msg}],
-            "documentation_url": "https://docs.github.com/rest"}
-    gh.respond(REVIEWS_KEY,
-               {"stdout": json.dumps(body), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
-                "exit": 1},
-               {"stdout": '{"id": 2}', "exit": 0})
-    github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]))
-    first, second = review_payloads(gh)
-    assert (first["event"], second["event"]) == (verdict.upper(), "COMMENT")
-    assert first["comments"] == second["comments"] and first["body"] == second["body"]
-
-
 @pytest.mark.parametrize("failure,remedy,label,gap", [
     ("not logged in", github.GH_AUTH_REMEDY, "", ""),
     ("HTTP 429 rate limit", "retry after GitHub's reset or Retry-After", "", ""),
@@ -626,16 +582,32 @@ def test_gh_timeout_redacts_diagnostics(monkeypatch) -> None:
     assert info.value.__suppress_context__
 
 
-@pytest.mark.parametrize("verdict,supplied", [("approve", False), ("request_changes", False), ("approve", True)])
-def test_post_review_posts_comment_directly_for_own_pr(gh: FakeGh, verdict: str, supplied: bool) -> None:
-    details = f"api repos/{REPO}/pulls/7"
-    arm_review(gh, author="someone-else" if supplied else "bot-user")
-    pr = github.pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"}))) if supplied else None
+@pytest.mark.parametrize("verdict,own_pr", [
+    ("approve", "lookup"), ("request_changes", "lookup"), ("approve", "supplied"),
+    ("approve", "fallback"), ("request_changes", "fallback"),
+])
+def test_post_review_comments_on_own_pr(gh: FakeGh, verdict: str, own_pr: str) -> None:
+    arm_review(gh, author="bot-user" if own_pr == "lookup" else "someone-else")
+    pr = github.pr_from_rest(rest_pr_json(pr_json(author={"login": "bot-user"}))) if own_pr == "supplied" else None
+    if own_pr == "fallback":
+        action = "approve" if verdict == "approve" else "request changes on"
+        rejection = {"message": "Unprocessable Entity", "errors": [{"message": f"Can not {action} your own pull request"}],
+                     "documentation_url": "https://docs.github.com/rest"}
+        gh.respond(REVIEWS_KEY, {"stdout": json.dumps(rejection), "stderr": "gh: Unprocessable Entity (HTTP 422)\n",
+                               "exit": 1}, {"stdout": '{"id": 2}', "exit": 0})
     github.post_review(REPO, 7, HEAD, review(verdict=verdict, findings=FINDINGS[:1]), pr=pr)
-    (payload,) = review_payloads(gh)
-    assert payload["event"] == "COMMENT"
-    assert [c["argv"] for c in calls_for(gh, details)] == ([] if supplied else [[*details.split(), "--include"]])
-    assert gh.argv(int(not supplied))[:2] == ["api", "graphql"]
+    payloads = review_payloads(gh)
+    assert payloads[-1]["event"] == "COMMENT"
+    if own_pr == "fallback":
+        first, second = payloads
+        assert first["event"] == verdict.upper()
+        assert first["comments"] == second["comments"] and first["body"] == second["body"]
+    else:
+        assert len(payloads) == 1
+        details = f"api repos/{REPO}/pulls/7"
+        looked_up = own_pr != "supplied"
+        assert [c["argv"] for c in calls_for(gh, details)] == ([[*details.split(), "--include"]] if looked_up else [])
+        assert gh.argv(int(looked_up))[:2] == ["api", "graphql"]
 
 
 def test_post_review_other_errors_propagate(gh: FakeGh) -> None:
@@ -675,6 +647,7 @@ def test_open_blocking_findings_filters_and_parses(gh: FakeGh) -> None:
     assert argv[:2] == ["api", "graphql"]
     assert "-F" in argv and "owner=acme" in argv and "name=widgets" in argv and "number=7" in argv
     assert any(a.startswith("query=") and "author { __typename login }" in a for a in argv)
+    assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
 
 @pytest.mark.parametrize("body, author", [
@@ -700,11 +673,6 @@ def test_open_findings_ignore_untrusted_or_quoted_markers(gh: FakeGh, body: str,
     gh.respond("api graphql", threads_json({**thread(body, author=author), "id": "T_1"}))
     assert github.open_blocking_findings(REPO, 7, HEAD, ("bot-user", "loopzero-app[bot]")) == []
     assert github.open_findings(REPO, 7, ("bot-user", "loopzero-app[bot]")) == []
-
-
-def test_open_findings_without_publishers_block_nothing(gh: FakeGh) -> None:
-    gh.respond("api graphql", threads_json(thread(f"{marker('critical')}\n**critical: X**")))
-    assert github.open_blocking_findings(REPO, 7, HEAD, ()) == []
 
 
 @pytest.mark.parametrize("data", [
@@ -958,33 +926,22 @@ def arm_workflow_runs(gh, *runs):
     gh.respond(f"api repos/{REPO}/actions/runs?head_sha={HEAD}", *pages)
 
 
-@pytest.mark.parametrize("reviewed,reasons", [
-    (HEAD, ()),
-    ("b" * 40, (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
-    (None, ("no review recorded for the current head",)),
+@pytest.mark.parametrize("reviewed,finding,reasons", [
+    (HEAD, None, ()),
+    ("b" * 40, None, (f"head {HEAD[:12]} differs from reviewed {'b' * 12}",)),
+    (None, None, ("no review recorded for the current head",)),
+    pytest.param(HEAD, thread(f"{marker('important')}\n**important: Oops**"),
+                 ("open important finding at src/a.py:3: Oops",), id="located"),
+    pytest.param(HEAD, thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
+                            "**critical: Global**\n\nno file", path="src/first.py", line=12),
+                 ("open critical finding at src/first.py:12: Global",), id="anchored"),
 ])
-def test_readiness_requires_current_review(gh: FakeGh, reviewed, reasons) -> None:
-    arm_readiness(gh, threads=(thread(f"{marker('critical')}\nX", resolved=True),
-                               thread(f"{marker('suggestion')}\nY")))
+def test_readiness_requires_current_review_and_resolved_findings(gh: FakeGh, reviewed, finding, reasons) -> None:
+    threads = (finding,) if finding else (thread(f"{marker('critical')}\nX", resolved=True),
+                                          thread(f"{marker('suggestion')}\nY"))
+    arm_readiness(gh, threads=threads)
     assert readiness(reviewed=reviewed) == github.Readiness(not reasons, reasons)
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
-
-
-@pytest.mark.parametrize("finding,reason", [
-    pytest.param(
-        thread(f"{marker('important')}\n**important: Oops**"),
-        "open important finding at src/a.py:3: Oops", id="located",
-    ),
-    pytest.param(
-        thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
-               "**critical: Global**\n\nno file", path="src/first.py", line=12),
-        "open critical finding at src/first.py:12: Global", id="anchored",
-    ),
-])
-def test_readiness_blocking_finding(gh: FakeGh, finding: dict, reason: str) -> None:
-    arm_readiness(gh, threads=(finding,))
-    result = readiness()
-    assert not result.ready and result.reasons == (reason,)
 
 
 def test_readiness_uses_head_or_non_outdated_rule_and_resolved_never_blocks(

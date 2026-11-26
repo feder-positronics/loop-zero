@@ -45,16 +45,13 @@ def test_size_budget_counts_unicode_and_propagates_read_errors(git_repo, fake_to
     source.parent.mkdir(parents=True)
     source.write_text("one\ntwo\n")
     source.with_name("z.py").write_text("three\n")
-    git(git_repo, "add", ".")
-    base = git(git_repo, "write-tree").strip()
+    base = stage_tree(git_repo)
     if failure == "deleted":  # unstaged deletion: skipped, not an error
         source.unlink()
     elif failure == "show":
         fake_tool("git", 'if [ "$1" = show ]; then case "$2" in */a.py) exit 1;; esac; fi\n'
                   f'exec {shutil.which("git")} "$@"\n')
-    done = subprocess.run(["bash", str(SCRIPT), base], cwd=git_repo,
-                          env={**os.environ, "PYTHON": sys.executable},
-                          capture_output=True, text=True, check=False)
+    done = run_budget(git_repo, base)
     assert bool(done.returncode) is (failure == "show")
     if failure != "show":
         assert done.stdout.startswith("src=1 (base 3," if failure else "src=3 (base 3, delta 0,")
@@ -82,38 +79,29 @@ _SIMPLE_FUNCTION = "def ok():\n    return 1\n"
 _HOT_FUNCTION = _branchy("hot", 11)
 
 
-@pytest.mark.parametrize("before,after,expected_rc", [
-    pytest.param(_SIMPLE_FUNCTION, _branchy("new_hot", 10), 1, id="new_over_cap"),
-    pytest.param(_HOT_FUNCTION, _HOT_FUNCTION, 0, id="existing_hold"),
-    pytest.param(_HOT_FUNCTION, _branchy("hot", 10), 0, id="existing_shrink"),
-    pytest.param(_HOT_FUNCTION, _branchy("hot", 12), 1, id="existing_grow"),
+_CONTEXT_MANAGERS = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
+                            for i in range(11))
+_PEP758 = "import contextlib\ndef pep758(x):\n" + _CONTEXT_MANAGERS + (
+    "    try:\n        return int(x) + y\n    except KeyError, TypeError:\n        return 0\n"
+)
+
+
+@pytest.mark.parametrize("before,after,over_cap,regressions", [
+    pytest.param(_SIMPLE_FUNCTION, _branchy("new_hot", 10), 1, 1, id="new_over_cap"),
+    pytest.param(_HOT_FUNCTION, _HOT_FUNCTION, 1, 0, id="existing_hold"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 10), 1, 0, id="existing_shrink"),
+    pytest.param(_HOT_FUNCTION, _branchy("hot", 12), 1, 1, id="existing_grow"),
+    pytest.param(_PEP758, _PEP758, 0, 0, id="pep758_with_blocks"),
 ])
-def test_complexity_ratchet(git_repo, module_path, before, after, expected_rc):
+def test_complexity_ratchet(git_repo, module_path, before, after, over_cap, regressions):
     module_path.write_text(before)
     base = stage_tree(git_repo)
     if after != before:
         module_path.write_text(after)
     done = run_budget(git_repo, base)
-    assert done.returncode == expected_rc, done.stdout + done.stderr
-    assert ("complexity=FAIL" if expected_rc else "complexity=PASS") in done.stdout
-
-
-def test_complexity_parses_pep758_and_ignores_with_blocks(git_repo, module_path):
-    with_blocks = "".join(f"    with contextlib.suppress(ValueError):\n        y = {i}\n"
-                          for i in range(11))
-    module_path.write_text(
-        "import contextlib\n"
-        "def pep758(x):\n"
-        f"{with_blocks}"
-        "    try:\n"
-        "        return int(x) + y\n"
-        "    except KeyError, TypeError:\n"
-        "        return 0\n"
-    )
-    base = stage_tree(git_repo)
-    done = run_budget(git_repo, base)
-    assert done.returncode == 0, done.stdout + done.stderr
-    assert "complexity=PASS (cap 10, over_cap 0, regressions 0)" in done.stdout
+    assert done.returncode == int(bool(regressions)), done.stdout + done.stderr
+    result = "FAIL" if regressions else "PASS"
+    assert f"complexity={result} (cap 10, over_cap {over_cap}, regressions {regressions})" in done.stdout
 
 
 def test_complexity_rejects_old_python(git_repo, module_path, tmp_path):
@@ -133,13 +121,9 @@ def test_complexity_rejects_old_python(git_repo, module_path, tmp_path):
     assert "requires Python 3.14+" in done.stderr
 
 
-@pytest.mark.parametrize("path,cap,grew,expected_rc", [
-    ("core/CONTRACT.md", 1500, True, 1),
-    ("core/CONTRACT.md", 1500, False, 0),
-    ("docs/DELEGATION.md", 660, True, 1),
-    ("docs/DELEGATION.md", 660, False, 0),
-])
-def test_markdown_doc_budgets(git_repo, path, cap, grew, expected_rc):
+@pytest.mark.parametrize("path,cap", [("core/CONTRACT.md", 1500), ("docs/DELEGATION.md", 660)])
+@pytest.mark.parametrize("grew", [True, False])
+def test_markdown_doc_budgets(git_repo, path, cap, grew):
     doc = git_repo / path
     doc.parent.mkdir(parents=True)
     doc.write_text("line\n" * (cap + 5))
@@ -147,4 +131,4 @@ def test_markdown_doc_budgets(git_repo, path, cap, grew, expected_rc):
     if grew:
         doc.write_text("line\n" * (cap + 6))
     done = run_budget(git_repo, base)
-    assert done.returncode == expected_rc, done.stdout + done.stderr
+    assert done.returncode == int(grew), done.stdout + done.stderr
