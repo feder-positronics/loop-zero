@@ -4698,9 +4698,7 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
     assert "Manual validation evidence." in draft
 
 
-@pytest.mark.parametrize("command", ["ready", "merge", "resume"])
-def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, command):
-    # PR #1230 fit its fork point at 7,482. Current main added 26 independent lines.
+def size_budget_fixture(wt, repo, headroom):
     checker = Path(__file__).resolve().parents[1] / "scripts/size_budget.sh"
     cap = int(re.search(r"^SRC_CAP=(\d+)$", checker.read_text(), re.MULTILINE)[1])
     (repo / "scripts").mkdir()
@@ -4712,7 +4710,7 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
     publish_workflow(wt, policy)
     fork = head_of(repo)
     git(wt, "merge", "--no-edit", fork)
-    for checkout, name, lines in [(wt, "feature", cap - 18), (repo, "upstream", 26)]:
+    for checkout, name, lines in [(wt, "feature", cap - headroom), (repo, "upstream", 26)]:
         folder = checkout / "src/loopzero"
         folder.mkdir(parents=True)
         (folder / f"{name}.py").write_text("# counted line\n" * lines)
@@ -4721,6 +4719,13 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
     # Deliberately leave origin/main stale in the source repository.
     git(repo, "push", "--no-verify", str(repo.parent / "origin.git"), "main")
     git(repo, "update-ref", "refs/remotes/origin/main", fork)
+    return cap
+
+
+@pytest.mark.parametrize("command", ["ready", "merge", "resume"])
+def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, command):
+    # PR #1230 fit its fork point at 7,482. Current main added 26 independent lines.
+    cap = size_budget_fixture(wt, repo, 18)
     head = head_of(wt)
     arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
     monkeypatch.setattr(mergify, "configured", lambda *_: True)
@@ -4738,3 +4743,42 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
         assert code == 1 and f"src={cap + 8} (base 26, delta {cap - 18}, cap {cap}" in out + err
     assert head_of(wt) == head
     assert not (wt / "src/loopzero/upstream.py").exists()
+
+
+@pytest.mark.parametrize("queue_state", ["ordered", "empty", "ambiguous", "unavailable"])
+def test_prequeue_size_warning_replays_1238(wt, repo, gh, capsys, monkeypatch, queue_state):
+    cap = size_budget_fixture(wt, repo, 48)
+    main = head_of(repo)
+    batches = []
+    for number, parents in [(1146, []), (1219, ["1146"])]:
+        git(repo, "switch", "--detach", main)
+        path = repo / f"src/loopzero/pr_{number}.py"
+        path.write_text("# counted line\n" * 13)
+        git(repo, "add", str(path))
+        git(repo, "commit", "-qm", f"PR {number}")
+        git(repo, "push", str(repo.parent / "origin.git"), f"HEAD:refs/pull/{number}/head")
+        batches.append({"id": str(number), "parent_ids": parents, "queue_rule_name": "main",
+                        "pull_requests": [{"number": number}], "sub_batches": []})
+
+    def snapshot(_repo, suffix):
+        assert suffix == "/merge-queue/status?branch=main"
+        if queue_state == "unavailable":
+            raise mergify.MergifyError("queue status unavailable")
+        if queue_state == "ambiguous":
+            batches[1]["parent_ids"] = []
+        return {"mode": "serial", "batches": [] if queue_state == "empty" else batches[::-1]}
+
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False)
+    monkeypatch.setattr(mergify, "configured", lambda *_: True)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "api_get", snapshot)
+    code, out, err = run(capsys, "ready")
+
+    assert code == 0 and f"ready: {URL}" in out
+    if queue_state == "ordered":
+        assert "#1146, #1219" in out + err
+        assert f"src={cap + 4} (base 26, delta {cap - 22}, cap {cap}" in out + err
+    else:
+        assert "projected size budget" not in out + err
