@@ -1803,7 +1803,8 @@ def main(argv: list[str] | None = None) -> int:
         if conflicts:
             parser.error(f"review --repost cannot be combined with {' or '.join(conflicts)}")
     try:
-        return args.func(args)
+        with _proc.unwind_on_sigterm():
+            return args.func(args)
     except IndependentReviewerUnavailable as exc:
         print(f"loopzero {args.command}: {exc}", file=sys.stderr)
         return 4
