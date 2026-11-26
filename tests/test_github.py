@@ -1253,6 +1253,19 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
         [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
 
 
+def test_graphql_limit_with_http_200_keeps_verified_reset(gh, monkeypatch):
+    monkeypatch.setattr(github, "_retry_sleep", lambda _delay: None)
+    monkeypatch.setattr(github.time, "time", lambda: 1795640554)
+    gh.respond("api graphql", "HTTP/2.0 200 OK\r\nX-RateLimit-Resource: graphql\r\nX-RateLimit-Remaining: 0\r\n"
+               "X-RateLimit-Reset: 1795640594\r\n\r\n"
+               '{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}',
+               exit=1, stderr="gh: API rate limit exceeded")
+    with github.bounded_reads(github.time.monotonic() + 30, retry=True), \
+            pytest.raises(github.GhRateLimited) as info:
+        github._gh("api", "graphql", "-f", "query={viewer{login}}")
+    assert (info.value.rate_reset, info.value.confirmed_rate_limit) == (1795640594, True)
+
+
 @pytest.mark.parametrize("diagnostic", [
     {"data": {"rateLimit": {"remaining": 0, "resetAt": "2099-01-01T00:00:00Z"}}},
     "null", "[]", {"data": {"rateLimit": {"remaining": 0, "resetAt": 42}}},

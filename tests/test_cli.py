@@ -4424,7 +4424,7 @@ def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch,
 
 
 @pytest.mark.parametrize("kind", ["checks", "mergify"])
-@pytest.mark.parametrize("reset", [None, -1, 20, 100])
+@pytest.mark.parametrize("reset", [None, -1, 20, 100, "transient"])
 def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
     head = commit_mergify_configuration(wt)
     config = cli.config_mod.load_trusted(wt)
@@ -4432,7 +4432,10 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
     clock = poll_clock(monkeypatch, jitter=1.0)
     monkeypatch.setattr(cli.time, "time", lambda: clock.now)
     polls = []
-    error = github.GhUnavailable(("gh",), "quota exhausted", rate_reset=reset)
+    error = github.GhRateLimited(("gh",), "quota exhausted", rate_reset=reset)
+    if reset == "transient":  # Two failures 2-5 s apart while the PR may still be queued.
+        error = (github.GhUnavailable(("gh",), "HTTP 502") if kind == "checks"
+                 else mergify.MergifyUnavailable("Mergify queue lookup failed with HTTP 502"))
 
     def next_poll(*_args):
         polls.append(clock.now)
@@ -4456,10 +4459,11 @@ def test_wait_restarts_the_poll_after_quota_reset(wt, monkeypatch, kind, reset):
         wait = partial(cli._wait_for_mergify, config, pr, 90, confirmed=True)
         expected = "e" * 40
 
-    if reset == 20:
+    if reset in (20, "transient"):
         assert wait() == expected
-        assert polls == [0, 20]
-        assert clock.sleeps == [20]
+        delay = 21 if reset == 20 else cli.WAIT_INTERVAL  # One second past the verified reset.
+        assert polls == [0, delay]
+        assert clock.sleeps == [delay]
     else:
         with pytest.raises(github.GhUnavailable, match="quota exhausted"):
             wait()

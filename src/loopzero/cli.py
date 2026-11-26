@@ -1500,11 +1500,15 @@ def _read_wait_poll[T](read: Callable[[], T], deadline: float) -> T:
     while True:
         try:
             return read()
-        except github.GhUnavailable as exc:
-            delay = (exc.rate_reset or 0) - time.time()
+        except (github.GhUnavailable, mergify.MergifyUnavailable) as exc:
+            # A quota waits one second past its verified reset; other transients retry next poll.
+            delay = WAIT_INTERVAL
+            if quota := isinstance(exc, github.GhRateLimited):
+                delay = exc.rate_reset + 1 - time.time() if exc.rate_reset else 0
             if not 0 < delay < deadline - time.monotonic():
                 raise
-            print(f"GitHub quota exhausted. Waiting {delay:.0f}s for the verified reset.", flush=True)
+            print(f"GitHub quota exhausted. Waiting {delay:.0f}s for the verified reset." if quota
+                  else f"{str(exc).splitlines()[0]}; retrying in {delay:.0f}s", flush=True)
             _sleep(delay)
             if time.monotonic() >= deadline:
                 raise

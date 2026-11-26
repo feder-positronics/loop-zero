@@ -82,6 +82,10 @@ class GhUnavailable(GhError):
     """GitHub could not supply a result because of a transient fault or limit."""
 
 
+class GhRateLimited(GhUnavailable):
+    """GitHub refused the request under a rate limit; `rate_reset` is set when verified."""
+
+
 class ReadDeadline(GhUnavailable):
     """A shared GitHub read deadline elapsed."""
 
@@ -413,11 +417,12 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
-    error = GhUnavailable if transient else GhError
-    confirmed_limit = rate_limited and status in {"403", "429"}
+    error = GhRateLimited if rate_limited else GhUnavailable if transient else GhError
+    # GraphQL reports an exhausted primary limit with HTTP 200 and the same headers.
+    exhausted = rate_limited and headers.get("x-ratelimit-remaining") == "0"
+    confirmed_limit = exhausted or (rate_limited and status in {"403", "429"})
     reset = headers.get("x-ratelimit-reset", "")
-    rate_reset = int(reset) if (confirmed_limit and headers.get("x-ratelimit-remaining") == "0"
-                                and re.fullmatch(r"[0-9]{1,18}", reset)) else None
+    rate_reset = int(reset) if exhausted and re.fullmatch(r"[0-9]{1,18}", reset) else None
     raise error(error_command, detail, token=selected, guidance=guidance,
                 confirmed_rate_limit=confirmed_limit, rate_reset=rate_reset)
 
