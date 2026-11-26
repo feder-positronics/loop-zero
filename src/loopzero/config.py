@@ -52,7 +52,7 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str) -> Config:
+def load(path: Path | str, *, require_ci: bool = False) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
     try:
@@ -70,7 +70,10 @@ def load(path: Path | str) -> Config:
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{path}: invalid TOML: {exc}") from exc
     try:
-        return _build(data)
+        policy = _build(data)
+        if require_ci:
+            _require_ci(data.get("checks", {}))
+        return policy
     except ConfigError as exc:
         raise ConfigError(f"{path}: {exc}") from None
 
@@ -108,7 +111,9 @@ def _has_replacement_refs(common_dir: Path) -> bool:
     return b" refs/replace/" in packed
 
 
-def _remote_workflow(worktree: Path, branch: str, previous: Config | None) -> tuple[Config, str]:
+def _remote_workflow(
+    worktree: Path, branch: str, previous: Config | None, *, require_ci: bool,
+) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
@@ -135,13 +140,18 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None) -> tu
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"{source}: invalid TOML: {exc}. {hint}") from None
     try:
-        return _build(data), revision
+        policy = _build(data)
+        if require_ci and policy.base_branch == branch:
+            _require_ci(data.get("checks", {}))
+        return policy, revision
     except ConfigError as exc:
         raise ConfigError(f"{source}: {exc}. {hint}") from None
 
 
-def load_trusted(worktree: Path, *, previous: Config | None = None) -> Config:
-    """Select delivery policy using Git's origin default and its trusted workflow."""
+def load_trusted(
+    worktree: Path, *, previous: Config | None = None, require_ci: bool = False,
+) -> Config:
+    """Select the trusted origin workflow, reusing a prior load with the same validation."""
     prefix = "refs/remotes/origin/"
     default = _proc.run(
         ["git", "symbolic-ref", "--quiet", f"{prefix}HEAD"],
@@ -154,13 +164,20 @@ def load_trusted(worktree: Path, *, previous: Config | None = None) -> Config:
             "or supply --config for bootstrap or an override."
         )
     branch = ref.removeprefix(prefix)
-    policy, revision = _remote_workflow(worktree, branch, previous)
+    policy, revision = _remote_workflow(worktree, branch, previous, require_ci=require_ci)
     if policy.base_branch == branch:
         return replace(policy, trusted_base_revision=revision)
-    base, revision = _remote_workflow(worktree, policy.base_branch, previous)
+    base, revision = _remote_workflow(worktree, policy.base_branch, previous, require_ci=require_ci)
     if base.base_branch != policy.base_branch:
         raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
     return replace(base, trusted_base_revision=revision)
+
+
+def _require_ci(checks: dict[str, Any]) -> None:
+    if "required_ci" not in checks:
+        raise ConfigError(
+            "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
+        )
 
 
 def _build(data: dict[str, Any]) -> Config:

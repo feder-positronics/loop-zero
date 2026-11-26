@@ -2363,6 +2363,27 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
+@pytest.mark.parametrize("command,required,code", [
+    ("ready", "", 1), ("merge", "", 1),
+    ("ready", "required_ci = []", 0), ("ready", 'required_ci = ["checks"]', 1),
+])
+def test_delivery_requires_explicit_ci_policy(wt, gh, capsys, head, command, required, code):
+    if not required:
+        arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
+    publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required) + "\n")
+    if required:
+        arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
+    actual, out, err = run(capsys, command)
+    assert actual == code, (out, err)
+    if not required:
+        assert "origin/main:workflow.toml: checks.required_ci must list the required contexts" in err
+        assert "required_ci = []" in err and not gh.calls
+    elif code:
+        assert "required check 'checks' is failure" in out
+    else:
+        assert not any("/check-runs" in " ".join(call["argv"]) for call in gh.calls)
+
+
 @pytest.mark.parametrize("retargeted,reason", [
     (True, "PR targets release, configured base is main"),
     (False, f"required check 'checks' is failure{FAILED_CHECK_HINT}"),

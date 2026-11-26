@@ -131,10 +131,11 @@ def _load_config(
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
+    require_ci = args.command in {"ready", "merge"} and not getattr(args, "cancel", False)
     if args.config:
         print("checks are unpinned because --config was provided")
-        return config_mod.load(path)
-    config = config_mod.load_trusted(root, previous=previous)
+        return config_mod.load(path, require_ci=require_ci)
+    config = config_mod.load_trusted(root, previous=previous, require_ci=require_ci)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
