@@ -35,6 +35,8 @@ reserved classes.
 Git owns commits, branches and ancestry. GitHub owns the live PR narrative,
 reviews, finding threads, check statuses and merge state. Within a task worktree,
 PR body writers lock the state directory from the live read through the update.
+Review publication rechecks the round while holding a same-host lock keyed by
+repository and PR. The lock covers POST and lost-response read-back.
 CI and branch protection
 provide the hosted enforcement. Readiness is a checklist over these sources,
 not a tamper-proof security boundary: repository writers can edit PR evidence,
@@ -392,8 +394,9 @@ one state transition should not become repeated writes that trigger policy CI.
 GitHub reads and the idempotent thread resolution mutation retry transient
 failures once after five seconds. They stop on exhausted quota and honor a
 secondary limit’s Retry-After when the delay fits the read budget. Mergify
-reads retry server errors, throttling and failed
-reads up to twice (2/5 seconds). Waits use bounded backoff. See the
+queue reads retry once after two seconds, subject to Retry-After and the
+remaining queue wait budget. Calls without a deadline allow less than five
+seconds of backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
 The optional host ai-accounts helper owns managed credential selection and exact-model
 eligibility under its existing lock. Its Claude exec reserve guard (including pinned
@@ -541,9 +544,11 @@ unpushed local commits, with the supplied environment and network policy under
 equivalent isolation, and must not claim not_started after launch. The coordinator resolves stages, verifies clean unchanged head before
 every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
-the authoritative `checks.json` receipt. Writers lock the task state directory
-while rechecking HEAD and atomically replacing the receipt from a synced sibling
-temporary file. Successful keyed stages are checkpointed in the same receipt
+the authoritative `checks.json` receipt. Checks lock the task state directory
+through execution and receipt publication. A waiter can reuse a newly published
+passing receipt when HEAD, settings and declared inputs match. Writers recheck
+HEAD and atomically replace the receipt from a synced sibling temporary file.
+Successful keyed stages are checkpointed in the same receipt
 for reuse. A checkpoint cannot replace a clean pass for the same head and
 settings or satisfy readiness before final worktree validation. Completed
 failures still replace passes. Runners cannot select stages or mint receipts. Stage admission

@@ -2,10 +2,13 @@
 import importlib.machinery
 import importlib.util
 import json
+import re
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -73,15 +76,20 @@ def test_exhausted_concurrent_stale_requests_and_terminal(helper, monkeypatch):
     assert helper.active('claude') == 'b'
 
 
-@pytest.mark.parametrize('http', [None, 429])
+@pytest.mark.parametrize('http', [None, 429, 503])
 def test_failed_or_unqualified_quota_never_selects(helper, monkeypatch, http):
     def probe(token, model):
         if http is None and token.endswith('-b'):
             raise OSError('offline')
         return {'ok': False, 'http': http or 200, 'util': {}}
     monkeypatch.setattr(helper, 'probe_claude_model', probe)
-    assert helper.exhausted('claude', helper.identity('claude', 'a'), 'm')['outcome'] == 'unknown'
-    assert helper.active('claude') == 'a'
+    identity = helper.identity('claude', 'a')
+    if http == 503:
+        helper.write_private(helper.STATE / 'status.json', json.dumps({'exhausted': {identity + ':m': helper.now() + 300}}))
+        result = helper.launch('claude', 'm', {})
+    else:
+        result = helper.exhausted('claude', identity, 'm')
+    assert result['outcome'] == 'unknown' and helper.active('claude') == 'a'
 
 
 def test_json_boundary_and_unavailable_store(helper, capsys):
@@ -156,22 +164,16 @@ def test_launch_then_pin_survives_active_change(helper, monkeypatch, capsys, exe
     assert exec_envs[0]['AI_ACCOUNTS_CLAUDE_IDENTITY'] == launch['identity']
 
 
-def test_pin_revision_changed_or_explicit_credentials_fails_closed(helper, monkeypatch, capsys, exec_envs):
+@pytest.mark.parametrize('explicit', [False, True], ids=['changed-revision', 'caller-credential'])
+def test_pin_revision_changed_or_explicit_credentials_fails_closed(helper, monkeypatch, capsys, exec_envs, explicit):
     revision = helper.with_accounts('claude', {})['AI_ACCOUNTS_CLAUDE_IDENTITY']
-    monkeypatch.setenv('CLAUDE_CODE_OAUTH_TOKEN', 'caller-explicit')
-    assert helper.main(['exec', 'claude', '--identity', revision, '--', 'real-harness']) == 2
-    assert json.loads(capsys.readouterr().out)['outcome'] == 'unmanaged'
-    monkeypatch.delenv('CLAUDE_CODE_OAUTH_TOKEN')
-    helper.write_private(helper.STATE / 'claude/tokens/a', 'synthetic-revised-secret')
+    if explicit:
+        monkeypatch.setenv('CLAUDE_CODE_OAUTH_TOKEN', 'caller-explicit')
+    else:
+        helper.write_private(helper.STATE / 'claude/tokens/a', 'synthetic-revised-secret')
     assert helper.main(['exec', 'claude', '--identity', revision, '--', 'real-harness']) == 2
     assert json.loads(capsys.readouterr().out)['outcome'] == 'unmanaged'
     assert exec_envs == []
-
-
-def test_launch_keeps_unknown_model_unknown(helper, monkeypatch):
-    helper.write_private(helper.STATE / 'status.json', json.dumps({'exhausted': {helper.identity('claude', 'a') + ':m': helper.now() + 300}}))
-    monkeypatch.setattr(helper, 'probe_claude_model', lambda *args: {'http': 503, 'ok': False})
-    assert helper.launch('claude', 'm', {})['outcome'] == 'unknown'
 
 
 def test_codex_select_reserves_current_at_85_without_churn(helper):
@@ -291,16 +293,21 @@ def test_exec_selects_under_reserve_or_preserves_caller_auth(helper, monkeypatch
     assert exec_envs[0][key] == expected
 
 
-@pytest.mark.parametrize('code,retry_after,delay', [
-    (429, '3600', 3600), (429, 'Thu, 01 Jan 2026 01:00:00 GMT', 3600),
-    (429, '9' * 400, 86400), (429, '1000000000000', 86400),
-    (429, 'Fri, 31 Dec 9999 23:59:59 GMT', 86400),
-    (429, 'Thu, 01 Jan 2026 01:00:00', 3600),
-    (429, None, 1800), (429, 'invalid', 1800), (429, '120', 1800),
-    (200, None, 1800), (503, None, 1800), (None, None, 1800)])
-def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, code, retry_after, delay):
+@pytest.mark.parametrize('code,retry_after,delay,previous', [
+    (429, '3600', 3600, None), (429, 'Thu, 01 Jan 2026 01:00:00 GMT', 3600, None),
+    (429, '9' * 400, 86400, None), (429, '1000000000000', 86400, None),
+    (429, 'Fri, 31 Dec 9999 23:59:59 GMT', 86400, None),
+    (429, 'Thu, 01 Jan 2026 01:00:00', 3600, None),
+    (429, None, 1800, None), (429, 'invalid', 1800, None), (429, '120', 1800, None),
+    (200, None, 1800, None), (503, None, 1800, None), (None, None, 1800, None),
+    *((200, None, 1800, deadline) for deadline in ('inf', '-inf', 'nan', '1e308', '1767312001')),
+])
+def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, code, retry_after, delay, previous):
     start = 1767225600  # 2026-01-01 00:00:00 UTC
     clock, calls = [start], []
+    deadline = helper.STATE / 'claude/usage-next/a'
+    if previous is not None:
+        helper.write_private(deadline, previous)
     limits = [{'kind': 'weekly_all', 'percent': 10, 'resets_at': start + 86400}]
     headers = {'anthropic-ratelimit-unified-7d-utilization': '.25'}
 
@@ -316,9 +323,10 @@ def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, cod
     monkeypatch.setattr(helper, '_http', http)
     first = helper.check_claude('a')
     assert first['source'] == ('OAuth usage API' if code == 200 else 'headers (fallback)')
-    deadline = helper.STATE / 'claude/usage-next/a'
     assert float(deadline.read_text()) == start + delay
     assert deadline.stat().st_mode & 0o777 == 0o600
+    if code == 200:
+        assert calls == [('GET', 'Bearer synthetic-secret-a')]
     log_path = helper.STATE / 'log'
     logged = log_path.read_text() if log_path.exists() else ''
     if code not in (200, None):
@@ -355,26 +363,6 @@ def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, cod
     clock[0] = start + delay
     fresh.check_claude('a')
     assert calls[0] == ('GET', 'Bearer synthetic-secret-a')
-
-
-@pytest.mark.parametrize('deadline', ['inf', '-inf', 'nan', '1e308', '1767312001'])
-def test_claude_usage_malformed_deadline_allows_fresh_attempt(helper, monkeypatch, deadline):
-    start = 1767225600  # 2026-01-01 00:00:00 UTC
-    next_file = helper.STATE / 'claude/usage-next/a'
-    helper.write_private(next_file, deadline)
-    calls = []
-
-    def http(req):
-        calls.append(req.get_method())
-        limits = [{'kind': 'weekly_all', 'percent': 10, 'resets_at': start + 86400}]
-        return 200, {}, json.dumps({'limits': limits}).encode()
-
-    monkeypatch.setattr(helper, 'now', lambda: start)
-    monkeypatch.setattr(helper, '_http', http)
-    result = helper.check_claude('a')
-    assert result['source'] == 'OAuth usage API'
-    assert calls == ['GET']
-    assert float(next_file.read_text()) == start + 1800
 
 
 @pytest.mark.parametrize('model_field', [{'scope': {'model': {'display_name': 'Fable', 'id': 'other'}}}, {'model': {'id': 'fable'}}, {'model': 'fable'}])
@@ -453,26 +441,19 @@ def test_pace_warns_only_for_increasing_same_reset_samples(helper, monkeypatch, 
 
 @pytest.mark.parametrize('name', ['loopzero', 'codex', 'claude'])
 @pytest.mark.parametrize('pin_state', ['absent', 'missing', 'nonexecutable', 'executable', 'symlink'])
-def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeypatch,
-                                                       name, pin_state):
+def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeypatch, fake_bin, fake_tool,
+                                                     name, pin_state):
     shims = tmp_path / 'shims'
     shims.mkdir()
     for shim in helper.SHIMS:
         (shims / shim).symlink_to(Path(helper.__file__))
-    binaries = tmp_path / 'bin'
-    binaries.mkdir()
-    for binary in helper.SHIMS:
-        target = binaries / binary
-        target.write_text('#!/bin/sh\nexit 0\n')
-        target.chmod(0o755)
+        fake_tool(shim, 'exit 0\n')
     pin = tmp_path / '.local/lib/codex-reviewer'
     if pin_state != 'absent':
-        version = pin.with_name('codex-reviewer-test')
-        version.mkdir(parents=True)
-        if pin_state == 'symlink':
-            pin.symlink_to(version, target_is_directory=True)
-        else:
-            pin.mkdir()
+        pin_home = pin.with_name('codex-reviewer-test') if pin_state == 'symlink' else pin
+        pin_home.mkdir(parents=True)
+        if pin_home != pin:
+            pin.symlink_to(pin_home, target_is_directory=True)
         if pin_state != 'missing':
             codex = pin / 'codex'
             codex.write_text('#!/bin/sh\nexit 0\n')
@@ -480,23 +461,19 @@ def test_shim_prefers_verified_codex_only_for_loopzero(helper, tmp_path, monkeyp
     codex_home = tmp_path / 'codex-home'
     arg0 = codex_home / 'tmp/arg0-linux/codex-arg0ABC123'
     monkeypatch.setenv('CODEX_HOME', str(codex_home))
-    monkeypatch.setenv('PATH', f'{shims}:{arg0}:{binaries}')
+    monkeypatch.setenv('PATH', f'{shims}:{arg0}:{fake_bin}')
     monkeypatch.setattr(helper.sys, 'argv', [str(shims / name)])
-    calls = []
-    monkeypatch.setattr(helper.os, 'execve', lambda *args: calls.append(args))
-
+    execute = Mock()
+    monkeypatch.setattr(helper.os, 'execve', execute)
     helper.cmd_shim(name, ['--help'])
-
-    real, argv, env = calls.pop()
-    assert real == str(binaries / name)
+    execute.assert_called_once()
+    real, argv, env = execute.call_args.args
+    assert real == str(fake_bin / name)
     assert argv == [real, '--help']
+    expected = [shims, arg0, fake_bin]
     if name == 'loopzero':
-        expected = [str(binaries)]
-        if pin_state in ('executable', 'symlink'):
-            expected.insert(0, str(pin))
-        assert env['PATH'].split(helper.os.pathsep) == expected
-    else:
-        assert env['PATH'] == f'{shims}:{arg0}:{binaries}'
+        expected = [pin, fake_bin] if pin_state in ('executable', 'symlink') else [fake_bin]
+    assert env['PATH'].split(helper.os.pathsep) == list(map(str, expected))
 
 
 @pytest.mark.parametrize('provider,email,shown', [
@@ -534,44 +511,37 @@ def test_account_lock_timeout_leaves_files_untouched(helper, monkeypatch):
     monkeypatch.setattr(helper, "codex_in_use", lambda _: False)
     monkeypatch.setattr(helper, "refresh_codex", premature_probe)
     monkeypatch.setattr(helper, "_http", premature_probe)
-    with (helper.STATE / ".lock").open("a") as holder:
-        helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
-        with pytest.raises(helper.AccountLockTimeout, match=r"^\.lock is busy"):
-            helper.check(quiet=True)
-    with (helper.STATE / ".codex-sync.lock").open("a") as holder:
-        helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
-        operations = (
-            lambda: helper.check(quiet=True),
+    check = partial(helper.check, quiet=True)
+    for name, operations in (
+        (".lock", (check,)),
+        (".codex-sync.lock", (
+            check,
             lambda: helper.launch("codex", "model", {}),
             lambda: helper.cmd_add("codex", "new"),
             lambda: helper.cmd_pinned_exec("codex", helper.identity("codex", "b"), ["unused"]),
             lambda: helper.exhausted("codex", helper.identity("codex", "main"), "model", retry_env={}),
-        )
-        for operation in operations:
-            with pytest.raises(helper.AccountLockTimeout, match=r"\.codex-sync\.lock is busy"):
-                operation()
+        )),
+    ):
+        with (helper.STATE / name).open("a") as holder:
+            helper.fcntl.flock(holder, helper.fcntl.LOCK_EX)
+            for operation in operations:
+                with pytest.raises(helper.AccountLockTimeout, match=rf"^{re.escape(name)} is busy"):
+                    operation()
     assert elapsed == 360
     assert not helper.codex_home("new").exists()
     assert helper.active("codex") == "main"
     assert helper.active("claude") == "a"
     assert json.loads(status.read_text()) == cooldown
 
-    acquire = helper._locked
-    home_lock_entries = []
-
-    def count_home_lock(name):
-        if name == ".codex-sync.lock":
-            home_lock_entries.append(name)
-        return acquire(name)
-
-    monkeypatch.setattr(helper, "_locked", count_home_lock)
+    acquire = Mock(wraps=helper._locked)
+    monkeypatch.setattr(helper, "_locked", acquire)
     monkeypatch.setattr(helper, "check_claude", lambda _: {"tier": -1})
     monkeypatch.setattr(helper, "check_codex", lambda _: {"tier": -1})
     helper.check(quiet=True)
-    assert home_lock_entries == [".codex-sync.lock"]
+    assert acquire.call_args_list.count(call(".codex-sync.lock")) == 1
     helper.set_active("codex", "b")
     assert helper.with_accounts("codex,codex", {})["CODEX_HOME"] == str(helper.codex_home("b"))
-    assert home_lock_entries == [".codex-sync.lock"] * 2
+    assert acquire.call_args_list.count(call(".codex-sync.lock")) == 2
 
 
 def test_provider_deadline_covers_http_error_body(helper, monkeypatch):
