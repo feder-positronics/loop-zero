@@ -1577,6 +1577,8 @@ def _wait_for_checks(
             elapsed >= MISSING_RUN_GRACE
             and all(" missing on " in r for r in pending)
             and not readiness.has_pending_checks
+            and not _read_wait_poll(partial(github.has_active_workflow, config.repo, pr.head_sha),
+                                    started + timeout)
         ):
             raise CliError(
                 f"{'; '.join(pending)} after {elapsed:.0f}s: inspect workflow scheduling, "
@@ -1910,7 +1912,7 @@ def cmd_resolve(args: argparse.Namespace) -> int:
         ) from exc
     if not remaining:
         github.refresh_eligibility(config.repo, pr, branch, config.base_branch, publishers)
-        print(f"refreshed Loop-zero Eligibility for PR #{pr.number}")
+        print(f"requested refresh of Loop-zero Eligibility for PR #{pr.number}")
     return 0
 
 

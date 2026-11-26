@@ -531,6 +531,12 @@ def _paged(endpoint: str, key: str = "check_runs") -> list:
     return list(_iter_paged(endpoint, key))
 
 
+def has_active_workflow(repo: str, head_sha: str) -> bool:
+    """A run queued in a concurrency group can exist before any of its check runs."""
+    runs = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+    return any(run.get("status") in _ACTIVE_WORKFLOWS for run in runs)
+
+
 def api_get(endpoint: str, **kwargs) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
     return _gh_json("api", endpoint, **kwargs)

@@ -3110,13 +3110,17 @@ def test_ready_wait_stops_if_pr_head_moves(wt, gh, capsys, monkeypatch, head):
                stderr_contains=(f"PR head changed while waiting: {head[:12]} to {moved[:12]}",))
 
 
-@pytest.mark.parametrize("running", [None, "upstream", "required-sibling"])
+@pytest.mark.parametrize("running", [None, "upstream", "required-sibling", "queued-run"])
 def test_ready_wait_with_missing_required_check(wt, gh, capsys, monkeypatch, head, running):
     # #189: an upstream job can be running before the required job appears.
     if running == "required-sibling":
         publish_workflow(wt, WORKFLOW.replace('["checks"]', '["checks", "Backend Tests"]'))
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    arm_check_runs(gh, head, [{"name": "Backend Tests", "status": "in_progress"}] if running else [])
+    arm_check_runs(gh, head, [{"name": "Backend Tests", "status": "in_progress"}]
+                   if running in ("upstream", "required-sibling") else [])
+    # A run waiting in a concurrency group has no check run yet (IntelFlo PR 14570).
+    gh.respond(f"api repos/{REPO}/actions/runs?head_sha={head}",
+               {"workflow_runs": [{"status": "queued"}] if running == "queued-run" else []})
     monkeypatch.setattr(cli, "MISSING_RUN_GRACE", 0.0)
 
     wait = "--wait=0" if running else "--wait"
@@ -4187,7 +4191,7 @@ def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: Fak
         assert f"gh api -X POST {ELIGIBILITY_DISPATCH} -f ref=main -f 'inputs[pr]=7'" in err
     else:
         assert (code, err) == (0, "")
-        assert out.splitlines()[1:] == ([] if outcome == "remaining" else ["refreshed Loop-zero Eligibility for PR #7"])
+        assert out.splitlines()[1:] == ([] if outcome == "remaining" else ["requested refresh of Loop-zero Eligibility for PR #7"])
 
 
 @pytest.mark.parametrize("cut", ["reply", "resolution"])
@@ -4248,7 +4252,7 @@ def test_resolve_resumes_after_github_accepts_mutation(gh, finding_pr, capsys, m
     assert run(capsys, "resolve", "0b9b59e7", reply)[0] == 130
     out, _err = expect_cli(capsys, 0, "resolve", "0b9b59e7", reply, stderr="")
     assert accepted == {"reply": 1, "resolution": 1}
-    assert "refreshed Loop-zero Eligibility for PR #7" in out
+    assert "requested refresh of Loop-zero Eligibility for PR #7" in out
     assert sum("eligibility.yml/dispatches" in " ".join(c["argv"]) for c in gh.calls) == 1
     assert run(capsys, "resolve") == (0, "", "")
 
@@ -4314,7 +4318,7 @@ def test_resolve_retries_only_thread_resolution(finding_pr, gh: FakeGh, capsys, 
     if recovers:
         assert (code, err) == (0, "")
         assert out.splitlines() == [
-            "resolved 0b9b59e7: Off by one", "refreshed Loop-zero Eligibility for PR #7",
+            "resolved 0b9b59e7: Off by one", "requested refresh of Loop-zero Eligibility for PR #7",
         ]
     else:
         assert code == 1
