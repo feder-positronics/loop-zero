@@ -595,7 +595,8 @@ def test_account_lock_preserves_existing_file_and_rejects_symlink(helper):
     assert lock.read_text() == "preserve"
 
 
-def test_sync_preserves_a_shared_directory_created_during_promotion(helper, monkeypatch):
+@pytest.mark.parametrize("unsupported", [None, "ENOSYS", "EINVAL"])
+def test_sync_preserves_a_shared_directory_created_during_promotion(helper, monkeypatch, unsupported):
     home = helper.codex_home("extra")
     home.mkdir(parents=True)
     helper.CODEX_MAIN.mkdir()
@@ -608,11 +609,12 @@ def test_sync_preserves_a_shared_directory_created_during_promotion(helper, monk
     def create_destination(entry, target):
         if entry == source:
             target.mkdir()
+            if unsupported:
+                raise OSError(getattr(helper.errno, unsupported), "no-replace unsupported")
         rename(entry, target)
 
     monkeypatch.setattr(helper, "_rename_noreplace", create_destination)
     helper.sync_codex_home(home)
     assert (source / "old").read_text() == "keep local"
     assert list((helper.CODEX_MAIN / "sessions").iterdir()) == []
-    assert (home / "notes").is_symlink()
-    assert (home / "notes").read_text() == "promote"
+    assert (home / "notes").is_symlink() and (home / "notes").read_text() == "promote"
