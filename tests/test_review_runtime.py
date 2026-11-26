@@ -9,7 +9,7 @@ import pytest
 
 from loopzero import cli, eligibility, runners
 from tests import test_cli, test_runners
-from tests.test_cli import expect_cli, post_key, prepare_review
+from tests.test_cli import expect_cli, posted, prepare_review
 from tests.test_runners import (
     APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review, replace_codex_events,
 )
@@ -81,7 +81,7 @@ def test_legacy_startup_never_publishes(wt, gh, fake_bin, capsys, row, repost):
         replace_codex_events(script, [envelope(row)["events"][1]], prepend=True)
         expect_cli(capsys, 4, "review", stderr_contains=("Code Mode",))
         assert not list((wt / ".loopzero").glob("review-*.json"))
-    assert not any(c["argv"][:2] == post_key().split() for c in gh.calls)
+    assert not any(map(posted, gh.calls))
 
 
 @pytest.mark.parametrize(

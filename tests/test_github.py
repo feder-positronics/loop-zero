@@ -887,7 +887,7 @@ def test_status_pagination_rejects_a_repeated_full_page(gh: FakeGh) -> None:
     page = [{"id": i, "state": "success"} for i in range(github.PAGE)]
     gh.respond(f"api {endpoint}", page, page)
     with pytest.raises(github.GhError, match="GitHub repeated a full page"):
-        github._paged(endpoint)
+        github.paged(endpoint)
     assert len(gh.calls) == 2
 
 
@@ -1308,7 +1308,7 @@ def test_merged_sha_requires_verified_merge_evidence(gh, views, expected):
 @pytest.mark.parametrize("merged", [None, pr_json(number=101, state="MERGED")])
 def test_merged_branch_history_reads_terminal_page(gh: FakeGh, merged: dict | None) -> None:
     gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [])
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls --method GET", [])
     closed_page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
     gh.respond(branch_history_key(), closed_page)
     gh.respond(branch_history_key(2), [closed_history_row(merged)] if merged else [])
@@ -1361,7 +1361,7 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     row["created_at"] = "2026-10-06T00:00:00Z"
     fork = row | {"number": 9, "head": row["head"] | {"repo": {"full_name": "fork/widgets"}}}
     other_branch = row | {"number": 8, "head": row["head"] | {"ref": "lz/other"}}
-    commits = f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
+    commits = f"api repos/{REPO}/commits/{HEAD}/pulls --method GET"
     gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
     gh.respond(commits, [fork, other_branch, row])
     if state == "CLOSED":

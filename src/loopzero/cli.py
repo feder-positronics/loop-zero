@@ -71,13 +71,7 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False,
-         extra_env: dict[str, str] | None = None) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout, extra_env=extra_env)
-    if done.exit_code != 0:
-        raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
-    return done.stdout if paths else done.stdout.strip()
+_git = partial(worktree.git, timeout=GIT_TIMEOUT)
 
 
 def _require_push_target(wt: Path, repo: str) -> None:
@@ -195,21 +189,8 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _rest_rows(endpoint: str, what: str, **kwargs) -> list[dict]:
-    """Every row of a REST list, oldest first, following pages until a short one."""
-    rows: list[dict] = []
-    for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}", **kwargs)
-        if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
-            raise CliError(f"invalid GitHub {what} response")
-        rows += batch
-        if len(batch) < github.PAGE:
-            return rows
-    raise CliError(f"GitHub {what} pagination limit exceeded")
-
-
 def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
-    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews", **kwargs)
+    return github.paged(f"repos/{repo}/pulls/{number}/reviews", **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -234,7 +215,7 @@ def _pr_markers(reviews: list[dict], head: str,
             continue
         if not trusted:
             trusted = {github.login().casefold()}
-        if (review.get("user") or {}).get("login", "").casefold() not in trusted:
+        if eligibility.review_login(review) not in trusted:
             continue
         found.append(Marker(match.group(1), match.group(2), review.get("state") or ""))
     return found
@@ -1010,15 +991,15 @@ def _confirm_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
         expected = next((p for p in payloads if p["body"] == review.get("body")), None)
         review_id = review.get("id")
         if (expected is None or review.get("commit_id") != result.head or review.get("state") not in states
-                or (review.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or eligibility.review_login(review) != publisher.casefold()
                 or type(review_id) is not int or review_id <= 0):
             hint = ("; for a publication format mismatch, use the publishing CLI revision or upgrade the recovery CLI"
                     if expected is None else "")
             raise CliError(f"conflicting or ambiguous review publication{hint}")
-        comments = _rest_rows(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments", "review comments")
+        comments = github.paged(f"repos/{config.repo}/pulls/{pr.number}/reviews/{review_id}/comments")
         if (any(c.get("start_line") is not None or c.get("start_side") is not None
                 or c.get("commit_id") != result.head or c.get("pull_request_review_id") != review_id
-                or (c.get("user") or {}).get("login", "").casefold() != publisher.casefold()
+                or eligibility.review_login(c) != publisher.casefold()
                 for c in comments)
                 or sorted((c.get("path"), c.get("body")) for c in comments)
                 != sorted((c.get("path"), c.get("body")) for c in expected["comments"])
@@ -1843,7 +1824,7 @@ def _delete_tracking_ref(wt: Path, branch: str, expected_head: str) -> None:
         current = _git(wt, "for-each-ref", "--format=%(objectname) %(refname) %(symref)", ref, paths=True).rstrip(" ")
         if current == f"{expected_head} {ref}":
             _git(wt, "update-ref", "--no-deref", "-d", ref, expected_head)
-    except (CliError, OSError, _proc.ProcTimeout) as exc:
+    except (CliError, worktree.WorktreeError, OSError, _proc.ProcTimeout) as exc:
         print(f"warning: merged but tracking ref cleanup failed for {ref}: {exc}", file=sys.stderr)
 
 

@@ -880,7 +880,7 @@ def test_cache_fingerprint_spawn_error(git_repo, bwrap_log, fetched_base, monkey
             raise OSError(error, os.strerror(error))
         return run(argv, **kwargs)
 
-    monkeypatch.setattr(sandbox._proc, "run", fail_fingerprint)
+    monkeypatch.setattr("loopzero.worktree.run", fail_fingerprint)
     if error != errno.E2BIG:
         with pytest.raises(OSError) as exc:
             sandbox.run_checks(config, git_repo)

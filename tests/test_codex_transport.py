@@ -419,8 +419,8 @@ def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, 
         result = dataclasses.replace(result, raw=json.dumps(json.loads(result.raw), indent=2))
     gh.respond(f"api repos/{repo}/pulls/7",
                rest_pr_json(pr_json(headRefOid=head, mergeStateStatus="CLEAN")))
-    gh.respond(f"api repos/{repo}/pulls/7/reviews?per_page=100&page=1", [review])
-    gh.respond(f"api repos/{repo}/pulls/7/reviews/100/comments?per_page=100&page=1", [listed_comment] if kind == "normal" else [])
+    gh.respond(f"api repos/{repo}/pulls/7/reviews --method GET", [review])
+    gh.respond(f"api repos/{repo}/pulls/7/reviews/100/comments --method GET", [listed_comment] if kind == "normal" else [])
     gh.respond("api graphql", threads_json())
     gitdir = native[2] / ".git/info/exclude"
     gitdir.write_text(gitdir.read_text() + "\n.loopzero/\n")
@@ -440,7 +440,7 @@ def test_large_publication_confirmation_and_hosted_agreement(replay_gh, native, 
         if kind == "normal":
             for field, value in (("path", "other.txt"), ("body", "Different body"),
                                  ("commit_id", "different-commit"), ("line", 2), ("side", "LEFT")):
-                monkeypatch.setattr(cli, "_rest_rows", lambda *_args, f=field, v=value: [{**listed_comment, f: v}])
+                monkeypatch.setattr(cli.github, "paged", lambda *_args, f=field, v=value, **_kw: [{**listed_comment, f: v}])
                 with pytest.raises(cli.CliError, match="review finding contents or locations differ"):
                     cli._confirm_review(native[2], cfg, pr, result, "bot", [review])
 
@@ -573,6 +573,6 @@ def test_hosted_eligibility_replays_synthetic_codex_v1(monkeypatch, case):
     head, repo, number = review["commit_id"], "acme/widgets", 7
     pr = github.PR(number, "https://example.invalid", head, "main", False, "OPEN", "MERGEABLE")
     monkeypatch.setattr(github, "pr_view", lambda *_: pr)
-    monkeypatch.setattr(github, "api_get", lambda *_: [review])
+    monkeypatch.setattr(github, "paged", lambda *_: [review])
     monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
     assert eligibility.evaluate(repo, number, head, "main", ("bot",)).ready is ready

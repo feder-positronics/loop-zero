@@ -65,7 +65,7 @@ def publisher(tmp_path, fake_bin, monkeypatch):
     gh.respond_pr_view(pr_json(), branch="lz/task")
     gh.respond("api graphql", threads_json())
     gh.respond(f"api repos/{REPO}/statuses/{HEAD}", {})
-    gh.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [])
+    gh.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [])
     return gh
 
 
@@ -97,7 +97,7 @@ def test_source_publication_is_bound_to_live_review(publisher, monkeypatch, case
         "untrusted": [review | {"user": {"login": "attacker"}}], "stale": [approval("b" * 40)],
         "malformed": [review | {"body": "<!-- loopzero:review invalid -->\n**approve**"}],
     }.get(case, [review])
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", reviews)
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", reviews)
     delays = []
     monkeypatch.setattr(hosted.eligibility, "sleep", delays.append)
     if blocker in {"conflict", "unknown", "settles"}:
@@ -169,7 +169,7 @@ def test_hosted_review_coverage_after_source_head_changes(
     source["base"]["sha"] = base
     publisher.respond(f"api repos/{REPO}/pulls/7", source)
     verdict = "loopzero primary review by claude: **approve** (0 critical, 0 important, 0 suggestion)"
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1",
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET",
                       [approval(reviewed, state="COMMENTED", verdict=verdict)])
     publisher.respond(f"api repos/{REPO}/compare/{reviewed}...{head}", {"status": "ahead"})
     monkeypatch.setattr(hosted.candidate_mod, "fetched_git",
@@ -248,11 +248,11 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     sleeps = []
     monkeypatch.setattr(github, "_retry_sleep", sleeps.append)
     pr = f"api repos/{REPO}/pulls/7"
-    reviews = f"{pr}/reviews?per_page={github.PAGE}"
+    reviews = f"{pr}/reviews"
     if error in {"api", "recover", "before"}:
         fault = {"stdout": "HTTP/2.0 503 Service Unavailable\r\nX-GitHub-Request-Id: GHREQ-8774\r\n\r\n"
                            '{"message":"Service unavailable github_pat_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ"}', "exit": 1}
-        endpoint = pr if error == "before" else f"{reviews}&page=1"
+        endpoint = pr if error == "before" else f"{reviews} --method GET"
         publisher.respond(endpoint, fault, [approval()] if error == "recover" else fault)
         check_source(publisher, states, exit_code=int(error == "before"))
         assert sleeps == [5]
@@ -264,7 +264,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
         changes = {"head": {"headRefOid": "b" * 40}, "metadata": {"labels": [{"name": "hold"}]},
                    "merged": {"state": "MERGED"}}
         publisher.respond_pr_view(pr_json(**changes[error]))
-        publisher.respond(f"{reviews}&page=1", [approval()])
+        publisher.respond(f"{reviews} --method GET", [approval()])
     elif error == "publication":
         message = "invalid description"
         publisher.respond(f"api repos/{REPO}/statuses/{HEAD}", {}, {"stdout": "", "exit": 1, "stderr": f"{message} (HTTP 422)"})
@@ -272,7 +272,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     elif error == "pages":
         page = [{"id": i, "state": "COMMENTED"} for i in range(github.PAGE)]
         for number in (1, 2):
-            publisher.respond(f"{reviews}&page={number}", page)
+            publisher.respond(f"{reviews} " + ("--method GET" if number == 1 else f"page={number}"), page)
         exception, message = github.GhError, "GitHub repeated a full page"
     else:
         monkeypatch.setenv("GITHUB_REPOSITORY", "other/repo")
@@ -308,7 +308,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
             labels=[{"name": "hold"}] if case == "hold" and number == 101 else [],
         )) | values[path]
         values[path]["base"]["ref"] = branch
-        values[f"{path}/reviews?per_page=100&page=1"] = [approval(sha)]
+        values[f"{path}/reviews"] = [approval(sha)]
     if case == "stale":
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
@@ -322,6 +322,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
             values["/" + path]["labels"].append({"name": "changed"})
         return event["repository"] if path == "repos/owner/repo" else values["/" + path]
     monkeypatch.setattr(github, "api_get", api_get)
+    monkeypatch.setattr(github, "paged", api_get)
     monkeypatch.setattr("loopzero.candidate._retry_sleep", sleeps.append)
     published = []
     def publish(*args):
@@ -410,7 +411,7 @@ def test_source_status_limit(publisher, capsys, prior):
         pages = [statuses[i:i + 100] for i in range(0, 1001, 100)]
         publisher.respond(f"api repos/{REPO}/commits/{HEAD}/statuses", *pages, *pages)
 
-    publisher.respond(f"api repos/{REPO}/pulls/7/reviews?per_page=100&page=1", [approval()])
+    publisher.respond(f"api repos/{REPO}/pulls/7/reviews --method GET", [approval()])
     if prior == 998:
         check_source(publisher, ["pending", "success"])
         assert not any("/commits/" in " ".join(call["argv"]) for call in publisher.calls)

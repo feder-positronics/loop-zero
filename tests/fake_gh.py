@@ -51,8 +51,9 @@ def replay(
             if basic == "api graphql" and any("viewer { login }" in arg for arg in args):
                 basic += " viewer"
             method = args[args.index("--method") + 1] if "--method" in args else ""
-            specific = basic + " --method " + method
-            return specific if specific in compat else basic
+            page = next((arg for arg in args if arg.startswith("page=") and arg != "page=1"), "")
+            return next((key for key in (f"{basic} {page}", f"{basic} --method {method}")
+                         if key in compat), basic)
 
         key = response_key(argv)
         responses = compat.get(key)

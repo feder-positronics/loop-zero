@@ -24,7 +24,7 @@ from pathlib import Path
 from . import __version__, _proc
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
-from .worktree import WorktreeError, read_local_state
+from .worktree import GitError, WorktreeError, git, read_local_state
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -97,8 +97,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
             "bwrap binary missing: bwrap not found on PATH\n"
             "sudo apt install bubblewrap"
         )
-    head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    head = _git(config, worktree, "rev-parse", "HEAD")
+    dirty = bool(_git(config, worktree, "status", "--porcelain"))
     if config.check_runner and dirty:
         return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
                                                    "Runner requires a clean worktree"),))
@@ -157,8 +157,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                        f"({result.duration_s:.1f}s)")
             if result.exit_code != 0:
                 break
-    final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+    final_head = _git(config, worktree, "rev-parse", "HEAD")
+    final_dirty = bool(_git(config, worktree, "status", "--porcelain"))
     if (final_head, final_dirty) != (head, dirty):
         results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
                     f"HEAD before: {head}; HEAD after: {final_head}; "
@@ -267,7 +267,7 @@ def _input_blobs(config: Config, worktree: Path, paths: tuple[str, ...]) -> str 
     # Empty pathspecs must not accidentally mean the whole tree.
     if not paths:
         return ""
-    empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null").strip()
+    empty = _git(config, worktree, "hash-object", "-t", "tree", "/dev/null")
     try:
         return _git(config, worktree, "-c", "core.quotePath=true", "diff-tree", "--no-commit-id",
                     "--raw", "-r", "--no-abbrev", empty, "HEAD", "--", *paths)
@@ -590,15 +590,10 @@ def bwrap_argv(
 
 
 def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(
-        ["git", *args], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
-    )
-    if done.exit_code != 0:
-        raise SandboxUnavailable(
-            f"git {' '.join(args)} failed in {worktree}: {_proc.tail(done.stderr, 1)}"
-        )
-    return done.stdout
+    try:
+        return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths)
+    except GitError as exc:
+        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
@@ -606,8 +601,8 @@ def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
 
 
 def _stage_unchanged(config: Config, worktree: Path, head: str) -> bool:
-    return (_git(config, worktree, "rev-parse", "HEAD").strip() == head
-            and not _git(config, worktree, "status", "--porcelain").strip())
+    return (_git(config, worktree, "rev-parse", "HEAD") == head
+            and not _git(config, worktree, "status", "--porcelain"))
 
 
 def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
