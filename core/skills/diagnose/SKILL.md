@@ -18,6 +18,9 @@ Rank competing hypotheses from evidence. Use discriminating experiments and
 predicted observations to establish cause; correlation or symptom disappearance
 is insufficient. For intermittent failures, use enough observations to distinguish
 improvement from chance. Aggregate available logs before adding instrumentation.
+After one retry of a check that reports `runner failure, not a check result`,
+if the retry also reports runner failure, stop retrying. Report the runner exit
+code, log path and host for diagnosis in the same turn.
 When the same check fails twice, before any requeue or rerun, diff the last
 green run against the first red one: runner or host, environment (ports, env
 vars, services, labels) and code. A host or runner change that is live ahead of

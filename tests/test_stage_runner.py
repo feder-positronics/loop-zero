@@ -20,7 +20,7 @@ FALLBACK_RUNNER = (sys.executable, '-c', READ_FRAME + STAGE_FIELDS.format(fallba
 @pytest.mark.parametrize('base_ref,body,verdict,tails', [
     *[(base_ref, 'r["tail"]=" ".join((env["UV_CACHE_DIR"],env["NODE_ENV"],env["AUDIT_VALUE"],os.environ["AUDIT_VALUE"]));print(json.dumps(r))',
        True, ['/operator/cache production [REDACTED] [REDACTED]'] * 2) for base_ref in ('stale', 'missing', 'recorded', 'abs-link', 'path-link')],
-    ('stale', 'r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_VALUE"];print(json.dumps(r))', False, ['ok [REDACTED]']),
+    ('stale', 'r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_VALUE"];print(json.dumps(r));sys.exit(75)', False, ['ok [REDACTED]']),
     ('stale', 'print("x" * 3000 + "worker socket unavailable " + env["AUDIT_VALUE"], file=sys.stderr);sys.exit(42)', False, None),
     ('stale', 'r["exit_code"]=7;r["tail"]=env["AUDIT_VALUE"]+"Ω"*8183+" newest";print(json.dumps(r))', False,
      ['[REDACTED]' + 'Ω' * 8183 + ' newest']),
@@ -69,31 +69,32 @@ def test_runner(git_repo, tmp_path, bwrap_log, monkeypatch, body, verdict, tails
         launcher = (link.name if base_ref == 'path-link' else str(link), str(path), 'relative/argument')
     path.write_text(preamble + STAGE_FIELDS.format(fallback=False, tail='ok') + '\n' + body)
     calls = []
-    report = sandbox.run_checks(make_config(checks=('echo one', 'echo two'),
-                                env=tuple(configured.items()), env_allowlist=("PATH", "AUDIT_VALUE"), network=True,
-                                check_runner=launcher), git_repo, progress=calls.append)
+    config = make_config(checks=('echo one', 'echo two'), check_runner=launcher, network=True,
+                         env=tuple(configured.items()), env_allowlist=("PATH", "AUDIT_VALUE"))
+    if tails is None:
+        with pytest.raises(sandbox.StageRunnerFailure) as raised:
+            sandbox.run_checks(config, git_repo, progress=calls.append)
+        assert calls == ['echo one']
+        error = raised.value
+        assert 'runner failure, not a check result' in str(error)
+        if 'sys.exit(42)' in body:
+            assert error.exit_code == 42
+            assert str(error).endswith(('x' * 3000 + 'worker socket unavailable [REDACTED]')[-2000:])
+        if '* 100000' in body:
+            assert any(word in str(error).lower() for word in ('recursion', 'stack overflow'))
+        if 'drift' in body:
+            assert 'Worktree changed after stage' in str(error)
+        assert not (git_repo / '.loopzero/checks.json').exists()
+        return
+    report = sandbox.run_checks(config, git_repo, progress=calls.append)
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
         assert report.results[0].exit_code == 7
-    if 'sys.exit(42)' in body:
-        result = report.results[0]
-        assert result.exit_code == 42 and result.duration_s > 0
-        assert result.tail == 'Stage runner failed: process exit 42\n' + ('x' * 3000 + 'worker socket unavailable [REDACTED]')[-2000:]
-    if tails is not None:
-        assert [r.tail for r in report.results] == tails
+    assert [r.tail for r in report.results] == tails
     if not verdict:
         assert calls == ['echo one']
         assert sum(r.tail == 'ok' for r in report.results) <= 1
-    if '* 100000' in body:
-        assert 'Stage runner failed' in report.results[0].tail
-        assert any(word in report.results[0].tail.lower() for word in ('recursion', 'stack overflow'))
     current_head = _save_report(git_repo, report)
-    if 'drift' in body:
-        assert report.dirty
-        assert 'Worktree changed after stage' in report.results[0].tail
-        assert current_head == git(git_repo, 'rev-parse', 'HEAD').strip() and current_head != report.head
-        assert _load_report(git_repo) != report
-        return
     assert current_head is None and _load_report(git_repo) == report
     receipt = json.loads((git_repo / '.loopzero/checks.json').read_text())
     assert receipt.keys() == {'head', 'dirty', 'results', 'settings_sha256'}
@@ -104,9 +105,14 @@ def test_runner_unavailable(git_repo, monkeypatch, dirty, fetched_base):  # noqa
     if dirty:
         (git_repo / 'dirty').write_text('x')
     monkeypatch.setattr(sandbox.shutil, 'which', lambda name: None)
-    report = sandbox.run_checks(make_config(check_runner=FALLBACK_RUNNER), git_repo)
-    assert not report.ok and report.dirty is dirty
-    assert ('bwrap binary missing' in report.results[0].tail) is not dirty
+    cfg = make_config(check_runner=FALLBACK_RUNNER)
+    if not dirty:
+        with pytest.raises(sandbox.StageRunnerFailure, match='bwrap binary missing'):
+            sandbox.run_checks(cfg, git_repo)
+    else:
+        report = sandbox.run_checks(cfg, git_repo)
+        assert not report.ok and report.dirty
+        assert 'bwrap binary missing' not in report.results[0].tail
 
 
 @pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink', 'short', 'list', 'parent', 'colon_link', 'colon_tree'])
@@ -131,23 +137,23 @@ def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
               'list': (sys.executable, f'/operator/safe:{runner}'),
               'parent': (sys.executable, '../escape'), 'colon_link': (str(link),),
               'colon_tree': (str(runner),)}[kind]
-    report = sandbox.run_checks(make_config(check_runner=prefix), git_repo)
-    assert not report.ok and 'references task worktree' in report.results[0].tail
+    with pytest.raises(sandbox.StageRunnerFailure, match='references task worktree'):
+        sandbox.run_checks(make_config(check_runner=prefix), git_repo)
 
 
 def test_runner_timeout(git_repo, monkeypatch, fetched_base):  # noqa: F811
     original = sandbox._proc.run
     def run(argv, **kwargs):
         if argv[0] == sys.executable:
-            raise sandbox._proc.ProcTimeout('deadline', 'partial opaque-fake-db-password', duration_s=0.25)
+            raise sandbox._proc.ProcTimeout('deadline', '{"exit_code":',
+                                            stderr='partial opaque-fake-db-password', duration_s=0.25)
         return original(argv, **kwargs)
     monkeypatch.setattr(sandbox._proc, 'run', run)
     cfg = make_config(check_runner=(sys.executable,), env=(("AUDIT_VALUE", "opaque-fake-db-password"),))
-    report = sandbox.run_checks(cfg, git_repo, timeout=0.1)
-    assert not report.ok
-    result = report.results[0]
-    assert result.exit_code == 124 and result.duration_s == 0.25
-    assert 'partial [REDACTED]' in result.tail and 'timed out after 0.1s' in result.tail
+    with pytest.raises(sandbox.StageRunnerFailure) as raised:
+        sandbox.run_checks(cfg, git_repo, timeout=0.1)
+    assert raised.value.exit_code == 124
+    assert 'partial [REDACTED]' in str(raised.value) and 'timed out after 0.1s' in str(raised.value)
 
 
 @pytest.mark.parametrize('change', ['fallback', 'base'])

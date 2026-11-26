@@ -64,6 +64,14 @@ def unwind_on_sigterm():
         raise
 
 
+def exit_status(code: int) -> int:
+    if code < 0:
+        if -code not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(-code, signal.SIG_DFL)
+        signal.raise_signal(-code)
+    return code
+
+
 @contextmanager
 def defer_sigterm():
     """Finish a private directory operation before unwinding."""

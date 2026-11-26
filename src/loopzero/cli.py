@@ -1932,7 +1932,7 @@ def main(argv: list[str] | None = None) -> int:
     return _run(parse_args(build_parser(), argv))
 
 
-def _run(args: argparse.Namespace) -> int:
+def _run(args: argparse.Namespace, *, console: bool = False) -> int:
     try:
         with _proc.unwind_on_sigterm():
             return globals()[f"cmd_{args.command}"](args)
@@ -1946,7 +1946,8 @@ def _run(args: argparse.Namespace) -> int:
         message = str(exc) if isinstance(exc, ReviewersUnavailable) else _one_line(exc)
         prefix = "unexpected response: " if isinstance(exc, UNEXPECTED) else ""
         print(f"loopzero {args.command}: {prefix}{message}", file=sys.stderr)
-        return 1
+        code = exc.exit_code if isinstance(exc, sandbox.StageRunnerFailure) else 1
+        return _proc.exit_status(code) if console else code
     except KeyboardInterrupt:
         print(f"loopzero {args.command}: interrupted", file=sys.stderr)
         return 130
@@ -1957,4 +1958,4 @@ def _one_line(exc: BaseException) -> str:
 
 
 if __name__ == "__main__":
-    sys.exit(_run(_module_args))
+    sys.exit(_run(_module_args, console=True))

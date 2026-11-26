@@ -679,6 +679,58 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
 
 
+@pytest.mark.parametrize("runner_exit, new_head", [(75, False), (124, False), (-15, True), (-9, False), (0, False)])
+def test_check_receipt_requires_stage_result(wt, gh, monkeypatch, capsys, head, runner_exit, new_head):
+    assert run(capsys, "check")[0] == 0
+    receipt = wt / ".loopzero/checks.json"
+    previous = receipt.read_bytes(), receipt.stat().st_mtime_ns
+    if new_head:
+        git(wt, "commit", "--allow-empty", "-m", "New candidate")
+    current = git(wt, "rev-parse", "HEAD").strip()
+    calls = list(gh.calls)
+    context = cli._context
+    script = f"""
+import json, os, sys
+frame = json.load(sys.stdin)
+code = {runner_exit}
+if frame["command"] == "echo ok":
+    code = 0
+    stage_exit = 0
+else:
+    stage_exit = 7
+    if code < 0:
+        print('{{"exit_code":', flush=True)
+        os.kill(os.getpid(), -code)
+    if code:
+        sys.exit(code)
+del frame["env"]
+print(json.dumps(dict(frame, exit_code=stage_exit, duration_s=0, tail="", not_started=False)))
+"""
+
+    def with_runner(*args, **kwargs):
+        worktree, settings = context(*args, **kwargs)
+        return worktree, replace(settings, check_runner=(sys.executable, "-c", script),
+                                 inputs={"echo ok": ("feature.py",)})
+
+    monkeypatch.setattr(cli, "_context", with_runner)
+    code, out, err = run(capsys, "check")
+    if runner_exit:
+        assert code == runner_exit
+        assert f"runner failure, not a check result: process exit {runner_exit}" in err
+        assert "PASS" not in out and "FAIL" not in out
+        assert (receipt.read_bytes(), receipt.stat().st_mtime_ns) == previous
+        assert gh.calls == calls
+    else:
+        assert code == 1 and out.endswith("FAIL\n")
+        assert cli._load_report(wt).results[-1].exit_code == 7
+        assert (receipt.read_bytes(), receipt.stat().st_mtime_ns) != previous
+    if new_head:
+        arm_approved_pr_with_check_result(gh, current, wt, "success", readiness={"local_exit": None})
+        out, _ = expect_cli(capsys, 1, "ready")
+        assert f"check receipt is for {head[:12]}" in out
+        assert all(c["argv"][:2] != ["pr", "ready"] for c in gh.calls)
+
+
 @pytest.mark.parametrize("receipt", ["saved", "head moved", "write failed"])
 def test_check_bounds_large_failure_and_preserves_receipt(wt, head, capsys, monkeypatch, receipt):
     tail = 'TEST_FAILURES={"detail":"' + "é" * 7500 + '","error":"Failed to fetch package"}\n'

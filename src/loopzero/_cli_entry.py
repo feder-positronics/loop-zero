@@ -7,4 +7,4 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(build_parser(), argv)
     from loopzero.cli import _run
 
-    return _run(args)
+    return _run(args, console=True)
