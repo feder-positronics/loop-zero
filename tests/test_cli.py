@@ -3058,28 +3058,6 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
-@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
-def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
-    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
-    with monkeypatch.context() as worker_env:
-        if worker == "different-path":
-            worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
-        assert run(capsys, "check")[0] == 0
-
-    receipt = wt / ".loopzero/checks.json"
-    payload = json.loads(receipt.read_bytes())
-    if worker == "legacy":
-        # Older producers serialize these results without a settings fingerprint.
-        del payload["settings_sha256"]
-    # Whole-job transport preserves the producer's fields.
-    receipt.write_text(json.dumps(payload))
-    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
-
-    if worker != "matching":
-        assert run(capsys, "check")[0] == 0
-        assert run(capsys, "ready")[0] == 0
-
-
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
@@ -3119,6 +3097,28 @@ def test_ready_matches_effective_inherited_check_environment(
         assert code == 0
     else:
         assert code == 1 and "not ready: check receipt has an incompatible settings fingerprint." in out
+
+
+@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
+def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    with monkeypatch.context() as worker_env:
+        if worker == "different-path":
+            worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
+        assert run(capsys, "check")[0] == 0
+
+    receipt = wt / ".loopzero/checks.json"
+    payload = json.loads(receipt.read_bytes())
+    if worker == "legacy":
+        # Older producers serialize these results without a settings fingerprint.
+        del payload["settings_sha256"]
+    # Whole-job transport preserves the producer's fields.
+    receipt.write_text(json.dumps(payload))
+    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
+
+    if worker != "matching":
+        assert run(capsys, "check")[0] == 0
+        assert run(capsys, "ready")[0] == 0
 
 
 def test_ready_ignores_forged_markers(wt: Path, gh: FakeGh, capsys, head) -> None:
