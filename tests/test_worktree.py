@@ -131,15 +131,27 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     assert task.read_text().endswith("(filled by `loopzero review`)\n")
 
 
-def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
+@pytest.mark.parametrize("replacement", [False, True], ids=["append", "replace"])
+def test_start_excludes_worktrees_and_task_dir(repo: Path, monkeypatch, replacement) -> None:
     exclude = repo / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text("*.log")  # no trailing newline on purpose
     old_inode = exclude.stat().st_ino
+    write = worktree.os.write
+
+    def interleave(fd, rules):
+        if rules.endswith(b".loopzero/\n"):
+            edit = exclude.with_suffix(".edited") if replacement else exclude
+            with edit.open("w" if replacement else "a") as stream:
+                stream.write("*.log\nlocal.env" if replacement else "\nlocal.env")
+            if replacement:
+                edit.replace(exclude)
+            monkeypatch.setattr(worktree.os, "write", write)
+        return write(fd, rules)
+
+    monkeypatch.setattr(worktree.os, "write", interleave)
     wt = worktree.start(repo, "t1", "main")
-    assert exclude.stat().st_ino != old_inode
-    lines = exclude.read_text().splitlines()
-    assert lines == ["*.log", ".worktrees/", ".loopzero/"]
+    assert (exclude.stat().st_ino != old_inode) == replacement
+    assert exclude.read_text().splitlines() == ["*.log", "local.env", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
     installed = exclude.stat()
