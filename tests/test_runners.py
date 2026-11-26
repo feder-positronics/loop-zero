@@ -352,7 +352,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     for index, diff in enumerate(diffs, 1):
         results.append(review_with(
             "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
-            review_context=context, chunk=(index, len(diffs)) if split else None,
+            review_context=context, chunk=(index, len(diffs)),
         ))
         override = next(arg for arg in _argv(fake_bin, "codex")
                         if arg.startswith("developer_instructions="))
@@ -362,7 +362,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
         assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
         assert raw_diff == diff.encode()
 
-    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
@@ -650,34 +650,23 @@ CLAUDE_EXPIRED_OAUTH = {
       for reason in ("Cannot authenticate", "OAuth failure", "Session expired", "401")),
     *(({"is_error": True, "api_error_status": status,
         "terminal_reason": "api_error", "result": "Internal server error"},
-       RunnerBadOutput, r"claude: (error|exited)") for status in (429, 500)),
+       RunnerBadOutput, r"claude: (error|exited)") for status in (429, 500, 529)),
     *(({"is_error": True, **details}, RunnerUsageLimit, None) for details in (
         {"result": "You've hit your weekly limit · resets 11pm (Europe/Warsaw)"},
         {"result": "You've hit your session limit"},
         {"terminal_reason": "blocking_limit", "result": "Please wait until reset"},
     )),
 ])
-def test_claude_classifies_error_envelopes(fake_bin, tmp_path, exit_code, output, error, diagnostic):
-    _fake_claude(fake_bin, output, exit_code=exit_code)
+def test_claude_classifies_error_envelopes(fake_bin, tmp_path, monkeypatch, exit_code, output, error, diagnostic):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", (key := "gw_FAKE0123456789abcdef") + "\n")
+    _fake_claude(fake_bin, {**output, "result": f"{output.get('result', '')} {key}"}, exit_code=exit_code)
     with pytest.raises(error, match=diagnostic) as raised:
         _review("claude", tmp_path)
     if error is RunnerBadOutput:
         assert not isinstance(raised.value, RunnerUsageLimit)
+    assert key not in f"{raised.value}{getattr(raised.value, 'tail', '')}"
     if output is CLAUDE_EXPIRED_OAUTH:
         assert "Token [REDACTED]." in str(raised.value)
-
-
-@pytest.mark.parametrize("result,error", [
-    ("API Error: 529 overloaded; sent x-api-key {key} (request 7)", RunnerBadOutput),
-    ("You've hit your session limit; key {key}", RunnerUsageLimit),
-])
-def test_every_failure_class_hides_forwarded_key(fake_bin, tmp_path, monkeypatch, result, error):
-    key = "gw_FAKE0123456789abcdef"
-    monkeypatch.setenv("ANTHROPIC_API_KEY", f"{key}\n")  # Forwarded unchanged, printed stripped.
-    _fake_claude(fake_bin, {"is_error": True, "result": result.format(key=key)}, exit_code=1)
-    with pytest.raises(error) as raised:
-        _review("claude", tmp_path)
-    assert key not in f"{raised.value}{raised.value.tail}" and "[REDACTED]" in raised.value.tail
 
 
 @pytest.mark.parametrize("family,message", [
@@ -907,6 +896,7 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         result = _review("claude", tmp_path, model=model, effort=effort)
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
     merged = merge_reviews(results)

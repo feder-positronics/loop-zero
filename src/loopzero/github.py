@@ -40,7 +40,7 @@ MARKER_RE = re.compile(
 PAGE = 100
 PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
-RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
+RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After."
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -412,7 +412,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, detail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
     error = GhUnavailable if transient else GhError
-    confirmed_limit = rate_limited and status in {"403", "429"}
+    confirmed_limit = rate_limited and status in {"200", "403", "429"}
     reset = headers.get("x-ratelimit-reset", "")
     rate_reset = int(reset) if (confirmed_limit and headers.get("x-ratelimit-remaining") == "0"
                                 and re.fullmatch(r"[0-9]{1,18}", reset)) else None
@@ -440,7 +440,7 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     }
     guidance = RATE_LIMIT_GUIDANCE
     if remaining == 0:
-        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
+        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}."
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
         guidance = f"\nRate limited: short-window limit: retry after {delay}."
@@ -819,7 +819,7 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         prefix = first + "\n" + header + (separator + rest if separator else "")
         _, span = runners.leading_review_block(prefix)
         if len(span.encode("utf-8")) > runners.CODEX_HEADER_LIMIT:
-            raise runners.RunnerBadOutput("codex: oversized leading machine block; HOLD")
+            raise runners.RunnerBadOutput("codex: oversized leading machine block. To publish a review, split the PR and review the smaller changes.")
     severities = [f.severity for f in result.findings]
     summary = ", ".join(f"{severities.count(s)} {s}" for s in ("critical", "important", "suggestion"))
     duration = "unknown" if result.duration_s is None else f"{result.duration_s:.1f}s"
@@ -1300,6 +1300,13 @@ def _missing_check_reason(name: str, head_sha: str, capped: bool) -> str:
         return (f"cannot determine required check '{name}' on {head_sha[:12]}: "
                 f"GitHub's {CHECK_SUITE_LIMIT:,}-suite limit")
     return f"required check '{name}' missing on {head_sha[:12]}"
+
+
+def has_check_activity(repo: str, head_sha: str, readiness: Readiness) -> bool:
+    if readiness.has_pending_checks:
+        return True
+    runs = _iter_paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
+    return any(run.get("head_sha") == head_sha and run.get("status") in _ACTIVE_WORKFLOWS for run in runs)
 
 
 def _has_active_replacement(repo: str, check: dict, workflows: list[dict], head_sha: str) -> bool:

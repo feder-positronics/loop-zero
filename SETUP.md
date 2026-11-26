@@ -366,8 +366,10 @@ requires one. If you used the isolated install, run these from the task
 worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
-`loopzero check` refuses it after the slot wait and before any stage runs; run
-`git repack -a -d` there, delete `objects/info/alternates`, and rerun.
+`loopzero check` refuses it before any stage runs. Move the task branch and
+`.loopzero/task.md` to the standalone clone, then recheck the same commit.
+To repair the original clone, run `git repack -a -d`, remove
+`objects/info/alternates`, and rerun the check.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"

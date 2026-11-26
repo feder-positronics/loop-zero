@@ -1249,7 +1249,7 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
     ("4676", "", "short-window limit: retry after ~60 s"),
     ("", "90", "short-window limit: retry after 90 s"),
     ("", "Wed, 25 Nov 2026 21:03:14 GMT", "short-window limit: retry after Wed, 25 Nov 2026 21:03:14 GMT"),
-    ("", "", "Rate limited: retry after GitHub's reset or Retry-After; No automatic retry."),
+    ("", "", "Rate limited: retry after GitHub's reset or Retry-After."),
 ])
 def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining, retry_after, hint):
     sleeps = []
@@ -1281,21 +1281,25 @@ def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining
         [[*branch_head_key("lz/x").split(), "--include"]] + [[*pr_list_key("lz/x").split(), "--include"]] * (1 + len(sleeps)))
 
 
-@pytest.mark.parametrize("secret,hidden", [
-    ("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmYWtlIn0.c2lnbmF0dXJlLWZha2U", "eyJzdWIi"),
-    ("rt_FAKE0123456789abcdefghijkl", "rt_FAKE"),
-    ("AKIAFAKE0123456789AB", "AKIAFAKE"),
-    ("-----BEGIN RSA PRIVATE KEY-----\nMIIEFAKEKEYBODY\n-----END RSA PRIVATE KEY-----", "MIIEFAKEKEYBODY"),
-    ("postgresql://app:hunter2-FAKE@db/app", "hunter2-FAKE"),
-    ("forwarded gw_FAKE_reviewer_key", "gw_FAKE_reviewer_key"),
-])
-def test_published_findings_redact_secret_classes(monkeypatch, secret, hidden):
+def test_published_findings_redact_secret_classes(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "gw_FAKE_reviewer_key\n")
-    finding = Finding("important", None, None, f"leak {secret}", f"quoted {secret}")
-    result = ReviewResult("codex", "a" * 40, "primary", "request_changes", (finding,), "")
-    body = (github._comment_body(finding, "a" * 40, prefix=f"Anchored at {secret}\n")
-            + github._review_body(result, [finding]))
-    assert hidden not in body and body.count("[REDACTED]") >= 3
+    secret = ("eyJheader.eyJzdWIi.signature rt_FAKE0123456789abcdefghijkl AKIAFAKE0123456789AB "
+              "-----BEGIN RSA PRIVATE KEY-----\nMIIEFAKEKEYBODY\n-----END RSA PRIVATE KEY----- "
+              "postgresql://app:hunter2-FAKE@db/app gw_FAKE_reviewer_key")
+    finding = Finding("important", None, None, secret, secret)
+    assert github._comment_body(finding, HEAD, prefix=secret + "\n").count("[REDACTED]") == 18
+    assert github._review_body(review(findings=(finding,)), [finding]).count("[REDACTED]") >= 6
+
+
+def test_graphql_http_200_rate_limit_preserves_verified_waiter_reset(gh):
+    response = (
+        "HTTP/2.0 200 OK\r\nX-RateLimit-Resource: graphql\r\nX-RateLimit-Remaining: 0\r\n"
+        'X-RateLimit-Reset: 4070908800\r\n\r\n{"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}'
+    )
+    gh.respond("api graphql", response, exit=1)
+    with pytest.raises(github.GhUnavailable) as info:
+        github._gh("api", "graphql", "-f", "query={viewer{login}}")
+    assert info.value.rate_reset == 4070908800
 
 
 @pytest.mark.parametrize("diagnostic", [

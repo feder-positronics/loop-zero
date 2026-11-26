@@ -117,14 +117,25 @@ def test_report_fails_when_head_changes_during_run(git_repo, bwrap_log):
     assert before in drift.tail and after in drift.tail
 
 
+SERVICE_KEY = 'p@ss/w0rd+1&"x\\9'
+
+
 @pytest.mark.parametrize("command,exit_code,line_count,start,end", [
     ("for i in $(seq 1 50); do echo $i; done; echo err >&2", 0, 40, "12", "err"),
     ("""python3 -c 'print("x" * 20000 + " Ω end")'""", 0, 1, "x", " Ω end"),
     ("""python3 -c 'print("terminal line" + "\\n" * 20_000)'""", 0, 1, "terminal line", "terminal line"),
     ("./" * 8_200 + "absent/file", 1, 1, "", "otherwise restore the required file."),
-], ids=["lines", "oversized-line", "trailing-newlines", "missing-file"])
-def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, command, exit_code, line_count, start, end):
-    (result,) = sandbox.run_checks(make_config(checks=(command,)), git_repo).results
+    ('for i in $(seq 1 1000); do printf "%s----------" "$SERVICE_KEY"; done', 0, 1, "", "----------"),
+    (f"printf %s {shlex.quote(json.dumps(SERVICE_KEY) + ' ' + quote(SERVICE_KEY, safe='') + ' ' + SERVICE_KEY)}", 0, 1,
+     '"[REDACTED]"', "[REDACTED]"),
+], ids=["lines", "oversized-line", "trailing-newlines", "missing-file", "split-key", "padded-and-encoded-key"])
+def test_tail_merges_streams_and_truncates(git_repo, bwrap_log, monkeypatch, command, exit_code, line_count, start, end):
+    monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n" if end == "[REDACTED]" else SERVICE_KEY)
+    (result,) = sandbox.run_checks(make_config(checks=(command,), env_allowlist=("PATH", "SERVICE_KEY")), git_repo).results
+    if end == "----------":
+        assert "[REDACTED]" in result.tail and all(piece in "[REDACTED]" for piece in result.tail.split("----------"))
+    elif end == "[REDACTED]":
+        assert result.tail == '"[REDACTED]" [REDACTED] [REDACTED]'
     lines = result.tail.splitlines()
     assert (result.exit_code, len(lines)) == (exit_code, line_count)
     assert lines[0].startswith(start) and lines[-1].endswith(end)
@@ -342,7 +353,8 @@ def test_alternate_probe_skips_default_inventory_and_honors_override(git_repo, m
     with pytest.raises(sandbox.SandboxUnavailable, match="Git alternate visibility probe timed out") as info:
         sandbox._preflight_alternates(cfg, git_repo, prefix, common)
     rendered = "".join(traceback.format_exception(info.value))
-    assert "private alternate probe diagnostic" not in rendered and "git repack -a -d" in rendered
+    assert "private alternate probe diagnostic" not in rendered
+    assert "Transfer this task branch" in rendered
 
 
 def test_not_a_git_repo(tmp_path, bwrap_log):
@@ -396,7 +408,8 @@ class TestRealSandbox:
         message = str(failure.value)
         assert str(objects) in message
         assert "alternate" in message.lower() and "sandbox" in message.lower()
-        assert "git repack -a -d" in message and "objects/info/alternates" in message
+        assert "transfer this task branch" in message.lower() and "standalone clone" in message.lower()
+        assert "rerun loopzero check at the same commit" in message.lower()
 
     @pytest.mark.parametrize("visibility", ("object-store", "zażółć", 'object-"store', 'zażółć"\\store', "configured"))
     def test_real_sandbox_allows_visible_git_alternates(self, git_repo, tmp_path, visibility):
@@ -719,44 +732,12 @@ def cache_check(git_repo, receipt_path):
     return cache
 
 
-SERVICE_KEY = "sk-live-0123456789abcdefghijklmnopqrstuv"
-
-
-def _run_secret_stage(monkeypatch, tmp_path, output: str) -> str:
-    def fake_bwrap(*_args, tail_chars, **_kwargs):
-        return sandbox._proc.Completed(1, output[-tail_chars:], "", 0.1)
-
-    monkeypatch.setattr(sandbox, "_run_bwrap", fake_bwrap)
-    cfg = make_config(env_allowlist=("PATH", "SERVICE_KEY"))
-    return sandbox._run_one(cfg, tmp_path, ["--"], "true", 5).tail
-
-
-def test_check_tail_redacts_secret_split_by_output_limit(monkeypatch, tmp_path):
-    monkeypatch.setenv("SERVICE_KEY", SERVICE_KEY)
-    tail = _run_secret_stage(monkeypatch, tmp_path, (SERVICE_KEY + "-" * 10) * 1000)
-    assert "[REDACTED]" in tail and tail.replace("[REDACTED]", "").strip("-") == ""
-
-
-def test_check_tail_redacts_secret_forwarded_with_surrounding_whitespace(monkeypatch, tmp_path):
-    monkeypatch.setenv("SERVICE_KEY", f" {SERVICE_KEY}\n")
-    tail = _run_secret_stage(monkeypatch, tmp_path, f"HTTP 401 for Bearer {SERVICE_KEY} (request 7)")
-    assert tail == "HTTP 401 for Bearer [REDACTED] (request 7)"
-
-
-def test_check_tail_redacts_json_escaped_and_url_quoted_secret(monkeypatch, tmp_path):
-    secret = 'p@ss/w0rd+1&"x\\9'
-    monkeypatch.setenv("SERVICE_KEY", secret)
-    output = f'{{"password": {json.dumps(secret)}}}\npostgresql://app:{quote(secret, safe="")}@db/app'
-    assert _run_secret_stage(monkeypatch, tmp_path, output) == '{"password": "[REDACTED]"}\npostgresql://app:[REDACTED]@db/app'
-
-
 @pytest.mark.parametrize('change', ['other', 'input', 'shared', 'command', 'network', 'environment', 'version',
                                     'failed', 'boolean_exit_code', 'dirty_receipt', 'keyless',
                                     'dirty_tree', 'legacy', 'grant'])
 def test_declared_input_reuse(git_repo, bwrap_log, monkeypatch, fetched_base, change, cache_check, receipt_path):
     monkeypatch.setenv('AUDIT_TOKEN', 'fake-cached-token')
-    cfg = make_config(checks=('echo one', 'echo two'), env=(('NODE_ENV', 'test'),),
-                      env_allowlist=('PATH', 'HOME', 'LZ_KEEP', 'AUDIT_TOKEN'),
+    cfg = make_config(checks=('echo one', 'echo two'), env=(('NODE_ENV', 'test'),), env_allowlist=('PATH', 'HOME', 'LZ_KEEP', 'AUDIT_TOKEN'),
                       inputs={'echo one': ('*.md',), 'echo two': ('*.md',), '*': ('shared',)})
     if change == 'grant':
         cfg = replace(cfg, env_allowlist=(*cfg.env_allowlist, "HEAVY_SLOT_GRANTED_CORES"))

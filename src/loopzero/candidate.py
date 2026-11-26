@@ -31,9 +31,9 @@ QUEUE_BRANCH_PREFIX = "mergify/merge-queue/"
 
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
-_ATTEST_ATTEMPTS = 3
+_ATTEST_ATTEMPTS = 4
 _ATTEST_SECONDS = 30
-_ATTEST_DELAY = 2
+_ATTEST_DELAY = 4
 _BATCH_SECONDS = 90
 _retry_sleep = time.sleep
 _retry_clock = time.monotonic
