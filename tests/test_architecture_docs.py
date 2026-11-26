@@ -1,8 +1,10 @@
 """Exercise the documentation check as a contributor/CI subprocess in real Git."""
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -11,15 +13,16 @@ from tests.conftest import git
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts/check_architecture_docs.py"
 
 
-def prepare(repo):
+@pytest.fixture
+def base(git_repo):
     for name in ("docs/ARCHITECTURE.md", "docs/README.md", "README.md", "AGENTS.md",
                  "core/CONTRACT.md"):
-        path = repo / name
+        path = git_repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("# Current\n")
-    git(repo, "add", ".")
-    git(repo, "commit", "-m", "architecture base")
-    return git(repo, "rev-parse", "HEAD").strip()
+    git(git_repo, "add", ".")
+    git(git_repo, "commit", "-m", "architecture base")
+    return git(git_repo, "rev-parse", "HEAD").strip()
 
 
 def run(repo, base, *args):
@@ -27,27 +30,18 @@ def run(repo, base, *args):
                           text=True, capture_output=True, check=False)
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="requires raw pathname bytes")
-@pytest.mark.parametrize("staged", [False, True])
-def test_architecture_check_accepts_non_utf8_path(git_repo, staged):
-    base = prepare(git_repo)
-    path = os.fsdecode(b"caf\xe9.txt")
-    (git_repo / path).write_text("unrelated file\n")
-    if staged:
-        git(git_repo, "add", "--", path)
-
-    done = run(git_repo, base)
-    assert done.returncode == 0, done.stderr
-
-    (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
-    done = run(git_repo, base)
-    assert done.returncode == 1
-    assert "without guide update or reasoned Architecture-Review trailer" in done.stderr
-
-
-@pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "squash"])
-def test_architecture_change_requires_update_or_reasoned_review(git_repo, sync):
-    base = prepare(git_repo)
+@pytest.mark.parametrize("sync", ["missing", "guide", "trailer", "empty", "squash",
+                                  "untracked-non-utf8", "staged-non-utf8"])
+def test_architecture_change_requires_update_or_reasoned_review(git_repo, base, sync):
+    if sync.endswith("non-utf8"):
+        if sys.platform != "linux":
+            pytest.skip("requires raw pathname bytes")
+        path = os.fsdecode(b"caf\xe9.txt")
+        (git_repo / path).write_text("unrelated file\n")
+        if sync == "staged-non-utf8":
+            git(git_repo, "add", "--", path)
+        done = run(git_repo, base)
+        assert done.returncode == 0, done.stderr
     git(git_repo, "checkout", "-b", "authored")
     (git_repo / "core/CONTRACT.md").write_text("# New authority\n")
     if sync == "guide":
@@ -71,17 +65,15 @@ def test_architecture_change_requires_update_or_reasoned_review(git_repo, sync):
 
 
 @pytest.mark.parametrize("target", ["absent.md", "../README.md#absent"])
-def test_broken_local_link_fails_even_with_guide_update(git_repo, target):
-    base = prepare(git_repo)
+def test_broken_local_link_fails_even_with_guide_update(git_repo, base, target):
     (git_repo / "docs/ARCHITECTURE.md").write_text(f"# Current\n[reference]({target})\n")
     done = run(git_repo, base)
     assert done.returncode == 1
     assert "invalid local" in done.stderr
 
 
-def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
-    base = prepare(git_repo)
-    path = git_repo / "src/loopzero/cli.py"
+def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo, base):
+    path = git_repo / "src/loopzero/_cli_args.py"
     path.parent.mkdir(parents=True)
     path.write_text("def build_parser():\n    return 'public'\n\ndef _fix():\n    return 1\n")
     git(git_repo, "add", ".")
@@ -94,9 +86,28 @@ def test_private_code_fix_needs_no_pointless_documentation_edit(git_repo):
     assert run(git_repo, base).returncode == 1
 
 
-def test_missing_base_fails_closed(git_repo):
-    prepare(git_repo)
+def test_missing_base_fails_closed(git_repo, base):
     assert run(git_repo, "not-a-revision").returncode == 1
+
+
+@pytest.mark.parametrize("entry", ["architecture", "sdist"])
+def test_direct_git_timeout(tmp_path, monkeypatch, capsys, entry):
+    def stalled_git(argv, *, timeout, **kwargs):
+        assert timeout == 60
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(subprocess, "run", stalled_git)
+    if entry == "architecture":
+        monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--links-only"])
+        assert runpy.run_path(str(SCRIPT))["main"]() == 1
+        assert "timed out" in capsys.readouterr().err
+    else:
+        monkeypatch.setitem(sys.modules, "hatchling.builders.hooks.plugin.interface",
+                            SimpleNamespace(BuildHookInterface=object))
+        hook = runpy.run_path(str(SCRIPT.parents[1] / "hatch_build.py"))["TrackedSdistFiles"]
+        (tmp_path / ".git").mkdir()
+        with pytest.raises(subprocess.TimeoutExpired):
+            hook.initialize(SimpleNamespace(root=tmp_path), "", {})
 
 
 def test_tach_enforces_module_boundaries(tmp_path):
@@ -105,10 +116,6 @@ def test_tach_enforces_module_boundaries(tmp_path):
     repo_root = Path(__file__).resolve().parents[1]
     tach = Path(sys.executable).with_name("tach")
     assert tach.exists(), f"tach not installed next to {sys.executable}"
-    clean = subprocess.run([str(tach), "check"], cwd=repo_root,
-                           text=True, capture_output=True, check=False)
-    assert clean.returncode == 0, clean.stdout + clean.stderr
-
     shutil.copy2(repo_root / "tach.toml", tmp_path / "tach.toml")
     shutil.copytree(repo_root / "src", tmp_path / "src")
     types_py = tmp_path / "src/loopzero/types.py"

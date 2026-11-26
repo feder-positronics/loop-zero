@@ -31,7 +31,3 @@ Coverage-only tests may pass existing code.
 
 Run focused and affected neighboring tests, then [contract delivery checks](../../CONTRACT.md#blockers).
 Record commands, results and limits in task Notes.
-
-Then continue the task you were given as far as it authorizes, or hand over
-what is left of its acceptance. If two repairs have failed, the route is
-probably wrong, so reconsider it before a third.

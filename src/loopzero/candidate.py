@@ -18,7 +18,8 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+from urllib.parse import quote
 
 MERGIFY_APP_ID = 10562
 MERGIFY_APP_OWNER = "Mergifyio"
@@ -82,41 +83,29 @@ def _require(condition: bool, message: str, error: type[CandidateError] = Candid
 def _identity(actor: object) -> tuple[object, object, object, object]:
     if not isinstance(actor, dict):
         return (None, None, None, None)
-    return (
-        actor.get("id"),
-        actor.get("login"),
-        actor.get("type"),
-        actor.get("html_url"),
-    )
+    return actor.get("id"), actor.get("login"), actor.get("type"), actor.get("html_url")
 
 
-def _object(value: JsonValue, message: str) -> JsonObject:
+def _object(value: object, message: str) -> JsonObject:
     _require(isinstance(value, dict), message)
     return value
 
 
-def _flatten_batches(status: object) -> dict[str, JsonObject]:
-    _require(isinstance(status, dict), "Mergify status is not an object")
-    batches = status.get("batches")
+def flatten_batches(status: object) -> dict[str, JsonObject]:
+    batches = _object(status, "Mergify status is not an object").get("batches")
     _require(isinstance(batches, list), "Mergify status has no batches list")
     indexed: dict[str, JsonObject] = {}
 
     def visit(items: list[object]) -> None:
         for item in items:
-            _require(isinstance(item, dict), "Mergify status contains an invalid batch")
+            item = _object(item, "Mergify status contains an invalid batch")
             batch_id = item.get("id")
             _require(isinstance(batch_id, str) and batch_id, "Mergify batch has no id")
-            _require(
-                batch_id not in indexed,
-                f"Mergify batch id is duplicated: {batch_id}",
-            )
+            _require(batch_id not in indexed, f"Mergify batch id is duplicated: {batch_id}")
             indexed[batch_id] = item
             children = item.get("sub_batches")
             if children is not None:
-                _require(
-                    isinstance(children, list),
-                    f"Mergify batch {batch_id} has invalid sub_batches",
-                )
+                _require(isinstance(children, list), f"Mergify batch {batch_id} has invalid sub_batches")
                 visit(children)
 
     visit(batches)
@@ -124,22 +113,14 @@ def _flatten_batches(status: object) -> dict[str, JsonObject]:
 
 
 def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int], list[str]]:
-    indexed = _flatten_batches(status)
-    matches = [
-        batch
-        for batch in indexed.values()
-        if batch.get("queue_pull_request_number") == candidate_number
-    ]
-    _require(
-        len(matches) == 1,
-        f"PR #{candidate_number} is not exactly one live Mergify batch",
-        CandidateBatchError,
-    )
-    candidate_id = matches[0]["id"]
-    pending = [candidate_id]
-    visited: set[str] = set()
-    source_numbers: list[int] = []
-    missing: list[str] = []
+    indexed = flatten_batches(status)
+    matches = [batch_id for batch_id, batch in indexed.items()
+               if batch.get("queue_pull_request_number") == candidate_number]
+    _require(len(matches) == 1, f"PR #{candidate_number} is not exactly one live Mergify batch",
+             CandidateBatchError)
+    candidate_id = matches[0]
+    pending, visited = [candidate_id], set()
+    source_numbers, missing = [], []
     while pending:
         batch_id = pending.pop()
         if batch_id in visited:
@@ -150,10 +131,7 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
             missing.append(batch_id)
             continue
         pull_requests = batch.get("pull_requests")
-        _require(
-            isinstance(pull_requests, list),
-            f"Mergify batch {batch_id} has no pull_requests list",
-        )
+        _require(isinstance(pull_requests, list), f"Mergify batch {batch_id} has no pull_requests list")
         for pull_request in pull_requests:
             _require(
                 isinstance(pull_request, dict)
@@ -163,80 +141,68 @@ def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, 
             )
             source_numbers.append(pull_request["number"])
         parent_ids = batch.get("parent_ids", [])
-        _require(
-            isinstance(parent_ids, list)
-            and all(isinstance(parent_id, str) and parent_id for parent_id in parent_ids),
-            f"Mergify batch {batch_id} has invalid parent_ids",
-        )
+        _require(isinstance(parent_ids, list)
+                 and all(isinstance(parent, str) and parent for parent in parent_ids),
+                 f"Mergify batch {batch_id} has invalid parent_ids")
         pending.extend(parent_ids)
     _require(source_numbers, f"Mergify batch for PR #{candidate_number} has no sources")
-    _require(
-        len(source_numbers) == len(set(source_numbers)),
-        f"Mergify batch for PR #{candidate_number} repeats a source pull request",
-    )
+    _require(len(source_numbers) == len(set(source_numbers)),
+             f"Mergify batch for PR #{candidate_number} repeats a source pull request")
     return candidate_id, sorted(source_numbers), sorted(missing)
 
 
+def _repo_identity(repo: JsonObject) -> tuple[object, object]:
+    return repo.get("id"), repo.get("full_name")
+
+
 def _candidate_snapshot(
-    candidate: JsonObject,
-    *,
-    event_pr: JsonObject,
-    repository: JsonObject,
+    candidate: JsonObject, number: int, event_head: JsonObject, repository: JsonObject,
     expected_identity: tuple[object, object, object, object],
+    base_branch: str,
 ) -> None:
-    _require(
-        candidate.get("number") == event_pr.get("number"),
-        "GitHub returned the wrong candidate PR",
-    )
-    _require(candidate.get("state") != "closed", "Mergify candidate PR is superseded (closed)")
-    _require(candidate.get("state") == "open", "Mergify candidate PR is not open")
+    _require(candidate.get("number") == number, "GitHub returned the wrong candidate PR")
+    state = candidate.get("state")
+    state_error = "Mergify candidate PR is superseded (closed)" if state == "closed" else "Mergify candidate PR is not open"
+    _require(state == "open", state_error)
     _require(candidate.get("draft") is True, "Mergify candidate PR must be a draft")
-    _require(
-        _identity(candidate.get("user")) == expected_identity,
-        "Candidate author is not the verified Mergify GitHub App",
-    )
-    head = candidate.get("head")
-    event_head = event_pr.get("head")
-    base = candidate.get("base")
-    _require(
-        isinstance(head, dict) and isinstance(event_head, dict) and isinstance(base, dict),
-        "Candidate refs are missing",
-    )
-    _require(
-        head.get("sha") == event_head.get("sha"),
-        "Candidate head changed after the workflow event",
-    )
-    _require(
-        head.get("ref") == event_head.get("ref")
-        and isinstance(head.get("ref"), str)
-        and head["ref"].startswith(QUEUE_BRANCH_PREFIX),
-        "Mergify candidate has an unexpected head ref",
-    )
-    _require(
-        base.get("ref") == "main",
-        "Mergify candidate must target the real main branch",
-    )
-    expected_repo = (repository.get("id"), repository.get("full_name"))
+    _require(_identity(candidate.get("user")) == expected_identity,
+             "Candidate author is not the verified Mergify GitHub App")
+    head, base = candidate.get("head"), candidate.get("base")
+    _require(isinstance(head, dict) and isinstance(base, dict), "Candidate refs are missing")
+    _require(head.get("sha") == event_head.get("sha"), "Candidate head changed after the workflow event")
+    _require(head.get("ref") == event_head.get("ref"), "Mergify candidate has an unexpected head ref")
+    _require(base.get("ref") == base_branch, f"Mergify candidate must target the real {base_branch} branch")
+    expected_repo = _repo_identity(repository)
     for label, repo in (("head", head.get("repo")), ("base", base.get("repo"))):
-        _require(
-            isinstance(repo, dict) and (repo.get("id"), repo.get("full_name")) == expected_repo,
-            f"Mergify candidate {label} repository does not match this repository",
-        )
+        _require(isinstance(repo, dict) and _repo_identity(repo) == expected_repo,
+                 f"Mergify candidate {label} repository does not match this repository")
 
 
 def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     head = source.get("head")
     base = source.get("base")
-    base_repo = base.get("repo") if isinstance(base, dict) else None
+    base = base if isinstance(base, dict) else {}
+    base_repo = base.get("repo")
+    labels = source.get("labels", [])
+    if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
+        raise CandidateError("invalid source PR labels")
     return (
+        source.get("number"),
+        source.get("merged"),
+        source.get("mergeable") is False,
+        tuple(label["name"] for label in labels),
         source.get("state"),
         source.get("draft"),
         source.get("body"),
         head.get("sha") if isinstance(head, dict) else None,
-        base.get("ref") if isinstance(base, dict) else None,
-        base_repo.get("id") if isinstance(base_repo, dict) else None,
-        base_repo.get("full_name") if isinstance(base_repo, dict) else None,
+        base.get("ref"),
+        *_repo_identity(base_repo if isinstance(base_repo, dict) else {}),
     )
+
+
+def _lookup_source(github_get: GitHubGet, repo: str, number: int) -> JsonObject:
+    return _object(github_get(f"/repos/{repo}/pulls/{number}"),
+                   f"GitHub source PR #{number} lookup returned an invalid payload")
 
 
 def _attest_source(
@@ -246,11 +212,9 @@ def _attest_source(
     repository: JsonObject,
     candidate_sha: str,
     github_get: GitHubGet,
+    base_branch: str,
 ) -> str:
-    _require(
-        source.get("number") == number,
-        f"GitHub returned the wrong source PR for #{number}",
-    )
+    _require(source.get("number") == number, f"GitHub returned the wrong source PR for #{number}")
     _require(
         source.get("state") == "open",
         f"source PR #{number} is not open",
@@ -264,11 +228,10 @@ def _attest_source(
     )
     base_repo = base.get("repo")
     _require(
-        base.get("ref") == "main"
+        base.get("ref") == base_branch
         and isinstance(base_repo, dict)
-        and (base_repo.get("id"), base_repo.get("full_name"))
-        == (repository.get("id"), repository.get("full_name")),
-        f"source PR #{number} does not target this repository's main branch",
+        and _repo_identity(base_repo) == _repo_identity(repository),
+        f"source PR #{number} does not target this repository's {base_branch} branch",
     )
     source_sha = head.get("sha")
     _require(
@@ -280,27 +243,43 @@ def _attest_source(
         "GitHub compare returned an invalid payload",
     )
     merge_base = comparison.get("merge_base_commit")
-    _require(
-        comparison.get("status") in {"ahead", "identical"}
-        and isinstance(merge_base, dict)
-        and merge_base.get("sha") == source_sha,
-        f"source PR #{number} head {source_sha} is not an ancestor of the candidate",
-    )
+    _require(comparison.get("status") in {"ahead", "identical"}
+             and isinstance(merge_base, dict) and merge_base.get("sha") == source_sha,
+             f"source PR #{number} head {source_sha} is not an ancestor of the candidate")
     return source_sha
 
 
-@contextlib.contextmanager
-def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
-    """Run bounded Git commands on fetched objects in an isolated bare repository."""
+def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
+    if operation == "fetch" and returncode:
+        from loopzero import github
+
+        output.seek(0)
+        diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
+        if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
+            raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
+    _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
+             "resource bound hit, or integration conflict")
+
+
+def _fetch_token() -> str:
     from loopzero import github
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         try:
             token = github.auth_token()
+        except github.GhUnavailable:
+            raise
         except github.GhError:
             raise CandidateError("GitHub fetch authentication unavailable") from None
     _require(bool(token), "GitHub fetch authentication unavailable")
+    return token
+
+
+@contextlib.contextmanager
+def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
+    """Run bounded Git commands on fetched objects in an isolated bare repository."""
+    token = _fetch_token()
     with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
         root = Path(directory)
         env = {
@@ -318,13 +297,15 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env) -> str:
+        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False,
+                merge_conflict_status: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                      "-c", "maintenance.auto=false", *args], cwd=root, env=command_env,
-                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL, stdout=output,
+                    stderr=output if args[0] == "fetch" else subprocess.DEVNULL,
                     start_new_session=True,
                 )
                 def store_size() -> int:  # Git renames temporaries: skip files that vanish
@@ -341,13 +322,17 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         _require(time.monotonic() < deadline, "Git time bound exceeded")
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
-                    _require(process.returncode == 0,
-                             f"git {args[0]} exited {process.returncode}: objects unavailable, "
-                             "resource bound hit, or integration conflict")
+                    report_status = merge_conflict_status and args[0] == "merge-tree" and process.returncode in {0, 1}
+                    if not report_status:
+                        _require_git_exit(args[0], process.returncode, output)
                     _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
                     _require(len(result) <= _TREE_OUTPUT, "Git object/output bound exceeded")
+                    if report_status:
+                        return str(process.returncode)
+                    if preserve_newlines:
+                        return result.decode("utf-8", errors="surrogateescape")
                     return result.decode().strip()
                 finally:
                     if process.poll() is None:
@@ -374,14 +359,11 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
         cursor = candidate
         while cursor in graph and pending:
             parents = graph[cursor]
-            if cursor in pending:
-                pending.remove(cursor)
-                reverse_order.append(cursor)
-            if len(parents) > 1:
-                _require(len(parents) == 2, "ambiguous candidate integration topology")
-                if parents[1] in pending:
-                    pending.remove(parents[1])
-                    reverse_order.append(parents[1])
+            _require(len(parents) <= 2, "ambiguous candidate integration topology")
+            for source in (cursor, *parents[1:]):
+                if source in pending:
+                    pending.remove(source)
+                    reverse_order.append(source)
             cursor = parents[0] if parents else ""
         _require(not pending, "ambiguous source order in candidate topology")
         integrated = main
@@ -397,18 +379,22 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
 def attest_candidate(
     event: JsonObject,
     *,
+    base_branch: str = "main",
     github_get: GitHubGet,
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
-    """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
+    """Retry races afresh, bounded by retry admission rather than synchronous I/O.
+
+    Source policy must raise CandidateError for an expected rejection.
+    """
     batch_wait = [0.0]
     batch_deadline = _retry_clock() + _BATCH_SECONDS
     deadline = _retry_clock() + _ATTEST_SECONDS
     for attempt in range(_ATTEST_ATTEMPTS):
         try:
             return _attest_candidate_once(
-                event,
+                event, base_branch,
                 github_get=github_get,
                 mergify_status=mergify_status,
                 source_policy=source_policy,
@@ -426,7 +412,7 @@ def attest_candidate(
 
 
 def _attest_candidate_once(
-    event: JsonObject,
+    event: JsonObject, base_branch: str,
     *,
     github_get: GitHubGet,
     mergify_status: MergifyStatus,
@@ -435,123 +421,82 @@ def _attest_candidate_once(
     batch_wait: list[float],
 ) -> list[dict[str, object]]:
     """Return stable source evidence after every source passes `source_policy`."""
-    repository = event.get("repository")
-    event_pr = event.get("pull_request")
-    _require(isinstance(repository, dict), "GitHub event repository is missing")
-    _require(isinstance(event_pr, dict), "GitHub event pull request is missing")
-    _require(
-        event.get("action") in {"opened", "synchronize"},
-        "Candidate attestation requires its creation or head-update event",
-    )
+    repository = _object(event.get("repository"), "GitHub event repository is missing")
+    event_pr = _object(event.get("pull_request"), "GitHub event pull request is missing")
+    _require(event.get("action") in {"opened", "synchronize"},
+             "Candidate attestation requires its creation or head-update event")
     full_name = repository.get("full_name")
-    _require(
-        isinstance(full_name, str) and _REPOSITORY.fullmatch(full_name) is not None,
-        "GitHub event repository name is invalid",
-    )
-    event_head = event_pr.get("head")
-    _require(isinstance(event_head, dict), "GitHub event candidate head is missing")
+    _require(isinstance(full_name, str) and _REPOSITORY.fullmatch(full_name) is not None,
+             "GitHub event repository name is invalid")
+    event_head = _object(event_pr.get("head"), "GitHub event candidate head is missing")
     event_ref = event_head.get("ref")
-    _require(
-        isinstance(event_ref, str) and event_ref.startswith(QUEUE_BRANCH_PREFIX),
-        "Mergify candidate has an unexpected head ref",
-    )
+    _require(isinstance(event_ref, str) and event_ref.startswith(QUEUE_BRANCH_PREFIX),
+             "Mergify candidate has an unexpected head ref")
     owner, repo = full_name.split("/", 1)
 
     app = _object(github_get("/apps/mergify"), "GitHub App lookup is invalid")
     app_owner = app.get("owner")
-    _require(
-        app.get("id") == MERGIFY_APP_ID
-        and app.get("slug") == "mergify"
-        and isinstance(app_owner, dict)
-        and app_owner.get("login") == MERGIFY_APP_OWNER,
-        "Could not resolve the official Mergify GitHub App",
-    )
-    expected_actor = _object(
-        github_get("/users/mergify%5Bbot%5D"),
-        "GitHub bot lookup is invalid",
-    )
-    expected_identity = _identity(expected_actor)
-    _require(
-        expected_identity == (MERGIFY_BOT_ID, MERGIFY_BOT_LOGIN, "Bot", MERGIFY_APP_URL),
-        "Could not resolve the Mergify GitHub App identity",
-    )
-    _require(
-        _identity(event_pr.get("user")) == expected_identity,
-        "Candidate author is not the verified Mergify GitHub App",
-    )
-    _require(
-        _identity(event.get("sender")) == expected_identity,
-        "Candidate head event was not sent by the verified Mergify GitHub App",
-    )
+    _require(app.get("id") == MERGIFY_APP_ID and app.get("slug") == "mergify"
+             and isinstance(app_owner, dict) and app_owner.get("login") == MERGIFY_APP_OWNER,
+             "Could not resolve the official Mergify GitHub App")
+    expected_identity = _identity(_object(github_get("/users/mergify%5Bbot%5D"), "GitHub bot lookup is invalid"))
+    _require(expected_identity == (MERGIFY_BOT_ID, MERGIFY_BOT_LOGIN, "Bot", MERGIFY_APP_URL),
+             "Could not resolve the Mergify GitHub App identity")
+    _require(_identity(event_pr.get("user")) == expected_identity,
+             "Candidate author is not the verified Mergify GitHub App")
+    _require(_identity(event.get("sender")) == expected_identity,
+             "Candidate head event was not sent by the verified Mergify GitHub App")
 
     candidate_number = event_pr.get("number")
     candidate_sha = event_head.get("sha")
-    _require(
-        isinstance(candidate_number, int) and candidate_number > 0,
-        "Candidate PR number is invalid",
-    )
-    _require(
-        isinstance(candidate_sha, str) and _SHA.fullmatch(candidate_sha) is not None,
-        "Candidate head SHA is invalid",
-    )
+    _require(isinstance(candidate_number, int) and candidate_number > 0, "Candidate PR number is invalid")
+    _require(isinstance(candidate_sha, str) and _SHA.fullmatch(candidate_sha) is not None,
+             "Candidate head SHA is invalid")
     candidate_path = f"/repos/{full_name}/pulls/{candidate_number}"
-    candidate_before = _object(
-        github_get(candidate_path),
-        "GitHub candidate lookup returned an invalid payload",
-    )
-    _candidate_snapshot(
-        candidate_before,
-        event_pr=event_pr,
-        repository=repository,
-        expected_identity=expected_identity,
-    )
+    def recheck_candidate(message: str = "GitHub candidate lookup returned an invalid payload") -> None:
+        candidate = _object(github_get(candidate_path), message)
+        _candidate_snapshot(candidate, candidate_number, event_head, repository, expected_identity, base_branch)
+
+    recheck_candidate()
 
     def live_lineage() -> tuple[str, list[int], list[str]]:
         delay = 2
         while True:
             try:
-                return _candidate_lineage(mergify_status(owner, repo, "main"), candidate_number)
+                return _candidate_lineage(mergify_status(owner, repo, base_branch), candidate_number)
             except CandidateBatchError:
-                def recheck_candidate() -> None:
-                    current = _object(github_get(candidate_path), "Invalid candidate lookup")
-                    _candidate_snapshot(current, event_pr=event_pr, repository=repository,
-                                        expected_identity=expected_identity)
-
-                recheck_candidate()
+                recheck_candidate("Invalid candidate lookup")
                 remaining = batch_deadline - _retry_clock()
                 if remaining <= 0:
                     raise
                 started = _retry_clock()
                 _retry_sleep(min(delay, remaining))
                 batch_wait[0] += _retry_clock() - started
-                recheck_candidate()
+                recheck_candidate("Invalid candidate lookup")
                 if _retry_clock() >= batch_deadline:
                     raise
                 delay = min(delay * 2, 30)
 
     first_lineage = live_lineage()
-    main_path = f"/repos/{full_name}/git/ref/heads/main"
-    main_before = github_get(main_path) if first_lineage[2] else None
+    base_path = f"/repos/{full_name}/git/ref/heads/{quote(base_branch)}"
+    base_before = github_get(base_path) if first_lineage[2] else None
     source_snapshots: dict[int, tuple[str, tuple[object, ...]]] = {}
     for number in first_lineage[1]:
-        source = _object(
-            github_get(f"/repos/{full_name}/pulls/{number}"),
-            f"GitHub source PR #{number} lookup returned an invalid payload",
-        )
+        source = _lookup_source(github_get, full_name, number)
         source_sha = _attest_source(
             source,
             number=number,
             repository=repository,
             candidate_sha=candidate_sha,
-            github_get=github_get,
+            github_get=github_get, base_branch=base_branch,
         )
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
         try:
             source_policy(number, source)
-        except Exception as exc:
+        except CandidateError as exc:
             current = None
             with contextlib.suppress(Exception):
-                current = github_get(f"/repos/{full_name}/pulls/{number}")
+                current = _lookup_source(github_get, full_name, number)
             if (isinstance(current, dict) and current.get("merged") is True
                     and isinstance(current.get("head"), dict)
                     and current["head"].get("sha") == source_sha):
@@ -560,17 +505,14 @@ def _attest_candidate_once(
 
     if first_lineage[2]:
         try:
-            main_ref = _object(main_before, "main ref unavailable")
-            main_sha = _object(main_ref.get("object"), "main object unavailable").get("sha")
-            _require(
-                isinstance(main_sha, str) and _SHA.fullmatch(main_sha) is not None,
-                "invalid main head",
-            )
-            _verify_tree(full_name, main_sha, candidate_sha,
+            base_ref = _object(base_before, f"{base_branch} ref unavailable")
+            base_sha = _object(base_ref.get("object"), f"{base_branch} object unavailable").get("sha")
+            _require(isinstance(base_sha, str) and _SHA.fullmatch(base_sha) is not None, f"invalid {base_branch} head")
+            _verify_tree(full_name, base_sha, candidate_sha,
                          [snapshot[0] for snapshot in source_snapshots.values()])
             _require(
-                github_get(main_path) == main_before,
-                "main changed during attestation",
+                github_get(base_path) == base_before,
+                f"{base_branch} changed during attestation",
                 CandidateRaceError,
             )
         except CandidateRaceError:
@@ -586,21 +528,9 @@ def _attest_candidate_once(
         "Mergify candidate membership changed during attestation",
         CandidateRaceError,
     )
-    candidate_after = _object(
-        github_get(candidate_path),
-        "GitHub candidate lookup returned an invalid payload",
-    )
-    _candidate_snapshot(
-        candidate_after,
-        event_pr=event_pr,
-        repository=repository,
-        expected_identity=expected_identity,
-    )
+    recheck_candidate()
     for number, (expected_sha, expected_fingerprint) in source_snapshots.items():
-        current = _object(
-            github_get(f"/repos/{full_name}/pulls/{number}"),
-            f"GitHub source PR #{number} lookup returned an invalid payload",
-        )
+        current = _lookup_source(github_get, full_name, number)
         current_head = current.get("head")
         _require(
             isinstance(current_head, dict) and current_head.get("sha") == expected_sha,
@@ -611,6 +541,4 @@ def _attest_candidate_once(
             f"source PR #{number} metadata changed during attestation",
             CandidateRaceError,
         )
-    return [
-        {"number": number, "head_sha": source_snapshots[number][0]} for number in first_lineage[1]
-    ]
+    return [{"number": number, "head_sha": sha} for number, (sha, _) in source_snapshots.items()]

@@ -9,33 +9,43 @@ from pathlib import Path
 
 import pytest
 
-from loopzero import github
+from loopzero import _proc, github
 
 GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 
 
-@pytest.fixture(autouse=True)
-def no_real_app_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(github, "PR_LOCK_DIR", tmp_path / "pr-locks")
+def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token", raising=False)
     monkeypatch.setattr(github, "_app_token_cache", ("", 0.0), raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_host_github_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    isolate_github_auth(tmp_path, monkeypatch)
+    monkeypatch.setattr(github, "PR_LOCK_DIR", tmp_path / "pr-locks")
 
 
 for _role in ("AUTHOR", "COMMITTER"):
     GIT_ENV |= {f"GIT_{_role}_NAME": "test", f"GIT_{_role}_EMAIL": "test@example.com"}
 
 
+def git_environment() -> dict[str, str]:
+    return _proc.build_env(("PATH", "LANG", "LC_ALL"), GIT_ENV)
+
+
 def git(repo: Path, *args: str) -> str:
     """Run git in `repo` with a deterministic identity; return stdout."""
-    env = {**os.environ, **GIT_ENV}
-    for key in os.environ:
-        if key in {"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS"} or key.startswith(
-            ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
-        ):
-            env.pop(key)
     return subprocess.run(
-        ["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True
+        ["git", *args], cwd=repo, env=git_environment(), capture_output=True, text=True, check=True
     ).stdout
+
+
+def commit_file(repo: Path, name: str, text: str, message: str) -> None:
+    (repo / name).write_text(text)
+    git(repo, "add", "--", name)
+    git(repo, "commit", "-qm", message)
 
 
 def init_git_repo(repo: Path) -> Path:
@@ -73,3 +83,11 @@ def fake_tool(fake_bin: Path) -> Callable[[str, str], Path]:
         return path
 
     return make
+
+
+@pytest.fixture
+def app_token_helper(fake_tool, monkeypatch):
+    def install(body="echo synthetic-app-token\n"):
+        monkeypatch.setattr(github, "APP_TOKEN_HELPER", fake_tool("app-token", body))
+
+    return install
