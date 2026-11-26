@@ -14,6 +14,7 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -319,8 +320,15 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
     return ""
 
 
+def _capture_headers(destination: dict[str, str] | None, headers: dict[str, str]) -> None:
+    if destination is not None:
+        destination.clear()
+        destination.update(headers)
+
+
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
-        token: str | None = None, retry_idempotent: bool = False) -> str:
+        token: str | None = None, retry_idempotent: bool = False,
+        response_headers: dict[str, str] | None = None) -> str:
     diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
     rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
     patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
@@ -376,6 +384,7 @@ def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
         raise GhError(error_command, error_tail, token=selected, guidance=guidance)
+    _capture_headers(response_headers, headers)
     return body
 
 
@@ -452,8 +461,8 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
     return ""
 
 
-def _gh_json(*args: str, token: str | None = None) -> object:
-    out = _gh(*args, token=token)
+def _gh_json(*args: str, token: str | None = None, **kwargs) -> object:
+    out = _gh(*args, token=token, **kwargs)
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
@@ -488,9 +497,20 @@ def _with_file(content: str) -> Path:
     return Path(name)
 
 
-def api_get(endpoint: str) -> object:
+def api_get(endpoint: str, *, response_headers: dict[str, str] | None = None) -> object:
     """`gh api <endpoint>` parsed as JSON (None on an empty body)."""
+    if response_headers is not None:
+        return _gh_json("api", endpoint, response_headers=response_headers)
     return _gh_json("api", endpoint)
+
+
+def response_date(headers: dict[str, str]) -> datetime | None:
+    """Return the HTTP response time when it identifies an instant."""
+    try:
+        stamp = parsedate_to_datetime(headers.get("date", ""))
+        return stamp.astimezone(UTC) if stamp.tzinfo is not None else None
+    except (OverflowError, ValueError):
+        return None
 
 
 def auth_token() -> str:
@@ -1133,15 +1153,24 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
             raise _not_found(number, exc) from exc
 
 
+def readiness_timestamp(value: object) -> datetime | None:
+    if isinstance(value, str):
+        with suppress(OverflowError, ValueError):
+            stamp = datetime.fromisoformat(value)
+            if stamp.tzinfo is not None:
+                return stamp.astimezone(UTC)
+    return None
+
+
 def _check_signals(
     repo: str,
     head_sha: str,
-    review_at: str | None = None,
+    review_at: datetime | None = None,
     review_grace: bool = False,
     required_ci: tuple[str, ...] = (),
     stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
-    signals: dict[str, list[tuple[str, str | None]]] = {}
+    signals: dict[str, list[tuple[str, datetime | None]]] = {}
     latest_runs: dict[str, dict] = {}
     runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
     for cr in runs:
@@ -1152,7 +1181,7 @@ def _check_signals(
         signals[name] = [
             (
                 cr.get("conclusion") or cr.get("status") or "unknown",
-                cr.get("completed_at") or cr.get("started_at"),
+                readiness_timestamp(cr.get("completed_at") or cr.get("started_at")),
             )
         ]
     latest_status: dict[str, dict] = {}
@@ -1160,7 +1189,7 @@ def _check_signals(
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
         signals.setdefault(name, []).append(
-            (status.get("state") or "unknown", status.get("created_at"))
+            (status.get("state") or "unknown", readiness_timestamp(status.get("created_at")))
         )
     states = {
         name: _aggregate_signal([state for state, _ in values])
@@ -1275,7 +1304,7 @@ def readiness(
     required_ci: tuple[str, ...],
     reviewed_head: str | None,
     *, allow_behind: bool = False, ancestor_review: bool = False,
-    review_at: str | None = None,
+    review_at: datetime | None = None,
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
