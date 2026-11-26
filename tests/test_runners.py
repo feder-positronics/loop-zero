@@ -242,6 +242,14 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
 
 
+def replace_codex_events(script: Path, events, *, prepend=False) -> None:
+    text = script.read_text()
+    start = text.index("echo '{\"type\":\"thread.started\"")
+    lines = "\n".join(json.dumps(event) for event in events)
+    suffix = text[start:] if prepend else "exit 0\n"
+    script.write_text(text[:start] + f"printf '%s\\n' {shlex.quote(lines)}\n" + suffix)
+
+
 def _fake_review(bin_dir, family):
     if family == "claude":
         return _fake_claude(bin_dir, _claude_envelope(APPROVE))
@@ -650,13 +658,23 @@ def test_linked_worktree_and_git_directory_are_read_only(
     assert (str(common),) * 2 in binds
 
 
-def test_claude_request_changes_escalates_verdict(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_claude(fake_bin, _claude_envelope(CHANGES))
-    result = _review("claude", tmp_path)
+@pytest.mark.parametrize("family", ["claude", "codex"])
+def test_review_escalates_verdict_with_blocking_finding(fake_bin, tmp_path, family):
+    if family == "claude":
+        _fake_claude(fake_bin, _claude_envelope(CHANGES))
+    else:
+        _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
+
+    result = _review(family, tmp_path)
+
     assert result.verdict == "request_changes"
-    assert [f.severity for f in result.findings] == ["important", "suggestion"]
-    assert result.findings[0].path == "a.py" and result.findings[0].line == 3
-    assert result.findings[1].path is None and result.findings[1].line is None
+    assert [(f.severity, f.path, f.line) for f in result.findings] == [
+        ("important", "a.py", 3), ("suggestion", None, None),
+    ]
+    if family == "codex":
+        assert result.model == "fallback"
+        assert json.loads(result.raw)["session_id"] == "codex-session-123"
+        assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
 def test_claude_falls_back_to_result_text(fake_bin: Path, tmp_path: Path) -> None:
@@ -1129,15 +1147,6 @@ def test_codex_approve(repo,
     command = sandbox_argv[sandbox_argv.index("--") + 1 :]
     assert command[command.index("--output-schema") + 1] == f"{SANDBOX_HOME}/schema.json"
     assert command[command.index("--output-last-message") + 1] == f"{SANDBOX_HOME}/last.json"
-
-
-def test_codex_request_changes(fake_bin: Path, tmp_path: Path) -> None:
-    _fake_codex(fake_bin, json.dumps(CHANGES), stderr="model: fallback")
-    result = _review("codex", tmp_path)
-    assert result.verdict == "request_changes" and len(result.findings) == 2
-    assert result.model == "fallback"
-    assert json.loads(result.raw)["session_id"] == "codex-session-123"
-    assert result.provenance["token_usage"]["input_tokens"] == 123
 
 
 def test_unknown_family_and_kind(tmp_path: Path) -> None:
