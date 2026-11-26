@@ -73,11 +73,14 @@ def review_marker(head: str, kind: str, source: str = "model") -> str:
 # --------------------------------------------------------------------------- git / context
 
 
-def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
-    done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout)
+def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT, paths: bool = False) -> str:
+    done = _proc.run(
+        ["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV, timeout=timeout,
+        preserve_newlines=paths, encoding=sys.getfilesystemencoding() if paths else None,
+    )
     if done.exit_code != 0:
         raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
-    return done.stdout.strip()
+    return done.stdout if paths else done.stdout.strip()
 
 
 def _require_push_target(wt: Path, repo: str) -> None:
@@ -104,16 +107,17 @@ def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
 
 
 def _toplevel() -> Path:
-    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel"))
+    return Path(_git(Path.cwd(), "rev-parse", "--show-toplevel", paths=True).removesuffix("\n"))
 
 
 def _repo_root(wt: Path) -> Path:
     """The verified primary checkout or bare repository owning this linked worktree."""
-    first = _git(wt, "worktree", "list", "--porcelain", "-z").split("\0", 1)[0]
+    first = _git(wt, "worktree", "list", "--porcelain", "-z", paths=True).split("\0", 1)[0]
     if not first.startswith("worktree "):
         raise CliError("Git did not identify the primary worktree; refusing cleanup")
     root = Path(first.removeprefix("worktree "))
-    common = Path(_git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")).resolve()
+    common = _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", paths=True)
+    common = Path(common.removesuffix("\n")).resolve()
     if root.resolve() == wt.resolve() or common not in (root.resolve(), (root / ".git").resolve()):
         raise CliError("primary repository does not own this linked worktree; refusing cleanup")
     return root
