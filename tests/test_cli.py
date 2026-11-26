@@ -1866,6 +1866,9 @@ def conflict_merge(wt, repo):
 @pytest.mark.parametrize("verified", [True, False])
 def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isolated_git, verified):
     reviewed = conflict_merge(wt, repo)
+    (wt / ".gitmodules").write_text('[submodule "dep"]\npath = dep\nurl = ../dep\nignore = all\n')
+    git(wt, "add", ".gitmodules")
+    git(wt, "update-index", "--add", "--cacheinfo", f"160000,{reviewed},dep")
     commit_file(wt, "topic.py", "topic = 2\n", "topic repair")
     history = [rev(reviewed, "primary")]
     head = prepare_review(wt, gh, fake_bin, history=history)
@@ -1883,7 +1886,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
     header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
     assert json.loads(header)["head"] == head
     assert b"+distinct resolution" in diff and b"+topic = 2" in diff and b"upstream.py" not in diff
-    assert diff.endswith(b"+topic = 2\n")
+    assert f"+Subproject commit {reviewed}".encode() in diff and diff.endswith(b"+topic = 2\n")
     posted = posted_review(gh)
     assert posted["commit_id"] == head and marker(head, "delta") in posted["body"]
 

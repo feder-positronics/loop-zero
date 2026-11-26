@@ -135,7 +135,8 @@ def base_merge_material(
             if clean:
                 return b""
             patch = git("log", "--first-parent", "--reverse", "--remerge-diff", "-p", "--format=",
-                        "--no-ext-diff", "--no-textconv", "--text", "--submodule=short",
+                        "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                        "--ignore-submodules=none", "--submodule=short",
                         f"{reviewed}..{head}", preserve_newlines=True)
             return patch.encode("utf-8", errors="surrogateescape")
     except (candidate.CandidateError, github.GhError, KeyError, OSError, TypeError, ValueError):
