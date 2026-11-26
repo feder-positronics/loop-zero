@@ -703,6 +703,39 @@ def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> Non
     assert not (wt / ".loopzero" / "checks.json").exists()
 
 
+@pytest.mark.parametrize("prior_receipt", [False, True])
+def test_check_runner_outage_preserves_receipt(wt, gh, monkeypatch, capsys, prior_receipt):
+    if prior_receipt:
+        assert run(capsys, "check")[0] == 0
+    receipt = wt / ".loopzero/checks.json"
+    previous = receipt.read_bytes() if prior_receipt else None
+    calls = list(gh.calls)
+    context = cli._context
+    script = """
+import json, sys
+frame = json.load(sys.stdin)
+if frame["command"] != "echo ok":
+    sys.exit(75)
+del frame["env"]
+print(json.dumps(dict(frame, exit_code=0, duration_s=0.0, tail="", not_started=False)))
+"""
+
+    def with_runner(*args, **kwargs):
+        worktree, settings = context(*args, **kwargs)
+        return worktree, replace(settings, check_runner=(sys.executable, "-c", script),
+                                 inputs={"echo ok": ("feature.py",)})
+
+    monkeypatch.setattr(cli, "_context", with_runner)
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 2
+    assert "process exit 75" in err and "Retry" in err
+    assert "PASS" not in out and "FAIL" not in out
+    assert (receipt.read_bytes() if receipt.exists() else None) == previous
+    assert gh.calls == calls
+
+
 @pytest.mark.parametrize("bootstrap", [False, True])
 def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys, bootstrap) -> None:
     if bootstrap:

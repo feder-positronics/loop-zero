@@ -15,6 +15,7 @@ import stat
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
@@ -48,7 +49,7 @@ SANDBOX_ENV = {
 
 
 class SandboxUnavailable(LoopZeroError):
-    """bubblewrap is missing or cannot create a sandbox on this host."""
+    """Check execution infrastructure is unavailable."""
 
 
 @contextmanager
@@ -104,7 +105,8 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
-    with _proc.unwind_on_sigterm(), _private_directories() as stack:
+    with (_proc.unwind_on_sigterm(), _defer_runner_checkpoint(config, checkpoint) as checkpoint,
+          _private_directories() as stack):
         prefix = []
         if not config.check_runner:
             home = _enter_private_directory(stack, "loopzero-home-")
@@ -153,20 +155,36 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                        f"({result.duration_s:.1f}s)")
             if result.exit_code != 0:
                 break
-    final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
-    final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
-    if (final_head, final_dirty) != (head, dirty):
-        results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
-                    f"HEAD before: {head}; HEAD after: {final_head}; "
-                    f"dirty before: {dirty}; dirty after: {final_dirty}"
-        )))
-        dirty = True
-    # A runner upgrade during execution makes the resulting receipt unverified.
-    settings_sha256 = (
-        settings_sha256 if not config.check_runner
-        or settings_sha256 == settings_fingerprint(config, worktree, base=base) else None
-    )
-    return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+        final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
+        final_dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
+        if (final_head, final_dirty) != (head, dirty):
+            results.append(CheckResult("<worktree changed during run>", 1, 0.0, (
+                        f"HEAD before: {head}; HEAD after: {final_head}; "
+                        f"dirty before: {dirty}; dirty after: {final_dirty}"
+            )))
+            dirty = True
+        # A runner upgrade during execution makes the resulting receipt unverified.
+        settings_sha256 = (
+            settings_sha256 if not config.check_runner
+            or settings_sha256 == settings_fingerprint(config, worktree, base=base) else None
+        )
+        return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+
+
+@contextmanager
+def _defer_runner_checkpoint(config: Config, checkpoint: Callable[[CheckReport], None] | None):
+    if not config.check_runner or checkpoint is None:
+        yield checkpoint
+        return
+    pending: deque[CheckReport] = deque(maxlen=1)
+    try:
+        yield pending.append
+    except SandboxUnavailable:
+        raise
+    except BaseException:
+        if pending:
+            checkpoint(pending[0])
+        raise
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
@@ -622,9 +640,8 @@ def _dispatch_one(
                              input=json.dumps({**binding, "env": env}), encoding="utf-8")
         if done.exit_code:
             stderr = _proc.tail(done.stderr)[-2000:]
-            detail = f"Stage runner failed: process exit {done.exit_code}"
-            return CheckResult(command, done.exit_code, done.duration_s,
-                               f"{detail}\n{stderr}".rstrip())
+            raise SandboxUnavailable(f"Stage runner failed: process exit {done.exit_code} "
+                                     f"({done.duration_s:.2f}s elapsed). Retry the check.\n{stderr}".rstrip())
         frame = _stage_frame(done.stdout, binding)
         if not _stage_unchanged(config, worktree, head):
             raise ValueError("Worktree changed after stage")
@@ -641,8 +658,9 @@ def _dispatch_one(
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
                            _check_tail(frame["tail"]))
     except _proc.ProcTimeout as exc:
-        return CheckResult(command, TIMEOUT_EXIT,
-                           exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
-    except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
+        elapsed = exc.duration_s if exc.duration_s is not None else timeout
+        raise SandboxUnavailable(
+            f"Stage runner timed out after {timeout:g}s ({elapsed:.2f}s elapsed). Retry the check.\n"
+            f"{_check_tail(exc.stderr or exc.stdout)}".rstrip()) from exc
+    except (_proc.ToolMissing, config_mod.ConfigError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
         return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {exc}"))
