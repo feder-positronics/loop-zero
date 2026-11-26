@@ -22,6 +22,7 @@ from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
     RunnerBadOutput,
+    RunnerMalformedOutput,
     RunnerMissing,
     RunnerPromptTooLong,
     RunnerUsageLimit,
@@ -1153,6 +1154,14 @@ def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) 
     _fake_codex(fake_bin, json.dumps({"verdict": "request_changes", "findings": [finding]}))
     with pytest.raises(RunnerBadOutput):
         _review("codex", tmp_path)
+
+
+def test_codex_schema_error_keeps_the_rejected_message(tmp_path, fake_bin, fake_bwrap):
+    message = json.dumps({"unknown": "codex output " * 300})
+    _fake_codex(fake_bin, message)
+    with pytest.raises(RunnerMalformedOutput, match="unexpected or missing keys") as error:
+        _review("codex", tmp_path)
+    assert error.value.tail == (message + "\n")[-2000:]
 
 
 def test_timeout_becomes_bad_output(
