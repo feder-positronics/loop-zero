@@ -1357,7 +1357,7 @@ def test_overlapping_review_dispatches_and_publishes_once(
     monkeypatch.setattr(cli, "_run_review", overlap)
     code, _, err = run(capsys, "review")
     if separate_checkout:
-        assert code == 1 and "already has a primary review" in err, overlapping
+        assert code == 1 and "primary review round is already taken" in err, overlapping
         assert len(dispatched) == 2 and overlapping[0][0] == 0
     else:
         assert code == 0 and len(dispatched) == 1
