@@ -1179,7 +1179,7 @@ def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap,
     from loopzero.cli import _review_failure
 
     def timeout(*args, **kwargs):
-        diagnostic = "界" * size + "waiting for proxy"
+        diagnostic = "connecting\r" + "界" * size + "waiting for proxy"
         stdout, stderr = ("partial reviewer output", diagnostic) if has_stderr else (diagnostic, "")
         raise runners._proc.ProcTimeout("timed out", stdout, stderr=stderr)
 

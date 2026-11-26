@@ -284,7 +284,8 @@ def _run(
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
     except _proc.ProcTimeout as exc:
-        last_line = (exc.stderr.strip() or exc.stdout.strip()).rpartition("\n")[2]
+        lines = _tail(exc.stderr.strip() or exc.stdout.strip()).splitlines()
+        last_line = lines[-1] if lines else ""
         diagnostic = last_line.encode()
         tail = "…" + diagnostic[-320:].decode(errors="ignore") if len(diagnostic) > 320 else last_line
         raise RunnerBadOutput(f"{family}: timed out after {timeout:g}s", tail) from exc
