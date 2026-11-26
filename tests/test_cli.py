@@ -887,6 +887,37 @@ def test_pr_pushes_and_creates_draft(
     assert "- `echo ok`: exit 0" in body and "- `test -f README.md`: exit 0" in body
 
 
+@pytest.mark.parametrize("refresh", [False, True])
+def test_pr_validation_redacts_private_check_commands(wt, gh, capsys, tmp_path, refresh):
+    command = ("git ls-remote 'https://x-access-token:ghs_FAKE0123@example.invalid/repo.git' "
+               "&& curl -H 'Authorization: Bearer opaque-fake-header' https://example.invalid/")
+    private = tmp_path / "private.toml"
+    private.write_text(WORKFLOW.replace(json.dumps("echo ok"), json.dumps(command)))
+    cfg = config.load(private)
+    head = head_of(wt)
+    results = (CheckResult(command, 7, 0.1, ""), CheckResult("test -f README.md", 0, 0.1, ""))
+    cli._save_report(wt, CheckReport(head, False, results, cli.sandbox.settings_fingerprint(cfg, wt)))
+
+    if refresh:
+        git(wt, "push", "-q", "-u", "origin", "lz/t1")
+        gh.respond_pr_list([pr_json(headRefOid=head)])
+        gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+        cli._refresh_pr_checks(wt, cfg)
+    else:
+        gh.respond(branch_history_key(), [])
+        gh.respond_pr_list([])
+        gh.respond_pr_create(pr_json(headRefOid=head))
+        assert run(capsys, "--config", str(private), "pr")[0] == 0
+
+    body = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "ghs_FAKE0123" not in body and "opaque-fake-header" not in body
+    assert "git ls-remote 'https://[REDACTED]@example.invalid/repo.git'" in body
+    assert "curl -H 'Authorization: [REDACTED]' https://example.invalid/`: exit 7" in body
+    assert f"Recorded for `{head[:12]}`" in body and "(unverified" not in body
+    assert "- `test -f README.md`: exit 0" in body
+    assert cli._load_report(wt).results == results
+
+
 @pytest.mark.parametrize("duplicate", [None, "CLOSED", "OPEN"])
 def test_pr_refuses_completed_branch_before_any_publication(
     wt: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, duplicate: str | None,

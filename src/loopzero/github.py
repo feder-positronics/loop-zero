@@ -196,6 +196,13 @@ def _api_path(args: tuple[str, ...]) -> str:
     return "/" + path.lstrip("/")
 
 
+def redact_credentials(value: str) -> str:
+    value = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@", value)
+    return re.sub(r"""(?i)((?P<quote>['"])?\bauthorization[ \t]*:[ \t]*)"""
+                  r"""(?(quote)(?:(?!(?P=quote))[^\r\n])+|(?:(?:basic|bearer|token)\s+)?[^\s'"`]+)""",
+                  r"\1[REDACTED]", value)
+
+
 def _redact_tokens(value: str, token: str = "") -> str:
     for secret in (token, os.environ.get("GH_TOKEN", ""),
                    os.environ.get("GITHUB_TOKEN", "")):
