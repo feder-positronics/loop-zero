@@ -1302,7 +1302,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
-    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
+    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
     assert_git_cost(git_calls, 14, 1)
@@ -1772,7 +1772,7 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
     task = (wt / ".loopzero/task.md").read_text()
-    expected_diff = git(wt, "diff", "--no-color", first, head).strip().encode("utf-8")
+    expected_diff = git(wt, "diff", "--no-color", first, head).encode("utf-8")
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith(f"delta review by claude on {head[:12]}: approve")
     header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
@@ -1902,9 +1902,9 @@ def test_review_reminted_app_token_keeps_publisher(
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\n{fail}echo synthetic-token-$(wc -l < {counter})\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    wall, run_review = [1_000_000.0], cli._run_review
-    monkeypatch.setattr(github.time, "time", lambda: wall[0])
-    monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), wall.append(wall.pop() + 3601))[0])
+    boot, run_review = [1_000_000.0], cli._run_review
+    monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
+    monkeypatch.setattr(cli, "_run_review", lambda *a, **k: (run_review(*a, **k), boot.append(boot.pop() + 3601))[0])
     (wt / "workflow.toml").write_text(WORKFLOW.replace(PUBLISHERS, 'review_publishers = ["app[bot]"]\n'))
     git(wt, "commit", "-qam", "configure publisher")
     git(wt, "update-ref", "refs/remotes/origin/main", "HEAD")

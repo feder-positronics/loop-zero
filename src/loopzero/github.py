@@ -257,10 +257,18 @@ def _read_only(args: tuple[str, ...]) -> bool:
     return False
 
 
+def _app_token_clock() -> float | None:
+    """Read elapsed time including suspend, when the OS provides it."""
+    if (clock := getattr(time, "CLOCK_BOOTTIME", None)) is not None:
+        with suppress(OSError):
+            return time.clock_gettime(clock)
+    return None
+
+
 def _cached_app_token() -> str:
-    # Installation tokens expire one hour after minting by wall clock, suspend included.
     token, minted = _app_token_cache
-    return token if token and 0 <= time.time() - minted < 3000 else ""
+    now = _app_token_clock() if token else None
+    return token if now is not None and 0 <= now - minted < 3000 else ""
 
 
 def app_token() -> str:
@@ -269,14 +277,17 @@ def app_token() -> str:
         return token
     if not APP_TOKEN_HELPER.is_file() or not os.access(APP_TOKEN_HELPER, os.X_OK):
         return ""
-    minted = time.time()  # before the helper runs: a suspend mid-call still ages the token
+    minted = _app_token_clock()  # before minting so a suspend mid-call ages the token
     try:
         result = run([str(APP_TOKEN_HELPER)], cwd=Path("/"), env_allowlist=GH_ENV, timeout=_read_timeout(10))
     except (ToolMissing, ProcTimeout, ReadDeadline, OSError):
         return ""
     if result.exit_code or not result.stdout.strip():
         return ""
-    _app_token_cache = (result.stdout.strip(), minted)
+    token = result.stdout.strip()
+    if minted is None:
+        return token  # no suspend-aware clock, so use this token only for this call
+    _app_token_cache = (token, minted)
     return _cached_app_token()
 
 
