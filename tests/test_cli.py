@@ -24,7 +24,7 @@ from urllib.parse import quote
 import pytest
 
 from loopzero import cli, config, github, mergify
-from loopzero._proc import Completed, ProcTimeout, build_env
+from loopzero._proc import Completed, build_env
 from loopzero.types import CheckReport, CheckResult, Finding, ReviewResult
 from tests.conftest import git, init_git_repo
 from tests.fake_gh import replay
@@ -3963,7 +3963,7 @@ def test_overlapping_mergify_command_after_lost_reply(wt, gh, monkeypatch, accep
             if accepted:
                 original_api(path, payload, **kwargs)
                 gh.respond(f"api {path}", [{"user": {"login": LOGIN}, "body": payload["body"]}])
-            raise ProcTimeout("lost Mergify command reply")
+            raise github.ProcTimeout("lost Mergify command reply")
         return original_api(path, payload, **kwargs)
 
     monkeypatch.setattr(cli.fcntl, "flock", lock)
