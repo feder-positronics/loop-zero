@@ -267,7 +267,7 @@ def arm_readiness(
         {"name": "checks", "status": "completed", "conclusion": conclusion}])
     gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [])
     if local_exit is not None:
-        config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
+        config = cli.config_mod.load_trusted(wt)
         results = tuple(CheckResult(command, local_exit, 0.1, "") for command in config.checks)
         cli._save_report(
             wt, CheckReport(head, dirty, results, cli.sandbox.settings_fingerprint(config, wt))
@@ -2345,11 +2345,12 @@ def test_ready_requires_explicit_review_publishers(wt, gh, capsys, head, publish
 
 @pytest.mark.parametrize("required_ci", ["", "required_ci = []", 'required_ci = ["checks"]'])
 def test_ready_requires_explicit_ci_policy(wt, gh, capsys, head, required_ci):
-    publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required_ci))
+    if required_ci != 'required_ci = ["checks"]':
+        publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required_ci))
     arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
 
     if not required_ci:
-        for command in ("ready", "merge"):
+        for command in ("ready", "merge", "status"):
             code, _, err = run(capsys, command)
             assert code == 1
             assert "origin/main:workflow.toml: checks.required_ci" in err

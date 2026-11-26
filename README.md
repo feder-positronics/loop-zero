@@ -71,7 +71,8 @@ from REST `/rate_limit`. See [GitHub's rate-limit guidance](https://docs.github.
 1. Set `sha` to the pinned commit SHA and run
    `uv tool install "git+https://github.com/feder-positronics/loop-zero@$sha"`.
 2. Copy [workflow.example.toml](workflow.example.toml) to `workflow.toml` at
-   your repo root and set `repo.name`, `checks.commands` and `required_ci`.
+   your repo root and set `repo.name`, `checks.commands`, `checks.required_ci`
+   and `delivery.review_publishers`.
    Commit and push `workflow.toml` to the configured remote base
    (`origin/main` by default) before starting your first task.
 3. Verify `git`, `gh auth status`, and your `claude` or `codex` CLI. Run
