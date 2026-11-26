@@ -3020,6 +3020,22 @@ def test_ready_and_merge_reject_receipt_after_clean_checkout_rewrites_input(
     assert run(capsys, *args, "check")[0] == 1
 
 
+def test_ready_accepts_fresh_check_for_input_without_reuse_key(wt, gh, capsys, tmp_path):
+    (wt / "link").symlink_to("feature.py")
+    git(wt, "add", "link")
+    git(wt, "commit", "-qm", "add tracked symlink")
+    arm_approved_ready_pr(gh, head_of(wt), wt, readiness={"local_exit": None}, isDraft=False)
+    settings = tmp_path / "workflow.toml"
+    settings.write_text(WORKFLOW.replace(
+        "[delivery]", '[checks.inputs]\n"*" = ["."]\n\n[delivery]',
+    ))
+    args = ("--config", str(settings))
+    assert run(capsys, *args, "check")[0] == 0
+    report = json.loads((wt / ".loopzero/checks.json").read_text())
+    assert all("input_key" not in stage for stage in report["results"])
+    assert run(capsys, *args, "ready")[0] == 0
+
+
 @pytest.mark.parametrize("base_sensitive", [False, True])
 def test_wait_snapshot_handles_trusted_base_advance(wt, repo, base_sensitive):
     if base_sensitive:
