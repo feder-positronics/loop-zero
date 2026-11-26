@@ -255,22 +255,13 @@ def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str
 
 
 def _run(
-    argv: list[str],
-    *,
-    cwd: Path,
-    prompt: str,  # delivered on stdin
-    env_allowlist: tuple[str, ...],
-    timeout: int,
-    family: str,
+    argv: list[str], *, cwd: Path, prompt: str,  # delivered on stdin
+    env_allowlist: tuple[str, ...], timeout: int, family: str,
 ) -> _proc.Completed:
     try:
         done = _proc.run(
-            argv,
-            cwd=cwd,
-            env_allowlist=env_allowlist,
-            timeout=timeout,
-            input=prompt,
-            encoding="utf-8",
+            argv, cwd=cwd, env_allowlist=env_allowlist, timeout=timeout,
+            input=prompt, encoding="utf-8",
         )
     except (_proc.ToolMissing, FileNotFoundError) as exc:
         raise RunnerMissing(f"{family}: {argv[0]!r} not found on PATH") from exc
@@ -302,18 +293,9 @@ _ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
 def _review_config(family: str, binary: Path, ro_paths: tuple[str, ...]) -> Config:
     """Build a networked, read-only sandbox config independent of check settings."""
     return Config(
-        repo="review/sandbox",
-        base_branch="main",
-        checks=(),
-        required_ci=(),
-        merge_strategy="squash",
-        reviewers=(family,),
-        network=True,
-        env_allowlist=BASE_ENV,
-        sandbox_ro=ro_paths or (str(binary.resolve().parent),),
-        writable=(),
-        scratch=(),
-        env=(),
+        repo="review/sandbox", base_branch="main", checks=(), required_ci=(),
+        merge_strategy="squash", reviewers=(family,), network=True, env_allowlist=BASE_ENV,
+        sandbox_ro=ro_paths or (str(binary.resolve().parent),), writable=(), scratch=(), env=(),
     )
 
 
@@ -385,13 +367,7 @@ def _sandbox_prefix(
     _require_review_sandbox()
     common_dir, git_dir = _git_dirs(cwd, config.env_allowlist)
     prefix = sandbox.bwrap_argv(
-        config,
-        cwd,
-        home,
-        common_dir,
-        git_dir,
-        clearenv=False,
-        writable_binds=auth_binds,
+        config, cwd, home, common_dir, git_dir, clearenv=False, writable_binds=auth_binds,
     )
     private = (home.resolve(), Path(sandbox.SANDBOX_HOME))
     args = iter(prefix)
