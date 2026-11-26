@@ -1076,7 +1076,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
-    assert_git_cost(git_calls, 15, 2)
+    assert_git_cost(git_calls, 16, 2)
     assert (code, err) == (5, "")  # request_changes: the exit code is the verdict
     assert out.splitlines()[0].startswith("reviewer paths pinned to origin/main@")
     assert out.splitlines()[-1] + "\n" == (
@@ -1097,6 +1097,25 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     assert "primary review of the whole change" in policy and policy.encode("utf-8") not in header + diff
     updated = json.loads(gh.calls[-1]["--input"])["body"]
     assert f"- primary, claude, {head[:12]}, request_changes" in updated
+
+
+def test_overlapping_review_dispatches_and_publishes_once(wt, gh, fake_bin, capsys, monkeypatch):
+    prepare_review(wt, gh, fake_bin)
+    review = cli._run_review
+    dispatched, overlapping = [], []
+
+    def overlap(*args, **kwargs):
+        dispatched.append(args[2])
+        if len(dispatched) == 1:
+            overlapping.append(run(capsys, "review"))
+        return review(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "_run_review", overlap)
+    assert run(capsys, "review")[0] == 0
+    assert len(dispatched) == 1
+    assert overlapping[0][0] == 1 and "review already running" in overlapping[0][2]
+    assert sum(call["argv"][1] == post_key().split()[1] and "--method" in call["argv"]
+               for call in gh.calls) == 1
 
 
 @pytest.mark.parametrize("refresh_fails", [False, True])
@@ -2013,7 +2032,8 @@ def test_late_check_keeps_current_passing_receipt(wt, gh, capsys, monkeypatch):
     assert "receipt accepted:" in out
 
 
-def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch):
+@pytest.mark.parametrize("late_save", [False, True])
+def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, monkeypatch, late_save):
     run_checks = cli.sandbox.run_checks
     old_head = head_of(wt)
     receipt = wt / ".loopzero/checks.json"
@@ -2022,19 +2042,32 @@ def test_passing_check_discarded_after_sandbox_when_head_moves(wt, gh, capsys, m
     assert run(capsys, "check")[0] == 0
     original_receipt = receipt.read_bytes()
 
+    save_report = cli._save_report
+
+    def advance_before_save(path, report):
+        nonlocal original_receipt
+        if report.head == old_head:
+            git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
+            assert run(capsys, "check")[0] == 0
+            original_receipt = receipt.read_bytes()
+        return save_report(path, report)
+
     def advance_after_checks(*args, **kwargs):
         report = run_checks(*args, **kwargs)
         assert report.ok
         git(wt, "commit", "--allow-empty", "-qm", "advance HEAD")
         return report
 
-    monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
+    if late_save:
+        monkeypatch.setattr(cli, "_save_report", advance_before_save)
+    else:
+        monkeypatch.setattr(cli.sandbox, "run_checks", advance_after_checks)
     code, out, err = run(capsys, "check")
     assert code == 1
     assert "PASS" not in out
     assert "discarded" in err and old_head in err and head_of(wt) in err
     assert receipt.read_bytes() == original_receipt
-    assert refreshed == [old_head]
+    assert refreshed == ([old_head, head_of(wt)] if late_save else [old_head])
 
 
 def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> None:
@@ -4267,6 +4300,8 @@ def test_wait_raises_when_closed_unmerged_persists(monkeypatch) -> None:
 
 def test_checks_report_survives_failed_publication(tmp_path, monkeypatch):
     path = tmp_path / cli.CHECKS_FILE
+    monkeypatch.setattr(cli.worktree, "head", lambda _: next(heads))
+    heads = iter(("a" * 40, "b" * 40))
     cli._save_report(tmp_path, CheckReport("a" * 40, False, ()))
 
     def interrupt(staged, dest):
