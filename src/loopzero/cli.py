@@ -125,11 +125,6 @@ def _load_config(
     config = config_mod.load_trusted(root, previous=previous, refresh=refresh,
                                      require_ci=require_ci, read_timeout=github._read_timeout)
     if args.command == "check":
-        if not config.checks:
-            raise config_mod.ConfigError(
-                f"origin/{config.base_branch}:workflow.toml: checks.commands must list "
-                "at least one command to run checks"
-            )
         print(f"checks pinned to origin/{config.base_branch}@{config.trusted_base_revision}")
     return config
 
@@ -431,7 +426,7 @@ def _load_report(wt: Path) -> CheckReport | None:
         results = tuple(CheckResult(**item) for item in data["results"])
         if any(not is_check_exit_code(result.exit_code) for result in results):
             raise TypeError("exit_code must be an integer")
-        dirty = data.get("dirty", True)
+        dirty = data["dirty"]
         if not isinstance(dirty, bool):
             raise TypeError("dirty must be a bool")
         return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
