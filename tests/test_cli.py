@@ -2262,9 +2262,10 @@ def test_review_redacts_native_authentication_diagnostics(wt, gh, fake_tool, cap
     assert code == 4
     assert err.count("Not logged in with [REDACTED] (server echoed [REDACTED])") == 2
     assert "opaque-fake-" not in err and "sk-FakeToken0123" not in err
-    for family, remedy in (("claude", "claude auth login"), ("codex", "codex login")):
+    for family in ("claude", "codex"):
         assert f"{family}: CLI is not authenticated" in err
-        assert f"Fix: run `{remedy}`." in err
+    assert "Fix: replace or unset `ANTHROPIC_API_KEY`" in err
+    assert "Fix: run `codex login`." in err
 
 
 @pytest.mark.parametrize("save", [True, False])
@@ -4025,6 +4026,19 @@ def test_ready_allows_behind_only_after_configured_mergify_attestation(
         assert code == (0 if attested else 1)
     else:
         assert f"ready:    {'yes' if attested else 'no'}" in out
+
+
+def test_prequeue_size_budget_reports_redacted_fetch_reason(wt, monkeypatch):
+    commit_mergify_configuration(wt)
+    config = replace(cli.config_mod.load_trusted(wt), checks=(cli._SIZE_BUDGET,))
+    pr = github.PR(7, URL, head_of(wt), "main", False, "OPEN", "MERGEABLE")
+    monkeypatch.setattr(cli, "_git", lambda *_args, **_kwargs: "origin")
+    detail = "fatal: Authentication failed for 'https://fake-token@example.com/repo'\n"
+    monkeypatch.setattr(cli._proc, "run", lambda *_args, **_kwargs: cli._proc.Completed(128, "", detail, 0))
+    with pytest.raises(cli.CliError, match="size budget check: fatal: Authentication failed") as caught:
+        cli._prequeue_size_budget(wt, config, pr, github.Readiness(True, ()))
+    assert "[REDACTED]@example.com" in str(caught.value)
+    assert "fake-token" not in str(caught.value)
 
 
 @pytest.mark.parametrize(("command", "queue"), [
