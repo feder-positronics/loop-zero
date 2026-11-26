@@ -1368,8 +1368,8 @@ def readiness(
     )
 
 
-def mark_ready(repo: str, number: int) -> None:
-    _gh("pr", "ready", str(number), "--repo", repo, timeout=_read_timeout(120))
+def mark_ready(repo: str, number: int, timeout: float = 120) -> None:
+    _gh("pr", "ready", str(number), "--repo", repo, timeout=timeout)
 
 
 _QUEUE_QUERY = (

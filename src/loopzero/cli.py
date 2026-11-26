@@ -1224,7 +1224,7 @@ def _activate_draft(wt: Path, config: Config, pr: github.PR, deadline: float | N
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
             if not (readiness.ready or _draft_checks_waiting(config, current, readiness)):
                 raise CliError("; ".join(readiness.reasons))
-            github.mark_ready(config.repo, pr.number)
+            github.mark_ready(config.repo, pr.number, github._read_timeout(120))
     except (CliError, github.GhError, _proc.ProcTimeout, OSError) as exc:
         raise CliError(f"{failure} | recovery: {exc}") from exc
 
