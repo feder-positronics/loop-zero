@@ -247,7 +247,10 @@ def is_dirty(wt: Path) -> bool:
 
 
 def diff_since(wt: Path, sha: str) -> bytes:
-    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    # Show every file as text, whatever attributes or NUL bytes the reviewed head adds,
+    # without diff drivers, and keep submodule pointers even if .gitmodules ignores them.
+    diff = _git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
     return diff.encode("utf-8", errors="surrogateescape")
 
 
