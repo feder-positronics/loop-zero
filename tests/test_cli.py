@@ -2607,7 +2607,7 @@ def test_ready_explains_trusted_policy_blocker(wt, gh, capsys, head, retargeted,
 def test_pending_required_check_names_the_wait(wt, gh, capsys, head, command):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     arm_named_check(gh, head, status="in_progress")
-    out, err = expect_cli(capsys, 1, command)
+    out, err = expect_cli(capsys, 3 if command == "ready" else 1, command)  # 3 = waiting (CONTRACT)
     out = without_accepted_receipt(out)
     reason = "required check 'checks' is pending"
     if command == "ready":

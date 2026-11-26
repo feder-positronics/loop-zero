@@ -1348,6 +1348,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if not readiness.ready:
         if args.wait is None and _pending_checks(config, pr, readiness):
             print(NEXT_WAIT)
+            return 3  # Only waitable blockers remain; CONTRACT exit 3 means waiting.
         return 1
     print(f"ready: {pr.url}")
     return 0

@@ -1221,7 +1221,7 @@ def test_rest_rate_limit_is_not_retried_or_probed(gh, monkeypatch, tmp_path, err
     ("4676", "", "short-window limit: retry after ~60 s"),
     ("", "90", "short-window limit: retry after 90 s"),
     ("", "Wed, 25 Nov 2026 21:03:14 GMT", "short-window limit: retry after Wed, 25 Nov 2026 21:03:14 GMT"),
-    ("", "", "Rate limited: retry after GitHub's reset or Retry-After; No automatic retry."),
+    ("", "", "Rate limited: retry after GitHub's reset or Retry-After; only a short Retry-After is retried automatically."),
 ])
 def test_rest_rate_limit_uses_failed_response_headers(gh, monkeypatch, remaining, retry_after, hint):
     sleeps = []

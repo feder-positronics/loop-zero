@@ -40,7 +40,8 @@ MARKER_RE = re.compile(
 PAGE = 100
 PR_FILE_LIMIT = 3_000
 PR_APP_INSTALLATION_HINT = "Check that the GitHub App installation includes this repository."
-RATE_LIMIT_GUIDANCE = "\nRate limited: retry after GitHub's reset or Retry-After; No automatic retry."
+RATE_LIMIT_GUIDANCE = ("\nRate limited: retry after GitHub's reset or Retry-After; "
+                       "only a short Retry-After is retried automatically.")
 CHECK_SUITE_LIMIT = 1_000
 GH_AUTH_REMEDY = "Run `gh auth login --scopes repo` (required token scope: repo)."
 _HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.MULTILINE)
@@ -447,7 +448,8 @@ def _rest_rate_limit(headers: dict[str, str]) -> str:
     }
     guidance = RATE_LIMIT_GUIDANCE
     if remaining == 0:
-        guidance = f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; No automatic retry."
+        guidance = (f"\nRate limited: hourly quota exhausted: retry after {reset or 'the quota resets'}; "
+                    "only a --wait whose deadline reaches a verified reset resumes by itself.")
     elif remaining is not None or retry_seconds or retry_date:
         delay = f"{retry_after} s" if retry_seconds else retry_after if retry_date else "~60 s"
         guidance = f"\nRate limited: short-window limit: retry after {delay}."
