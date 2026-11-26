@@ -41,7 +41,7 @@ class ConfigError(LoopZeroError):
     """The configuration file is missing, unreadable, or has invalid content."""
 
 
-def load(path: Path | str) -> Config:
+def load(path: Path | str, *, require_ci: bool = False) -> Config:
     """Load and validate a workflow file."""
     path = Path(path)
     try:
@@ -53,12 +53,17 @@ def load(path: Path | str) -> Config:
             "(https://github.com/feder-positronics/loop-zero/blob/main/SETUP.md#configure), "
             "or follow this repository's review process if it has one."
         ) from exc
-    return _parse_workflow(raw, path)
+    return _parse_workflow(raw, path, require_ci=require_ci)
 
 
-def _parse_workflow(raw: bytes, source: Path | str, hint: str = "") -> Config:
+def _parse_workflow(raw: bytes, source: Path | str, hint: str = "", *,
+                    require_ci: bool = False, branch: str | None = None) -> Config:
     try:
-        return _build(tomllib.loads(raw.decode("utf-8")))
+        data = tomllib.loads(raw.decode("utf-8"))
+        policy = _build(data)
+        if require_ci and (branch is None or policy.base_branch == branch):
+            _require_ci(data.get("checks", {}))
+        return policy
     except UnicodeDecodeError as exc:
         raise ConfigError(f"{source}: {exc}") from exc
     except (tomllib.TOMLDecodeError, ConfigError) as exc:
@@ -101,7 +106,7 @@ def _has_replacement_refs(common_dir: Path) -> bool:
 
 
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
-                     refresh: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
+                     refresh: bool, require_ci: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
     hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
     ref = f"refs/remotes/origin/{branch}"
@@ -127,12 +132,13 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
-    return _parse_workflow(shown.stdout.encode("utf-8", "surrogateescape"), source, f". {hint}"), revision
+    return _parse_workflow(shown.stdout.encode("utf-8", "surrogateescape"), source, f". {hint}",
+                           require_ci=require_ci, branch=branch), revision
 
 
-def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False,
+def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: bool = False, require_ci: bool = False,
                  read_timeout: Callable[[float], float] = float) -> Config:
-    """Select delivery policy using Git's origin default and its trusted workflow."""
+    """Select trusted delivery policy, reusing earlier loads from the same validation mode."""
     prefix = "refs/remotes/origin/"
     default = run_git(worktree, "symbolic-ref", "--quiet", f"{prefix}HEAD", timeout=read_timeout(60))
     ref = default.stdout.strip()
@@ -143,11 +149,19 @@ def load_trusted(worktree: Path, *, previous: Config | None = None, refresh: boo
         )
     branch = ref.removeprefix(prefix)
     for _ in range(2):
-        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh, read_timeout=read_timeout)
+        policy, revision = _remote_workflow(worktree, branch, previous, refresh=refresh,
+                                            require_ci=require_ci, read_timeout=read_timeout)
         if policy.base_branch == branch:
             return replace(policy, trusted_base_revision=revision)
         branch = policy.base_branch
     raise ConfigError("trusted origin workflows disagree on repo.base; align them or supply --config")
+
+
+def _require_ci(checks: dict[str, Any]) -> None:
+    if "required_ci" not in checks:
+        raise ConfigError(
+            "checks.required_ci must list the required contexts or explicitly set required_ci = [] if none are required"
+        )
 
 
 def _build(data: dict[str, Any]) -> Config:
