@@ -92,7 +92,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     repo = repo.rename(repo.with_name("repo\rreturn"))
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
-    run_git = worktree._git
+    run_git = worktree.git
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
@@ -102,7 +102,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         return output
 
     with monkeypatch.context() as patch:
-        patch.setattr(worktree, "_git", interrupt_after_add)
+        patch.setattr(worktree, "git", interrupt_after_add)
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
@@ -247,8 +247,8 @@ def test_task_helpers_errors(repo: Path) -> None:
 
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
-    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
-    monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
+    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree.git
+    monkeypatch.setattr(worktree, "git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
     (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)

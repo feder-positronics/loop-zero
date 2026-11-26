@@ -14,7 +14,7 @@ from pathlib import Path
 from time import sleep
 
 from loopzero import candidate, config, github, runners
-from loopzero.types import LoopZeroError
+from loopzero.types import LoopZeroError, is_sha
 
 REVIEW_MARKER_RE = runners.REVIEW_MARKER_RE
 CONTEXT = "Loop-zero Eligibility"
@@ -63,7 +63,8 @@ def review_projection(review: dict, head: str, repo: str, number: int):
         evidence = runners.decode_codex_evidence(block[1])
         if (not marker or marker[1] != head or marker[2] != evidence["kind"]
                 or evidence["repo"] != repo or evidence["pr"] != number
-                or evidence["head"] != head or evidence["publisher"] != (review.get("user") or {}).get("login")
+                or evidence["head"] != head or not isinstance(user := review.get("user"), dict)
+                or evidence["publisher"] != user.get("login")  # exact, as recorded in the evidence
                 or review.get("commit_id") != head or not evidence["complete"]):
             return True, None
         return True, evidence
@@ -71,18 +72,25 @@ def review_projection(review: dict, head: str, repo: str, number: int):
         return True, None
 
 
+def review_login(row: dict) -> str:
+    """The casefolded GitHub login of a REST review or comment row; empty when malformed."""
+    user = row.get("user")
+    login = user.get("login") if isinstance(user, dict) else None
+    return login.casefold() if isinstance(login, str) else ""
+
+
 def eligible_review(reviews: list[dict], head: str, publishers: tuple[str, ...], *,
                     repo: str = "", number: int = 0) -> dict | None:
     """Latest trusted evidence on this exact head; revocation cannot revive older evidence."""
     trusted = {login.casefold() for login in publishers}
     latest = next((r for r in reversed(reviews)
-                   if (r.get("user") or {}).get("login", "").casefold() in trusted
+                   if review_login(r) in trusted
                    and r.get("commit_id") == head and "loopzero:review" in (r.get("body") or "")), None)
     if latest is None or latest.get("state") not in {"APPROVED", "COMMENTED", "CHANGES_REQUESTED"}:
         return None
     body = latest.get("body") or ""
     marker = leading_marker(body)
-    if not marker or marker.group(1) != head or not re.fullmatch(r"[0-9a-f]{40}", head):
+    if not marker or marker.group(1) != head or not is_sha(head):
         return None
     verdict = latest.get("state") in {"APPROVED", "CHANGES_REQUESTED"} or any(
         f"**{value}**" in body for value in ("approve", "request_changes")
@@ -131,8 +139,7 @@ def base_merge_material(
     try:
         pr = github.api_get(f"repos/{repo}/pulls/{number}")
         base = pr["base"]["sha"]
-        if (pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch
-                or not re.fullmatch(r"[0-9a-f]{40}", base)):
+        if pr["head"]["sha"] != head or pr["base"]["ref"] != base_branch or not is_sha(base):
             return None
         with candidate.fetched_git(repo, [reviewed, head, base]) as git:
             git("merge-base", "--is-ancestor", reviewed, head)
@@ -170,7 +177,7 @@ def readiness_review(reviews: list[dict], head: str, publishers: tuple[str, ...]
                      repo: str, number: int, base_branch: str) -> dict | None:
     """An eligible review at the current head or an ancestor that covers it."""
     trusted = {login.casefold() for login in publishers}
-    marked = [r for r in reviews if (r.get("user") or {}).get("login", "").casefold() in trusted
+    marked = [r for r in reviews if review_login(r) in trusted
               and "loopzero:review" in (r.get("body") or "")]
     if not marked or any(r.get("commit_id") == head for r in marked):
         return eligible_review(marked, head, publishers, repo=repo, number=number)
@@ -212,26 +219,14 @@ def source_snapshot(repo: str, number: int, head: str, pr: github.PR | None = No
 def evaluate(repo: str, number: int, head: str, base: str,
              publishers: tuple[str, ...], *, snapshot: github.PR | None = None) -> github.Readiness:
     """Evaluate live review evidence. Callers supplying a snapshot own the final source check."""
-    if not publishers or not re.fullmatch(r"[0-9a-f]{40}", head):
+    if not publishers or not is_sha(head):
         raise LoopZeroError("eligibility requires trusted publishers and a full source SHA")
     pr = snapshot if snapshot is not None else source_snapshot(repo, number, head)
     if pr.number != number or pr.head_sha != head:
         return github.Readiness(False, ("source head changed; refresh eligibility",))
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
-    reviews, page = [], 1
-    seen: set[bytes] = set()
-    endpoint = f"repos/{repo}/pulls/{number}/reviews"
-    while True:
-        batch = github.api_get(f"{endpoint}?per_page={github.PAGE}&page={page}")
-        if not isinstance(batch, list):
-            raise LoopZeroError("invalid GitHub reviews response")
-        if len(batch) >= github.PAGE:
-            github.record_full_page(endpoint, batch, seen)
-        reviews.extend(batch)
-        if len(batch) < github.PAGE:
-            break
-        page += 1
+    reviews = github.paged(f"repos/{repo}/pulls/{number}/reviews")
     review = readiness_review(reviews, head, publishers, repo=repo, number=number, base_branch=base)
     result = github.readiness(repo, pr, base, (), head if review else None, allow_behind=True,
                               ancestor_review=review is not None and review["commit_id"] != head,
@@ -256,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     except config.ConfigError as exc:
         print(exc, file=sys.stderr)
         return 1
-    if not cfg.review_publishers or args.pr <= 0 or not re.fullmatch(r"[0-9a-f]{40}", args.head):
+    if not cfg.review_publishers or args.pr <= 0 or not is_sha(args.head):
         raise LoopZeroError("configure delivery.review_publishers and specify PR/full source SHA")
     def publish(state: str, description: str) -> None:
         github.commit_status(cfg.repo, args.head, CONTEXT, state, description[:140])

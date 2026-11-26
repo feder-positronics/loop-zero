@@ -257,12 +257,21 @@ def test_pr_lookup_fallback_for_deleted_branch(gh: FakeGh, states: list[str], ex
         assert pr.number == (8 if expected == "MERGED" else 9)
 
 
+def test_commit_pr_lookup_rejects_a_repeated_full_page(gh: FakeGh) -> None:
+    page = [rest_pr_json(pr_json(number=n), branch="lz/other") for n in range(1, github.PAGE + 1)]
+    gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls --method GET", page, page, [])
+    with pytest.raises(github.GhError, match="GitHub repeated a full page"):
+        github.pr_for_branch(REPO, "lz/t1")
+    assert sum(c["argv"][1] == f"repos/{REPO}/commits/{HEAD}/pulls" for c in gh.calls) == 2
+
+
 @pytest.mark.parametrize("message, fallback", [
     (f"No commit found for SHA: {HEAD}", True),
     ("Validation failed", False),
 ])
 def test_pr_lookup_with_local_head_handles_only_unknown_sha_422(gh: FakeGh, message: str, fallback: bool) -> None:
-    assoc = f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
+    assoc = f"api repos/{REPO}/commits/{HEAD}/pulls --method GET"
     gh.fail(assoc, f"gh: {message} (HTTP 422)")
     gh.respond_pr_list([pr_json()])
     if fallback:
@@ -878,8 +887,27 @@ def test_status_pagination_rejects_a_repeated_full_page(gh: FakeGh) -> None:
     page = [{"id": i, "state": "success"} for i in range(github.PAGE)]
     gh.respond(f"api {endpoint}", page, page)
     with pytest.raises(github.GhError, match="GitHub repeated a full page"):
-        github._paged(endpoint)
+        github.paged(endpoint)
     assert len(gh.calls) == 2
+
+
+@pytest.mark.parametrize("pages,error", [
+    ([{"check_runs": []}], "invalid paginated response"),  # an envelope where a list is due
+    ([[{"id": i} for i in range(github.PAGE + 1)]], "invalid paginated response"),
+    ([[{"id": page * github.PAGE + i} for i in range(github.PAGE)] for page in range(100)],
+     "pagination exceeds 100 pages"),
+])
+def test_list_pagination_rejects_wrong_shapes_and_endless_pages(monkeypatch, pages, error) -> None:
+    responses = iter(pages)
+    monkeypatch.setattr(github, "_gh_json", lambda *args, **kwargs: next(responses))
+    with pytest.raises(github.GhError, match=error):
+        github.paged(f"repos/{REPO}/pulls/7/reviews")
+
+
+@pytest.mark.parametrize("user", [{"login": 123}, {"login": None}, "bot", None, {}])
+def test_malformed_review_login_is_untrusted(user) -> None:
+    from loopzero import eligibility
+    assert eligibility.review_login({"user": user}) == ""
 
 
 # --- readiness ----------------------------------------------------------------------------
@@ -1300,7 +1328,7 @@ def test_merged_sha_requires_verified_merge_evidence(gh, views, expected):
 @pytest.mark.parametrize("merged", [None, pr_json(number=101, state="MERGED")])
 def test_merged_branch_history_reads_terminal_page(gh: FakeGh, merged: dict | None) -> None:
     gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
-    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1", [])
+    gh.respond(f"api repos/{REPO}/commits/{HEAD}/pulls --method GET", [])
     closed_page = [closed_history_row(pr_json(number=n, state="CLOSED")) for n in range(1, 101)]
     gh.respond(branch_history_key(), closed_page)
     gh.respond(branch_history_key(2), [closed_history_row(merged)] if merged else [])
@@ -1353,7 +1381,7 @@ def test_branch_pr_lookup_uses_commit_and_ignores_foreign_heads(gh: FakeGh, stat
     row["created_at"] = "2026-10-06T00:00:00Z"
     fork = row | {"number": 9, "head": row["head"] | {"repo": {"full_name": "fork/widgets"}}}
     other_branch = row | {"number": 8, "head": row["head"] | {"ref": "lz/other"}}
-    commits = f"api repos/{REPO}/commits/{HEAD}/pulls?per_page=100&page=1"
+    commits = f"api repos/{REPO}/commits/{HEAD}/pulls --method GET"
     gh.respond(branch_head_key(), {"commit": {"sha": HEAD}})
     gh.respond(commits, [fork, other_branch, row])
     if state == "CLOSED":
