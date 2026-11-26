@@ -43,10 +43,9 @@ and branch protection remains essential.
 Local `.loopzero/task.md` is working handoff context, rendered into the PR.
 The CLI also writes a head-bound checks receipt and saved review output in
 `.loopzero/` for local readiness and reposting. The CLI rejects tracked state
-and symbolic links. Receipt reads and writes use a directory descriptor for
-the worktree's state directory. These files do not form a second authoritative
-delivery history; new Codex native audit
-receipts have the restricted retention requirement described below. Local readiness requires
+and symlinks and uses the worktree's state directory descriptor for receipt I/O.
+GitHub retains authoritative delivery history. The retention rule for Codex
+native audit receipts is described below. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
 the configured origin base once at startup before loading its publisher policy.
@@ -121,10 +120,11 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    at that head with the current commands and check settings digest. A settings
    change or an older receipt without the digest requires a fresh check. The
    digest covers execution and stage reuse settings without recording raw
-   environment values. It excludes only inherited `HEAVY_SLOT_GRANTED_CORES`
-   for local sandbox receipts. Explicit settings, delegated runner environments
-   and stage reuse keys still bind the grant. Waiters check for policy changes
-   on every poll.
+   environment values. For local sandbox receipts it omits inherited `PATH`,
+   `LANG`, `LC_ALL`, `TERM`, and `HEAVY_SLOT_GRANTED_CORES` so readiness can
+   run in a different host environment. Explicit settings, delegated runner
+   environments, and stage reuse keys still bind these values. Waiters check
+   for policy changes on every poll.
    Local readiness and hosted eligibility carry a review forward only across
    a first-parent chain of verified merges from the configured PR base. They
    reconstruct each merge in an isolated Git repository and compare its tree
@@ -321,12 +321,16 @@ PR writes. [Hosted dispatch](../src/loopzero/hosted.py) and
 Local readiness and hosted source and candidate eligibility reject PRs with
 merge-authority holds. Adding or removing a hold refreshes source eligibility
 even when the head stays the same. Merge admission rechecks the live hold.
+Hosted evaluation uses the source snapshot already fetched by dispatch or
+candidate attestation. The caller rechecks the source fields that affect the
+verdict before publication. Standalone evaluation performs its own PR reads.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
 When delivery uses the existing size checker, local readiness and new Mergify
 requests evaluate a temporary integration with the freshly fetched target. The
 target supplies the checker and baseline. Existing requests continue to the
-queue wait path.
+queue wait path. Readiness and new queue requests without an admission deadline can project an
+advisory budget after a single known chain of queued predecessors.
 Candidate lineage reads wait on zero or multiple live batch matches with exponential
 backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
 both reads and all attestation attempts. Each wait revalidates the candidate before
