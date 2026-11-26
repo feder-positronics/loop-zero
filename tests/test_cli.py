@@ -2762,6 +2762,7 @@ def test_ready_wait_review_failure_freshness(
     failed_at = {
         "tie": "2026-09-23T12:00:00Z",
         "missing": None,
+        "fractional-review": "2026-09-23T12:00:00.000Z",
         "fractional-newer": "2026-09-23T12:00:00.250Z",
         "offset-tie": "2026-09-23T11:00:00-01:00",
         "offset-older": "2026-09-23T13:59:59+02:00",
