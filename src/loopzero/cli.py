@@ -19,7 +19,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import datetime
 from functools import partial, wraps
 from pathlib import Path
 
@@ -186,11 +186,11 @@ def _require_pushed(pr: github.PR, head: str) -> None:
 # --------------------------------------------------------------------------- review markers
 
 
-def _rest_rows(endpoint: str, what: str) -> list[dict]:
+def _rest_rows(endpoint: str, what: str, **kwargs) -> list[dict]:
     """Every row of a REST list, oldest first, following pages until a short one."""
     rows: list[dict] = []
     for page in range(1, 101):
-        batch = github.api_get(f"{endpoint}?per_page={PAGE}&page={page}")
+        batch = github.api_get(f"{endpoint}?per_page={PAGE}&page={page}", **kwargs)
         if not isinstance(batch, list) or not all(isinstance(row, dict) for row in batch):
             raise CliError(f"invalid GitHub {what} response")
         rows += batch
@@ -199,8 +199,8 @@ def _rest_rows(endpoint: str, what: str) -> list[dict]:
     raise CliError(f"GitHub {what} pagination limit exceeded")
 
 
-def _pr_reviews(repo: str, number: int) -> list[dict]:
-    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews")
+def _pr_reviews(repo: str, number: int, **kwargs) -> list[dict]:
+    return _rest_rows(f"repos/{repo}/pulls/{number}/reviews", "reviews", **kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -254,6 +254,17 @@ def _decide_kind(markers: list[Marker], head: str) -> tuple[str, str | None]:
 MERGEABILITY_PENDING = "GitHub is computing mergeability"
 
 
+def _review_age(review_at: datetime | None, headers: dict[str, str]) -> tuple[float | None, float]:
+    server_time = github.response_date(headers)
+    now = server_time.timestamp() if server_time is not None else time.time()
+    age = now - review_at.timestamp() if review_at is not None else None
+    if server_time is None:
+        return age, -MAX_REVIEW_CLOCK_SKEW
+    if age is not None and -1 < age < 0:
+        age = 0.0  # HTTP Date rounds down to the second.
+    return age, 0.0
+
+
 def _readiness(
     wt: Path, config: Config, pr: github.PR, head: str, reviews: list[dict] | None = None,
     *, workflow_wait: bool = False, announce_receipt: bool = False,
@@ -261,25 +272,26 @@ def _readiness(
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
     if reviews is None:
-        reviews = _pr_reviews(config.repo, pr.number)
+        headers: dict[str, str] = {}
+        reviews = _pr_reviews(config.repo, pr.number, response_headers=headers if workflow_wait else None)
+    else:
+        headers = {}
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
         reviews, head, publishers, repo=config.repo, number=pr.number, base_branch=config.base_branch,
     )
-    review_at = review.get("submitted_at") if review else None
-    # GitHub's review timestamp is in UTC and predates this process.
-    review_age = (time.time() - datetime.strptime(review_at, "%Y-%m-%dT%H:%M:%SZ")
-                  .replace(tzinfo=UTC).timestamp()) if review_at else None
+    review_at = github.readiness_timestamp(review.get("submitted_at")) if review else None
+    review_age, min_age = _review_age(review_at, headers)
     result = github.readiness(
         config.repo, pr, config.base_branch, config.required_ci,
         head if review else None, review_at=review_at,
         ancestor_review=review is not None and review["commit_id"] != head,
         review_grace=review_age is not None and 0 <= review_age < MISSING_RUN_GRACE,
         workflow_wait=workflow_wait,
-        # Allow skew only for verdicts GitHub timestamps establish are stale.
+        # Allow host clock skew only when GitHub did not supply a usable Date.
         stale_verdict_grace=(
             workflow_wait and review_age is not None
-            and -MAX_REVIEW_CLOCK_SKEW <= review_age < STALE_VERDICT_GRACE
+            and min_age <= review_age < STALE_VERDICT_GRACE
         ),
     )
     report = _load_report(wt)
