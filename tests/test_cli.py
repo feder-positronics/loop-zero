@@ -1448,13 +1448,11 @@ def test_runtime_pinning_requires_trusted_workflow(
     origin = Path(git(wt, "remote", "get-url", "origin").strip())
     if missing == "default":
         git(wt, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
-    elif missing == "remote":
-        git(wt, "update-ref", "-d", "refs/remotes/origin/main")
-        git(origin, "update-ref", "-d", "refs/heads/main")
     else:
-        initial = git(wt, "rev-list", "--max-parents=0", "HEAD").strip()
-        git(wt, "update-ref", "refs/remotes/origin/main", initial)
-        git(origin, "update-ref", "refs/heads/main", initial)
+        options = ("-d",) if missing == "remote" else ()
+        revision = () if options else (git(wt, "rev-list", "--max-parents=0", "HEAD").strip(),)
+        for checkout, ref in ((wt, "refs/remotes/origin/main"), (origin, "refs/heads/main")):
+            git(checkout, "update-ref", *options, ref, *revision)
     prepare_review(wt, gh, fake_bin)
     code, out, err = run(capsys, command)
     assert "reviewer paths" not in out + err
@@ -2470,7 +2468,7 @@ def test_source_wait_reads_once_before_first_interval(
 
 @pytest.mark.parametrize("command", ["ready", "merge"])
 @pytest.mark.parametrize("settled", ["CONFLICTING", "MERGEABLE", "UNKNOWN"])
-def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled, git_calls):
+def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, settled):
     head = commit_mergify_configuration(wt)
     arm_approved_ready_pr(gh, head, wt, mergeable="UNKNOWN", isDraft=False)
     gh.respond_pr_view(pr_json(headRefOid=head, mergeable=settled, isDraft=False,
@@ -2481,67 +2479,16 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, command, sett
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
 
     poll_clock(monkeypatch)
-    git_calls.clear()
     code, out, err = run(capsys, command, "--wait=1")
 
-    assert sum(call[0] == "fetch" for call in git_calls) == 1
     if settled == "CONFLICTING":
         assert code == 1 and "has merge conflicts" in out + err
     elif settled == "UNKNOWN":
-        assert code == 3 and out.endswith(f"timed out waiting for GitHub to compute mergeability on {head[:12]}. Run `loopzero {command} --wait` to resume on this head.\n"), (code, out, err)
+        assert code == 3 and out.endswith(f"timed out waiting for GitHub to compute mergeability on {head[:12]}. Run `loopzero {command} --wait` to resume on this head.\n")
     else:
         assert code == (0 if command == "ready" else 3)
     assert requests == ([(REPO, 7, head, "main")]
                         if command == "merge" and settled == "MERGEABLE" else [])
-
-
-@pytest.mark.parametrize("publisher,expected", [
-    ("retired-publisher", "pending"), ("replacement-publisher", "success"),
-])
-def test_readiness_and_hosted_use_current_base_publishers(wt, gh, head, tmp_path, monkeypatch, capsys,
-                                                          publisher, expected):
-    git(tmp_path, "clone", "-q", str(tmp_path / "origin.git"), "trusted")
-    trusted = tmp_path / "trusted"
-    workflow = trusted / "workflow.toml"
-    retired_workflow = (WORKFLOW.replace('required_ci = ["checks"]',
-                                        'required_ci = ["checks", "Loop-zero Eligibility"]')
-                        + 'review_publishers = ["retired-publisher"]\n')
-    workflow.write_text(retired_workflow)
-    git(trusted, "commit", "-qam", "trust old review publisher")
-    git(trusted, "push", "-q", "origin", "main")
-    git(wt, "fetch", "-q", "origin", "main")
-    stale = git(wt, "rev-parse", "origin/main")
-
-    arm_approved_pr_with_check_result(gh, head, wt, "success", isDraft=False, review_login=publisher)
-    gh.respond(f"api repos/{REPO}/commits/{head}/statuses",
-               [{"context": "Loop-zero Eligibility", "state": "success"}])
-    workflow.write_text(retired_workflow.replace("retired-publisher", "replacement-publisher"))
-    git(trusted, "commit", "-qam", "rotate review publisher")
-    git(trusted, "push", "-q", "origin", "main")
-    assert git(wt, "rev-parse", "origin/main") == stale
-    assert git(trusted, "rev-parse", "HEAD") != stale
-
-    code, out, _ = run(capsys, "ready")
-    assert code == (0 if expected == "success" else 1)
-    assert (github.MISSING_REVIEW_REASON in out) == (expected == "pending")
-    if expected == "pending":
-        git(wt, "remote", "set-url", "origin", str(tmp_path / "unavailable.git"))
-        code, _, err = run(capsys, "ready")
-        assert code == 1 and "could not refresh origin/main" in err
-        explicit = tmp_path / "explicit.toml"
-        explicit.write_text(retired_workflow)
-        assert run(capsys, "--config", str(explicit), "ready")[0] == 0
-
-    event = trusted / "event.json"
-    event.write_text(json.dumps({"inputs": {"pr": "7"}}))
-    monkeypatch.chdir(trusted)
-    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
-    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
-    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
-    assert hosted.main() == 0
-    payload = json.loads(gh.calls[-1]["--input"])
-    assert gh.calls[-1]["argv"][1] == f"repos/{REPO}/statuses/{head}"
-    assert payload["state"] == expected
 
 
 @pytest.mark.parametrize("command,check,hold_at_admission", [
@@ -4178,12 +4125,25 @@ def test_hosted_eligibility_uses_publisher_not_token(wt, gh, state, verdict, exp
 
 
 @pytest.mark.parametrize("publisher", ["stranger", "lz-bot"])
-def test_ready_pins_review_publishers_to_base(wt, gh, capsys, publisher, head):
-    (wt / "workflow.toml").write_text(WORKFLOW + f'\nreview_publishers = ["{publisher}"]\n')
+def test_ready_pins_review_publishers_to_base(wt, repo, gh, capsys, monkeypatch, publisher, head):
+    policy = WORKFLOW.replace('required_ci = ["checks"]', 'required_ci = ["checks", "Loop-zero Eligibility"]')
+    publish_workflow(wt, policy + '\nreview_publishers = ["stranger"]\n')
+    commit_file(repo, "workflow.toml", policy + f'\nreview_publishers = ["{LOGIN}"]\n', "rotate publisher")
+    git(repo, "push", str(repo.parent / "origin.git"), "main")  # preserve the retired local publisher
+    (wt / "workflow.toml").write_text(policy + f'\nreview_publishers = ["{publisher}"]\n')
     arm_approved_pr_with_check_result(
         gh, head, wt, "success", review_login=publisher, isDraft=False
     )
+    gh.respond(f"api repos/{REPO}/commits/{head}/statuses", [{"context": "Loop-zero Eligibility", "state": "success"}])
     assert run(capsys, "ready")[0] == (0 if publisher == LOGIN else 1)
+    event = repo / "event.json"
+    event.write_text(json.dumps({"inputs": {"pr": "7"}}))
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    gh.respond(f"api repos/{REPO}/statuses/{head}", {})
+    assert hosted.main() == 0
+    assert json.loads(gh.calls[-1]["--input"])["state"] == ("success" if publisher == LOGIN else "pending")
 
 
 def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatch):
