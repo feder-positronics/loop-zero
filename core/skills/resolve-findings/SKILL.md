@@ -14,6 +14,9 @@ Fix valid blocking findings within commissioned scope or hand off bounded repair
 and validation through [response handoff](reference.md#response-handoff).
 Explain repaired, inapplicable or unsupported findings in-thread with verified
 evidence using `loopzero resolve`; never resolve silently. Suggestions are optional.
+If a finding cites outdated acceptance, verify the authorized criteria against
+the current head and resolve the mistaken premise with that evidence. Use the
+existing review budget if the changed head still needs review.
 Requester-reserved, irreversible or acceptance/scope/cost changes and external
 commitments require direction.
 
