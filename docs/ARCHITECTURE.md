@@ -132,6 +132,8 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    suffix consisting only of verified base merges with a conflict. Isolated Git
    reconstructs the automatic merges to confirm the conflict. Unresolved
    blocking findings or a third recorded review rule out this allowance.
+   An empty base-merge delta cannot bypass unresolved blocking findings.
+   Without review coverage, readiness also shows outdated unresolved findings.
 5. `ready` derives readiness from the current head, its check receipt, an eligible review at that
    head or an eligible review covering an ancestor, blocking findings
    (unresolved threads a review publisher opened with a head-bound marker line),

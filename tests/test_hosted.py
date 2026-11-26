@@ -204,8 +204,9 @@ def test_hosted_review_coverage_after_source_head_changes(
 
     ordinary = change == "ordinary"
     state = ("failure" if candidate else "pending") if ordinary else "success"
-    check_source(publisher, ["pending", state], error=hosted.LoopZeroError if state == "failure" else None,
-                 match="no review recorded")
+    statuses = check_source(publisher, ["pending", state], exit_code=int(state == "failure"))
+    if state == "failure":
+        assert "source #7: no review recorded" in statuses[-1]["description"]
 
 
 def test_merged_source_refresh_publishes_nothing(publisher):
@@ -296,10 +297,10 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
 
 
 @pytest.mark.parametrize("case,error,message", [
-    ("valid", None, ""), ("trunk", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
+    ("valid", None, ""), ("trunk", None, ""), ("policy", None, "source #101: no review recorded"),
     ("settled_mergeability", None, ""), ("pending_mergeability", None, ""),
     ("poll_drift", CandidateRaceError, "changed during mergeability polling"),
-    ("hold", hosted.LoopZeroError, "source #101: PR #101 has a merge-authority hold"),
+    ("hold", None, "source #101: PR #101 has a merge-authority hold"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
     ("head", hosted.LoopZeroError, "head changed"), ("publisher", CandidateError, "not open"),
@@ -309,7 +310,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
     ("stale", hosted.LoopZeroError, "head is no longer current"),
     ("untrusted", CandidateError, "head event was not sent"),
 ])
-def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, case, error, message):
+def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatch, capsys, case, error, message):
     event = candidate_event()
     event["action"], event["sender"]["id"] = (
         "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
@@ -391,7 +392,7 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         monkeypatch.setattr(hosted.mergify, "api_get", lambda repo, suffix: candidate_status()
                             if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     with pytest.raises(error, match=message or None) if error else nullcontext():
-        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability"})
+        assert hosted.main() == int(case in {"api", "mergify", "pending_mergeability", "policy", "hold"})
     states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "mergify": ["pending"], "manual": [], "metadata": [], "stale": []}
     states |= {"settled_mergeability": ["pending", "success"], "pending_mergeability": ["pending"]}
@@ -400,13 +401,16 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
         assert mergeability_sleeps == ([2] if case == "settled_mergeability" else [2, 4, 8])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)
     if case == "race":
-        assert rest_calls.count("apps/mergify") == 3 and sleeps == [2, 2] and len(evaluated) == 6
+        assert rest_calls.count("apps/mergify") == 4 and sleeps == [4, 4, 4] and len(evaluated) == 8
     if case == "valid":
         assert len(rest_calls) + len(published) <= 16
         assert evaluated == [("owner/repo", n, str(n - 100) * 40, "main", ("trusted-publisher",))
                              for n in (101, 102)]
         assert [call[-1] for call in published] == [
             "Refreshing live source review evidence", "All attested candidate sources are reviewed"]
+    elif case in {"hold", "policy"}:
+        assert message in published[-1][-1]
+        assert message in capsys.readouterr().out
     elif case not in states:
         assert published[-1][-1] == "Eligibility refresh failed; inspect workflow logs"
 
