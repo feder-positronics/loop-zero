@@ -482,6 +482,13 @@ def test_strict_projection_types_and_bounds(field, value):
         runners.decode_codex_evidence(packed(evidence))
 
 
+def test_non_object_publisher_is_ignored_not_a_crash():
+    review = row(SYNTHETIC_NATIVE)
+    assert cli._pr_markers([review], review["commit_id"], ("bot",), repo="acme/widgets", number=7)
+    review["user"] = "bot"
+    assert cli._pr_markers([review], review["commit_id"], ("bot",), repo="acme/widgets", number=7) == []
+
+
 def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     raw = json.loads(SYNTHETIC_NATIVE.raw)
     raw.pop("review_context")

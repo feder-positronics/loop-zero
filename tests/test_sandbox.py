@@ -866,9 +866,14 @@ def test_reused_check_preserves_integration_shard_output(git_repo, bwrap_log, fe
     assert len(result["tail"].encode("utf-8")) <= 16 * 1024
 
 
-def test_sandbox_git_output_stays_raw_for_input_keys(git_repo):
-    # Input keys hash diff-tree output byte for byte; stripping would invalidate saved receipts.
-    assert sandbox._git(make_config(), git_repo, "rev-parse", "HEAD").endswith("\n")
+def test_input_blobs_keep_git_output_byte_for_byte(git_repo):
+    # Input keys hash diff-tree output; stripping would invalidate saved receipts.
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=git_repo, capture_output=True, text=True, check=True).stdout
+    empty = git("hash-object", "-t", "tree", "/dev/null").strip()
+    raw = git("-c", "core.quotePath=true", "diff-tree", "--no-commit-id", "--raw", "-r", "--no-abbrev",
+              empty, "HEAD", "--", "README.md")
+    assert raw.endswith("\n") and sandbox._input_blobs(make_config(), git_repo, ("README.md",)) == raw
 
 
 @pytest.mark.parametrize("error", [errno.E2BIG, errno.ENOENT])

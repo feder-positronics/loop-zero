@@ -63,7 +63,8 @@ def review_projection(review: dict, head: str, repo: str, number: int):
         evidence = runners.decode_codex_evidence(block[1])
         if (not marker or marker[1] != head or marker[2] != evidence["kind"]
                 or evidence["repo"] != repo or evidence["pr"] != number
-                or evidence["head"] != head or evidence["publisher"] != (review.get("user") or {}).get("login")
+                or evidence["head"] != head or not isinstance(user := review.get("user"), dict)
+                or evidence["publisher"] != user.get("login")  # exact, as recorded in the evidence
                 or review.get("commit_id") != head or not evidence["complete"]):
             return True, None
         return True, evidence
