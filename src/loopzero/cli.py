@@ -643,21 +643,29 @@ def _check_failure_preview(tail: str, limit: int = 1536) -> str:
     return preview.decode(errors="ignore")
 
 
-def cmd_check(args: argparse.Namespace) -> int:
-    wt, config = _context(args, pin_checks=True)
-    if not config.checks:
-        raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
-    try:
-        report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {command}", flush=True),
-            status=lambda message: print(message, flush=True),
-            checkpoint=lambda partial: _save_report(wt, partial),
-            workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
-    except sandbox.SandboxUnavailable as exc:
-        print(f"sandbox unavailable: {exc}", file=sys.stderr)
-        return 2
+EXCLUSION_PATHSPEC = re.compile(r"^:(?:[/!^]*[!^]|\((?:[^,)]*,)*exclude(?:[,)]))")
+
+
+def _reusable_check_report(wt: Path, config: Config) -> CheckReport | None:
+    if any(EXCLUSION_PATHSPEC.match(path) for paths in config.inputs.values() for path in paths):
+        return None
+    with suppress(OSError, sandbox.SandboxUnavailable, _proc.ProcTimeout, worktree.WorktreeError):
+        if not (wt / CHECKS_FILE).is_file():
+            return None
+        with _lock_task_state(wt):
+            if worktree.is_dirty(wt):
+                return None
+            head = worktree.head(wt)
+            report = _current_check_report(wt, config, head)
+            if report is not None and not worktree.is_dirty(wt) and worktree.head(wt) == head:
+                _refresh_existing_pr_checks(wt, config)
+                return report
+    return None
+
+
+def _print_check_failures(config: Config, results: tuple[CheckResult, ...]) -> bool:
     shortened = False
-    for result in report.results:
+    for result in results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
@@ -674,6 +682,27 @@ def cmd_check(args: argparse.Namespace) -> int:
                     "(use the required groups) so the cache under `[checks] writable` is warm, "
                     "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
                 )
+    return shortened
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    wt, config = _context(args, pin_checks=True)
+    if not config.checks:
+        raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
+    if (receipt := _reusable_check_report(wt, config)) is not None:
+        _print_receipt(wt, receipt, f"reused from {CHECKS_FILE}")
+        print("PASS")
+        return 0
+    try:
+        report = sandbox.run_checks(config, wt, progress=lambda command: print(
+            f"running: {command}", flush=True),
+            status=lambda message: print(message, flush=True),
+            checkpoint=lambda partial: _save_report(wt, partial),
+            workflow=args.config or f"origin/{config.base_branch}:workflow.toml")
+    except sandbox.SandboxUnavailable as exc:
+        print(f"sandbox unavailable: {exc}", file=sys.stderr)
+        return 2
+    shortened = _print_check_failures(config, report.results)
     if (current_head := _save_report(wt, report)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)

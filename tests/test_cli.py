@@ -427,25 +427,25 @@ def test_start_without_config(git_repo: Path, monkeypatch, capsys) -> None:
     assert code == 1 and "workflow.toml" in err and err.count("\n") == 1
 
 
-def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys) -> None:
-    code, out, _ = run(capsys, "check")
-    assert gh.calls == []
-    lines = out.splitlines()
-    assert code == 0 and lines[-1] == "PASS"
-    assert lines[0].startswith("checks pinned to origin/main@")
-    assert lines[1] == "running: echo ok"
-    assert lines[2].startswith("stage 1/2: exit 0 (")
-    assert lines[3] == "running: test -f README.md"
-    assert lines[4].startswith("stage 2/2: exit 0 (")
-    assert sum("exit 0" in line for line in lines) == 2
-    report = json.loads((wt / ".loopzero" / "checks.json").read_text())
-    assert report["head"] == head_of(wt)
-    assert report["dirty"] is False
-    assert f"receipt produced: head={report['head']} content=" in out
-    assert "config=commands-sha256:" in out and "environment=unknown" in out
-    assert [(r["command"], r["exit_code"]) for r in report["results"]] == [
-        ("echo ok", 0), ("test -f README.md", 0)]
-    assert report["results"][0]["tail"] == "ok"
+@pytest.mark.parametrize("exclusion", ["", ":!README.md", ":^README.md", ":(glob,exclude)README.md"])
+def test_check_pass_writes_and_reuses_report(wt, gh, capsys, monkeypatch, exclusion):
+    if exclusion:
+        publish_workflow(wt, WORKFLOW.replace("[delivery]", f'[checks.inputs]\n"*" = ["{exclusion}"]\n[delivery]'))
+    out, _ = expect_cli(capsys, 0, "check")
+    pin, first, first_exit, second, second_exit, evidence, verdict = out.splitlines()
+    assert not gh.calls and verdict == "PASS" and pin.startswith("checks pinned to origin/main@")
+    assert (first, second) == ("running: echo ok", "running: test -f README.md")
+    assert first_exit.startswith("stage 1/2: exit 0 (") and second_exit.startswith("stage 2/2: exit 0 (")
+    path = wt / ".loopzero/checks.json"
+    report = json.loads(original := path.read_bytes())
+    assert report["head"] == head_of(wt) and report["dirty"] is False
+    assert re.fullmatch(f"receipt produced: head={report['head']} content=.* config=commands-sha256:.* environment=unknown", evidence)
+    assert [(r["command"], r["exit_code"], r["tail"]) for r in report["results"]] == [("echo ok", 0, "ok"), ("test -f README.md", 0, "")]
+    monkeypatch.setattr(cli.sandbox, "run_checks", stages := Mock(wraps=cli.sandbox.run_checks))
+    out, _ = expect_cli(capsys, 0, "check")
+    assert stages.called is bool(exclusion)
+    if not exclusion:
+        assert out.endswith("PASS\n") and "receipt reused from .loopzero/checks.json" in out and path.read_bytes() == original
 
 
 @pytest.mark.parametrize("state", [None, "CLOSED", "MERGED"])
@@ -2382,7 +2382,7 @@ def test_late_check_preserves_receipt_when_head_moves(wt, gh, capsys, monkeypatc
     monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *_: refreshed.append(head_of(wt)))
     if phase != "stage":
         expect_cli(capsys, 0, "check")
-        saved_receipt = receipt.read_bytes()
+        receipt.write_bytes(saved_receipt := receipt.read_bytes().replace(b'"settings_sha256"', b'"obsolete_settings_sha256"'))
     run_stage, run_checks, save_report = cli.sandbox._run_one, cli.sandbox.run_checks, cli._save_report
 
     def advance_head(*, rerun=True):
