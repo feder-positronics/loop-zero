@@ -3438,10 +3438,11 @@ def test_merged_bare_primary_cleans_only_clean_linked_worktree(
     code, out, err = run(capsys, "merge")
     assert {primary.resolve(), repo.resolve()}.isdisjoint(cwds)
 
+    assert code == 0 and out.endswith(f"{'c' * 40}\n") and "cd " not in out, (out, err)
     if state == "wrong_primary":
-        assert code == 1 and "does not own this linked worktree" in err
+        assert "warning: merged but worktree cleanup failed:" in err
+        assert "does not own this linked worktree" in err
     else:
-        assert code == 0 and out.endswith(f"{'c' * 40}\n") and "cd " not in out, (out, err)
         assert ("worktree is dirty" in err) if state == "dirty" else not err
     assert linked.exists() is (state != "clean")
     assert bool(git(primary, "branch", "--list", "lz/bare")) is (state != "clean")
