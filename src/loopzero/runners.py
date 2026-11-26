@@ -87,6 +87,10 @@ class RunnerBadOutput(RunnerError):
         self.tail = tail
 
 
+class RunnerMalformedOutput(RunnerBadOutput):
+    """The runner returned a payload that could not be parsed as a review."""
+
+
 class RunnerPromptTooLong(RunnerBadOutput):
     """The provider rejected the prompt for exceeding its context window."""
 
@@ -214,33 +218,34 @@ def _claude_payload(envelope: dict) -> object:
     return _extract_json_object(str(envelope.get("result", ""))) if payload is None else payload
 
 
-def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str) -> ReviewResult:
+def parse_review(payload: object, *, family: str, head: str, kind: str, raw: str, excerpt: str | None = None) -> ReviewResult:
     """Validate a decoded review object against the findings schema."""
+    diagnostic = _tail(raw if excerpt is None else excerpt)
     if not isinstance(payload, dict):
-        raise RunnerBadOutput(f"{family}: review is not a JSON object", _tail(raw))
+        raise RunnerMalformedOutput(f"{family}: review is not a JSON object", diagnostic)
     if set(payload) != {"verdict", "findings"}:
-        raise RunnerBadOutput(f"{family}: review has unexpected or missing keys", _tail(raw))
+        raise RunnerMalformedOutput(f"{family}: review has unexpected or missing keys", diagnostic)
     verdict, items = payload["verdict"], payload["findings"]
     if (
         not isinstance(verdict, str)
         or verdict not in ("approve", "request_changes")
         or not isinstance(items, list)
     ):
-        raise RunnerBadOutput(f"{family}: review lacks verdict/findings", _tail(raw))
+        raise RunnerMalformedOutput(f"{family}: review lacks verdict/findings", diagnostic)
     findings: list[Finding] = []
     for item in items:
         required = {"severity", "path", "line", "title", "body"}
         if not isinstance(item, dict) or set(item) != required:
-            raise RunnerBadOutput(f"{family}: finding has unexpected or missing keys", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding has unexpected or missing keys", diagnostic)
         if not isinstance(item["severity"], str) or item["severity"] not in SEVERITIES:
-            raise RunnerBadOutput(f"{family}: finding has bad severity", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding has bad severity", diagnostic)
         path, line = item["path"], item["line"]
         if path is not None and not isinstance(path, str):
-            raise RunnerBadOutput(f"{family}: finding path is not a string", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding path is not a string", diagnostic)
         if line is not None and (isinstance(line, bool) or not isinstance(line, int)):
-            raise RunnerBadOutput(f"{family}: finding line is not an integer", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding line is not an integer", diagnostic)
         if not isinstance(item["title"], str) or not isinstance(item["body"], str):
-            raise RunnerBadOutput(f"{family}: finding title/body must be strings", _tail(raw))
+            raise RunnerMalformedOutput(f"{family}: finding title/body must be strings", diagnostic)
         findings.append(Finding(**item))
     if any(f.severity in BLOCKING for f in findings):
         verdict = "request_changes"
@@ -502,10 +507,13 @@ def _codex_repository_skill_overrides(cwd: Path) -> list[str]:
 
 def _repository_skill_paths(cwd: Path) -> set[str]:
     tree, paths, seen = cwd.resolve(), set(), set()
-    pending = [cwd / ".agents" / "skills", cwd / ".codex" / "skills"]
+    roots = (cwd / ".agents", cwd / ".codex")
+    pending = list(roots)
     while pending:
         path = pending.pop()
-        if not os.path.lexists(path):
+        try:
+            path.lstat()
+        except FileNotFoundError:
             continue
         # Strict: a looping or dangling link fails closed; Codex might resolve it elsewhere.
         real = path.resolve(strict=True)
@@ -514,6 +522,9 @@ def _repository_skill_paths(cwd: Path) -> set[str]:
         if not real.is_dir():
             if path.name == "SKILL.md":
                 paths.add(str(real))
+            continue
+        if path in roots:
+            pending.append(path / "skills")
             continue
         if real in seen:
             continue
@@ -813,7 +824,8 @@ def _inspection_commands(command, cwd):
                 args = [
                     part
                     for part in group[1:]
-                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv"}
+                    if part not in {"--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                                    "--ignore-submodules=none", "--submodule=short"}
                 ]
                 if len(args) != 2 or not all(_hex(part, 40) for part in args):
                     return []
@@ -1138,9 +1150,9 @@ def _review_claude(
     try:
         envelope = _extract_json_object(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerBadOutput("claude: stdout is not JSON", _tail(raw)) from exc
+        raise RunnerMalformedOutput("claude: stdout is not JSON", _tail(raw)) from exc
     if not isinstance(envelope, dict):
-        raise RunnerBadOutput("claude: result envelope is not an object", _tail(raw))
+        raise RunnerMalformedOutput("claude: result envelope is not an object", _tail(raw))
     if _claude_envelope_auth_failure(envelope):
         raise RunnerAuthFailed(f"claude: CLI is not authenticated\n{_tail(raw)}")
     if envelope.get("is_error") and _subscription_exhausted(raw, envelope):
@@ -1155,7 +1167,7 @@ def _review_claude(
     try:
         payload = _claude_payload(envelope)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerBadOutput("claude: result text is not JSON", _tail(raw)) from exc
+        raise RunnerMalformedOutput("claude: result text is not JSON", _tail(str(envelope.get("result", "")))) from exc
     usage = envelope.get("modelUsage")
     models = tuple(key for key in usage if isinstance(key, str)) if isinstance(usage, dict) else ()
     reported_model = ", ".join(models) or None
@@ -1163,7 +1175,7 @@ def _review_claude(
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
     provenance["configured_settings"] = [configured]
     return replace(
-        parse_review(payload, family="claude", head=head, kind=kind, raw=raw),
+        parse_review(payload, family="claude", head=head, kind=kind, raw=raw, excerpt=json.dumps(payload)),
         model=reported_model or model, effort=effort,
         duration_s=done.duration_s, provenance=provenance,
     )
@@ -1256,18 +1268,20 @@ def _review_codex(
         )
         final = _codex_final_file(last_file)
         if final["status"] not in ("complete", "absent"):
-            raise RunnerBadOutput("codex: final message file could not be read completely")
+            raise RunnerMalformedOutput("codex: final message file could not be read completely")
+        message_bytes = base64.b64decode(final.get("bytes_base64", ""))
         try:
-            message = base64.b64decode(final.get("bytes_base64", "")).decode("utf-8")
+            message = message_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise RunnerBadOutput("codex: final message is not UTF-8") from exc
+            fragment = _tail(message_bytes.decode(errors="replace"))
+            raise RunnerMalformedOutput("codex: final message is not UTF-8", fragment) from exc
         provenance, raw = _codex_provenance(done.stdout, done.stderr, message, home=home)
     if not message.strip():
         raise RunnerBadOutput("codex: no final message written", _tail(done.stdout + done.stderr))
     try:
         payload = _extract_json_object(message)
     except (json.JSONDecodeError, ValueError) as exc:
-        raise RunnerBadOutput("codex: final message is not JSON", _tail(message)) from exc
+        raise RunnerMalformedOutput("codex: final message is not JSON", _tail(message)) from exc
     envelope = _evidence_json(raw)
     envelope["configured_settings"] = configured
     envelope["cli_version"] = cli_version
@@ -1278,7 +1292,7 @@ def _review_codex(
     provenance["requested_settings"] = [{"model": model, "effort": effort}]
     banner_model = _CODEX_MODEL_RE.search(done.stderr)
     return replace(
-        parse_review(payload, family="codex", head=head, kind=kind, raw=raw),
+        parse_review(payload, family="codex", head=head, kind=kind, raw=raw, excerpt=message),
         model=model or (banner_model.group(1) if banner_model else None), effort=effort,
         duration_s=done.duration_s,
         provenance=provenance,
@@ -1384,7 +1398,8 @@ def split_diff(diff: str, budget: int) -> list[str]:
 
 
 def _summarize_deleted(block: str) -> str:
-    if "\ndeleted file mode " not in block and "\n+++ /dev/null" not in block:
+    # Judge deletion from git's header lines only; hunk lines are the PR's own text.
+    if not re.search(r"(?m)^deleted file mode [0-7]{6}$", block.partition("\n@@")[0]):
         return block
     header = block.partition("\n")[0]
     match = re.fullmatch(r'diff --git ("?)a/(.*)\1 \1b/\2\1', header)
@@ -1401,16 +1416,20 @@ def _split_bytes(text: str, budget: int) -> list[str]:
     pieces: list[str] = []
     current = ""
     for line in text.splitlines(keepends=True):
-        if len(line.encode()) > budget:
+        encoded = line.encode()
+        if len(encoded) > budget:
             if current:
                 pieces.append(current)
                 current = ""
-            while line:
-                cut = min(len(line), budget)
-                while len(line[:cut].encode()) > budget:
+            start = 0
+            while start < len(encoded):
+                cut = min(len(encoded), start + budget)
+                while cut < len(encoded) and encoded[cut] & 0xC0 == 0x80:
                     cut -= 1
-                pieces.append(line[:cut])
-                line = line[cut:]
+                if cut <= start:
+                    raise ValueError("diff chunk budget cannot fit one UTF-8 character")
+                pieces.append(encoded[start:cut].decode())
+                start = cut
         elif current and len((current + line).encode()) > budget:
             pieces.append(current)
             current = line

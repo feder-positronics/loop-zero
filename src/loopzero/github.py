@@ -14,7 +14,7 @@ from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import count
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -22,16 +22,15 @@ from urllib.parse import quote
 from loopzero import runners
 from loopzero._proc import ProcTimeout, ToolMissing, run
 from loopzero.runners import review_settings
-from loopzero.types import BLOCKING, Finding, LoopZeroError, ReviewResult
+from loopzero.types import BLOCKING, Finding, ReviewResult
 
 GH_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
 MARKER_RE = re.compile(
-    r"<!--\s*loopzero:finding\s+(?:v=(?P<version>1)\s+)?"
-    r"severity=(?P<severity>\w+)(?:\s+head=(?P<head>[0-9a-fA-F]+))?"
-    r"(?:\s+id=(?P<id>[0-9a-fA-F]{8}))?\s*-->"
+    r"<!-- loopzero:finding v=1 severity=(?P<severity>\w+) "
+    r"head=(?P<head>[0-9a-f]{40}) id=(?P<id>[0-9a-f]{8}) -->"
 )
 PAGE = 100
 PR_FILE_LIMIT = 3_000
@@ -51,7 +50,9 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id isResolved isOutdated path line
-          comments(first: 1) { nodes { body } pageInfo { hasNextPage endCursor } }
+          comments(first: 1) {
+            nodes { body author { __typename login } } pageInfo { hasNextPage endCursor }
+          }
         }
       }
     }
@@ -69,7 +70,11 @@ class GhError(Exception):
         super().__init__(f"{command_text} failed: {self.tail.strip()[-600:]}")
 
 
-class ReadDeadline(GhError):
+class GhUnavailable(GhError):
+    """GitHub could not supply a result because of a transient fault or limit."""
+
+
+class ReadDeadline(GhUnavailable):
     """A shared GitHub read deadline elapsed."""
 
 
@@ -116,7 +121,7 @@ class Readiness:
 TRANSIENT_RE = re.compile(r"HTTP 5\d\d|timed out|TLS handshake timeout|i/o timeout|"
                           r"connection reset|no server is currently|error connecting to api\.github\.com|"
                           r"unexpected end of JSON input|Something went wrong while executing your query", re.IGNORECASE)
-RETRY_DELAYS = (5.0, 20.0, 60.0)
+RETRY_DELAY = 5.0
 _retry_sleep = time.sleep
 _read_scope: ContextVar[tuple[float, str | None, bool] | None] = ContextVar("github_reads", default=None)
 _api_error_diagnostics: ContextVar[bool] = ContextVar("github_api_error_diagnostics", default=False)
@@ -139,8 +144,8 @@ def bounded_reads(deadline: float, token: str | None = "", *, retry: bool = Fals
         _read_scope.reset(scope)
 
 
-def _read_timeout(limit: float) -> float:
-    scope = _read_scope.get()
+def _read_timeout(limit: float, *, scoped: bool = True) -> float:
+    scope = _read_scope.get() if scoped else None
     if scope is None:
         return limit
     remaining = scope[0] - time.monotonic()
@@ -161,17 +166,24 @@ def api_error_diagnostics():
 
 def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
     """Split one `gh api --include` response into status, headers and body."""
-    for eol in ("\r\n", "\n"):
-        head, separator, body = output.partition(eol * 2)
-        if not separator:
-            continue
-        status, *lines = head.split(eol)
-        if not (match := _HTTP_STATUS_RE.match(status)):
-            break
-        headers = {name.strip().casefold(): value.strip()
-                   for name, colon, value in (line.partition(":") for line in lines) if colon}
-        return match.group(1), headers, body
-    return None, {}, output
+    head, separator, body = output.partition("\r\n\r\n")
+    line_separator = "\r\n"
+    if not separator:
+        head, separator, body = output.partition("\n\n")
+        line_separator = "\n"
+    if not separator:
+        return None, {}, output
+    lines = head.split(line_separator)
+    match = _HTTP_STATUS_RE.match(lines[0])
+    if match is None:
+        return None, {}, output
+    status = match.group(1)
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        name, separator, value = line.partition(":")
+        if separator:
+            headers[name.strip().casefold()] = value.strip()
+    return status, headers, body
 
 
 def _api_method(args: tuple[str, ...]) -> str:
@@ -223,16 +235,23 @@ def _api_error_detail(args: tuple[str, ...], stdout: str, stderr: str,
         status = match.group(1) if match else "unavailable"
     request_id = headers.get("x-github-request-id") or "unavailable"
     message = ""
-    with suppress(ValueError, TypeError):
+    try:
         payload = json.loads(body)
-        if isinstance(payload, dict):
-            value = payload.get("message")
-            if isinstance(value, str):
-                message = value
-            elif isinstance(errors := payload.get("errors"), list):
-                message = "; ".join(item["message"] for item in errors
-                                    if isinstance(item, dict) and isinstance(item.get("message"), str))
-    message = message or body.strip() or stderr.strip().removeprefix("gh:").strip()
+    except (TypeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        message_value = payload.get("message")
+        if isinstance(message_value, str):
+            message = message_value
+        else:
+            errors = payload.get("errors")
+            if isinstance(errors, list):
+                message = "; ".join(
+                    error["message"] for error in errors
+                    if isinstance(error, dict) and isinstance(error.get("message"), str)
+                )
+    if not message:
+        message = body.strip() or stderr.strip().removeprefix("gh:").strip()
     message = " ".join(_redact_tokens(message if message_tail is None else message_tail, token).split())
     message = message[:400] or "no response message"
     return _redact_tokens(
@@ -292,10 +311,38 @@ def _select_token(token: str | None, scope: tuple[float, str | None, bool] | Non
     return selected if selected is not None else (app_token() if read_only else "")
 
 
-def _transient_error(tail: str, retry_idempotent: bool) -> bool:
-    return bool(TRANSIENT_RE.search(tail)) or (
+def _transient_error(tail: str, retry_idempotent: bool, status: str | None = None) -> bool:
+    return (status or "").startswith("5") or bool(TRANSIENT_RE.search(tail)) or (
         retry_idempotent and "something went wrong while executing your query" in tail.lower()
     )
+
+
+def _request_error(transient: bool) -> type[GhError]:
+    return GhUnavailable if transient else GhError
+
+
+def _rate_limited(status: str | None, headers: dict[str, str], tail: str) -> bool:
+    return (status == "429"
+            or (status == "403" and (headers.get("x-ratelimit-remaining") == "0" or "retry-after" in headers))
+            or bool(re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)))
+
+
+def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> bool:
+    if delay is None or delay >= _read_timeout(limit, scoped=scoped):
+        return False
+    _retry_sleep(delay)
+    return True
+
+
+def _rate_limit_delay(headers: dict[str, str], delay: float | None) -> float | None:
+    if delay is None or headers.get("x-ratelimit-remaining") == "0":
+        return None
+    value = headers.get("retry-after", "")
+    try:
+        wait = int(value) if re.fullmatch(r"[0-9]{1,18}", value) else parsedate_to_datetime(value).timestamp() - time.time()
+    except (OverflowError, OSError, ValueError):
+        return None
+    return max(delay, wait)
 
 
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:
@@ -308,59 +355,61 @@ def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool)
 
 def _gh(*args: str, cwd: Path | None = None, timeout: float = 120,
         token: str | None = None, retry_idempotent: bool = False) -> str:
+    diagnostic_api = _api_error_diagnostics.get() and args[:1] == ("api",)
+    rest_api = args[:1] == ("api",) and args[:2] != ("api", "graphql")
+    patch_error = args[:1] == ("api",) and _api_method(args) == "PATCH"
+    request_args = args
     api = args[:1] == ("api",)
-    diagnostic_api = api and _api_error_diagnostics.get()
-    rest_api = api and args[:2] != ("api", "graphql")
-    explain = diagnostic_api or (api and _api_method(args) == "PATCH")
-    include = (rest_api or diagnostic_api) and not {"--include", "-i"} & set(args)
-    argv = ("gh", *args, *(("--include",) if include else ()))
+    if api and not {"--include", "-i"} & set(args):
+        request_args = (*args, "--include")
+    argv = ("gh", *request_args)
     cwd = cwd or Path("/")
     read_only = _read_only(args)
     retryable = read_only or retry_idempotent
     scope = _read_scope.get() if read_only else None
-    delays = (None,) if scope and not scope[2] else (*RETRY_DELAYS, None)
-    rate_guidance = None
+    delays = (RETRY_DELAY, None) if retryable and (not scope or scope[2]) else (None,)
     for delay in delays:
         selected = _select_token(token, scope, read_only)  # a retry backoff can outlive the app token
         try:
             done = run(list(argv), cwd=cwd, env_allowlist=GH_ENV,
                        extra_env={"GH_TOKEN": selected} if selected else None,
-                       timeout=_read_timeout(timeout) if scope else timeout)
+                       timeout=_read_timeout(timeout, scoped=read_only))
         except ToolMissing as exc:
             raise GhMissing(argv, str(exc), token=selected,
                             guidance=f"\nInstall GitHub CLI, then {GH_AUTH_REMEDY}") from exc
         except ProcTimeout as exc:
-            if scope and scope[2]:
-                _read_timeout(timeout)
-            if delay is None or not retryable:
+            _read_timeout(timeout, scoped=bool(scope and scope[2]))
+            if not _retry_pause(delay, timeout, scoped=read_only):
                 raise ProcTimeout(
                     _redact_tokens(str(exc), selected), _redact_tokens(exc.stdout, selected),
                     stderr=_redact_tokens(exc.stderr, selected), duration_s=exc.duration_s,
                 ) from None
-            _retry_sleep(_read_timeout(delay) if scope else delay)
             continue
-        status, headers, body = (_included_response(done.stdout) if rest_api or diagnostic_api
+        status, headers, body = (_included_response(done.stdout) if api
                                  else (None, {}, done.stdout))
-        tail = "\n".join(part for part in (done.stderr, body if rest_api else done.stdout) if part)
-        if done.exit_code and ((rest_api and status == "429")
-                               or re.search(r"rate limit|HTTP 429", tail, re.IGNORECASE)):
-            rate_guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api
-                             else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
+        tail = "\n".join(part for part in (done.stderr, body) if part)
+        if done.exit_code and _rate_limited(status, headers, tail):
+            if _retry_pause(_rate_limit_delay(headers, delay), timeout, scoped=read_only):
+                continue
+            guidance = (_redact_tokens(_rest_rate_limit(headers), selected) if rest_api or headers
+                        else _graphql_reset(args, tail, cwd, selected) + RATE_LIMIT_GUIDANCE)
+            if diagnostic_api or patch_error:
+                detail = _api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
+                                           message_tail=None if diagnostic_api else tail)
+                raise GhUnavailable(("GitHub API request",), detail, token=selected, guidance=guidance)
+            raise GhUnavailable(("gh", *args), tail, token=selected, guidance=guidance)
+        transient = _transient_error(tail, retry_idempotent, status)
+        if done.exit_code == 0 or not transient or not _retry_pause(delay, timeout, scoped=read_only):
             break
-        if done.exit_code == 0 or delay is None or not retryable or not _transient_error(tail, retry_idempotent):
-            break
-        _retry_sleep(_read_timeout(delay) if scope else delay)
     if done.exit_code != 0:
-        error_command = ("GitHub API request",) if explain else argv
+        error_command = ("GitHub API request",) if diagnostic_api or patch_error else argv
         error_tail = (_api_error_detail(args, done.stdout if diagnostic_api else "", done.stderr, selected,
                                         message_tail=None if diagnostic_api else tail)
-                      if explain else tail)
-        if rate_guidance is not None:
-            raise GhError(error_command, error_tail, token=selected, guidance=rate_guidance)
+                      if diagnostic_api or patch_error else tail)
         if "gh auth login" in tail or "not logged in" in tail.lower():
             raise GhAuth(error_command, error_tail.rstrip(), token=selected, guidance=f"\n{GH_AUTH_REMEDY}")
         guidance = _pr_list_error_guidance(args, done.stderr, bool(read_only and selected and token is None))
-        raise GhError(error_command, error_tail, token=selected, guidance=guidance)
+        raise _request_error(transient)(error_command, error_tail, token=selected, guidance=guidance)
     return body
 
 
@@ -446,22 +495,17 @@ def _gh_json(*args: str, token: str | None = None) -> object:
                       token=token or "") from None
 
 
-def rest_rows(endpoint: str, what: str, *, error: type[LoopZeroError] = LoopZeroError,
-              limit: int | None = 100, validate_rows: bool = True) -> list[dict]:
-    rows: list[dict] = []
-    for page in range(1, limit + 1) if limit is not None else count(1):
-        batch = api_get(f"{endpoint}?per_page={PAGE}&page={page}")
-        if not isinstance(batch, list) or (validate_rows and not all(isinstance(row, dict) for row in batch)):
-            raise error(f"invalid GitHub {what} response")
-        rows.extend(batch)
-        if len(batch) < PAGE:
-            return rows
-    raise error(f"GitHub {what} pagination limit exceeded")
+def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
+    digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).digest()
+    if digest in seen:
+        raise GhError(("gh", "api", endpoint), "GitHub repeated a full page")
+    seen.add(digest)
 
 
 def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
     """Yield validated rows until the last page."""
     page = 1
+    seen: set[bytes] = set()
     while True:
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
                          "-F", f"page={page}")
@@ -469,6 +513,8 @@ def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
             chunk = chunk.get(key)
         if not isinstance(chunk, list) or not all(isinstance(row, dict) for row in chunk):
             raise GhError(("gh", "api", endpoint), "invalid paginated response")
+        if len(chunk) >= PAGE:
+            record_full_page(endpoint, chunk, seen)
         yield from chunk
         if len(chunk) < PAGE:
             return
@@ -477,13 +523,6 @@ def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
 
 def _paged(endpoint: str, key: str = "check_runs") -> list:
     return list(_iter_paged(endpoint, key))
-
-
-def _with_file(content: str) -> Path:
-    fd, name = tempfile.mkstemp(suffix=".loopzero", text=True)
-    with open(fd, "w", encoding="utf-8") as handle:
-        handle.write(content)
-    return Path(name)
 
 
 def api_get(endpoint: str) -> object:
@@ -513,11 +552,12 @@ def _not_found(number: int, exc: Exception) -> GhError:
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
          token: str | None = None) -> object:
-    path = _with_file(json.dumps(payload))
-    try:
-        return _gh_json("api", endpoint, "--method", method, "--input", str(path), token=token)
-    finally:
-        path.unlink(missing_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".loopzero", encoding="utf-8", delete_on_close=False
+    ) as handle:
+        handle.write(json.dumps(payload))
+        handle.close()
+        return _gh_json("api", endpoint, "--method", method, "--input", handle.name, token=token)
 
 
 def merge_hold(number: int, labels: tuple[str, ...]) -> str | None:
@@ -530,7 +570,7 @@ def _pr_labels(data: dict) -> tuple[str, ...]:
     return tuple(label["name"] for label in data.get("labels", []))
 
 
-def _pr_from_rest(data: object) -> PR:
+def pr_from_rest(data: object) -> PR:
     """Normalize one REST pull detail without treating absent merge evidence as clean."""
     try:
         if not isinstance(data, dict):
@@ -569,7 +609,7 @@ def _pr_from_rest(data: object) -> PR:
 
 def _pr_detail(repo: str, number: int) -> tuple[PR, dict]:
     data = api_get(f"repos/{repo}/pulls/{number}")
-    pr = _pr_from_rest(data)
+    pr = pr_from_rest(data)
     if pr.number != number:
         raise GhError(("gh", "api", f"repos/{repo}/pulls/{number}"),
                       f"PR detail number {pr.number} differs from requested {number}")
@@ -582,25 +622,20 @@ def _matches_branch(source: dict, repo: str, branch: str) -> bool:
     return source.get("ref") == branch and isinstance(name, str) and name.casefold() == repo.casefold()
 
 
-def _ref_sha(endpoint: str, field: str) -> str | None:
+def _branch_head(repo: str, branch: str) -> str | None:
+    endpoint = f"repos/{repo}/branches/{quote(branch, safe='')}"
     try:
         ref = api_get(endpoint)
     except GhError as exc:
         if re.search(r"\bHTTP 404\b", exc.tail):
             return None
         raise
-    obj = ref.get(field) if isinstance(ref, dict) else None
-    sha = obj.get("sha") if isinstance(obj, dict) else None
-    if field == "commit":
-        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
-            raise GhError(("gh", "api", endpoint), "invalid remote branch SHA")
-    elif not isinstance(sha, str) or not sha:
-        raise GhError(("gh", "api", endpoint), "missing remote ref SHA")
+    commit = ref.get("commit") if isinstance(ref, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise GhError(("gh", "api", endpoint), "invalid remote branch SHA")
+
     return sha
-
-
-def _branch_head(repo: str, branch: str) -> str | None:
-    return _ref_sha(f"repos/{repo}/branches/{quote(branch, safe='')}", "commit")
 
 
 def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
@@ -630,10 +665,9 @@ def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:
     pr, detail = _pr_detail(repo, number)
-    states = {"CLOSED", "MERGED"} if state == "CLOSED" else {state}
-    if pr.state not in states or not _matches_branch(detail["head"], repo, branch):
-        lookup = "completion" if state == "MERGED" else "branch"
-        raise GhError(("gh", "api", endpoint), f"PR changed during {lookup} lookup")
+    state_matches = pr.state == state or (state == "CLOSED" and pr.state == "MERGED")
+    if not state_matches or not _matches_branch(detail["head"], repo, branch):
+        raise GhError(("gh", "api", endpoint), "PR changed during branch lookup")
     return pr
 
 
@@ -699,7 +733,10 @@ def merged_pr_for_branch(repo: str, branch: str) -> PR | None:
             number = _closed_history_number(repo, branch, endpoint, row, seen)
             seen.add(number)
             if row["merged_at"] is not None:
-                return _confirm_branch_pr(repo, branch, endpoint, number, "MERGED")
+                pr, detail = _pr_detail(repo, number)
+                if pr.state != "MERGED" or not _matches_branch(detail["head"], repo, branch):
+                    raise GhError(("gh", "api", endpoint), "PR changed during completion lookup")
+                return pr
         if page == 0:
             # A prior merge may belong to a different commit of this branch.
             seen.clear()
@@ -716,7 +753,7 @@ def create_draft_pr(repo: str, branch: str, base: str, title: str, body: str) ->
     detail = _api(
         f"repos/{repo}/pulls", {"head": branch, "base": base, "title": title,
                                "body": body, "draft": True})
-    pr = _pr_from_rest(detail)
+    pr = pr_from_rest(detail)
     source_repo = detail["head"].get("repo") or {}
     if (pr.state != "OPEN" or not pr.is_draft or pr.base_ref != base
             or detail["head"].get("ref") != branch
@@ -737,7 +774,9 @@ def finding_id(head_sha: str, path: str | None, line: int | None, title: str) ->
 
 def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
     stable_id = finding_id(head_sha, finding.path, finding.line, finding.title)
-    return f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
+    return (
+        f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
+    )
 
 
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:
@@ -778,8 +817,13 @@ def _review_body(result: ReviewResult, unplaced: list[Finding], prefix: str = ""
         effort = f" (effort {result.effort})" if result.effort else ""
         settings = f"model {result.model or 'unknown'}{effort}, "
     lines = [prefix.rstrip("\n")] if prefix else []
-    lines.append(f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
-                 f"{settings}{duration}: **{result.verdict}** ({summary})")
+    lines += [
+        (
+            f"loopzero {result.kind} review by {result.family} on `{result.head}`, "
+            f"{settings}{duration}: "
+            f"**{result.verdict}** ({summary})"
+        ),
+    ]
     if result.fallback:
         lines.append(f"\nSame-family fallback: {result.fallback}. Cross-family review is preferred.")
     if result.chunk_count > 1:
@@ -917,10 +961,26 @@ def review_payloads(repo: str, number: int, head_sha: str, result: ReviewResult,
 
 
 def post_review(
-    repo: str, number: int, head_sha: str, result: ReviewResult, body_prefix: str = "",
-    pr: PR | None = None, token: str | None = None, *, publisher: str | None = None,
+    repo: str,
+    number: int,
+    head_sha: str,
+    result: ReviewResult,
+    body_prefix: str = "",
+    pr: PR | None = None,
+    token: str | None = None,
+    *,
+    publisher: str | None = None,
 ) -> None:
-    """Publish with the verified login for token. GitHub only permits self-reviews as comments."""
+    """Post `result` as a PR review on `head_sha`, one inline comment per finding.
+
+    `body_prefix`, when given, becomes the first line of the review body. When the
+    token user authored the PR (`pr` is fetched if not given) the review is posted
+    as a COMMENT, since GitHub rejects self-approval and self-request-changes.
+
+    Findings whose location is missing or outside the diff are anchored on the first
+    changed file with a hunk, so every blocking finding creates a review thread.
+    A supplied publisher is the login already checked for the supplied token.
+    """
     author = (pr or pr_view(repo, number)).author
     token = app_token() if token is None else token  # "" means the operator identity
     if token or (author and author == (publisher or login(token=token))):
@@ -943,22 +1003,29 @@ def _title_of(text: str) -> str:
     return re.sub(r"^\*\*\w+:\s*|\*\*$", "", title_line).strip()
 
 
-def _parse_thread(node: dict, current_head: str | None) -> Finding | None:
+def _thread_marker(node: dict, publishers: tuple[str, ...]) -> re.Match[str] | None:
+    """The v=1 marker opening a thread's first comment, if a review publisher wrote it."""
     comments = node.get("comments", {}).get("nodes") or []
     if not comments:
         return None
-    first = comments[0]
-    body = first.get("body") or ""
-    match = MARKER_RE.search(body)
+    author = comments[0].get("author") or {}
+    login = str(author.get("login") or "")
+    # GraphQL names an App's bot account without REST's "[bot]" suffix.
+    if author.get("__typename") == "Bot":
+        login += "[bot]"
+    if not login or login.casefold() not in {p.casefold() for p in publishers}:
+        return None
+    # The publisher writes the marker as the whole first line, exactly as finding_marker does.
+    return MARKER_RE.fullmatch((comments[0].get("body") or "").partition("\n")[0])
+
+
+def _parse_thread(node: dict, current_head: str | None,
+                  publishers: tuple[str, ...]) -> Finding | None:
+    match = _thread_marker(node, publishers)
     if not match or match.group("severity") not in BLOCKING:
         return None
-    version = match.group("version")
+    body = node["comments"]["nodes"][0]["body"]
     marker_head = match.group("head")
-    marker_id = match.group("id")
-    if version and (not marker_head or not marker_id):
-        return None
-    if not version and marker_id:
-        return None
     if current_head is not None and marker_head != current_head and node.get("isOutdated"):
         return None
     severity = match.group("severity")
@@ -976,12 +1043,13 @@ _RESOLVE_MUTATION = (
 )
 
 
-def open_findings(repo: str, number: int) -> list[tuple[str, str, Finding]]:
+def open_findings(repo: str, number: int,
+                  publishers: tuple[str, ...]) -> list[tuple[str, str, Finding]]:
     """(marker id, thread id, finding) for every unresolved blocking thread, any head."""
     return [
-        (MARKER_RE.search(node["comments"]["nodes"][0]["body"]).group("id") or node["id"], node["id"], f)
-        for node in _review_threads(repo, number)
-        if (f := _parse_thread(node, None))
+        (_thread_marker(node, publishers).group("id"), node["id"], f)
+        for node in _unresolved_threads(repo, number)
+        if (f := _parse_thread(node, None, publishers))
     ]
 
 
@@ -999,11 +1067,21 @@ query($thread: ID!, $after: String!) {
 """
 
 
+def _next_thread_cursor(page: dict, seen: set[str]) -> str:
+    cursor = page.get("endCursor")
+    if not isinstance(cursor, str) or not cursor.strip() or cursor in seen:
+        raise GhError(("gh", "api", "graphql"), "missing or repeated review thread cursor")
+    seen.add(cursor)
+    return cursor
+
+
 def _has_thread_reply(node: dict, reply: str) -> bool:
     page = node["comments"].get("pageInfo", {})
+    seen: set[str] = set()
     while page.get("hasNextPage"):
+        cursor = _next_thread_cursor(page, seen)
         data = _gh_json("api", "graphql", "-f", f"query={_THREAD_REPLIES_QUERY}",
-                        "-F", f"thread={node['id']}", "-f", f"after={page['endCursor']}")
+                        "-F", f"thread={node['id']}", "-f", f"after={cursor}")
         try:
             comments = data["data"]["node"]["comments"]
             page = comments["pageInfo"]
@@ -1015,16 +1093,16 @@ def _has_thread_reply(node: dict, reply: str) -> bool:
     return False
 
 
-def resolve_finding(repo: str, number: int, finding_id: str, reply: str) -> Finding:
+def resolve_finding(repo: str, number: int, finding_id: str, reply: str,
+                    publishers: tuple[str, ...]) -> Finding:
     """Reply to a blocking finding, or resume an identical resolution."""
     threads = _review_threads(repo, number, include_resolved=True)
     for node in sorted(threads, key=lambda node: bool(node.get("isResolved"))):
-        finding = _parse_thread(node, None)
+        finding = _parse_thread(node, None, publishers)
         if finding is None:
             continue
-        marker = MARKER_RE.search(node["comments"]["nodes"][0]["body"])
         thread_id = node["id"]
-        if (marker.group("id") or thread_id) != finding_id:
+        if _thread_marker(node, publishers).group("id") != finding_id:
             continue
         confirmed = _has_thread_reply(node, reply)
         if node.get("isResolved"):
@@ -1071,30 +1149,37 @@ def refresh_eligibility(repo: str, number: int, base: str) -> None:
 
 
 def open_blocking_findings(
-    repo: str, number: int, current_head: str | None = None
+    repo: str, number: int, current_head: str | None, publishers: tuple[str, ...],
 ) -> list[Finding]:
-    """Findings from unresolved review threads whose first comment carries a blocking marker.
+    """Findings from unresolved review threads whose first comment opens with a blocking marker.
 
-    Only explicit critical and important markers block. When `current_head` is supplied, an
-    outdated thread is ignored unless its marker names that head.
+    Only critical and important v=1 markers on the first line of a comment written by a
+    review publisher block. When `current_head` is supplied, an outdated thread is ignored
+    unless its marker names that head.
     """
     return [
-        f for node in _review_threads(repo, number) if (f := _parse_thread(node, current_head))
+        f for node in _unresolved_threads(repo, number)
+        if (f := _parse_thread(node, current_head, publishers))
     ]
 
 
-def _pr_graphql_args(query: str, repo: str, number: int) -> tuple[str, ...]:
-    owner, name = repo.split("/", 1)
-    return ("api", "graphql", "-f", f"query={query}", "-F", f"owner={owner}",
-            "-F", f"name={name}", "-F", f"number={number}")
+def _unresolved_threads(repo: str, number: int) -> list[dict]:
+    return _review_threads(repo, number)
 
 
 def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -> list[dict]:
-    args = _pr_graphql_args(_THREADS_QUERY, repo, number)
+    owner, name = repo.split("/", 1)
     after: str | None = None
+    seen: set[str] = set()
     found: list[dict] = []
     while True:
-        data = _gh_json(*args, *(("-F", f"after={after}") if after else ()))
+        args = [
+            "api", "graphql", "-f", f"query={_THREADS_QUERY}", "-F", f"owner={owner}",
+            "-F", f"name={name}", "-F", f"number={number}",
+        ]
+        if after:
+            args += ["-F", f"after={after}"]
+        data = _gh_json(*args)
         try:
             threads = data["data"]["repository"]["pullRequest"]["reviewThreads"]
             nodes = threads["nodes"]
@@ -1102,42 +1187,51 @@ def _review_threads(repo: str, number: int, *, include_resolved: bool = False) -
             found += [node for node in nodes if include_resolved or not node.get("isResolved")]
             if not page["hasNextPage"]:
                 return found
-            after = page["endCursor"]
+            after = _next_thread_cursor(page, seen)
         except (KeyError, TypeError) as exc:
             raise _not_found(number, exc) from exc
 
 
-_PENDING_STATES = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
-_NON_FAILURES = _PENDING_STATES | {"success"}
-
-
 def _check_signals(
-    repo: str, head_sha: str, review_at: str | None = None, review_grace: bool = False,
-    required_ci: tuple[str, ...] = (), stale_verdict_grace: bool = False,
+    repo: str,
+    head_sha: str,
+    review_at: str | None = None,
+    review_grace: bool = False,
+    required_ci: tuple[str, ...] = (),
+    stale_verdict_grace: bool = False,
 ) -> tuple[dict[str, str], tuple[str, ...], tuple[str, ...], bool]:
+    signals: dict[str, list[tuple[str, str | None]]] = {}
     latest_runs: dict[str, dict] = {}
     runs = _paged(f"repos/{repo}/commits/{head_sha}/check-runs")
     for cr in runs:
         previous = latest_runs.get(cr["name"])
         if previous is None or _check_run_order(cr) > _check_run_order(previous):
             latest_runs[cr["name"]] = cr
-    signals = {
-        name: [(run.get("conclusion") or run.get("status") or "unknown",
-                run.get("completed_at") or run.get("started_at"))]
-        for name, run in latest_runs.items()
-    }
+    for name, cr in latest_runs.items():
+        signals[name] = [
+            (
+                cr.get("conclusion") or cr.get("status") or "unknown",
+                cr.get("completed_at") or cr.get("started_at"),
+            )
+        ]
     latest_status: dict[str, dict] = {}
     for status in _paged(f"repos/{repo}/commits/{head_sha}/statuses"):
         latest_status.setdefault(status["context"], status)
     for name, status in latest_status.items():
-        signals.setdefault(name, []).append((status.get("state") or "unknown", status.get("created_at")))
-    states = {name: _aggregate_signal([state for state, _ in values]) for name, values in signals.items()}
+        signals.setdefault(name, []).append(
+            (status.get("state") or "unknown", status.get("created_at"))
+        )
+    states = {
+        name: _aggregate_signal([state for state, _ in values])
+        for name, values in signals.items()
+    }
+    pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
     stale = tuple(name for name, values in signals.items() if review_at
-                  and states[name] not in _NON_FAILURES
+                  and states[name] not in pending and states[name] != "success"
                   and all(at and at < review_at for state, at in values
-                          if state not in _NON_FAILURES)
+                          if state != "success" and state not in pending)
                   and (review_grace or any(at and at >= review_at
-                                           for state, at in values if state in _PENDING_STATES)))
+                                           for state, at in values if state in pending)))
     stale_verdicts = tuple(
         name
         for name, values in signals.items()
@@ -1152,10 +1246,10 @@ def _check_signals(
     workflows: list[dict] | None = None
     for name in required_ci:
         cr = latest_runs.get(name)
-        if (name in stale or cr is None or states.get(name) in _NON_FAILURES
+        if (name in stale or cr is None or states.get(name) in pending | {"success"}
                 or cr.get("conclusion") not in {"failure", "cancelled", "timed_out"}
                 or cr.get("status") != "completed" or not (cr.get("check_suite") or {}).get("id")
-                or any(state not in _NON_FAILURES for state, _ in signals[name][1:])):
+                or any(state not in pending | {"success"} for state, _ in signals[name][1:])):
             continue
         if workflows is None:
             workflows = _paged(f"repos/{repo}/actions/runs?head_sha={head_sha}", "workflow_runs")
@@ -1228,7 +1322,9 @@ def _check_run_order(run: dict) -> tuple[int, str]:
 def _aggregate_signal(states: list[str]) -> str:
     if all(state == "success" for state in states):
         return "success"
-    return next((state for state in states if state not in _NON_FAILURES), "pending")
+    pending = {"pending", "queued", "in_progress", "requested", "waiting", "expected"}
+    failures = [state for state in states if state != "success" and state not in pending]
+    return failures[0] if failures else "pending"
 
 
 def behind_reason(pr: PR, reviewed_head: str | None) -> str:
@@ -1252,6 +1348,7 @@ def readiness(
     review_grace: bool = False,
     workflow_wait: bool = False,
     stale_verdict_grace: bool = False,
+    publishers: tuple[str, ...],
 ) -> Readiness:
     """Decide whether `pr` may be marked ready / merged. Never raises on policy failures."""
     reasons: list[str] = []
@@ -1267,7 +1364,8 @@ def readiness(
         reasons.append(MISSING_REVIEW_REASON)
     elif pr.head_sha != reviewed_head:
         reasons.append(f"head {pr.head_sha[:12]} differs from reviewed {reviewed_head[:12]}")
-    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha):
+    for f in open_blocking_findings(repo, pr.number, None if ancestor_review else pr.head_sha,
+                                    publishers):
         where = f"{f.path}:{f.line}" if f.path else "(no location)"
         reasons.append(f"open {f.severity} finding at {where}: {f.title}")
     checks, stale, stale_verdicts, capped = (_check_signals(
@@ -1323,23 +1421,27 @@ def merged_sha(
     if expected_head and (not isinstance(view.get("head"), dict)
                           or view["head"].get("sha") != expected_head):
         raise GhError(argv, "PR head changed before merge verification")
-    state = view.get("state")
-    if view["merged"] and state == "closed":
+    if view["merged"] and view.get("state") == "closed":
         sha = view.get("merge_commit_sha")
         if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
-    if not view["merged"] and state == "open":
+    elif not view["merged"] and view.get("state") == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
             raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
-    error = ClosedUnmerged if not view["merged"] and state == "closed" else GhError
-    raise error(argv, "PR closed without a verified merge or invalid merge evidence")
+    if not view["merged"] and view.get("state") == "closed":
+        raise ClosedUnmerged(argv, "PR closed without a verified merge or invalid merge evidence")
+    raise GhError(argv, "PR closed without a verified merge or invalid merge evidence")
 
 
 def merge_pending(repo: str, number: int) -> bool:
     """True when GitHub holds the PR for merging: queued, or accepted as an auto-merge
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
-    argv = _pr_graphql_args(_QUEUE_QUERY, repo, number)
+    owner, name = repo.split("/", 1)
+    argv = (
+        "api", "graphql", "-f", f"query={_QUEUE_QUERY}", "-F", f"owner={owner}",
+        "-F", f"name={name}", "-F", f"number={number}",
+    )
     try:
         data = _gh_json(*argv)
         pr = data["data"]["repository"]["pullRequest"]
@@ -1389,10 +1491,24 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     raise MergeFailed(("gh", *argv), f"PR #{number} neither merged nor queued")
 
 
+def _remote_branch_head(endpoint: str) -> str | None:
+    try:
+        current = api_get(endpoint)
+    except GhError as exc:
+        if re.search(r"\bHTTP 404\b", exc.tail):
+            return None
+        raise
+    obj = current.get("object") if isinstance(current, dict) else None
+    sha = obj.get("sha") if isinstance(obj, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise GhError(("gh", "api", endpoint), "missing remote ref SHA")
+    return sha
+
+
 def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     """Return False if the remote ref moved, or True if deleted or absent."""
     endpoint = f"repos/{repo}/git/ref/heads/{quote(branch, safe='/')}"
-    current = _ref_sha(endpoint, "object")
+    current = _remote_branch_head(endpoint)
     if current != expected_head:
         return current is None
     ref = f"refs/heads/{branch}"
@@ -1408,7 +1524,7 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
         done = run(argv, cwd=scratch, env_allowlist=GH_ENV, extra_env=env, timeout=120)
     if done.exit_code == 0:
         return True
-    current = _ref_sha(endpoint, "object")
+    current = _remote_branch_head(endpoint)
     if current != expected_head:
         return current is None
     raise GhError(argv, done.stderr or done.stdout)

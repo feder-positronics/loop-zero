@@ -26,7 +26,6 @@ from loopzero.runners import (
     RunnerPromptTooLong,
     RunnerUsageLimit,
     author_families,
-    build_prompt,
     codex_evidence,
     merge_reviews,
     render_patch,
@@ -147,18 +146,12 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0) -> Path:
         f"""
         printf '%s\\0' "$@" > "{bin_dir}/claude.argv"
         cat > "{bin_dir}/claude.stdin"
-        case " $* " in
-          *" -p "*) ;; *) echo "missing -p" >&2; exit 64;;
-        esac
-        case " $* " in
-          *" --output-format json "*) ;; *) echo "missing --output-format json" >&2; exit 64;;
-        esac
-        case " $* " in
-          *" --permission-mode plan "*) ;; *) echo "missing --permission-mode plan" >&2; exit 64;;
-        esac
-        case " $* " in
-          *" --json-schema "*) ;; *) echo "missing --json-schema" >&2; exit 64;;
-        esac
+        for required in "-p" "--output-format json" "--permission-mode plan" "--json-schema"; do
+          case " $* " in
+            *" $required "*) ;;
+            *) echo "missing $required" >&2; exit 64;;
+          esac
+        done
         cat <<'JSON'
         {text}
         JSON
@@ -271,15 +264,6 @@ def repo(tmp_path):
 
 
 # ----------------------------------------------------------------- prompt
-
-
-def test_prompt_frames_exact_task_and_raw_diff() -> None:
-    prompt = build_prompt(kind="delta", head="deadbeef", task_text=" Objective ", diff="+line\n")
-    header, diff = prompt.split("\n", 1)
-    assert json.loads(header) == {
-        "head": "deadbeef", "kind": "delta", "task_text": " Objective ", "diff_utf8_bytes": 6,
-    }
-    assert diff == "+line\n"
 
 
 @pytest.mark.parametrize("family", ["claude", "codex"])
@@ -457,14 +441,10 @@ def test_claude_approve(
     assert (str(tmp_path.resolve()), str(tmp_path.resolve())) in _pairs(options, "--ro-bind")
     assert _pairs(options, "--ro-bind-try") == [(str(fake_bin.resolve()),) * 2]
     assert _pairs(options, "--bind")[0][1] == SANDBOX_HOME
+    raw_sandbox_argv = fake_bwrap.read_text().splitlines()
+    assert "sk-secret" not in raw_sandbox_argv and "ANTHROPIC_API_KEY" not in raw_sandbox_argv
+    assert "--clearenv" not in raw_sandbox_argv
 
-
-def test_reviewer_sandbox_binds_resolv_conf(
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path
-) -> None:
-    _fake_review(fake_bin, "claude")
-    _review("claude", tmp_path)
-    argv = _bwrap_argv(fake_bwrap)
     resolv_conf = Path("/etc/resolv.conf")
     resolved = resolv_conf.resolve()
     expected = (
@@ -473,7 +453,7 @@ def test_reviewer_sandbox_binds_resolv_conf(
         and any(resolved.is_relative_to(root) for root in (Path("/tmp"), Path("/run")))
         else (str(resolved), str(resolv_conf))
     )
-    assert expected in _pairs(argv, "--ro-bind")
+    assert expected in _pairs(sandbox_argv, "--ro-bind")
 
 
 @pytest.mark.parametrize("credential", [None, ""])
@@ -856,17 +836,6 @@ def test_env_is_stripped_to_allowlist_plus_auth(fake_bin: Path, tmp_path: Path,
     assert "OPENAI_API_KEY" not in env and "SOME_RANDOM_SECRET" not in env
 
 
-def test_secrets_never_appear_in_bwrap_argv(
-    fake_bin: Path, tmp_path: Path, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _fake_review(fake_bin, "claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
-    _review("claude", tmp_path)
-    argv = fake_bwrap.read_text().splitlines()
-    assert "sk-secret" not in argv and "ANTHROPIC_API_KEY" not in argv
-    assert "--clearenv" not in argv
-
-
 def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path, fake_bwrap: Path) -> None:
     _fake_review(fake_bin, "claude")
     allowed = tmp_path / "runtime"
@@ -884,8 +853,6 @@ def test_reviewer_ro_paths_replace_binary_default(fake_bin: Path, tmp_path: Path
 
 @pytest.mark.parametrize("family,override", [("codex", "CODEX_HOME"), ("claude", "CLAUDE_CONFIG_DIR")])
 def test_blank_reviewer_home_matches_unset(repo, family, override, tmp_path, fake_bwrap, monkeypatch):
-    from loopzero import runners
-
     git(repo, "init", "-q")
     host = tmp_path / "host"
     state = host / f".{family}"
@@ -893,9 +860,6 @@ def test_blank_reviewer_home_matches_unset(repo, family, override, tmp_path, fak
     (state / "auth.json").touch()
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.chdir(repo)
-    for name in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-                 *runners.CLAUDE_AUTH_ENV):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(runners, "_review_binary", lambda _: Path("/usr/bin/true"))
     monkeypatch.setattr(runners.sandbox, "probe", lambda *_: None)
 
@@ -911,22 +875,8 @@ def test_blank_reviewer_home_matches_unset(repo, family, override, tmp_path, fak
     assert runners._auth_binds(family, blank_home) == unset_binds
 
 
-def test_empty_secure_storage_override_preserves_native_default(repo,
-    fake_bin, tmp_path, fake_bwrap, monkeypatch,
-) -> None:
-    host = tmp_path / "host"
-    host.mkdir()
-    monkeypatch.setenv("HOME", str(host))
-    monkeypatch.chdir(repo)
-    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "")
-    _fake_review(fake_bin, "claude")
-    assert _review("claude", repo).verdict == "approve"
-    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
-        _review("claude", repo, reviewer_ro_paths=(str(Path.home() / ".claude"),))
-
-
 @pytest.mark.parametrize("state", [
-    ".claude", ".codex", ".claude.json", "custom-claude", "custom-codex", "secure-storage",
+    ".claude", ".codex", ".claude.json", "custom-claude", "custom-codex", "secure-storage", "blank-secure-storage",
 ])
 @pytest.mark.parametrize("exposure", ["exact", "ancestor", "descendant", "alias", "repository"])
 def test_review_refuses_additional_host_state_exposure(
@@ -938,8 +888,9 @@ def test_review_refuses_additional_host_state_exposure(
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / "custom-claude"))
     monkeypatch.setenv("CODEX_HOME", str(host / "custom-codex"))
-    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", str(host / "secure-storage"))
-    protected = host / state
+    blank = state == "blank-secure-storage"
+    monkeypatch.setenv("CLAUDE_SECURESTORAGE_CONFIG_DIR", "" if blank else str(host / "secure-storage"))
+    protected = host / (".claude" if blank else state)
     protected.mkdir()
     (protected / "history.txt").write_text("private host history")
     child = protected / "child"
@@ -951,6 +902,11 @@ def test_review_refuses_additional_host_state_exposure(
     repo = protected if exposure == "repository" else tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     _fake_review(fake_bin, "claude")
+    if blank and exposure == "exact":
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+        monkeypatch.chdir(repo)
+        assert _review("claude", repo).verdict == "approve"
+        (fake_bin / "claude.stdin").unlink()
     with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
         _review("claude", repo, reviewer_ro_paths=() if exposure == "repository" else (str(exposed),))
     assert not (fake_bin / "claude.stdin").exists()
@@ -1035,25 +991,13 @@ def test_review_denies_state_exposure_from_non_runtime_mounts(repo,
     assert not (fake_bin / "claude.stdin").exists()
 
 
-@pytest.mark.parametrize("family", ["claude", "codex"])
 @pytest.mark.parametrize("reported", [True, False])
-def test_native_settings_keep_requests_and_bounded_claims_separate(fake_bin, tmp_path, family, reported):
-    if family == "claude":
-        envelope = _claude_envelope(APPROVE, modelUsage={"reported-model": {}} if reported else {})
-        _fake_claude(fake_bin, envelope)
-    else:
-        _fake_codex(fake_bin, json.dumps(APPROVE), stderr=(
-            "model: reported-model\nreasoning effort: high\nSECRET-NOT-PERSISTED" if reported else ""
-        ))
-    result = _review(family, tmp_path, model="requested-model", effort="medium")
+def test_claude_keeps_native_settings_separate_from_requested_settings(fake_bin, tmp_path, reported):
+    envelope = _claude_envelope(APPROVE, modelUsage={"reported-model": {}} if reported else {})
+    _fake_claude(fake_bin, envelope)
+    result = _review("claude", tmp_path, model="requested-model", effort="medium")
     assert result.provenance["requested_settings"] == [{"model": "requested-model", "effort": "medium"}]
-    if family == "claude":
-        assert json.loads(result.raw) == envelope, "native Claude evidence must remain unchanged"
-    else:
-        assert json.loads(result.raw)["reported_settings"] == {
-            "model": "reported-model" if reported else None, "effort": "high" if reported else None,
-        }
-        assert "SECRET-NOT-PERSISTED" not in result.raw
+    assert json.loads(result.raw) == envelope
 
 
 def test_merge_preserves_native_call_order_and_pads_legacy_requests(fake_bin, tmp_path):
@@ -1073,6 +1017,8 @@ def test_merge_preserves_native_call_order_and_pads_legacy_requests(fake_bin, tm
 
 
 @pytest.mark.parametrize("stderr,expected", [
+    ("", {"model": None, "effort": None}),
+    ("model: reported-model\nreasoning effort: high\nSECRET-NOT-PERSISTED", {"model": "reported-model", "effort": "high"}),
     ("model: " + "x" * 129 + "\nreasoning effort: high extra", {"model": None, "effort": None}),
     ("diagnostic model: ignored\neffort: high", {"model": None, "effort": None}),
     ("model:\nSECRET-NOT-PERSISTED", {"model": None, "effort": None}),
@@ -1080,7 +1026,8 @@ def test_merge_preserves_native_call_order_and_pads_legacy_requests(fake_bin, tm
 ])
 def test_codex_retains_only_recognized_bounded_cli_claims(fake_bin, tmp_path, stderr, expected):
     _fake_codex(fake_bin, json.dumps(APPROVE), stderr=stderr)
-    result = _review("codex", tmp_path)
+    result = _review("codex", tmp_path, model="requested-model", effort="medium")
+    assert result.provenance["requested_settings"] == [{"model": "requested-model", "effort": "medium"}]
     assert json.loads(result.raw)["reported_settings"] == expected
     assert "SECRET-NOT-PERSISTED" not in result.raw
 
@@ -1159,20 +1106,19 @@ def test_codex_skill_links_leaving_the_checkout_fail_before_scan_or_launch(
 
 
 @pytest.mark.parametrize("plant", [
-    "too_many", "loop", "undecodable", "dangling", "root_loop:.agents/skills", "root_loop:.codex/skills"])
+    "too_many", "loop", "undecodable", "dangling", "loop:.agents/skills", "loop:.codex/skills",
+    "loop:.agents", "loop:.codex", "dangling:.agents", "dangling:.codex"])
 def test_codex_skill_lists_it_cannot_disable_fail_before_any_codex_call(
     repo, fake_bin: Path, fake_tool, fake_bwrap: Path, monkeypatch: pytest.MonkeyPatch, plant: str,
 ) -> None:
     if plant == "too_many":
         _plant_skills(repo)
         monkeypatch.setattr("loopzero.runners.CODEX_SKILL_OVERRIDE_LIMIT", 100)
-    elif plant in ("loop", "dangling"):
-        (repo / ".agents/skills").mkdir(parents=True)
-        (repo / ".agents/skills/x").symlink_to("x" if plant == "loop" else "/nonexistent/skills")
-    elif plant.startswith("root_loop:"):
-        root = repo / plant.partition(":")[2]
-        root.parent.mkdir(parents=True)
-        root.symlink_to(root.name)
+    elif plant != "undecodable":
+        kind, _, name = plant.partition(":")
+        link = repo / (name or ".agents/skills/x")
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(link.name if kind == "loop" else "missing")
     else:
         skill = repo / ".codex/skills" / os.fsdecode(b"\xff")
         skill.mkdir(parents=True)
@@ -1244,9 +1190,11 @@ def test_unknown_family_and_kind(tmp_path: Path) -> None:
     ],
 )
 def test_review_schema_is_strict(fake_bin: Path, tmp_path: Path, finding: dict) -> None:
-    _fake_codex(fake_bin, json.dumps({"verdict": "request_changes", "findings": [finding]}))
-    with pytest.raises(RunnerBadOutput):
+    message = json.dumps({"verdict": "request_changes", "findings": [finding]})
+    _fake_codex(fake_bin, message)
+    with pytest.raises(runners.RunnerMalformedOutput) as error:
         _review("codex", tmp_path)
+    assert error.value.tail == message + "\n"
 
 
 @pytest.mark.parametrize(("has_stderr", "size"), [(True, 0), (True, 3000), (False, 3000)])
@@ -1270,20 +1218,16 @@ def test_timeout_becomes_bad_output(tmp_path, monkeypatch, fake_bin, fake_bwrap,
     assert len(detail.encode()) < 450 and ("…" in detail) == bool(size)
 
 
-def test_split_diff_respects_budget_and_summarizes_deleted_file() -> None:
-    deleted = (
-        "diff --git a/gone.py b/gone.py\n"
-        "deleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n"
-        "@@ -1,3 +0,0 @@\n-one\n-two\n-three\n"
-    )
-    added = "diff --git a/new.py b/new.py\n" + "+x\n" * 60
-    chunks = split_diff(deleted + added, 100)
-    assert all(len(chunk.encode()) <= 100 for chunk in chunks)
-    assert any("gone.py: deleted, 3 lines" in chunk for chunk in chunks)
+def test_inspection_accepts_the_reviewer_patch_command() -> None:
+    command = (f"git -C /repo diff --no-color --no-ext-diff --no-textconv --text "
+               f"--ignore-submodules=none --submodule=short {'a' * 40} {'b' * 40}")
+    assert runners._inspection_commands(command, "/repo") == [("diff", "a" * 40, "b" * 40)]
 
 
-@pytest.mark.parametrize("name", ["zażółć gęślą.txt", "gone with spaces.txt", "gone.txt"])
-def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> None:
+@pytest.mark.parametrize("name,budget", [
+    ("zażółć gęślą.txt", 4096), ("gone with spaces.txt", 4096), ("gone.txt", 4096), ("gone.py", 100),
+])
+def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budget: int) -> None:
     git(git_repo, "config", "core.quotePath", "true")
     path = git_repo / name
     path.write_text("deleted line\n" * 600)
@@ -1294,11 +1238,32 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str) -> N
     git(git_repo, "commit", "-qm", "delete file")
     diff = render_patch(worktree.diff_since(git_repo, base))
 
-    chunks = split_diff(diff, 4096)
-
-    assert all(len(chunk.encode()) <= 4096 for chunk in chunks)
+    chunks = split_diff(diff, budget)
+    assert all(len(chunk.encode()) <= budget for chunk in chunks)
     assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
     assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
+
+
+def test_split_diff_encodes_long_utf8_line_in_linear_work() -> None:
+    diff = "diff --git a/new.txt b/new.txt\n+" + "aé€😀" * 1500 + "\n"
+    budget = 511
+    encoded_chars = 0
+
+    def count_encodes(frame, event, arg):
+        nonlocal encoded_chars
+        if event == "c_call" and arg.__name__ == "encode" and isinstance(arg.__self__, str):
+            encoded_chars += len(arg.__self__)
+
+    previous = sys.getprofile()
+    sys.setprofile(count_encodes)
+    try:
+        chunks = split_diff(diff, budget)
+    finally:
+        sys.setprofile(previous)
+
+    assert "".join(chunks) == diff
+    assert all(len(chunk.encode()) <= budget for chunk in chunks)
+    assert encoded_chars <= 5 * len(diff)
 
 
 # ----------------------------------------------------------------- family detection

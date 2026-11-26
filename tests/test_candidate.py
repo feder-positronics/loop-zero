@@ -9,6 +9,7 @@ the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.
 from __future__ import annotations
 
 import base64
+from contextlib import nullcontext
 import subprocess
 from copy import deepcopy
 from functools import partial
@@ -19,9 +20,8 @@ from shutil import copytree
 
 import pytest
 
-from loopzero import candidate
+from loopzero import candidate, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
-from loopzero.types import LoopZeroError
 from tests.conftest import commit_file, git as isolated_git
 
 
@@ -475,7 +475,7 @@ def test_vanished_parent_rejects_conflicting_current_main(tree_candidate):
         attest(main_head=main)
 
 
-@pytest.mark.parametrize("timing", ["metadata", "policy", "initial"])
+@pytest.mark.parametrize("timing", ["metadata", "policy", "initial", TypeError, AttributeError, KeyError])
 def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monkeypatch, timing):
     _, git, _, _, parent, source, head = tree_candidate
     candidate_event = event()
@@ -511,9 +511,11 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     def policy(number, snapshot):
         seen.append(number)
+        if isinstance(timing, type) and number == 101:
+            raise timing("policy implementation error")
         if timing == "policy" and number == 101:
             assert snapshot["state"] == "open" and source_reads == 1 and status_reads == 1
-            raise LoopZeroError("source #101: PR #101 is MERGED, not open")
+            raise CandidateError("source #101: PR #101 is MERGED, not open")
 
     def verify_tree(repo, main_sha, candidate_sha, sources):
         verified.append((main_sha, candidate_sha, sources))
@@ -521,6 +523,11 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
     monkeypatch.setattr(candidate, "_verify_tree", verify_tree)
+    if isinstance(timing, type):
+        with pytest.raises(timing, match="policy implementation error"):
+            run_attestation(candidate_event, github_get=get, mergify_status=lineage, source_policy=policy)
+        assert seen == [101] and source_reads == 1 and not sleeps
+        return
     assert run_attestation(candidate_event, github_get=get, mergify_status=lineage,
                            source_policy=policy) == [{"number": 102, "head_sha": source}]
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
@@ -563,7 +570,7 @@ def test_metadata_retry_evaluates_fresh_policy(field, value):
 def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
     values, live = payloads(event()), status()
     sleeps, attempts, source_reads = [], [], []
-    expected = LoopZeroError("source #101: missing required review")
+    expected = CandidateError("source #101: missing required review")
     if failure == "closed":
         values["/repos/owner/repo/pulls/101"].update(state="closed", merged=False)
     if failure == "identity":
@@ -594,7 +601,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
             raise expected
 
     monkeypatch.setattr(candidate, "_retry_sleep", sleeps.append)
-    with pytest.raises((CandidateError, LoopZeroError)) as caught:
+    with pytest.raises(CandidateError) as caught:
         run_attestation(github_get=get, status_reads=[live], source_policy=policy)
     assert not isinstance(caught.value, CandidateRaceError) and len(attempts) == 1 and sleeps == []
     if failure == "policy":
@@ -672,18 +679,16 @@ def test_rebuild_wait(monkeypatch, matches, second, stop):
         assert clock[0] == {"closed": 2, "ambiguous": 90, "slow": 100 * (1 + second), "oversleep": 100}[stop]
 
 
-@pytest.mark.parametrize("exceeds_bound", [False, True])
-def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_bound):
-    waits = []
-    killed = []
-
+@pytest.mark.parametrize("outcome", ["normal", "bound", "fetch"])
+def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, outcome):
+    waits, killed = [], []
     class Child:
         pid = 123
-        returncode = 0
-
         def __init__(self, argv, cwd, **kwargs):
-            self.root = cwd
-            self.running = "test-command" in argv
+            self.root, self.running = cwd, "test-command" in argv
+            self.returncode = 128 if outcome == "fetch" and "fetch" in argv else 0
+            if self.returncode:
+                kwargs["stderr"].write(b"fatal: The requested URL returned error: 503")
 
         def poll(self):
             return None if self.running else self.returncode
@@ -691,7 +696,7 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
         def wait(self, timeout=None):
             if self.running:
                 waits.append(timeout)
-                if timeout is not None and exceeds_bound:
+                if timeout is not None and outcome == "bound":
                     (self.root / "oversized").write_bytes(b"x" * 65)
                     raise subprocess.TimeoutExpired("test-command", timeout)
                 self.running = False
@@ -703,12 +708,13 @@ def test_fetched_git_waits_for_exit_or_resumes_size_checks(monkeypatch, exceeds_
     monkeypatch.setattr(candidate.os, "killpg", lambda pid, sig: killed.append((pid, sig)))
     monkeypatch.setattr(candidate.time, "sleep", lambda _: pytest.fail("used a fixed delay"))
 
-    with candidate.fetched_git("owner/repo", []) as git:
-        if exceeds_bound:
+    error = pytest.raises(github.GhUnavailable, match="temporarily unavailable") if outcome == "fetch" else nullcontext()
+    with error, candidate.fetched_git("owner/repo", []) as git:
+        if outcome == "bound":
             with pytest.raises(CandidateError, match="Git object/size bound exceeded"):
                 git("test-command")
         else:
             assert git("test-command") == ""
 
-    assert waits == ([0.02, None] if exceeds_bound else [0.02])
-    assert killed == ([(123, candidate.signal.SIGKILL)] if exceeds_bound else [])
+    assert waits == {"bound": [0.02, None], "normal": [0.02], "fetch": []}[outcome]
+    assert killed == ([(123, candidate.signal.SIGKILL)] if outcome == "bound" else [])

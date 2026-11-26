@@ -39,7 +39,7 @@ depends_on = ["loopzero._proc", "loopzero.runners", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.mergify"
-depends_on = ["loopzero.github", "loopzero.types"]
+depends_on = ["loopzero.candidate", "loopzero.github", "loopzero.types"]
 
 [[modules]]
 path = "loopzero.candidate"

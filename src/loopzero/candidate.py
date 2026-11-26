@@ -18,7 +18,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 MERGIFY_APP_ID = 10562
 MERGIFY_APP_OWNER = "Mergifyio"
@@ -90,7 +90,7 @@ def _object(value: JsonValue, message: str) -> JsonObject:
     return value
 
 
-def _flatten_batches(status: object) -> dict[str, JsonObject]:
+def flatten_batches(status: object) -> dict[str, JsonObject]:
     _require(isinstance(status, dict), "Mergify status is not an object")
     batches = status.get("batches")
     _require(isinstance(batches, list), "Mergify status has no batches list")
@@ -116,7 +116,7 @@ def _flatten_batches(status: object) -> dict[str, JsonObject]:
 
 
 def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int], list[str]]:
-    indexed = _flatten_batches(status)
+    indexed = flatten_batches(status)
     matches = [
         batch
         for batch in indexed.values()
@@ -216,7 +216,14 @@ def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     head = source.get("head")
     base = source.get("base")
     base_repo = base.get("repo") if isinstance(base, dict) else None
+    labels = source.get("labels", [])
+    if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
+        raise CandidateError("invalid source PR labels")
     return (
+        source.get("number"),
+        source.get("merged"),
+        source.get("mergeable") is False,
+        tuple(label["name"] for label in labels),
         source.get("state"),
         source.get("draft"),
         source.get("body"),
@@ -276,18 +283,37 @@ def _attest_source(
     return source_sha
 
 
-@contextlib.contextmanager
-def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
-    """Run bounded Git commands on fetched objects in an isolated bare repository."""
+def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
+    if operation == "fetch" and returncode:
+        from loopzero import github
+
+        output.seek(0)
+        diagnostic = output.read(_TREE_OUTPUT).decode(errors="replace")
+        if github._transient_error(diagnostic, False) or re.search(r"returned error: (?:429|5\d\d)", diagnostic):
+            raise github.GhUnavailable(("git", "fetch"), "GitHub objects temporarily unavailable")
+    _require(returncode == 0, f"git {operation} exited {returncode}: objects unavailable, "
+             "resource bound hit, or integration conflict")
+
+
+def _fetch_token() -> str:
     from loopzero import github
 
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         try:
             token = github.auth_token()
+        except github.GhUnavailable:
+            raise
         except github.GhError:
             raise CandidateError("GitHub fetch authentication unavailable") from None
     _require(bool(token), "GitHub fetch authentication unavailable")
+    return token
+
+
+@contextlib.contextmanager
+def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
+    """Run bounded Git commands on fetched objects in an isolated bare repository."""
+    token = _fetch_token()
     with tempfile.TemporaryDirectory(prefix="loopzero-candidate-") as directory:
         root = Path(directory)
         env = {
@@ -305,13 +331,14 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env) -> str:
+        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
                      "git", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0",
                      "-c", "maintenance.auto=false", *args], cwd=root, env=command_env,
-                    stdin=subprocess.DEVNULL, stdout=output, stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL, stdout=output,
+                    stderr=output if args[0] == "fetch" else subprocess.DEVNULL,
                     start_new_session=True,
                 )
                 def store_size() -> int:  # Git renames temporaries: skip files that vanish
@@ -328,13 +355,13 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         _require(time.monotonic() < deadline, "Git time bound exceeded")
                         with contextlib.suppress(subprocess.TimeoutExpired):
                             process.wait(timeout=0.02)
-                    _require(process.returncode == 0,
-                             f"git {args[0]} exited {process.returncode}: objects unavailable, "
-                             "resource bound hit, or integration conflict")
+                    _require_git_exit(args[0], process.returncode, output)
                     _require(store_size() <= _TREE_BYTES, "Git object/size bound exceeded")
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
                     _require(len(result) <= _TREE_OUTPUT, "Git object/output bound exceeded")
+                    if preserve_newlines:
+                        return result.decode("utf-8", errors="surrogateescape")
                     return result.decode().strip()
                 finally:
                     if process.poll() is None:
@@ -385,7 +412,10 @@ def attest_candidate(
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
-    """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
+    """Retry races afresh, bounded by retry admission rather than synchronous I/O.
+
+    Source policy must raise CandidateError for an expected rejection.
+    """
     batch_wait = [0.0]
     batch_deadline = _retry_clock() + _BATCH_SECONDS
     deadline = _retry_clock() + _ATTEST_SECONDS
@@ -507,7 +537,7 @@ def _attest_candidate_once(
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
         try:
             source_policy(number, source)
-        except Exception as exc:
+        except CandidateError as exc:
             current = None
             with contextlib.suppress(Exception):
                 current = _lookup_source(github_get, full_name, number)

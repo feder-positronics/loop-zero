@@ -20,27 +20,20 @@ implementing the change. For changes touching guards, auth, permissions,
 sessions, secrets or trust boundaries, record a short design pass in Notes
 before the first code edit: threats, invariants and chosen approach.
 
-Implement that bounded acceptance with behavior proof; use
-[write-tests](../write-tests/SKILL.md) for test design and regression evidence.
-For migrations,
-authorization, locking/concurrency or policy logic, list edge cases in Acceptance
-and map each to a test or recorded evidence. Observe required UI/runtime behavior within actual permissions; include visual
-proof for UI changes per [Reporting](../../CONTRACT.md#reporting). Required
-acceptance that remains unobserved stays open
-with a next-action owner. Record the tested revision, observations, trade-offs
-and limits in Notes or human Validation. Start primary review only with a
-completed passing `loopzero check` receipt for the exact pushed head. Focused
-tests and running checks are intermediate evidence. Reuse a passing same-head
-receipt under the [contract's reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
+Use [write-tests](../write-tests/SKILL.md) to prove the bounded acceptance.
+Map migration, authorization, locking/concurrency and policy edge cases to tests
+or evidence in Acceptance. Observe required UI and runtime behavior under actual
+permissions, with visual proof for UI changes per [Reporting](../../CONTRACT.md#reporting).
+Leave unobserved acceptance open with a next-action owner. Record revision,
+observations, trade-offs and limits in Notes or human Validation.
+Primary review requires a completed passing `loopzero check` receipt at the pushed head.
+Focused or ongoing checks are intermediate. Follow the [receipt reuse rules](../../CONTRACT.md#gate-execution-and-delivery-priority).
 
 Run commands expected to take more than about two minutes detached as in
 [Long-running jobs](../../../docs/DELEGATION.md#long-running-jobs).
-For builds, tests, CI, review, ready and merge, Codex exec/write_stdin yields
->=120 s (>=30 s otherwise); Claude uses a background completion notification
-or `t3_background_wait`. Read the completed result once; never use
-`t3_thread_read` or `task_status` for liveness. Cap returned output at the
-producer: `gh api --jq` selected fields, shell `| head -c 2000`, thread reads
-limit <=2, maxCharsPerItem <=600 and runLimit 1. Do not end the turn, settle or
+Follow [wait and output](../../../docs/DELEGATION.md#briefs-and-ownership)
+and [caps](../../../docs/DELEGATION.md#coordinator-rollover). Set
+`runLimit 1` for thread reads. Do not end the turn, settle or
 report done while a job you started has no `LOG.exit`, unless the unit is gone
 and you report the job as killed and the result as failed. If the turn must
 end, first schedule a one-shot wakeup (T3 `schedule:{type:once,runAt:<ISO time>}`)
@@ -67,20 +60,17 @@ Before the check and draft push for primary review, rebase your own commits onto
 `[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 Leave base merges out of a branch awaiting its delta.
-After an approved primary or a delta, merge `origin/<base>` into the existing
-branch when the base or its check scripts change.
-Preserve the primary for the delta and the delta for
-post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
+For base or check-script changes after review, follow the
+[Review budget](../../CONTRACT.md#review-budget).
+Preserve the primary for the delta and the delta for post-review fixes.
 
-Do not bypass the sandbox, change the check list or enable `[checks].network`
-to pass checks. Report base failures rather than work around them. If you must
-work around a deterministic defect outside your scope, fix it in a follow-up PR
-when small and test-only; otherwise file it labelled `urgent`, naming the PR it
-blocks. Only you
-commit, never checks, hooks or scripts. If acceptance requires unlisted paths,
-update task and PR first; request scope decisions for expanded proof seams or
-ownership. If interrupted, preserve an adoptable diff and report remaining
-acceptance, checks and findings under the contract's handoff rules.
+Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
+Report base failures without working around them. If a deterministic out-of-scope
+defect requires a workaround, use a follow-up PR for a small test-only fix or file an `urgent` issue naming the
+blocked PR. Commit yourself, never from checks, hooks or scripts. Update task and
+PR before adding paths required by acceptance, and get scope decisions before
+expanding proof seams or ownership. On interruption, preserve an adoptable diff
+and report remaining acceptance, checks and findings per the contract.
 
 A host or runner change that alters what jobs see (ports, env vars, paths,
 services, labels) goes live only after the repository change consuming it is on

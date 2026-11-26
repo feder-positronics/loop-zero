@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import errno
+import fcntl
+import os
 import re
-import stat
+import subprocess
+import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
-from uuid import uuid4
+from select import select
 
-from loopzero._proc import run
+from loopzero._proc import build_env, run
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
 _ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-EXCLUDES = (".worktrees/", ".loopzero/")
+EXCLUDES = (b".worktrees/", b".loopzero/")
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
 
@@ -58,10 +63,11 @@ def _git(
 ) -> str:
     argv = ("git", *args)
     done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
-               preserve_newlines=preserve_newlines)
+               preserve_newlines=preserve_newlines or preserve_whitespace,
+               encoding=sys.getfilesystemencoding() if preserve_whitespace else None)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
-    if preserve_newlines:
+    if preserve_newlines and not preserve_whitespace:
         return done.stdout
     return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
@@ -101,25 +107,26 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, *_ABSOLUTE_COMMON_DIR))
-    exclude = common / "info" / "exclude"
+    common = Path(_git(repo_root, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True)).resolve()
+    info = (common / "info").resolve()
+    exclude = (info / "exclude").resolve()
+    if not info.is_relative_to(common) or not exclude.is_relative_to(common):
+        raise WorktreeError(f"Git exclude is outside its Git directory: {exclude}")
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    exclude = exclude.resolve()
-    existing = exclude.read_text() if exclude.exists() else ""
-    missing = [entry for entry in EXCLUDES if entry not in existing.splitlines()]
-    if missing:
-        sep = "" if not existing or existing.endswith("\n") else "\n"
-        mode = stat.S_IMODE(exclude.stat().st_mode) if exclude.exists() else None
-        temp = exclude.with_name(f".exclude-{uuid4().hex}")
-        stream = temp.open("x")
-        try:
-            with stream:
-                stream.write(existing + sep + "\n".join(missing) + "\n")
-            if mode is not None:
-                temp.chmod(mode)
-            temp.replace(exclude)
-        finally:
-            temp.unlink(missing_ok=True)
+    while True:
+        fd = os.open(exclude, os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o666)
+        with os.fdopen(fd, "rb") as stream:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            lines = set(stream.read().splitlines())
+            missing = [entry for entry in EXCLUDES if entry not in lines]
+            if missing:
+                # An editor can append an unterminated line before this write.
+                rules = b"\n" + b"\n".join(missing) + b"\n"
+                if os.write(fd, rules) != len(rules):
+                    raise WorktreeError(f"incomplete write to Git exclude: {exclude}")
+            with suppress(FileNotFoundError):
+                if os.path.samestat(os.fstat(fd), exclude.lstat()):
+                    return
 
 
 def start(repo_root: Path, slug: str, base_branch: str) -> Path:
@@ -134,9 +141,14 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
-    base_ref = f"refs/remotes/origin/{base_branch}"
+    remote_ref = f"refs/heads/{base_branch}"
+    lookup = ("ls-remote", "--refs", "origin", remote_ref)
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", f"+refs/heads/{base_branch}:{base_ref}")
+        advertised = _git(repo_root, *lookup)
+        base, _, ref = advertised.partition("\t")
+        if ref != remote_ref:
+            raise GitError(("git", *lookup), f"origin did not report a unique {remote_ref}")
+        _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -145,7 +157,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    base = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
+    _git(repo_root, "update-ref", "--no-deref", f"refs/remotes/origin/{base_branch}", base)
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:
@@ -232,7 +244,7 @@ def task_text(wt: Path) -> str:
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         )
-    return task.read_text()
+    return task.read_text(encoding="utf-8")
 
 
 def base_sha(wt: Path) -> str:
@@ -247,7 +259,10 @@ def is_dirty(wt: Path) -> bool:
 
 
 def diff_since(wt: Path, sha: str) -> bytes:
-    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    # Show every file as text, whatever attributes or NUL bytes the reviewed head adds,
+    # without diff drivers, and keep submodule pointers even if .gitmodules ignores them.
+    diff = _git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
     return diff.encode("utf-8", errors="surrogateescape")
 
 
@@ -256,17 +271,66 @@ def merges_since(wt: Path, sha: str) -> list[str]:
     return _git(Path(wt), "rev-list", "--first-parent", "--reverse", "--merges", f"{sha}..HEAD").split()
 
 
-def cleanup(wt: Path) -> None:
-    """Remove the worktree and its branch. Refuses when the worktree is dirty."""
+@contextmanager
+def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]:
+    argv = ("git", "update-ref", "--stdin")
+    with subprocess.Popen(
+        argv, cwd=wt, env=build_env(GIT_ENV), stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="surrogateescape",
+    ) as transaction:
+        assert transaction.stdin is not None and transaction.stdout is not None
+        try:
+            transaction.stdin.write(f"option no-deref\nverify {ref} {expected_head}\nprepare\n")
+            transaction.stdin.flush()
+            if not select([transaction.stdout], [], [], 30)[0]:
+                raise GitError(argv, "timed out verifying the merged branch")
+            response = transaction.stdout.readline()
+            if response != "prepare: ok\n":
+                raise GitError(argv, response)
+            yield
+        finally:
+            try:
+                transaction.communicate("abort\n", timeout=5)
+            except subprocess.TimeoutExpired:
+                transaction.terminate()
+
+
+def _require_no_ignored_user_files(wt: Path) -> None:
+    ignored = _git(
+        wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", preserve_newlines=True
+    )
+    for path in ignored.split("\0")[:-1]:
+        if (
+            (path in {".loopzero/task.md", ".loopzero/checks.json"}
+             or re.fullmatch(r"\.loopzero/review(?:er-output)?-[0-9a-f]{12}-(primary|delta)\.json", path))
+            and not (wt / path).is_symlink()
+        ):
+            continue
+        raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
+
+
+def cleanup(wt: Path, expected_head: str) -> None:
+    """Remove a clean merged worktree and its branch if it has no local user files."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
-    if is_dirty(wt):
-        raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
-    name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
-    _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+    if head(wt) != expected_head:
+        raise WorktreeError("local HEAD differs from merged PR head")
+    name = branch(wt)
+    gd = Path(_git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True))
+    ref = f"refs/heads/{name}"
+    with _lock_verified_ref(wt, ref, expected_head):
+        if branch(wt) != name:
+            raise WorktreeError("local branch changed during merge cleanup")
+        if is_dirty(wt):
+            raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
+        _require_no_ignored_user_files(wt)
+        _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
+    worktrees = _git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z")
+    if f"branch {ref}" in worktrees.split("\0"):
+        raise WorktreeError(f"local branch {name!r} is checked out in another worktree")
     try:
-        _git(gd, f"--git-dir={gd}", "branch", "-D", name)
+        _git(gd, f"--git-dir={gd}", "update-ref", "--no-deref", "-d", ref, expected_head)
     except GitError:
         if _git(gd, f"--git-dir={gd}", "branch", "--list", "--", name):
             raise
