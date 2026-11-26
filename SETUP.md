@@ -272,6 +272,13 @@ path at `~/.local/lib/ai-accounts/bin/claude` (and `codex`). Copy
 `~/.config/systemd/user/`, then run
 `systemctl --user enable --now ai-accounts.timer`.
 
+To review with a pinned CLI and managed credentials, set `PINNED_BIN` to the
+directory containing the pinned `loopzero` executable:
+
+```sh
+PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
+```
+
 - Claude accounts are long-lived tokens: run `claude setup-token` per account and
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
@@ -349,17 +356,22 @@ access to the configured GitHub repository even before a PR exists. See the
 
 ### Check receipts with remote execution
 
-Run the current `loopzero check` coordinator from the task worktree with
-the same effective settings used by `loopzero ready`. To execute stages
-remotely, configure an operator-trusted `[checks].runner` that implements the
-[stage protocol](docs/ARCHITECTURE.md#check-stage-runners). The local coordinator
-writes the receipt.
+Use one pinned CLI revision and the same effective settings for `check`,
+`ready`, and `merge`. If a shared install can change mid-task, use the
+[isolated install](#install). The coordinator runs in the task worktree and
+writes the receipt. For remote stages, configure an operator-trusted
+`[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
 
 Without a stage adapter, run the whole check locally. Use a local slot if the
-host requires one. On miki, run this from the task worktree.
+host requires one. On miki, if you used the isolated install, run these from
+the task worktree with the `install_dir` from that recipe.
 
 ```sh
+export PATH="$install_dir/venv/bin:$PATH"
 HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
+# After opening and reviewing the PR, keep this PATH for delivery.
+loopzero ready --wait
+loopzero merge --wait
 ```
 
 A whole-job remote worker writes its own receipt. Ready can use it only if it
@@ -496,6 +508,12 @@ the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
 (the loop-zero checkout ref or installed package revision). Dispatch the
 eligibility workflow for the existing PR, or run the command below with its
 unchanged source SHA. The refreshed reader can use the approval already on GitHub.
+
+For inherited review coverage, advance both source and candidate workflow pins to
+a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
+The updated reader accepts an ancestor approval only across verified clean merges
+from the configured base. After deploying both pins, refresh eligibility for open
+sources judged by the older reader so their statuses reflect the updated policy.
 
 From a trusted base checkout, run:
 

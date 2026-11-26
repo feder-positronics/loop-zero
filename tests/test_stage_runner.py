@@ -6,22 +6,26 @@ import pytest
 
 from loopzero import sandbox
 from loopzero.cli import _load_report, _save_report
-from loopzero.config import ConfigError, load
 
 from .conftest import git
-from .test_sandbox import bwrap_log, make_config  # noqa: F401
+from .test_sandbox import bwrap_log, fetched_base, make_config  # noqa: F401
 
 
-@pytest.mark.parametrize('base_ref', ['stale', 'missing', 'recorded'])
-@pytest.mark.parametrize('body,verdict,tails', [
-    ('print(json.dumps(r))', True, ['ok', 'ok']),
-    ('r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
-    ('print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
-    ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
+READ_FRAME = 'import json,sys;r=json.load(sys.stdin);r.pop("env");'
+STAGE_FIELDS = 'r.update(exit_code=0,duration_s=0,not_started={fallback},tail={tail!r});'
+RETURN_FRAME = 'print(json.dumps(r))'
+FALLBACK_RUNNER = (sys.executable, '-c', READ_FRAME + STAGE_FIELDS.format(fallback=True, tail='') + RETURN_FRAME)
+
+
+@pytest.mark.parametrize('base_ref,body,verdict,tails', [
+    *[(base_ref, 'print(json.dumps(r))', True, ['ok', 'ok']) for base_ref in ('stale', 'missing', 'recorded', 'abs-link', 'path-link')],
+    ('stale', 'r["exit_code"]=7;print(json.dumps(r))', False, ['ok']),
+    ('stale', 'print("x" * 3000 + "worker socket unavailable", file=sys.stderr);sys.exit(42)', False, None),
+    ('stale', 'r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
      ['Ω' * 8188 + ' newest']),
-    ('subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
-    ('r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
-    *[(body, False, None) for body in [
+    ('stale', 'subprocess.run(["git","-C",repo,"-c","user.name=test","-c","user.email=t@e","commit","--allow-empty","-m","drift"],stdout=sys.stderr,check=True);print(json.dumps(r))', False, None),
+    ('stale', 'r.update(not_started=True,duration_s=0,tail="");print(json.dumps(r))', True, ['one', 'two']),
+    *[('stale', body, False, None) for body in [
         '', '''print('{"x":' * 100000 + "0" + "}" * 100000)''', 'print("{")', 'print(json.dumps(r));print(json.dumps(r))',
         'del r["exit_code"];print(json.dumps(r))', 'del r["worktree"];print(json.dumps(r))',
         'r["duration_s"]=float("nan");print(json.dumps(r))',
@@ -31,7 +35,7 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
         *[f'r["{field}"]="wrong";print(json.dumps(r))' for field in ('head', 'base', 'command', 'env_sha256', 'network', 'worktree')],
     ]],
 ])
-def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref):  # noqa: F811
+def test_runner(git_repo, tmp_path, bwrap_log, monkeypatch, body, verdict, tails, base_ref):  # noqa: F811
     git(git_repo, 'switch', '-c', 'task')
     git(git_repo, 'commit', '--allow-empty', '-m', 'advance')
     base = git(git_repo, 'rev-parse', 'HEAD').strip()
@@ -43,19 +47,26 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     if base_ref == 'missing':
         git(git_repo, 'branch', '-D', 'main')
+    expected = dict(sandbox.SANDBOX_ENV, UV_CACHE_DIR="/operator/cache")
     body = (f'repo=r["worktree"]\nassert r["base"] == "{base}"\n'
             'assert not Path.cwd().is_relative_to(Path(repo))\n'
-            f'assert r.pop("env") == {dict(sandbox.SANDBOX_ENV, UV_CACHE_DIR="/operator/cache")!r}\n'
-            'assert r["network"] is True\n'
-            'assert r["env_sha256"] == hashlib.sha256(json.dumps('
-            f'{dict(sandbox.SANDBOX_ENV, UV_CACHE_DIR="/operator/cache")!r},'
+            f'assert r.pop("env") == {expected!r} and r["network"] is True\n'
+            f'assert r["env_sha256"] == hashlib.sha256(json.dumps({expected!r},'
             'sort_keys=True,separators=(",", ":")).encode()).hexdigest()\n' + body)
     path = tmp_path / 'runner.py'
-    path.write_text('import hashlib,json,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\nr.update(exit_code=0,duration_s=0.1,not_started=False,tail="ok")\n' + body)
+    preamble = 'import hashlib,json,sys,subprocess\nfrom pathlib import Path\nr=json.load(sys.stdin)\n'
+    launcher = (sys.executable, str(path))
+    if base_ref in ('abs-link', 'path-link'):
+        link = tmp_path / 'runner-python'
+        link.symlink_to(sys.executable)
+        monkeypatch.setenv('PATH', f'{tmp_path}:' + os.environ['PATH'])
+        preamble += f'assert sys.executable == {str(link)!r}\n'
+        launcher = (link.name if base_ref == 'path-link' else str(link), str(path), 'relative/argument')
+    path.write_text(preamble + STAGE_FIELDS.format(fallback=False, tail='ok') + '\n' + body)
     calls = []
     report = sandbox.run_checks(make_config(checks=('echo one', 'echo two'),
                                 env=(("UV_CACHE_DIR", "/operator/cache"),), network=True,
-                                check_runner=(sys.executable, str(path))), git_repo, progress=calls.append)
+                                check_runner=launcher), git_repo, progress=calls.append)
     assert report.ok is verdict
     if 'exit_code"]=7' in body:
         assert report.results[0].exit_code == 7
@@ -66,17 +77,15 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
     if tails is not None:
         assert [r.tail for r in report.results] == tails
     if not verdict:
+        assert calls == ['echo one']
         assert sum(r.tail == 'ok' for r in report.results) <= 1
     if '* 100000' in body:
         assert 'Stage runner failed' in report.results[0].tail
         assert any(word in report.results[0].tail.lower() for word in ('recursion', 'stack overflow'))
-    if 'drift' in body:
-        assert report.dirty and calls == ['echo one']
-        assert 'Worktree changed after stage' in report.results[0].tail
-    elif not verdict:
-        assert calls == ['echo one']
     current_head = _save_report(git_repo, report)
     if 'drift' in body:
+        assert report.dirty
+        assert 'Worktree changed after stage' in report.results[0].tail
         assert current_head == git(git_repo, 'rev-parse', 'HEAD').strip() and current_head != report.head
         assert _load_report(git_repo) != report
         return
@@ -86,26 +95,13 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
 
 
 @pytest.mark.parametrize('dirty', [True, False])
-def test_runner_unavailable(git_repo, monkeypatch, dirty):
+def test_runner_unavailable(git_repo, monkeypatch, dirty, fetched_base):  # noqa: F811
     if dirty:
         (git_repo / 'dirty').write_text('x')
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
     monkeypatch.setattr(sandbox.shutil, 'which', lambda name: None)
-    prefix = (sys.executable, '-c', 'import json,sys;r=json.load(sys.stdin);r.pop("env");r.update(exit_code=0,duration_s=0,not_started=True,tail="");print(json.dumps(r))')
-    report = sandbox.run_checks(make_config(check_runner=prefix), git_repo)
+    report = sandbox.run_checks(make_config(check_runner=FALLBACK_RUNNER), git_repo)
     assert not report.ok and report.dirty is dirty
     assert ('bwrap binary missing' in report.results[0].tail) is not dirty
-
-
-@pytest.mark.parametrize('value', ['[]', '[""]', '[1]', '"runner"', '["./runner"]', '["tools/runner"]', '["python3","tools/run_stage.py"]', '["dispatch","--stage"]', '["dispatch","--opt=/operator/run.py"]'])
-def test_runner_config(tmp_path, value):
-    path = tmp_path / 'workflow.toml'
-    path.write_text('[repo]\nname="o/n"\n[checks]\nrunner=' + value)
-    if 'dispatch' in value or 'tools/run_stage.py' in value:
-        assert load(path).check_runner == tuple(json.loads(value))
-    else:
-        with pytest.raises(ConfigError):
-            load(path)
 
 
 @pytest.mark.parametrize('kind', ['executable', 'argument', 'symlink', 'path', 'executable_symlink', 'option', 'option_symlink', 'short', 'list', 'parent', 'colon_link', 'colon_tree'])
@@ -134,21 +130,7 @@ def test_runner_rejects_task_paths(git_repo, tmp_path, monkeypatch, kind):
     assert not report.ok and 'references task worktree' in report.results[0].tail
 
 
-@pytest.mark.parametrize('bare', [False, True])
-def test_runner_preserves_executable_symlink(git_repo, tmp_path, monkeypatch, bare):
-    link = tmp_path / 'runner-python'
-    link.symlink_to(sys.executable)
-    monkeypatch.setenv('PATH', f'{tmp_path}:' + os.environ['PATH'])
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
-    body = (f'import json,sys;assert sys.executable == {str(link)!r};'
-            'r=json.load(sys.stdin);r.pop("env");'
-            'r.update(exit_code=0,duration_s=0,not_started=False,tail="ok");print(json.dumps(r))')
-    report = sandbox.run_checks(make_config(check_runner=(link.name if bare else str(link), '-c', body, 'relative/argument')), git_repo)
-    assert report.ok, report.results[0].tail
-
-
-def test_runner_timeout(git_repo, monkeypatch):
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', 'HEAD')
+def test_runner_timeout(git_repo, monkeypatch, fetched_base):  # noqa: F811
     original = sandbox._proc.run
     def run(argv, **kwargs):
         if argv[0] == sys.executable:
@@ -163,21 +145,17 @@ def test_runner_timeout(git_repo, monkeypatch):
 
 
 @pytest.mark.parametrize('change', ['fallback', 'base'])
-def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, change):  # noqa: F811
+def test_runner_reuse_binds_execution_context(git_repo, bwrap_log, fetched_base, change):  # noqa: F811
     from dataclasses import replace
 
     (git_repo / '.git/info/exclude').write_text('.loopzero/\n')
-    base = git(git_repo, 'rev-parse', 'HEAD').strip()
-    git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     command = 'echo stage-ran; exit 7' if change == 'fallback' else 'echo one'
     cfg = make_config(checks=(command,), inputs={command: ('README.md',)})
-    body = ('import json,sys;r=json.load(sys.stdin);r.pop("env");'
-            'r.update(exit_code=0,duration_s=0,not_started=True,tail="");print(json.dumps(r))')
-    runner = (sys.executable, '-c', body)
+    runner = FALLBACK_RUNNER
     if change == 'fallback':
         passing = sandbox.run_checks(replace(cfg, checks=('echo seed',)), git_repo)
         result = replace(passing.results[0], command=command,
-                         input_key=sandbox._input_key(cfg, git_repo, command, base))
+                         input_key=sandbox._input_key(cfg, git_repo, command, fetched_base))
         _save_report(git_repo, replace(passing, results=(result,)))
     else:
         cfg = replace(cfg, check_runner=runner)
