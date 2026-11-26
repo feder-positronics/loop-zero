@@ -8,6 +8,7 @@ import os
 import re
 import stat
 import subprocess
+import time
 from collections.abc import Iterator
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
@@ -112,7 +113,15 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
         raise WorktreeError(f"local state directory is not a directory or is a symbolic link: {path}") from exc
     try:
         if lock:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            deadline = time.monotonic() + 60
+            while (remaining := deadline - time.monotonic()) > 0:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(min(0.1, remaining))
+            else:
+                raise TimeoutError(f"task state is busy in {wt}; retry when the other command finishes")
         yield fd
     finally:
         os.close(fd)
