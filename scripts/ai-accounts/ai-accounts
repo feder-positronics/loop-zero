@@ -634,8 +634,10 @@ def check_codex(name: str) -> dict:
     models = {m: v["available"] for m, v in model_usage.items()
               if isinstance(v, dict) and isinstance(v.get("available"), bool)}
     unknown = sorted(m for m in model_usage if m not in models)
+    if not models:
+        return {**result, "error": "usage response has no known model availability", "models_unknown": unknown}
     usable = [available for available in models.values() if available]
-    tier = 0 if not ok or (models and not usable) else (2 if all(models.values()) else 1)
+    tier = 0 if not ok or not usable else (2 if all(models.values()) else 1)
     extra = {"models_unknown": unknown} if unknown else {}
     return {**result, "tier": tier, "models": models, **extra}
 
