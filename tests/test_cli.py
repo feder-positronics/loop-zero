@@ -5,12 +5,16 @@ from __future__ import annotations
 import base64
 import errno
 import json
+import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from select import select
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -3667,6 +3671,53 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     assert f"review:   primary on {head[:12]} (approved)" in out
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == ["api", reviews_key()[4:]]) == 1
+
+
+@pytest.mark.parametrize(("signum", "status"), [
+    (signal.SIGTERM, -signal.SIGTERM),
+    (signal.SIGINT, 130),
+])
+def test_status_reaps_gh_after_signal(wt, fake_tool, signum, status):
+    fake_tool("gh", "exec /bin/sleep 30")
+    driver = """
+import subprocess
+import sys
+from loopzero import cli, github
+
+github.app_token = lambda: ""
+communicate = subprocess.Popen.communicate
+
+def announce(process, *args, **kwargs):
+    if process.args[0] == "gh":
+        print(process.pid, flush=True)
+    return communicate(process, *args, **kwargs)
+
+subprocess.Popen.communicate = announce
+sys.exit(cli.main(["status"]))
+"""
+    env = {**os.environ, "PYTHONPATH": str(Path(cli.__file__).resolve().parents[1])}
+    with subprocess.Popen(
+        [sys.executable, "-c", driver], cwd=wt, env=env, stdout=subprocess.PIPE, bufsize=0,
+    ) as process:
+        child = None
+        try:
+            # Read until the supervisor enters communicate on the offline gh child.
+            for _ in range(6):
+                assert select([process.stdout], [], [], 5)[0]
+                line = process.stdout.readline().strip()
+                if line.isdigit():
+                    child = int(line)
+                    break
+            assert child is not None
+            process.send_signal(signum)
+            assert process.wait(timeout=5) == status
+            with pytest.raises(ProcessLookupError):
+                os.kill(child, 0)
+        finally:
+            process.kill()
+            if child is not None:
+                with suppress(ProcessLookupError):
+                    os.killpg(child, signal.SIGKILL)
 
 
 def test_status_silently_ignores_legacy_report_without_dirty(
