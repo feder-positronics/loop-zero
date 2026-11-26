@@ -182,7 +182,10 @@ The R3 runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
-that header, a newline and the exact raw diff without trimming task or diff text.
+that header, a newline and the Git patch, including carriage returns and the
+final newline. UTF-8 patches are supplied verbatim. For other patches, the
+prompt escapes invalid bytes and literal backslashes so the changes stay
+visible. The native inspection digest always binds the original Git bytes.
 The runner probes the selected Codex binary with `--version` and records its
 stdout in runner provenance and the saved review receipt. A failed probe uses
 RunnerBadOutput and existing family fallback before model input. Successful

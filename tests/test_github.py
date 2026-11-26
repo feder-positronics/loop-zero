@@ -733,8 +733,10 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-app-token\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    clock = [0.0]
-    monkeypatch.setattr(github.time, "time", lambda: clock[0])
+    wall_time = boot_time = 10_000.0
+    monkeypatch.setattr(github.time, "time", lambda: wall_time)
+    monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(github.time, "clock_gettime", lambda _: boot_time)
     monkeypatch.setattr(github.time, "monotonic", lambda: 100.0)  # stopped during host suspend
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
@@ -754,7 +756,8 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
         "operator-token", "operator-token", "operator-token",
     ]
     assert counter.read_text().splitlines() == ["called"]
-    clock[0] = 3601.0
+    boot_time += 3_620
+    wall_time += 2_620  # The wall clock stepped back by a thousand seconds.
     github.api_get("repos/acme/widgets")
     assert counter.read_text().splitlines() == ["called", "called"]
 
@@ -765,10 +768,10 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
     helper.chmod(0o755)
     monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
-    wall, real_run = [1_000_000.0], github.run
-    suspend = lambda: wall.append(wall.pop() + 3601)  # noqa: E731
-    monkeypatch.setattr(github.time, "time", lambda: wall[0])
-    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), wall[0] == 1e6 and suspend())[0])
+    boot, real_run = [1_000_000.0], github.run
+    suspend = lambda: boot.append(boot.pop() + 3601)  # noqa: E731
+    monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
+    monkeypatch.setattr(github, "run", lambda argv, **k: (real_run(argv, **k), boot[0] == 1e6 and suspend())[0])
     monkeypatch.setattr(github, "_retry_sleep", lambda delay: suspend())
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.expect(["api", "repos/acme/widgets", "--include"], {})
