@@ -4965,7 +4965,8 @@ def test_merge_queue_landing_within_budget(
     assert ("timed out waiting for the merge queue" in out) is (expected == 3)
 
 
-def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeypatch, head, replay_gh):
+@pytest.mark.parametrize("verified", [True, False])
+def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeypatch, head, replay_gh, verified):
     arm_approved_ready_pr(gh, head, wt, isDraft=False)
     clock = poll_clock(monkeypatch)
     run_gh = github.run
@@ -4974,7 +4975,8 @@ def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeyp
     def merge_then_verify(argv, *, timeout, **kwargs):
         if argv[1:3] == ["pr", "merge"]:
             clock.now += 2
-            gh.respond(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="e" * 40))
+            gh.respond(f"api repos/{REPO}/pulls/7", merge_json(
+                state="MERGED", head=head if verified else "f" * 40, sha="e" * 40))
             return Completed(0, "", "", 2)
         return run_gh(argv, timeout=timeout, **kwargs)
 
@@ -4983,8 +4985,12 @@ def test_direct_merge_verifies_after_queue_wait_deadline(wt, gh, capsys, monkeyp
     monkeypatch.setattr(cli, "_cleanup", lambda *_: cleaned.append(True))
 
     code, out, err = run(capsys, "merge", "--wait=1")
-    assert (code, err, cleaned) == (0, "", [True])
-    assert out.splitlines()[-1] == "e" * 40
+    if verified:
+        assert (code, err, cleaned) == (0, "", [True])
+        assert out.splitlines()[-1] == "e" * 40
+    else:
+        assert (code, cleaned) == (1, [])
+        assert "merge could not be verified" in err and "timed out" not in out + err
 
 
 def test_queue_wait_keeps_landing_verified_before_scope_exit(monkeypatch):

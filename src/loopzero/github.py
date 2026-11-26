@@ -1476,6 +1476,20 @@ def merge_pending(repo: str, number: int, head_sha: str) -> bool:
     return queued or bool(auto)
 
 
+def _merge_evidence(repo: str, number: int, head_sha: str) -> tuple[str | None, bool, MergeFailed | None]:
+    """Read the merge SHA, queued state and queue error after a merge request."""
+    if sha := merged_sha(repo, number, expected_head=head_sha):
+        return sha, False, None
+    queue_error = None
+    try:
+        if merge_pending(repo, number, head_sha):
+            return None, True, None
+    except MergeFailed as exc:
+        queue_error = exc
+    # The queue may have landed the PR between the two reads.
+    return merged_sha(repo, number, expected_head=head_sha), False, queue_error
+
+
 def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
     """Merge at exactly this head, returning None if GitHub queued the PR."""
     if strategy not in ("squash", "merge", "rebase", "queue"):
@@ -1492,20 +1506,16 @@ def merge(repo: str, number: int, strategy: str, head_sha: str) -> str | None:
         write_error = exc
     # A direct merge already in flight still needs verification and cleanup.
     scope = _read_scope.set(_read_scope.get() if strategy == "queue" else None)
-    queue_error = None
     try:
-        if sha := merged_sha(repo, number, expected_head=head_sha):
-            return sha
-        try:
-            if merge_pending(repo, number, head_sha):
-                return None
-        except MergeFailed as exc:
-            queue_error = exc
-        # The queue may have landed the PR between the two reads.
-        sha = merged_sha(repo, number, expected_head=head_sha)
+        sha, queued, queue_error = _merge_evidence(repo, number, head_sha)
+    except (GhError, ProcTimeout) as exc:
+        if strategy == "queue" or isinstance(exc, (MergeFailed, ClosedUnmerged)):
+            raise
+        # A direct merge reports its own verification failure, never a queue timeout.
+        raise MergeFailed(("gh", *argv), f"PR #{number} merge could not be verified: {exc}") from exc
     finally:
         _read_scope.reset(scope)
-    if sha:
+    if sha or queued:
         return sha
     if queue_error:
         raise queue_error
