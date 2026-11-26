@@ -2962,8 +2962,7 @@ def test_check_refuses_unverified_receipt_after_runner_retarget(wt, gh, capsys, 
     publish_workflow(wt, WORKFLOW.replace("[checks]", f"[checks]\nrunner = {json.dumps([str(runner)])}"))
     arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
 
-    code, out, err = run(capsys, "check")
-    assert code == 1
+    out, err = expect_cli(capsys, 1, "check")
     assert "receipt produced:" not in out and "PASS" not in out
     assert "stages passed but the receipt is unverified" in err
     assert "rerun loopzero check from the task worktree with a stable, readable configured runner" in err
@@ -3516,8 +3515,7 @@ def test_status_explains_detached_head(wt: Path, capsys) -> None:
 def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     head = head_of(wt)
     gh.respond_pr_list([])
-    code, out, _ = run(capsys, "status")
-    assert code == 0
+    out, _ = expect_cli(capsys, 0, "status")
     assert "branch:   lz/t1" in out and f"head:     {head}" in out and "dirty:    no" in out
     assert "pr:       none (commit changes and pass `loopzero check` before `loopzero pr`)" in out
     arm_approved_pr_with_check_result(gh, head, wt, "pending")

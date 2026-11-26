@@ -201,8 +201,7 @@ def test_recovery_cannot_outlive_deadline_or_live_review_evidence(
                 raise _proc.ProcTimeout("read timed out")
         return data
     monkeypatch.setattr(github, "api_get", read)
-    code, out, err = run(capsys, "review")
-    assert code == 1 and "read-back blocked" in err
+    out, _ = expect_cli(capsys, 1, "review", stderr_contains=("read-back blocked",))
     assert out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
     assert len([c for c in gh.calls if "--input" in c]) == 1
 
