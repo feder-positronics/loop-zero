@@ -16,6 +16,7 @@ from uuid import uuid4
 from loopzero._proc import build_env, run
 
 GIT_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GIT_SSH_COMMAND", "SSH_AUTH_SOCK")
+_ABSOLUTE_COMMON_DIR = ("rev-parse", "--path-format=absolute", "--git-common-dir")
 EXCLUDES = (".worktrees/", ".loopzero/")
 _BASE_LINE = re.compile(r"^Base:\s*([0-9a-fA-F]{7,40})\s*$", re.MULTILINE)
 _TASK_TEMPLATE = """# {title}
@@ -60,7 +61,7 @@ def _git(
     preserve_whitespace: bool = False, preserve_newlines: bool = False,
 ) -> str:
     argv = ("git", *args)
-    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+    done = run(argv, cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
                preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
@@ -83,8 +84,8 @@ def branch_name(repo_root: Path, slug: str) -> str:
 
 def title_from_slug(slug: str) -> str:
     """`add-workflow_config-note` -> `Add workflow config note`."""
-    words = re.sub(r"[-_]+", " ", slug).split()
-    return " ".join(words)[:1].upper() + " ".join(words)[1:]
+    title = " ".join(re.sub(r"[-_]+", " ", slug).split())
+    return title[:1].upper() + title[1:]
 
 
 def worktree_dir(repo_root: Path, slug: str) -> Path:
@@ -98,21 +99,18 @@ def task_file(wt: Path) -> Path:
 def _branch_exists(repo_root: Path, branch: str) -> bool:
     done = run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-        cwd=repo_root,
-        env_allowlist=GIT_ENV,
-        timeout=30,
+        cwd=repo_root, env_allowlist=GIT_ENV, timeout=30,
     )
     return done.exit_code == 0
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    common = Path(_git(repo_root, *_ABSOLUTE_COMMON_DIR))
     exclude = common / "info" / "exclude"
     exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude = exclude.resolve()
     existing = exclude.read_text() if exclude.exists() else ""
-    lines = set(existing.splitlines())
-    missing = [e for e in EXCLUDES if e not in lines]
+    missing = [entry for entry in EXCLUDES if entry not in existing.splitlines()]
     if missing:
         sep = "" if not existing or existing.endswith("\n") else "\n"
         mode = stat.S_IMODE(exclude.stat().st_mode) if exclude.exists() else None
@@ -178,8 +176,7 @@ def _resumable_head(repo_root: Path, wt: Path, expected_branch: str) -> str | No
     if (len(fields) != 3 or fields[2] != f"branch refs/heads/{expected_branch}"
             or not (wt / ".git").is_file()):
         return None
-    common_dir = ("rev-parse", "--path-format=absolute", "--git-common-dir")
-    if _git(wt, *common_dir) != _git(repo_root, *common_dir) or branch(wt) != expected_branch:
+    if _git(wt, *_ABSOLUTE_COMMON_DIR) != _git(repo_root, *_ABSOLUTE_COMMON_DIR) or branch(wt) != expected_branch:
         return None
     current_head = head(wt)
     if fields[1] != f"HEAD {current_head}" or is_dirty(wt):
@@ -220,7 +217,7 @@ def head(wt: Path) -> str:
 
 def is_linked_checkout(wt: Path) -> bool:
     git_dir = _git(wt, "rev-parse", "--absolute-git-dir")
-    common_dir = _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    common_dir = _git(wt, *_ABSOLUTE_COMMON_DIR)
     return git_dir != common_dir
 
 
@@ -254,7 +251,10 @@ def is_dirty(wt: Path) -> bool:
 
 
 def diff_since(wt: Path, sha: str) -> bytes:
-    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    # Show every file as text, whatever attributes or NUL bytes the reviewed head adds,
+    # without diff drivers, and keep submodule pointers even if .gitmodules ignores them.
+    diff = _git(Path(wt), "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--text",
+                "--ignore-submodules=none", "--submodule=short", sha, "HEAD", preserve_newlines=True)
     return diff.encode("utf-8", errors="surrogateescape")
 
 
@@ -287,20 +287,36 @@ def _lock_verified_ref(wt: Path, ref: str, expected_head: str) -> Iterator[None]
                 transaction.terminate()
 
 
+def _require_no_ignored_user_files(wt: Path) -> None:
+    ignored = _git(
+        wt, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", preserve_newlines=True
+    )
+    for path in ignored.split("\0")[:-1]:
+        if (
+            (path in {".loopzero/task.md", ".loopzero/checks.json"}
+             or re.fullmatch(r"\.loopzero/review-[0-9a-f]{12}-(primary|delta)\.json", path))
+            and not (wt / path).is_symlink()
+        ):
+            continue
+        raise WorktreeError(f"worktree contains ignored file {path!r}, refusing to remove: {wt}")
+
+
 def cleanup(wt: Path, expected_head: str) -> None:
-    """Remove the worktree and its branch. Refuses when the worktree is dirty."""
+    """Remove a clean merged worktree and its branch if it has no local user files."""
     wt = Path(wt).absolute()
     if not wt.exists():
         raise WorktreeError(f"no such worktree: {wt}")
     if head(wt) != expected_head:
         raise WorktreeError("local HEAD differs from merged PR head")
-    name, gd = branch(wt), (wt / _git(wt, "rev-parse", "--git-common-dir")).resolve()
+    name = branch(wt)
+    gd = Path(_git(wt, *_ABSOLUTE_COMMON_DIR, preserve_whitespace=True))
     ref = f"refs/heads/{name}"
     with _lock_verified_ref(wt, ref, expected_head):
         if branch(wt) != name:
             raise WorktreeError("local branch changed during merge cleanup")
         if is_dirty(wt):
             raise WorktreeError(f"worktree is dirty, refusing to remove: {wt}")
+        _require_no_ignored_user_files(wt)
         _git(gd, f"--git-dir={gd}", "worktree", "remove", str(wt))  # never the primary checkout
     worktrees = _git(gd, f"--git-dir={gd}", "worktree", "list", "--porcelain", "-z")
     if f"branch {ref}" in worktrees.split("\0"):
