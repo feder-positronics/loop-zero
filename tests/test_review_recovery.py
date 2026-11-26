@@ -24,14 +24,14 @@ gh, git_seed, repo, wt = support.gh, support.git_seed, support.repo, support.wt
 
 
 def lost_reply(wt, gh, fake_bin, monkeypatch, *, kind, verdict, interrupted=False,
-               mutate=None, timeout=False):
+               mutate=None, timeout=False, payload=None):
     history = []
     if kind == "delta":
         history = [rev(head_of(wt), "primary")]
         (wt / "feature.py").write_text("print('fixed')\n")
         git(wt, "commit", "-qam", "repair")
     head = support.prepare_review(wt, gh, fake_bin, history=history, post_id=17,
-                                  payload=APPROVE if verdict == 0 else CHANGES)
+                                  payload=payload or (APPROVE if verdict == 0 else CHANGES))
     reviewer = fake_bin / "claude"
     reviewer.write_text(reviewer.read_text().replace(
         "#!/bin/sh\n", f'#!/bin/sh\nprintf "run\\n" >> "{fake_bin}/claude.runs"\n'))
@@ -152,6 +152,34 @@ def test_recovery_requires_exact_live_publication(
             out.startswith("reviewer paths pinned to origin/main@") and len(out.splitlines()) == 1
         )
     assert len([c for c in gh.calls if "--input" in c]) == 1
+
+
+@pytest.mark.parametrize("altered", [False, True])
+def test_repost_explains_historical_anchor_difference(
+    wt, gh, fake_bin, monkeypatch, capsys, altered,
+):
+    path = wt / "feature.py"
+    path.write_text("# context\u2028continued\n# tail\n")
+    git(wt, "commit", "-qam", "add context")
+    path.write_text("# context\u2028continued\nprint('new')\n# tail\n")
+    git(wt, "commit", "-qam", "add a line")
+    patch = git(wt, "diff", "HEAD^", "HEAD", "--", path.name)
+    gh.respond(f"api repos/{REPO}/pulls/7/files", [{"filename": path.name, "patch": patch}])
+
+    def historical_publication(_reviews, comments):
+        assert comments[0]["line"] == 2  # LF-only fresh placement.
+        comments[0]["line"] = 3  # Inline location saved by 10ee679a.
+        if altered:
+            comments[0]["body"] += " changed"
+
+    finding = {**CHANGES["findings"][0], "path": None, "line": None}
+    lost_reply(wt, gh, fake_bin, monkeypatch, kind="primary", verdict=5, interrupted=True,
+               mutate=historical_publication, payload=CHANGES | {"findings": [finding]})
+    assert run(capsys, "review")[0] == 130
+    code, _, err = run(capsys, "review", "--repost")
+    assert code == 1 and "contents or locations differ" in err
+    assert ("use the publishing CLI revision" in err) is not altered
+    assert_single_publication(gh, fake_bin)
 
 
 @pytest.mark.parametrize("change", ["login", "raw", "repo", "publisher", "number"])
