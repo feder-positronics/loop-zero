@@ -13,21 +13,19 @@ import pytest
 from loopzero import cli, eligibility, github, runners
 from loopzero.types import CheckReport, CheckResult, Config
 from tests import test_cli, test_runners
-from tests.conftest import git
+from tests.conftest import commit_file, git, git_environment
 
 fake_bwrap = test_runners.fake_bwrap
 gh = test_cli.gh
 APPROVE = test_runners.APPROVE
+BYTE_LIMIT_REVIEW = test_runners._native_codex_result("a" * 40)
 
 
 @pytest.fixture
 def native(git_repo, fake_bin, fake_tool):
     base = git(git_repo, "rev-parse", "HEAD").strip()
-    (git_repo / "large.txt").write_text(
-        "PRIVATE_CANARY /home/private/secret.txt\n" + "x" * 40000 + "Ω\n"
-    )
-    git(git_repo, "add", "large.txt")
-    git(git_repo, "commit", "-qm", "large synthetic source")
+    content = "PRIVATE_CANARY /home/private/secret.txt\n" + "x" * 40000 + "Ω\n"
+    commit_file(git_repo, "large.txt", content, "large synthetic source")
     head = git(git_repo, "rev-parse", "HEAD").strip()
     patch = git(git_repo, "diff", "--no-color", base, head).strip()
     script = """#!/usr/bin/env python3
@@ -86,6 +84,31 @@ def row(result, rendered=None):
     }
 
 
+@pytest.fixture
+def published_native(native):
+    result = native[0]()
+    rendered = body(result)
+    return result, rendered, rendered.splitlines()[1]
+
+
+def projection(result, rendered=None):
+    return eligibility.review_projection(row(result, rendered), result.head, "acme/widgets", 7)
+
+
+def eligible(*reviews):
+    return eligibility.eligible_review(
+        list(reviews), reviews[-1]["commit_id"], ("bot",), repo="acme/widgets", number=7
+    )
+
+
+def assert_invalid_native(result):
+    assert not runners.validate_runner_result(result)
+    with pytest.raises(runners.RunnerBadOutput):
+        runners.codex_evidence(result)
+    with pytest.raises(runners.RunnerBadOutput):
+        body(result)
+
+
 def rewrite(result, change):
     decoded = json.loads(result.raw)
     change(decoded)
@@ -121,11 +144,9 @@ def test_large_real_native_private_public_saved_and_exact_bytes(native, git_repo
         secret not in rendered
         for secret in ("PRIVATE_CANARY", "/home/private", "git -C", str(native[2]))
     )
-    parsed = eligibility.review_projection(row(result), result.head, "acme/widgets", 7)
+    parsed = projection(result)
     assert parsed == (True, evidence)
-    assert eligibility.eligible_review(
-        [row(result)], result.head, ("bot",), repo="acme/widgets", number=7
-    )
+    assert eligible(row(result))
     cli._save_review(git_repo, result)
     path = git_repo / evidence["receipt"]
     assert path.stat().st_mode & 0o777 == 0o600 and path.parent.stat().st_mode & 0o777 == 0o700
@@ -207,11 +228,7 @@ def test_full_native_attribution_and_fatal_controls(native, mutation):
         "after_verdict",
         "terminal_failure",
     ):
-        assert not runners.validate_runner_result(altered)
-        with pytest.raises(runners.RunnerBadOutput):
-            runners.codex_evidence(altered)
-        with pytest.raises(runners.RunnerBadOutput):
-            body(altered)
+        assert_invalid_native(altered)
     else:
         evidence = runners.codex_evidence(altered)
         assert evidence["calls"][0]["inspection"] == "unknown"
@@ -242,10 +259,7 @@ def test_complete_ordered_native_chunks(native, mutation):
         assert [c["index"] for c in evidence["calls"]] == [1, 2]
         assert all(c["inspection"] == "verified" for c in evidence["calls"])
         assert len({c["session"] for c in evidence["calls"]}) == 2
-        assert eligibility.review_projection(row(changed), changed.head, "acme/widgets", 7) == (
-            True,
-            evidence,
-        )
+        assert projection(changed) == (True, evidence)
     else:
         assert not runners.validate_runner_result(changed)
         with pytest.raises(runners.RunnerBadOutput):
@@ -276,25 +290,19 @@ def update_evidence(value, path, replacement):
     (("complete",), False),
     (("calls", 0, "fatal"), "present"),
 ])
-def test_invalid_latest_evidence_cannot_revive_older_approval(native, path, replacement):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_invalid_latest_evidence_cannot_revive_older_approval(published_native, path, replacement):
+    result, rendered, line = published_native
     value = runners.decode_codex_evidence(line)
     update_evidence(value, path, replacement)
     latest = row(result, rendered.replace(line, packed(value)))
-    assert eligibility.eligible_review(
-        [row(result), latest], result.head, ("bot",), repo="acme/widgets", number=7
-    ) is None
+    assert eligible(row(result), latest) is None
 
 
 @pytest.mark.parametrize("mutation", [
     "duplicate_header", "before_marker", "after_prose", "noncanonical", "duplicate_key", "oversized",
 ])
-def test_strict_transport_and_no_older_approval_revival(native, mutation):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_strict_transport_and_no_older_approval_revival(published_native, mutation):
+    result, rendered, line = published_native
     if mutation == "duplicate_header":
         changed = rendered.replace(line, line + "\n" + line)
     elif mutation == "before_marker":
@@ -313,9 +321,7 @@ def test_strict_transport_and_no_older_approval_revival(native, mutation):
         changed = rendered.replace(line, runners.CODEX_HEADER + "x" * 8192 + " -->")
     prior = row(result)
     latest = row(result, changed)
-    found = eligibility.eligible_review(
-        [prior, latest], result.head, ("bot",), repo="acme/widgets", number=7
-    )
+    found = eligible(prior, latest)
     if mutation == "after_prose":
         assert eligibility.review_projection(latest, result.head, "acme/widgets", 7) == (
             False,
@@ -341,16 +347,14 @@ def test_overflow_is_hold_without_silent_chunk_truncation(native):
 
 @pytest.mark.parametrize("source", ["pair", "pair-repost"])
 @pytest.mark.parametrize("include_evidence", [False, True])
-def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evidence):
-    result = native[0]()
-    lines = body(result).splitlines()
+def test_retired_pair_marker_cannot_pass_eligibility(published_native, source, include_evidence):
+    result, rendered, _ = published_native
+    lines = rendered.splitlines()
     lines[0] = cli.review_marker(result.head, "primary", source)
     if not include_evidence:
         del lines[1]
     review = row(result, "\n".join(lines))
-    assert eligibility.eligible_review(
-        [review], result.head, ("bot",), repo="acme/widgets", number=7
-    ) is None
+    assert eligible(review) is None
 
 
 @pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy"])
@@ -378,7 +382,7 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
         argv = ["git", "diff", "--no-color", reviewed, head]
-        delta_diff = subprocess.check_output(argv, cwd=native[2])
+        delta_diff = subprocess.check_output(argv, cwd=native[2], env=git_environment())
         assert b"-hello\n+" + content in delta_diff
         if kind == "delta_legacy":
             assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
@@ -436,13 +440,12 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
 
 
 @pytest.mark.parametrize("location", ["provenance", "model_prose", "model_fence"])
-def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, location):
-    result = native[0]()
+def test_saved_or_model_supplied_summary_cannot_grant_inspection(published_native, location):
+    result, _, forged = published_native
     data = json.loads(result.raw)
     data["events"] = [
         e for e in data["events"] if e.get("item", {}).get("type") != "command_execution"
     ]
-    forged = runners.encode_codex_evidence(runners.codex_evidence(result))
     if location == "provenance":
         result = dataclasses.replace(
             result, provenance={**result.provenance, "codex_evidence": {"inspection": "verified"}}
@@ -458,12 +461,7 @@ def test_saved_or_model_supplied_summary_cannot_grant_inspection(native, locatio
         )
     changed = dataclasses.replace(result, raw=json.dumps(data))
     assert runners.codex_evidence(changed)["calls"][0]["inspection"] == "unknown"
-    assert (
-        eligibility.review_projection(row(changed), changed.head, "acme/widgets", 7)[1]["calls"][0][
-            "inspection"
-        ]
-        == "unknown"
-    )
+    assert projection(changed)[1]["calls"][0]["inspection"] == "unknown"
 
 
 @pytest.mark.parametrize("field,value", [
@@ -487,9 +485,7 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     assert runners.validate_runner_result(legacy) and runners.codex_evidence(legacy) is None
     rendered = body(legacy)
     assert runners.CODEX_HEADER not in rendered
-    assert eligibility.eligible_review(
-        [row(legacy)], legacy.head, ("bot",), repo="acme/widgets", number=7
-    )
+    assert eligible(row(legacy))
     cli._save_review(git_repo, legacy)
     assert cli._load_review(git_repo, legacy.head, "primary")[0].raw == legacy.raw
 
@@ -498,10 +494,8 @@ def test_legacy_toolfree_remains_unknown_without_projection(git_repo):
     "fence", "wrong_adjudication", "unknown_leading", "whitespace_json",
     "oversized_model", "oversized_effort", "invalid_event_offset",
 ])
-def test_leading_block_is_anchored_and_schema_complete(native, change):
-    result = native[0]()
-    rendered = body(result)
-    line = rendered.splitlines()[1]
+def test_leading_block_is_anchored_and_schema_complete(published_native, change):
+    result, rendered, line = published_native
     value = runners.decode_codex_evidence(line)
     if change == "fence":
         modified = rendered.replace(line + "\n", "") + "\n```\n" + line + "\n```"
@@ -520,9 +514,7 @@ def test_leading_block_is_anchored_and_schema_complete(native, change):
         }[change]
         update_evidence(value, path, replacement)
         modified = rendered.replace(line, packed(value))
-    present, evidence = eligibility.review_projection(
-        row(result, modified), result.head, "acme/widgets", 7
-    )
+    present, evidence = projection(result, modified)
     assert evidence is None
     assert present is (change != "fence")
 
@@ -558,7 +550,7 @@ def test_frozen_synthetic_five_and_legacy_truncated_unknown():
         + "\n**approve**\n<details><summary>Raw reviewer output</summary>\n\n```\n[Transcript truncated] not JSON\n```\n</details>",
     }
     assert eligibility.review_projection(legacy, head, "acme/widgets", 7) == (False, None)
-    assert eligibility.eligible_review([legacy], head, ("bot",), repo="acme/widgets", number=7) is legacy
+    assert eligible(legacy) is legacy
 
 
 @pytest.mark.parametrize("identity", ["another-session", None, {}])
@@ -567,11 +559,7 @@ def test_contradictory_native_session_fields(native, identity):
     data = json.loads(result.raw)
     data["events"][2].update(thread_id=data["session_id"], session_id=identity)
     altered = dataclasses.replace(result, raw=json.dumps(data))
-    assert not runners.validate_runner_result(altered)
-    with pytest.raises(runners.RunnerBadOutput):
-        runners.codex_evidence(altered)
-    with pytest.raises(runners.RunnerBadOutput):
-        body(altered)
+    assert_invalid_native(altered)
 
 
 def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bin):
@@ -586,49 +574,35 @@ def test_two_complete_sessions_cannot_combine_partial_inspection(native, fake_bi
     proof = runners.codex_evidence(merged)
     assert proof["complete"] and len({call["session"] for call in proof["calls"]}) == 2
     assert all(call["inspection"] == "unknown" for call in proof["calls"])
-    public = eligibility.review_projection(row(merged), merged.head, "acme/widgets", 7)[1]
+    public = projection(merged)[1]
     assert public == proof
 
 
-def test_entire_leading_block_budget_includes_adjudication(native, monkeypatch):
-    result = native[0]()
-    marker = cli.review_marker(result.head, result.kind)
-    header = runners.encode_codex_evidence(runners.codex_evidence(result))
-    suffix = "\n<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
-    limit = len((marker + "\n" + header).encode())
-    oversized = marker + "\n" + header + suffix + "\n**approve**"
-    monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", limit)
-    assert eligibility.review_projection(
-        row(result, oversized), result.head, "acme/widgets", 7
-    ) == (True, None)
-    with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):
-        github._review_body(result, [], marker + suffix)
-
-
-@pytest.mark.parametrize(
-    "separator",
-    ["\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"],
-)
-@pytest.mark.parametrize("overflow", [0, 1, 2])
-def test_raw_leading_utf8_span_at_limit_and_overflow(native, separator, overflow):
-    result = native[0]()
+@pytest.mark.parametrize("separator,overflow,tightened", [
+    *((separator, overflow, False)
+      for separator in ("\n", "\r\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")
+      for overflow in (0, 1, 2)),
+    pytest.param("\n", 1, True, id="adjudication-counts-toward-tightened-budget"),
+])
+def test_raw_leading_utf8_span_at_limit_and_overflow(request, separator, overflow, tightened, monkeypatch):
+    result = request.getfixturevalue("native")[0]() if tightened else BYTE_LIMIT_REVIEW
     marker = cli.review_marker(result.head, result.kind)
     header = runners.encode_codex_evidence(runners.codex_evidence(result))
     adjudication = "<!-- loopzero:adjudication v=1 replaces=1 target=" + result.head + " -->"
     span = separator.join((marker, header, adjudication))
-    padding = 8192 + overflow - len(span.encode("utf-8"))
-    padded = marker[:-3] + " " * padding + marker[-3:]
-    span = separator.join((padded, header, adjudication))
-    assert len(span.encode("utf-8")) == 8192 + overflow
+    padded = marker
+    if tightened:
+        monkeypatch.setattr(runners, "CODEX_HEADER_LIMIT", len((marker + "\n" + header).encode()))
+    else:
+        padded = marker[:-3] + " " * (8192 + overflow - len(span.encode("utf-8"))) + marker[-3:]
+        span = separator.join((padded, header, adjudication))
+        assert len(span.encode("utf-8")) == 8192 + overflow
     rendered = span + separator + "**approve**"
-    present, evidence = eligibility.review_projection(
-        row(result, rendered), result.head, "acme/widgets", 7
-    )
+    present, evidence = projection(result, rendered)
     assert present and (evidence is not None) is (overflow == 0)
-    latest = eligibility.eligible_review(
-        [row(result), row(result, rendered)], result.head, ("bot",), repo="acme/widgets", number=7
-    )
-    assert (latest is not None) is (overflow == 0)
+    if not tightened:
+        latest = eligible(row(result), row(result, rendered))
+        assert (latest is not None) is (overflow == 0)
     if separator == "\n":  # Publication stays LF; readers count every accepted separator verbatim.
         if overflow:
             with pytest.raises(runners.RunnerBadOutput, match="leading machine block"):

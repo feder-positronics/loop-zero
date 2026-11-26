@@ -1,7 +1,7 @@
 name: review eligibility
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft]
+    types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, labeled, unlabeled]
   workflow_run:
     workflows: [review event]
     types: [completed]
@@ -20,12 +20,15 @@ jobs:
   # job would fail closed (no MERGIFY_API_KEY) and publish a failure, never a pass.
   source-eligibility:
     # Skip closed PRs and title/body edits before a runner is allocated. Draft churn
-    # waits for readiness; conversion to draft still invalidates prior eligibility.
+    # waits for readiness except when conversion or a hold change needs a refresh.
     if: >-
       github.event_name != 'pull_request_target' || (
         github.event.action != 'closed' &&
-        (!github.event.pull_request.draft || github.event.action == 'converted_to_draft') &&
+        (!github.event.pull_request.draft || github.event.action == 'converted_to_draft' ||
+         github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
         (github.event.action != 'edited' || github.event.changes.base != null) &&
+        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+         github.event.label.name == 'hold') &&
         github.event.pull_request.user.login != 'mergify[bot]' &&
         !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))
     # Skipped events stay out of the group and cannot replace a pending refresh.
