@@ -11,14 +11,12 @@ import io
 import json
 import math
 import os
-import shlex
 import random
 import re
+import shlex
 import sys
-import tempfile
 import time
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from datetime import UTC, datetime
 from functools import partial, wraps
 from pathlib import Path
@@ -347,59 +345,17 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
         return
 
 
-@contextmanager
-def _lock_task_state(wt: Path) -> Iterator[None]:
-    directory = wt / ".loopzero"
-    directory.mkdir(parents=True, exist_ok=True)
-    fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(fd)
-
-
 def _save_report(wt: Path, report: CheckReport) -> str | None:
-    """Publish the receipt or return the current HEAD if the result is stale."""
-    path = wt / CHECKS_FILE
-    payload = {
-        "head": report.head,
-        "dirty": report.dirty,
-        "results": [{k: v for k, v in dataclasses.asdict(result).items()
-                     if k not in {"input_key", "reused_from"} or v is not None}
-                    for result in report.results],
-    }
-    if report.settings_sha256 is not None:
-        payload["settings_sha256"] = report.settings_sha256
-    with _lock_task_state(wt):
-        current_head = worktree.head(wt)
-        if report.head != current_head:
-            return current_head
-        _write_json_atomically(path, payload)
-    return None
-
-
-def _write_json_atomically(path: Path, payload: dict) -> None:
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}-", delete=False
-    ) as stream:
-        temp = Path(stream.name)
-        try:
-            stream.write(json.dumps(payload, indent=2) + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-            stream.close()
-            os.replace(temp, path)
-        finally:
-            temp.unlink(missing_ok=True)
+    payload = dataclasses.asdict(
+        report, dict_factory=lambda fields: {key: value for key, value in fields if value is not None})
+    text = json.dumps(payload, indent=2) + "\n"
+    return worktree.write_local_state(wt, CHECKS_FILE.name, text, expected_head=report.head)
 
 
 def _load_report(wt: Path) -> CheckReport | None:
     path = wt / CHECKS_FILE
-    if not path.exists():
-        return None
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(worktree.read_local_state(wt, path.name))
         results = tuple(CheckResult(**item) for item in data["results"])
         if any(not is_check_exit_code(result.exit_code) for result in results):
             raise TypeError("exit_code must be an integer")
@@ -408,6 +364,8 @@ def _load_report(wt: Path) -> CheckReport | None:
             raise TypeError("dirty must be a bool")
         return CheckReport(head=str(data["head"]), dirty=dirty, results=results,
                            settings_sha256=data.get("settings_sha256"))
+    except FileNotFoundError:
+        return None
     except (TypeError, KeyError, ValueError) as exc:
         print(f"warning: ignoring unreadable {path}: {exc}", file=sys.stderr)
         return None
@@ -584,6 +542,7 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
+    worktree.local_state_files(wt, CHECKS_FILE.name)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
@@ -730,6 +689,10 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         runtime_source = f"reviewer paths pinned to origin/{config.base_branch}@{config.trusted_base_revision}"
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
+    kinds = ("primary", "delta")
+    _, *saved_files = worktree.local_state_files(
+        wt, "task.md", *(_review_file(wt, head, kind).name for kind in kinds)
+    )
     _require_clean(wt)
     pr = _require_review_pr(config, branch, repost=args.repost)
     _require_pushed(pr, head)
@@ -743,7 +706,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
         raise CliError("current GitHub login is not a configured review publisher")
     reviews = [] if args.repost else _pr_reviews(config.repo, pr.number)
     if args.repost:
-        saved = [kind for kind in ("primary", "delta") if _review_file(wt, head, kind).exists()]
+        saved = [kind for kind, exists in zip(kinds, saved_files, strict=True) if exists]
         if len(saved) > 1:
             raise CliError("multiple saved reviews for HEAD; publication is ambiguous")
         if not saved:
@@ -758,7 +721,7 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
     if args.repost:
         authors = runners.author_families(wt, head, _primary_base(wt, config))
         excluded = [family for family in config.reviewers if family in authors]
-        result = _load_review(wt, head, kind)
+        result, publication = _load_review(wt, head, kind)
         if result.fallback and result.family not in excluded:
             raise CliError(
                 f"saved review claims a same-family fallback, but {result.family} is not a configured "
@@ -773,7 +736,6 @@ def cmd_review(args: argparse.Namespace, wt: Path, config: Config) -> int:
                 f"saved reviewer family {result.family} contributed to this PR lineage; "
                 "run without --repost to obtain an independent review"
             )
-        publication = json.loads(_review_file(wt, head, kind).read_text()).get("publication")
         if publication is not None:
             if (not isinstance(publication, dict) or publication.get("repo") != config.repo
                     or publication.get("number") != pr.number
@@ -1083,30 +1045,19 @@ def _review_file(wt: Path, head: str, kind: str) -> Path:
 
 def _save_review(wt: Path, result: ReviewResult, publication: dict | None = None) -> None:
     path = _review_file(wt, result.head, result.kind)
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    path.parent.chmod(0o700)
-    data = dataclasses.asdict(result)
-    if publication is not None:
-        data["publication"] = publication
-    if path.is_symlink():
-        raise OSError(f"refusing to replace symbolic link: {path}")
-    _write_json_atomically(path, data)
+    data = dataclasses.asdict(result) | ({"publication": publication} if publication is not None else {})
+    worktree.write_local_state(wt, path.name, json.dumps(data, indent=2) + "\n", private=True)
 
 
-def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
+def _load_review(wt: Path, head: str, kind: str) -> tuple[ReviewResult, object]:
     path = _review_file(wt, head, kind)
-    if not path.exists():
-        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost")
     try:
-        data = json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
-    if not isinstance(data, dict):
-        raise CliError(f"{path} is not runner-produced: invalid saved review")
-    if data.get("head") != head:
-        raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
-    try:
-        data.pop("publication", None)
+        data = json.loads(worktree.read_local_state(wt, path.name))
+        if not isinstance(data, dict):
+            raise ValueError("review receipt must be an object")
+        if data.get("head") != head:
+            raise CliError(f"{path} holds a review of {str(data.get('head'))[:12]}, not HEAD {head[:12]}")
+        publication = data.pop("publication", None)
         if data.get("kind") != kind:
             raise ValueError("saved review kind mismatch")
         findings = tuple(Finding(**f) for f in data["findings"])
@@ -1116,11 +1067,13 @@ def _load_review(wt: Path, head: str, kind: str) -> ReviewResult:
             if data.pop(field, default) != default:
                 raise ValueError("retired paired review")
         result = ReviewResult(**{**data, "findings": findings})
-    except (KeyError, TypeError, ValueError) as exc:
+    except FileNotFoundError:
+        raise CliError(f"no saved {kind} review for {head[:12]} at {path}; run without --repost") from None
+    except (KeyError, OSError, TypeError, ValueError) as exc:
         raise CliError(f"{path} is not runner-produced: invalid saved review") from exc
     if not runners.validate_runner_result(result):
         raise CliError(f"{path} is not runner-produced: provenance/envelope mismatch")
-    return result
+    return result, publication
 
 
 def _pr_readiness(
