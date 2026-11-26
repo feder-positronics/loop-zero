@@ -9,10 +9,10 @@ Produce the smallest artifact that lets the next actor proceed without
 re-deriving intent or architecture. Do not implement it. Unless explicitly
 requested, skip the document for a clear, small, safely bounded change.
 
-Read [shared design guidance](reference.md) for grounding, artifact choice,
-decision records, conventions, and validation. Align material ambiguity before
-drafting; preserve requester decisions and keep unresolved questions owned and
-visibly blocking the relevant action.
+Read only Grounding and Design Contract in [the reference](reference.md) up front.
+Read Artifact Choice if undecided, Decisions for material choices, Artifact
+Lifecycle for relationships or time gates, and Validate and the applicable
+Type-Specific Checks before handoff. Resolve ambiguity and keep blockers owned.
 
 Follow [Reporting](../../CONTRACT.md#reporting) for the owner-facing opening
 and visuals. Write user scenarios before UI proposals, then validate material
