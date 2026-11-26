@@ -1463,7 +1463,12 @@ def _mergify_timeout_detail(
     )
     detail = f"still queued in {queue}. {location}"
     if state.unmet_conditions:
-        detail += ". Unmet candidate conditions: " + "; ".join(state.unmet_conditions)
+        labels = [label.encode() for label in state.unmet_conditions[:4]]
+        shown = [label[:160].decode(errors="ignore") + ("…" if len(label) > 160 else "")
+                 for label in labels]
+        detail += ". Unmet candidate conditions: " + "; ".join(shown)
+        if omitted := len(state.unmet_conditions) - len(shown):
+            detail += f"; {omitted} more"
     return detail
 
 
