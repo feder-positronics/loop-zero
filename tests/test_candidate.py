@@ -21,7 +21,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from loopzero import candidate, github
+from loopzero import candidate, eligibility, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from tests.conftest import commit_file, git as isolated_git
 
@@ -303,6 +303,31 @@ def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, bas
     seen = []
     assert attest(base_branch=base_branch, policy=lambda n, _: seen.append(n)) == expected_sources((102, source))
     assert seen == [102]
+
+
+def test_isolated_proofs_deepen_for_an_older_merge_base(tree_candidate, monkeypatch):
+    attest, git, _, _, _, source, _ = tree_candidate
+    monkeypatch.setattr(candidate, "_TREE_DEPTH", 2)
+    popen, depths = subprocess.Popen, []
+
+    def record_fetch(argv, **kwargs):
+        depths.extend(arg for arg in argv if arg.startswith(("--depth=", "--deepen=")))
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", record_fetch)
+    for index in range(5):
+        git("commit", "--allow-empty", "-m", f"base advance {index}")
+    main = git("rev-parse", "main")
+    assert attest(main_head=main) == expected_sources((102, source))
+    assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
+
+    depths.clear()
+    git("checkout", "--detach", source)
+    git("merge", "--no-ff", main, "-m", "merge current main")
+    head = git("rev-parse", "HEAD")
+    with candidate.fetched_git("owner/repo", [source, head, main]) as run:
+        assert eligibility._verified_base_chain(run, source, head, main, clean=True, conflict_only=False)
+    assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
 
 
 @pytest.mark.parametrize("mutation,diagnostic", [

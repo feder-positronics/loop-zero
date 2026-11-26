@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO
 from urllib.parse import quote
@@ -238,7 +239,13 @@ def _attest_source(
     return source_sha
 
 
+class _MissingMergeHistory(CandidateError):
+    """Merge evidence is missing or incomplete in the current Git store."""
+
+
 def _require_git_exit(operation: str, returncode: int, output: BinaryIO) -> None:
+    if operation == "merge-base" and returncode == 1:
+        raise _MissingMergeHistory("Git history does not prove the requested merge base or ancestry")
     if operation == "fetch" and returncode:
         from loopzero import github
 
@@ -265,6 +272,39 @@ def _fetch_token() -> str:
     return token
 
 
+def _fetch_history(run: Callable[..., str], repo: str, heads: list[str],
+                   env: dict[str, str], depth: str) -> None:
+    run("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
+        depth, f"https://github.com/{repo}.git", *heads, command_env=env)
+    objects = run("rev-list", "--objects", "--no-object-names", *heads).splitlines()
+    _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
+
+
+def _merge_history_git(run: Callable[..., str], fetch: Callable[[str], None], shallow: Path) -> Callable[..., str]:
+    increment = _TREE_DEPTH
+
+    def git(*args: str, **kwargs: Any) -> str:
+        nonlocal increment
+        while True:
+            try:
+                result = run(*args, **kwargs)
+                if args[:2] == ("merge-base", "--all") and shallow.exists() and run(
+                    "rev-list", "--max-parents=0", *args[2:], "--not", *result.splitlines(),
+                ):
+                    raise _MissingMergeHistory("shallow history may hide other merge bases")
+                return result
+            except _MissingMergeHistory:
+                if not shallow.exists():
+                    raise
+                boundary = set(shallow.read_bytes().splitlines())
+                fetch(f"--deepen={increment}")
+                if shallow.exists() and set(shallow.read_bytes().splitlines()) == boundary:
+                    raise
+                increment *= 2
+
+    return git
+
+
 @contextlib.contextmanager
 def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
     """Run bounded Git commands on fetched objects in an isolated bare repository."""
@@ -286,7 +326,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False,
+        def run(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False,
                 merge_conflict_status: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
@@ -328,13 +368,10 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                         os.killpg(process.pid, signal.SIGKILL)
                     process.wait()
 
-        git("init", "--bare", "--template=", ".")
-        git("fetch", "--no-tags", "--no-recurse-submodules", "--no-write-fetch-head",
-            f"--depth={_TREE_DEPTH}",
-            f"https://github.com/{repo}.git", *heads, command_env=fetch_env)
-        objects = git("rev-list", "--objects", "--no-object-names", *heads).splitlines()
-        _require(len(objects) <= _TREE_OBJECTS, "Git object count bound exceeded")
-        yield git
+        fetch = partial(_fetch_history, run, repo, heads, fetch_env)
+        run("init", "--bare", "--template=", ".")
+        fetch(f"--depth={_TREE_DEPTH}")
+        yield _merge_history_git(run, fetch, root / "shallow")
 
 
 def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> None:
@@ -357,6 +394,7 @@ def _verify_tree(repo: str, main: str, candidate: str, sources: list[str]) -> No
         _require(not pending, "ambiguous source order in candidate topology")
         integrated = main
         for source in reversed(reverse_order):
+            git("merge-base", "--all", integrated, source)
             tree = git("merge-tree", "--write-tree", integrated, source)
             _require(_SHA.fullmatch(tree) is not None, "invalid integration tree")
             integrated = git("commit-tree", tree, "-p", integrated, "-p", source,

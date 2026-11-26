@@ -45,7 +45,8 @@ and the live attestation inputs are reread before success. Squashed parents can
 pass; unavailable live predecessors behind a missing batch and unrelated main
 advances may still reject. The fallback requires POSIX file-size limits and Git with
 `merge-tree --write-tree`; it is bounded to 32 sources, 100,000 reachable objects,
-256 MiB on disk, 8 MiB command output, history depth 200 and 120 seconds of Git work.
+256 MiB on disk, 8 MiB command output and 120 seconds of Git work. Fetches start at
+depth 200 and deepen within those bounds when merge history is incomplete.
 
 ## Protection and credentials
 
