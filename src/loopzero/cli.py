@@ -339,14 +339,10 @@ def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
 
 
 def _save_report(wt: Path, report: CheckReport) -> str | None:
-    """Publish the receipt or return the current HEAD if the result is stale."""
-    payload = {key: value for key, value in dataclasses.asdict(report).items() if value is not None}
-    payload["results"] = [
-        {key: value for key, value in result.items() if value is not None} for result in payload["results"]
-    ]
-    return worktree.write_local_state(
-        wt, CHECKS_FILE.name, json.dumps(payload, indent=2) + "\n", expected_head=report.head,
-    )
+    payload = dataclasses.asdict(
+        report, dict_factory=lambda fields: {key: value for key, value in fields if value is not None})
+    text = json.dumps(payload, indent=2) + "\n"
+    return worktree.write_local_state(wt, CHECKS_FILE.name, text, expected_head=report.head)
 
 
 def _load_report(wt: Path) -> CheckReport | None:

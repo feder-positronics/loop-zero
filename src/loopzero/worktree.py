@@ -120,12 +120,12 @@ def local_state_files(wt: Path, *names: str) -> tuple[bool, ...]:
 
 
 def read_local_state(wt: Path, name: str) -> str:
-    with _local_state_directory(wt) as fd:
-        file_fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        with os.fdopen(file_fd, encoding="utf-8") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
-                raise WorktreeError(f"local state file is not regular: {wt / '.loopzero' / name}")
-            return stream.read()
+    with _local_state_directory(wt) as fd, os.fdopen(
+        os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd), encoding="utf-8"
+    ) as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise WorktreeError(f"local state file is not regular: {wt / '.loopzero' / name}")
+        return stream.read()
 
 
 def write_local_state(
@@ -198,7 +198,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
     task = task_file(wt)
     existing = wt.exists()
     refusal = f"worktree directory already exists: {wt}"
-    if wt.is_symlink() or task.exists() or task.is_symlink() or task.parent.is_symlink():
+    if wt.is_symlink() or task.parent.is_symlink() or task.is_symlink() or task.exists():
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
@@ -281,12 +281,11 @@ def branch(wt: Path) -> str:
 
 
 def task_text(wt: Path) -> str:
-    task = task_file(wt)
     try:
-        return read_local_state(wt, task.name)
+        return read_local_state(wt, "task.md")
     except FileNotFoundError:
         raise WorktreeError(
-            f"missing {task}. Run `loopzero start <slug>` for a new task worktree, "
+            f"missing {task_file(wt)}. Run `loopzero start <slug>` for a new task worktree, "
             "or recreate the file using the handoff template at "
             "https://github.com/feder-positronics/loop-zero/blob/main/core/HANDOFF.md"
         ) from None
