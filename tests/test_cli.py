@@ -400,10 +400,21 @@ def test_check_pass_writes_and_reuses_report(wt, gh, capsys, monkeypatch):
     first_result, second_result = report["results"]
     assert (first_result["command"], first_result["exit_code"], first_result["tail"]) == ("echo ok", 0, "ok")
     assert (second_result["command"], second_result["exit_code"]) == ("test -f README.md", 0)
+    run_checks, lock = cli.sandbox.run_checks, cli._lock_task_state
     monkeypatch.setattr(cli.sandbox, "run_checks", Mock(side_effect=AssertionError("stages ran")))
     code, out, err = run(capsys, "check")
     reused = receipt.replace("receipt produced", "receipt reused from .loopzero/checks.json", 1)
     assert (code, out.splitlines(), err, path.read_bytes()) == (0, [pin, reused, "PASS"], "", original)
+
+    def edit_during_lock_wait(worktree):
+        (wt / "README.md").write_text("edited while waiting\n")
+        monkeypatch.setattr(cli, "_lock_task_state", lock)
+        return lock(worktree)
+
+    monkeypatch.setattr(cli, "_lock_task_state", edit_during_lock_wait)
+    monkeypatch.setattr(cli.sandbox, "run_checks", run_checks)
+    expect_cli(capsys, 0, "check", stdout_contains=("running: echo ok",))
+    assert json.loads(path.read_bytes())["dirty"] is True
 
 
 @pytest.mark.parametrize("state", [None, "CLOSED", "MERGED"])

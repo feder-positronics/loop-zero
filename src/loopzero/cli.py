@@ -626,15 +626,14 @@ def cmd_start(args: argparse.Namespace) -> int:
 
 def _reusable_check_report(wt: Path, config: Config) -> CheckReport | None:
     with suppress(OSError, sandbox.SandboxUnavailable, _proc.ProcTimeout, worktree.WorktreeError):
-        if (not (wt / CHECKS_FILE).is_file() or worktree.is_dirty(wt)
-                or not sandbox.has_untracked_task_state(config, wt)):
-            return None
-        head = worktree.head(wt)
-        report = _current_check_report(wt, config, head)
-        if report is None or not sandbox.receipt_checkout_matches(config, wt, report):
+        if not (wt / CHECKS_FILE).is_file():
             return None
         with _lock_task_state(wt):
-            if worktree.head(wt) == head and _load_report(wt) == report:
+            if worktree.is_dirty(wt) or not sandbox.has_untracked_task_state(config, wt):
+                return None
+            head = worktree.head(wt)
+            report = _current_check_report(wt, config, head)
+            if report is not None and sandbox.receipt_checkout_matches(config, wt, report):
                 _refresh_existing_pr_checks(wt, config)
                 return report
     return None
