@@ -2420,7 +2420,7 @@ def test_ready_wait_reports_initial_draft_blocker_once(wt, gh, capsys, monkeypat
     ]
 
 
-@pytest.mark.parametrize("settles,fault", [(True, "interrupt"), (False, "interrupt"), (True, "lost"), (True, "retry"), (False, "moved")])
+@pytest.mark.parametrize("settles,fault", [(True, "interrupt"), (False, "interrupt"), (True, "lost"), (False, "lost_zero"), (True, "retry"), (False, "moved")])
 def test_ready_wait_resumes_after_draft_transition(wt, gh, capsys, monkeypatch, head, settles, fault):
     arm_approved_pr_with_check_result(gh, head, wt, "skipped", isDraft=True)
     gh.respond("pr ready", "")
@@ -2443,7 +2443,7 @@ def test_ready_wait_resumes_after_draft_transition(wt, gh, capsys, monkeypatch, 
     code, out, err = run(capsys, "ready", wait)
     assert (code, "head changed" in err) == ((1, True) if fault == "moved" else (0 if settles else 3, False))
     assert ("waiting: required check 'checks' is pending" in out) == settles
-    assert ("timed out waiting for required checks" in out) == (not settles and fault == "interrupt")
+    assert ("timed out waiting for required checks" in out) == (not settles and fault in {"interrupt", "lost_zero"})
     assert sum(c["argv"][:2] == ["pr", "ready"] for c in gh.calls) == len(attempts) == (2 if fault == "retry" else 1)
     assert pauses == ([5] if fault == "retry" else [])
 
