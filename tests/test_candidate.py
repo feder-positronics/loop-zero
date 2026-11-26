@@ -1,10 +1,4 @@
-"""Mergify candidate attestation at the trusted hosted boundary.
-
-For the IntelFlo replay, set INTELFLO_CANDIDATE_POLICY_DIR to a scratch directory
-containing IntelFlo's check_mergify_candidate_policy.py, check_pr_body_contract.py
-and migration_prereq_policy.py from scripts/ci. Save loop-zero's candidate.py from
-the Mergify Candidate Policy workflow pin in that directory as pinned_candidate.py.
-"""
+"""Mergify candidate attestation at the trusted hosted boundary."""
 
 from __future__ import annotations
 
@@ -13,7 +7,6 @@ from contextlib import nullcontext
 import subprocess
 from copy import deepcopy
 from functools import partial
-from importlib import import_module
 from itertools import cycle
 from os import environ
 from shutil import copytree
@@ -21,7 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from loopzero import candidate, github
+from loopzero import candidate, eligibility, github
 from loopzero.candidate import CandidateError, CandidateRaceError, attest_candidate
 from tests.conftest import commit_file, git as isolated_git
 
@@ -129,6 +122,11 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     ("action", "creation or head-update event"), ("ref", "unexpected head ref"),
     ("missing status", "status is not an object"), ("missing ancestor", "not an ancestor"),
     ("same-head policy", "source policy blocked"),
+    ("candidate ready", "must be a draft"),
+    ("candidate retargeted", "must target the real main branch"),
+    ("candidate head fork", "head repository does not match"),
+    ("candidate base fork", "base repository does not match"),
+    ("source retargeted", "source PR #102 does not target this repository"),
 ])
 def test_rejects_invalid_attestation_evidence(case, diagnostic):
     incoming = event()
@@ -147,6 +145,14 @@ def test_rejects_invalid_attestation_evidence(case, diagnostic):
         incoming["action"] = "edited"
     elif case == "ref":
         incoming["pull_request"]["head"]["ref"] = "feature/forged"
+    elif case == "candidate ready":
+        values["/repos/owner/repo/pulls/900"]["draft"] = False
+    elif case == "candidate retargeted":
+        values["/repos/owner/repo/pulls/900"]["base"]["ref"] = "release"
+    elif case in {"candidate head fork", "candidate base fork"}:
+        values["/repos/owner/repo/pulls/900"][case.split()[1]]["repo"]["id"] = 8
+    elif case == "source retargeted":
+        values["/repos/owner/repo/pulls/102"]["base"]["ref"] = "release"
     elif case == "missing ancestor":
         values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]["status"] = "diverged"
     elif case == "same-head policy":
@@ -239,8 +245,7 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
 
     def attest(
         *, head=candidate_sha, main_head=main, policy=lambda _n, _s: None,
-        main_after=None, extra_source=None, lineage="vanished", run=attest_candidate,
-        held_source=None, base_branch="main",
+        main_after=None, extra_source=None, lineage="vanished", base_branch="main",
     ):
         candidate_event = event(head)
         values = payloads(candidate_event)
@@ -257,7 +262,6 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
             queue["batches"][0]["sub_batches"][0]["pull_requests"].append({"number": 101})
         for number in (101, 102):
             values[f"/repos/owner/repo/pulls/{number}"].update(
-                labels=[{"name": "hold"}] if number == held_source else [],
                 body="## Objective\nApply a reviewed source change.",
             )
             for endpoint in ("commits", "files"):
@@ -272,10 +276,8 @@ def tree_candidate(candidate_seed, tmp_path, monkeypatch):
                 return deepcopy(values[path])
             return {"object": {"sha": sha}} if (sha := next(reads)) else {}
 
-        if base_branch != "main":
-            run = partial(run, base_branch=base_branch)
         sources = run_attestation(candidate_event, github_get=get, status_reads=[queue],
-                                  source_policy=policy, run=run)
+                                  source_policy=policy, run=partial(attest_candidate, base_branch=base_branch))
         if environ.get("HTTPS_PROXY") == "http://proxy.invalid:8080":
             assert observed_transport == {"fetch", "plumbing"}
         return sources
@@ -290,6 +292,31 @@ def test_vanished_squash_parent_passes_real_tree_attestation(tree_candidate, bas
     seen = []
     assert attest(base_branch=base_branch, policy=lambda n, _: seen.append(n)) == expected_sources((102, source))
     assert seen == [102]
+
+
+def test_isolated_proofs_deepen_for_an_older_merge_base(tree_candidate, monkeypatch):
+    attest, git, _, _, _, source, _ = tree_candidate
+    monkeypatch.setattr(candidate, "_TREE_DEPTH", 2)
+    popen, depths = subprocess.Popen, []
+
+    def record_fetch(argv, **kwargs):
+        depths.extend(arg for arg in argv if arg.startswith(("--depth=", "--deepen=")))
+        return popen(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", record_fetch)
+    for index in range(5):
+        git("commit", "--allow-empty", "-m", f"base advance {index}")
+    main = git("rev-parse", "main")
+    assert attest(main_head=main) == expected_sources((102, source))
+    assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
+
+    depths.clear()
+    git("checkout", "--detach", source)
+    git("merge", "--no-ff", main, "-m", "merge current main")
+    head = git("rev-parse", "HEAD")
+    with candidate.fetched_git("owner/repo", [source, head, main]) as run:
+        assert eligibility._verified_base_chain(run, source, head, main, clean=True, conflict_only=False)
+    assert depths[0] == "--depth=2" and any(depth.startswith("--deepen=") for depth in depths)
 
 
 @pytest.mark.parametrize("mutation,diagnostic", [
@@ -333,48 +360,20 @@ def test_vanished_parent_rejects_main_change(tree_candidate):
     seen = []
     with pytest.raises(CandidateRaceError, match="main changed"):
         tree_candidate[0](main_after=tree_candidate[3], policy=lambda n, _: seen.append(n))
-    assert seen == [102, 102, 102]
-
-
-@pytest.fixture
-def intelflo_policy(monkeypatch):
-    # This replay is opt-in so ordinary checks can run without an IntelFlo checkout or network.
-    snapshot = environ.get("INTELFLO_CANDIDATE_POLICY_DIR")
-    if not snapshot:
-        pytest.skip("set INTELFLO_CANDIDATE_POLICY_DIR to the fetched policy and workflow pin")
-    monkeypatch.syspath_prepend(snapshot)
-    wrapper = import_module("check_mergify_candidate_policy")
-    pinned = import_module("pinned_candidate")
-    monkeypatch.setattr(wrapper, "attest_candidate", pinned.attest_candidate)
-    clock = [0.0]
-    monkeypatch.setattr(pinned, "_retry_clock", lambda: clock[0])
-    monkeypatch.setattr(pinned, "_retry_sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
-
-    def run(event, *, github_get, mergify_status, source_policy):
-        return wrapper.validate_candidate_policy(
-            event, github_get=github_get, mergify_status=mergify_status,
-        )
-
-    return pinned, run
-
-
-@pytest.fixture(params=["loopzero", "intelflo"])
-def candidate_policy(request):
-    return request.getfixturevalue("intelflo_policy") if request.param == "intelflo" else (candidate, attest_candidate)
+    assert seen == [102, 102, 102, 102]
 
 
 @pytest.mark.parametrize("case", [
     "single", "stacked", "combined", "mismatch", "incomplete", "stale", "ambiguous", "budget",
 ])
-def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monkeypatch, case):
+def test_candidate_policy(tree_candidate, monkeypatch, case):
     attest, git, commit, base, parent, source, candidate_sha = tree_candidate
-    implementation, run = candidate_policy
     if case == "single":
         head = tree_commit(git, source, base, source, subject="single source integration")
-        assert attest(run=run, lineage="single", head=head, main_head=base) == expected_sources((102, source))
+        assert attest(lineage="single", head=head, main_head=base) == expected_sources((102, source))
         return
     if case == "stacked":
-        assert attest(run=run, lineage="stacked", main_head=base) == expected_sources((101, parent), (102, source))
+        assert attest(lineage="stacked", main_head=base) == expected_sources((101, parent), (102, source))
         return
 
     # The earlier batch has landed by squash. Both live source heads still need
@@ -385,7 +384,7 @@ def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monk
     git("merge", "--no-ff", second, "-m", "second integration")
     head = git("rev-parse", "HEAD")
     if case == "combined":
-        assert attest(run=run, head=head, extra_source=second) == expected_sources((101, second), (102, source))
+        assert attest(head=head, extra_source=second) == expected_sources((101, second), (102, source))
         return
 
     kwargs = {}
@@ -404,17 +403,10 @@ def test_intelflo_candidate_policy_parity(tree_candidate, candidate_policy, monk
         head = tree_commit(git, head, candidate_sha, second, parent, subject="octopus")
         diagnostic = "ambiguous"
     else:
-        monkeypatch.setattr(implementation, "_TREE_OBJECTS", 1)
+        monkeypatch.setattr(candidate, "_TREE_OBJECTS", 1)
         diagnostic = "object count bound"
-    with pytest.raises(implementation.CandidateError, match=diagnostic):
-        attest(run=run, head=head, extra_source=second, **kwargs)
-
-
-def test_intelflo_wrapper_applies_source_policy(tree_candidate, intelflo_policy):
-    _, run = intelflo_policy
-    wrapper = import_module("check_mergify_candidate_policy")
-    with pytest.raises(wrapper.PolicyError, match="source PR #102 has a hold label"):
-        tree_candidate[0](run=run, lineage="stacked", held_source=102)
+    with pytest.raises(CandidateError, match=diagnostic):
+        attest(head=head, extra_source=second, **kwargs)
 
 
 @pytest.mark.parametrize("timing", ["metadata", "policy", "initial", TypeError, AttributeError, KeyError])
@@ -470,7 +462,7 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
                            source_policy=policy) == expected_sources((102, source))
     assert seen == {"metadata": [101, 102, 102], "policy": [101, 102], "initial": [102]}[timing]
     assert candidate_reads == (4 if timing == "metadata" else 3)
-    assert verified == [(main, head, [source])] and sleeps == [2]
+    assert verified == [(main, head, [source])] and sleeps == [4]
 
 
 @pytest.mark.parametrize("field,value", [("body", "new policy evidence"), ("draft", True)])
@@ -542,7 +534,7 @@ def test_nonrace_failure_does_not_retry(monkeypatch, failure, reread):
 
 @pytest.mark.parametrize(
     "elapsed,oversleep,attempt_count",
-    [(0, 0, 3), (29, 0, 1), (0, 30, 1)],
+    [(0, 0, 4), (29, 0, 1), (0, 30, 1)],
 )
 def test_persistent_race_preserves_last_error_and_bounds_retry(
     monkeypatch, no_retry_delay, elapsed, oversleep, attempt_count
@@ -564,7 +556,20 @@ def test_persistent_race_preserves_last_error_and_bounds_retry(
     with pytest.raises(CandidateRaceError, match="membership changed") as caught:
         run_attestation(github_get=lambda _: None, status_reads=[None])
     assert len(attempts) == attempt_count and caught.value is attempts[-1]
-    assert sum(sleeps) <= 4
+    assert sum(sleeps) <= 12
+
+
+def test_candidate_retries_across_predecessor_landing(monkeypatch, no_retry_delay):
+    clock = no_retry_delay
+    sources = expected_sources((102, "2" * 40))
+
+    def attest(*_args, **_kwargs):
+        if clock[0] < 10:
+            raise CandidateRaceError("source PR #101 is not open")
+        return sources
+
+    monkeypatch.setattr(candidate, "_attest_candidate_once", attest)
+    assert run_attestation() == sources
 
 
 def test_membership_drift_is_a_retryable_race():

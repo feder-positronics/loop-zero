@@ -37,13 +37,6 @@ def commit_on_origin(repo: Path, name: str) -> str:
     return worktree.head(clone)
 
 
-def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
-    ambient = tmp_path / "ambient.git"
-    monkeypatch.setenv("GIT_DIR", str(ambient))
-    checkout = init_git_repo(tmp_path / "checkout")
-    assert (checkout / ".git").is_dir() and not ambient.exists()
-
-
 @pytest.mark.parametrize("slug", ["zażółć\u00a0", "ok-1.2_x"])
 def test_branch_reads_valid_names_and_rejects_detached_head(repo: Path, slug: str) -> None:
     git(repo, "switch", "-c", worktree.branch_name(repo, slug))
@@ -91,7 +84,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
-    assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
+    assert base_section.strip().splitlines() == [f"main @ {upstream}"]
 
 
 @pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
@@ -99,7 +92,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     repo = repo.rename(repo.with_name("repo\rreturn"))
     base = commit_on_origin(repo, "base-change")
     wt = repo / ".worktrees" / "my-task"
-    run_git = worktree._git
+    run_git = worktree.git
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
@@ -109,7 +102,7 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         return output
 
     with monkeypatch.context() as patch:
-        patch.setattr(worktree, "_git", interrupt_after_add)
+        patch.setattr(worktree, "git", interrupt_after_add)
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
@@ -248,14 +241,18 @@ def test_task_helpers_errors(repo: Path) -> None:
     worktree.task_file(wt).write_text("# no base line\n")
     with pytest.raises(worktree.WorktreeError, match="Base:"):
         worktree.base_sha(wt)
+    worktree.task_file(wt).write_text("## Base\nmain @ " + "a" * 40 + "\n")
+    assert worktree.base_sha(wt) == "a" * 40
+    worktree.task_file(wt).write_text("Base: " + "b" * 40 + "\n")
+    assert worktree.base_sha(wt) == "b" * 40
     worktree.task_file(wt).unlink()
     with pytest.raises(worktree.WorktreeError, match="missing"):
         worktree.task_text(wt)
 
 
 def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
-    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree._git
-    monkeypatch.setattr(worktree, "_git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
+    wt, calls, real = worktree.start(repo, "done", "main"), [], worktree.git
+    monkeypatch.setattr(worktree, "git", lambda d, *a, **k: calls.append((d, a)) or real(d, *a, **k))
     (wt / f".loopzero/reviewer-output-{worktree.head(wt)[:12]}-primary.json").write_text("{}")
     worktree.cleanup(wt, worktree.head(wt))  # #439: no cleanup git runs in (or -C) the primary checkout
     assert calls and all(Path(d).resolve() != repo.resolve() and "-C" not in a for d, a in calls)

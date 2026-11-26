@@ -279,12 +279,17 @@ def _run(
         if family == "claude":
             with contextlib.suppress(json.JSONDecodeError, ValueError):
                 envelope = _extract_json_object(done.stdout)
-        if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(combined):
-            raise _auth_failure(family, combined)
-        if _subscription_exhausted(combined, envelope):
-            raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(combined))
-        if _looks_too_long(combined):
-            raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(combined))
+        diagnostic = combined if family == "claude" else "\n".join(
+            [done.stderr, *(json.dumps(event, ensure_ascii=False) for event in _json_lines(done.stdout)
+                            if event.get("type") in ("error", "turn.failed")
+                            or (event.get("type") == "item.completed" and isinstance(event.get("item"), dict)
+                                and event["item"].get("type") == "error"))])
+        if _claude_envelope_auth_failure(envelope) or _looks_like_auth_failure(diagnostic):
+            raise _auth_failure(family, diagnostic)
+        if _subscription_exhausted(diagnostic, envelope):
+            raise RunnerUsageLimit(f"{family}: usage limit reached", _tail(diagnostic))
+        if _looks_too_long(diagnostic):
+            raise RunnerPromptTooLong(f"{family}: prompt is too long", _tail(diagnostic))
         raise RunnerBadOutput(f"{family}: exited {done.exit_code}", _tail(combined))
     return done
 
@@ -395,7 +400,7 @@ def _sandbox_prefix(
                          state_file, *private)
             if any(path.is_relative_to(root) or root.is_relative_to(path)
                    for path in (source, destination) for root in roots):
-                raise sandbox.SandboxUnavailable(
+                raise RunnerBadOutput(
                     f"sandbox mount {source} -> {destination} exposes protected reviewer state; "
                     "use a runtime installation outside state directories"
                 )
@@ -432,15 +437,12 @@ def _auth_binds(family: str, home: Path) -> tuple[tuple[Path, Path], ...]:
     return tuple(binds)
 
 
-def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str:
-    diagnostic = "codex: version probe failed"
+def _observe_codex_version(binary: Path, cwd: Path, env_allowlist: tuple[str, ...]) -> str | None:
     try:
         done = _proc.run([str(binary), "--version"], cwd=cwd, env_allowlist=env_allowlist, timeout=30)
-    except (_proc.ToolMissing, _proc.ProcTimeout, OSError) as exc:
-        raise RunnerBadOutput(diagnostic) from exc
-    if done.exit_code:
-        raise RunnerBadOutput(diagnostic, _tail(done.stdout + done.stderr))
-    return done.stdout.rstrip("\n")
+    except (_proc.ToolMissing, _proc.ProcTimeout, OSError):
+        return None
+    return None if done.exit_code else done.stdout.rstrip("\n")
 
 
 def _codex_supports_ignore_user_config(
@@ -715,7 +717,7 @@ def _codex_header(value):
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     header = CODEX_HEADER + base64.urlsafe_b64encode(encoded).decode().rstrip("=") + " -->"
     if len(header.encode()) > CODEX_HEADER_LIMIT:
-        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes; HOLD")
+        raise RunnerBadOutput("codex: evidence header exceeds 8192 bytes. To publish a review, split the PR and review the smaller changes.")
     return header
 
 
@@ -1224,6 +1226,8 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     envelopes = [json.loads(result.raw) for result in results]
     if any(codex_fatal_startup(envelope) for envelope in envelopes):
         raise RunnerBadOutput("codex: fatal Code Mode startup failure")
+    if len(results) == 1:
+        return first
     sessions = [str(result.provenance["session_id"]) for result in results]
     settings = [call for result in results for call in review_settings(result)]
     provenance: dict[str, object] = {
@@ -1248,7 +1252,7 @@ def merge_reviews(results: list[ReviewResult]) -> ReviewResult:
     )
 
 
-def split_diff(diff: str, budget: int) -> list[str]:
+def split_diff(diff: str, budget: int = 200_000) -> list[str]:
     """Group unified-diff file blocks below ``budget`` bytes."""
     starts = [match.start() for match in re.finditer(r"(?m)^diff --git ", diff)]
     blocks = [diff[start:end] for start, end in zip(starts, [*starts[1:], len(diff)], strict=False)] or [diff]

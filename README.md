@@ -10,8 +10,8 @@ record.
 It exists for people and coding agents who ship many small PRs and want the
 same discipline on every one of them: checks run in a sandbox with read-only
 Git metadata and no network by default, a reviewer reads the exact head (from a
-different family by default, subject to the contract's bounded owner-approved
-contributor-review exception), and a PR needs an eligible review, resolved
+different family by default, with a disclosed same-family fallback when none
+can run), and a PR needs an eligible review, resolved
 blocking findings and green required CI to merge. The full rules fit in
 [core/CONTRACT.md](core/CONTRACT.md).
 
@@ -22,8 +22,8 @@ ownership and the contributor routine that keeps documentation current.
 
 | Command | What it does |
 | --- | --- |
-| `loopzero start <slug>` | Create a worktree and branch from base; write the Context/Problem/Goal task template. |
-| `loopzero check` | Run trusted-base checks with local bwrap or the configured runner. |
+| `loopzero start <slug>` | Create a worktree and branch from base; write the Goal/Problem/Context task template. |
+| `loopzero check` | Run trusted-base checks with local bwrap. Before a long check, open the draft with `loopzero pr` first. |
 | `loopzero pr` | Push and open a draft PR from the task file, with its Validation section rendered. |
 | `loopzero review` | Run one Claude or Codex review on the exact head; post it and append its summary under Review. Exits 0 on approval, 5 on changes requested. |
 | `loopzero ready [--wait[=SECONDS]]` | Verify head, findings and CI; optionally wait for required checks on that head. |
@@ -31,7 +31,11 @@ ownership and the contributor routine that keeps documentation current.
 
 For a picture of the whole flow, see the [workflow diagrams](docs/WORKFLOW.md).
 
-`loopzero status` reports the branch stage and can exit 0 with `ready: no`.
+`loopzero status` shows GitHub's draft state on its `pr:` line and, when a PR
+exists, the local readiness verdict that `loopzero merge` uses on its `ready:`
+line; it can exit 0 with `ready: no`. Queueing directly in GitHub with a red
+local check receipt is covered only by the contract's
+[owner queue route](core/CONTRACT.md#blockers).
 It requires authenticated GitHub access even before a PR exists.
 `loopzero resolve` lists the open blocking findings with their ids;
 `loopzero resolve <id> "<what changed>"` replies in that thread and resolves it.
@@ -104,9 +108,8 @@ Settings and semantics the example does not spell out:
 | --- | --- |
 | `checks.required_ci` | Names may be check runs or commit statuses; for each required name, the newest check run and the newest commit status, whichever exist, must succeed. |
 | `checks.writable` | The forbidden-path rules from `checks.ro_paths` apply. |
-| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers and require local execution without `checks.runner`. |
-| `checks.env_allowlist` | Host environment variables passed into the sandbox. To forward a launcher-provided variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. An explicit list replaces the defaults (`PATH HOME LANG LC_ALL TERM`). |
-| `delivery.review_chunk_bytes` | Diff chunk budget in UTF-8 bytes, at least `4096`; default `200000`. Oversized file patches split by lines; large deleted files are summarized. |
+| `checks.limits` | Local per-check resource limits applied with `prlimit`: `memory_mb = 4096` (address space) and `file_mb = 2048` (file size), capped at inherited hard limits. Overrides must be positive integers. |
+| `checks.env_allowlist` | Host variables allowed for checks. An explicit list replaces the configured default (`PATH HOME LANG LC_ALL TERM`). The sandbox forwards `PATH LANG LC_ALL TERM` by default and sets `HOME` to `/tmp/home`. To forward another launcher variable, append its name to `[checks].env_allowlist` in the base branch’s `workflow.toml`. |
 
 ## What it deliberately does not do
 

@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import runners, sandbox, worktree
+from tests.conftest import bwrap_argv, write_fake_tool
 from loopzero.runners import (
     REVIEW_SCHEMA,
     RunnerAuthFailed,
@@ -90,10 +91,6 @@ def _argv(bin_dir: Path, name: str) -> list[str]:
     return (bin_dir / f"{name}.argv").read_text().split("\0")[:-1]
 
 
-def _bwrap_argv(log: Path) -> list[str]:
-    return log.read_text().splitlines()
-
-
 @pytest.fixture(autouse=True)
 def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.MonkeyPatch) -> Path:
     # Keep reviewer state outside tmp_path, which many tests mount as the checkout.
@@ -107,13 +104,6 @@ def fake_bwrap(fake_tool, tmp_path: Path, tmp_path_factory, monkeypatch: pytest.
     return log
 
 
-def _script(bin_dir: Path, name: str, body: str) -> Path:
-    path = bin_dir / name
-    path.write_text("#!/bin/sh\n" + textwrap.dedent(body))
-    path.chmod(0o755)
-    return path
-
-
 def set_host_state(monkeypatch, host, *, claude=".claude", codex=".codex"):
     monkeypatch.setenv("HOME", str(host))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(host / claude))
@@ -124,7 +114,7 @@ def _fake_claude(bin_dir: Path, stdout: object, *, exit_code: int = 0, capture_e
     """Fake ``claude`` that checks argv shape, dumps argv and prints ``stdout``."""
     text = stdout if isinstance(stdout, str) else json.dumps(stdout)
     capture = f'env > "{bin_dir}/claude.env"' if capture_env else ":"
-    return _script(
+    return write_fake_tool(
         bin_dir,
         "claude",
         f"""
@@ -152,7 +142,7 @@ if [ "$1" = exec ] && [ "$2" = --help ]; then echo --ignore-user-config; exit 0;
 
 
 def _real_codex(path, guard, *, version="codex-cli 0.161.0"):
-    _script(path.parent, path.name, _codex_probes(version) + textwrap.dedent(f"""
+    write_fake_tool(path.parent, path.name, _codex_probes(version) + textwrap.dedent(f"""
         set -eu
         cat >/dev/null
         {guard}
@@ -181,7 +171,7 @@ def _fake_codex(
         "printf '%s\\n' " + shlex.quote(rollout)
         + ' > "$codex_home/sessions/2026/10/30/rollout-test-$sid.jsonl"'
     )
-    return _script(
+    return write_fake_tool(
         bin_dir,
         "codex",
         f"""
@@ -190,8 +180,6 @@ def _fake_codex(
         printf '%s\\0' "$@" > "{bin_dir}/codex.argv"
         printf '%s' "$codex_home" > "{bin_dir}/codex.home"
         [ -e "$codex_home/config.toml" ] && echo yes > "{bin_dir}/codex.config" || true
-        [ ! -f "$codex_home/auth.json" ] || cat "$codex_home/auth.json" > "{bin_dir}/codex.auth"
-        [ ! -f "$codex_home/auth.json" ] || printf refreshed > "$codex_home/auth.json"
         cat > "{bin_dir}/codex.stdin"
         [ "$1" = exec ] || {{ echo "expected exec subcommand" >&2; exit 64; }}
         out=""; schema=""
@@ -228,6 +216,28 @@ def _claude_envelope(payload: object, **extra: object) -> dict[str, object]:
             "result": json.dumps(payload), "structured_output": payload,
             "session_id": "claude-session-123", "usage": {"input_tokens": 10},
             "total_cost_usd": 0.01, "duration_api_ms": 25, **extra}
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_fake_codex_does_not_read_or_overwrite_auth(fake_bin, tmp_path, override):
+    script = _fake_codex(fake_bin, json.dumps(APPROVE))
+    home = tmp_path / "outer-home"
+    codex_home = tmp_path / "outer-codex" if override else home / ".codex"
+    codex_home.mkdir(parents=True)
+    auth = codex_home / "auth.json"
+    sentinel = '{"tokens":{"access_token":"synthetic-sentinel"}}'
+    auth.write_text(sentinel)
+    schema = tmp_path / "schema.json"
+    schema.write_text("{}")
+    env = {"HOME": str(home), "PATH": os.defpath}
+    if override:
+        env["CODEX_HOME"] = str(codex_home)
+    subprocess.run(
+        [str(script), "exec", "--output-last-message", str(tmp_path / "last.json"), "--output-schema", str(schema)],
+        input="", encoding="utf-8", capture_output=True, check=True, env=env,
+    )
+    assert auth.read_text() == sentinel
+    assert not (fake_bin / "codex.auth").exists()
 
 
 def replace_codex_events(script: Path, events, *, prepend=False) -> None:
@@ -342,7 +352,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
     for index, diff in enumerate(diffs, 1):
         results.append(review_with(
             "codex", cwd=tmp_path, head=head, kind=kind, diff=diff, task_text=task,
-            review_context=context, chunk=(index, len(diffs)) if split else None,
+            review_context=context, chunk=(index, len(diffs)),
         ))
         override = next(arg for arg in _argv(fake_bin, "codex")
                         if arg.startswith("developer_instructions="))
@@ -352,7 +362,7 @@ def test_codex_uses_supplied_diff_without_requiring_git_reads(fake_bin, tmp_path
         assert json.loads(header)["head"] == head and json.loads(header)["task_text"] == task
         assert raw_diff == diff.encode()
 
-    proof = codex_evidence(merge_reviews(results) if split else results[0])
+    proof = codex_evidence(merge_reviews(results))
     assert proof["complete"]
     assert [call["inspection"] for call in proof["calls"]] == ["unknown"] * len(diffs)
 
@@ -379,9 +389,10 @@ def test_codex_version_probe(fake_bin, tmp_path, monkeypatch, version, failure):
         return original(argv, **kwargs)
 
     monkeypatch.setattr(_proc, "run", probe)
-    with pytest.raises(RunnerBadOutput, match="version probe failed"):
-        _review("codex", tmp_path)
-    assert not (fake_bin / "codex.stdin").exists()
+    result = _review("codex", tmp_path)
+    assert result.verdict == "approve"
+    assert result.provenance["cli_version"] is None
+    assert (fake_bin / "codex.stdin").exists()
 
 
 @pytest.mark.parametrize("runtime", [False, True], ids=["default", "explicit"])
@@ -413,7 +424,7 @@ def test_claude_approve(
         "Write,Edit,Bash,NotebookEdit,WebFetch,WebSearch"
     )
     assert "sk-secret" not in result.raw
-    sandbox_argv = _bwrap_argv(fake_bwrap)
+    sandbox_argv = bwrap_argv(fake_bwrap)
     options = sandbox_argv[: sandbox_argv.index("--")]
     assert "--share-net" in options
     assert (str(tmp_path.resolve()), str(tmp_path.resolve())) in _pairs(options, "--ro-bind")
@@ -453,7 +464,7 @@ def test_claude_binds_config_and_state_read_write_without_copying(
     monkeypatch.setattr("loopzero.runners.shutil.copyfile", lambda *args: pytest.fail("copied auth"))
     _fake_review(fake_bin, "claude")
     assert _review("claude", repo).verdict == "approve"
-    binds = _pairs(_bwrap_argv(fake_bwrap), "--bind")
+    binds = _pairs(bwrap_argv(fake_bwrap), "--bind")
     assert (str(configured.resolve()), f"{SANDBOX_HOME}/.claude") in binds
     assert (str(state.resolve()), f"{SANDBOX_HOME}/.claude.json") in binds
 
@@ -493,7 +504,7 @@ def test_real_claude_environment_auth_hides_host_state(repo,
         f"test ! -e {shlex.quote(str(path))} || "
         "{ echo 'host state exposed' >&2; exit 70; }" for path in hidden
     )
-    _script(fake_bin, "claude", f"""
+    write_fake_tool(fake_bin, "claude", f"""
         set -eu
         cat >/dev/null
         {checks}
@@ -533,7 +544,7 @@ def test_real_file_auth_preserves_host_writes(repo, fake_bin, tmp_path, monkeypa
     state.write_text("synthetic global state")
     set_host_state(monkeypatch, host)
     if family == "claude":
-        _script(fake_bin, family, f"""
+        write_fake_tool(fake_bin, family, f"""
             set -eu
             cat >/dev/null
             printf refreshed > "$HOME/.claude/.credentials.json"
@@ -562,7 +573,7 @@ def test_reviewer_does_not_bind_missing_auth_paths(repo, fake_bin, tmp_path, fak
     monkeypatch.setenv(variable, str(host_home / f"missing-{family}"))
     _fake_review(fake_bin, family)
     _review(family, repo)
-    assert all(destination == SANDBOX_HOME for _, destination in _pairs(_bwrap_argv(fake_bwrap), "--bind"))
+    assert all(destination == SANDBOX_HOME for _, destination in _pairs(bwrap_argv(fake_bwrap), "--bind"))
 
 
 @pytest.mark.parametrize("repo_name", ["repo", "repo\ncommon", "repo\rcommon"], ids=["ordinary", "newline", "carriage-return"])
@@ -716,14 +727,27 @@ def test_provider_errors_are_typed(fake_bin: Path, tmp_path: Path, family, phras
         assert ("not json" if family == "claude" else "looks fine") in raised.value.tail.lower()
 
 
+@pytest.mark.parametrize("provider_error", [False, True])
+def test_codex_classifies_errors_without_reading_command_output(monkeypatch, tmp_path, provider_error):
+    phrase = "Error: Not logged in. Run codex login first."
+    event = {"type": "error", "message": phrase} if provider_error else {
+        "type": "item.completed", "item": {"type": "command_execution", "aggregated_output": phrase},
+    }
+    result = runners._proc.Completed(1, json.dumps(event), "", 0)
+    monkeypatch.setattr(runners._proc, "run", lambda *_args, **_kwargs: result)
+    expected = RunnerAuthFailed if provider_error else RunnerBadOutput
+    with pytest.raises(expected, match="not authenticated" if provider_error else "exited 1"):
+        runners._run(["codex"], cwd=tmp_path, prompt="", env_allowlist=(), timeout=60, family="codex")
+
+
 @pytest.mark.parametrize("family", ["claude", "codex"])
 @pytest.mark.parametrize("mode", ["missing", "nonexecutable", "shim-only", "shim-first", "ordinary"])
 def test_reviewer_binary_selection(fake_bin: Path, git_repo: Path, monkeypatch, family, mode) -> None:
-    shim = _script(fake_bin, "ai-accounts", "exit 99")
+    shim = write_fake_tool(fake_bin, "ai-accounts", "exit 99")
     if mode.startswith("shim"):
         (fake_bin / family).symlink_to(shim)
     elif mode == "nonexecutable":
-        _script(fake_bin, family, "exit 99").chmod(0o644)
+        write_fake_tool(fake_bin, family, "exit 99").chmod(0o644)
     real_dir = fake_bin / "versions"
     real_dir.mkdir()
     (fake_bin / "git").symlink_to("/usr/bin/git")
@@ -734,7 +758,7 @@ def test_reviewer_binary_selection(fake_bin: Path, git_repo: Path, monkeypatch, 
         if mode == "ordinary":
             (fake_bin / family).symlink_to(real_dir / "2.1.286")
             real.unlink()
-            _script(real_dir, family, "exit 99")
+            write_fake_tool(real_dir, family, "exit 99")
     monkeypatch.setenv("PATH", f"{fake_bin}:{real_dir}:/usr/bin:/bin" if mode in {"shim-first", "ordinary"} else str(fake_bin))
     def guard(config, *args):  # Reject shim selection before any executable can run.
         assert mode in {"shim-first", "ordinary"}
@@ -806,7 +830,7 @@ def test_review_refuses_additional_host_state_exposure(
         monkeypatch.chdir(repo)
         assert _review("claude", repo).verdict == "approve"
         (fake_bin / "claude.stdin").unlink()
-    with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+    with pytest.raises(RunnerBadOutput, match="protected reviewer state"):
         _review("claude", repo, reviewer_ro_paths=(str(exposed),) if exposed else ())
     assert not (fake_bin / "claude.stdin").exists()
 
@@ -853,9 +877,9 @@ def test_review_mounts_only_implicit_runtime_files(repo, fake_bin, tmp_path, fak
         assert history.read_text() == "private history marker"
         if not real:
             expected = [native, helper] if family == "codex" else [native]
-            assert _pairs(_bwrap_argv(fake_bwrap), "--ro-bind-try") == [(str(p), str(p)) for p in expected]
+            assert _pairs(bwrap_argv(fake_bwrap), "--ro-bind-try") == [(str(p), str(p)) for p in expected]
     if mode not in {"implicit", "codex_helper", "real_codex"}:
-        with pytest.raises(SandboxUnavailable, match="protected reviewer state"):
+        with pytest.raises(RunnerBadOutput, match="protected reviewer state"):
             _review(family, repo, reviewer_ro_paths=(str(native.parent if real else native),)
                     if real or mode == "explicit" else ())
 
@@ -871,6 +895,7 @@ def test_claude_settings_and_merged_calls_preserve_native_evidence(fake_bin, tmp
         result = _review("claude", tmp_path, model=model, effort=effort)
         assert result.provenance["requested_settings"] == [{"model": model, "effort": effort}]
         assert json.loads(result.raw) == envelope
+        assert runners.validate_runner_result(merge_reviews([result]))
         results.append(result)
     results[0].provenance.pop("requested_settings")
     merged = merge_reviews(results)
@@ -1005,7 +1030,7 @@ def test_codex_approve(repo, fake_bin, tmp_path, fake_bwrap, monkeypatch):
     isolated = (fake_bin / "codex.home").read_text()
     assert isolated != str(configured) and "loopzero-review-home-" in isolated
     assert not (fake_bin / "codex.config").exists()
-    sandbox_argv = _bwrap_argv(fake_bwrap)
+    sandbox_argv = bwrap_argv(fake_bwrap)
     writable = _pairs(sandbox_argv, "--bind")
     auth_bind = (str((configured / "auth.json").resolve()), f"{SANDBOX_HOME}/.codex/auth.json")
     assert auth_bind in writable
@@ -1080,6 +1105,15 @@ def test_split_diff_summarizes_real_git_deletion(git_repo: Path, name: str, budg
     assert all(len(chunk.encode()) <= budget for chunk in chunks)
     assert any(f"{name}: deleted, 600 lines" in chunk for chunk in chunks)
     assert chunks[0].split("\n", 1)[0] == diff.split("\n", 1)[0]
+
+
+@pytest.mark.parametrize("extra,count", [(0, 1), (1, 2)])
+def test_split_diff_default_budget_is_200000_bytes(extra: int, count: int) -> None:
+    first = "diff --git a/a b/a\n+" + "x" * 99_000 + "\n"
+    second = "diff --git a/b b/b\n+"
+    second += "y" * (200_000 - len(first) - len(second) - 1 + extra) + "\n"
+    assert len((first + second).encode()) == 200_000 + extra
+    assert len(split_diff(first + second)) == count
 
 
 def test_split_diff_encodes_long_utf8_line_in_linear_work() -> None:

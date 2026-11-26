@@ -7,6 +7,8 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 
 | Module in `src/loopzero/` | Responsibility |
 | --- | --- |
+| `_cli_entry.py` | Console entry: parse arguments before loading commands. |
+| `_cli_args.py` | Define the command-line parser and options. |
 | `types.py` | Shared configuration, check reports, findings and review results. |
 | `config.py` | Validate `workflow.toml`; load trusted base sections. |
 | `_proc.py` | Run subprocesses with an environment allowlist, timeouts and typed failures. |
@@ -20,13 +22,5 @@ the system boundaries; the [contract](../core/CONTRACT.md) owns delivery behavio
 | `mergify.py` | Read queue membership and configuration; request explicit admission or removal. |
 | `candidate.py` | Attest integration candidates against live sources and trusted review evidence. |
 
-## Live references
-
-- [Mergify operations](MERGIFY.md): candidate constraints, protection and recovery.
-- [Module boundaries](../tach.toml): exact layered dependency rules enforced by
-  `uv run --python 3.14 --locked --group dev tach check` in CI and `loopzero check`.
-- [Size budget script](../scripts/size_budget.sh): authoritative source, test
-  and core/delegation Markdown caps against base; over-cap budgets pass only
-  when they do not grow. Function complexity is Ruff `C901` in `src/`.
-- [Tests](../tests/): module behavior proofs using temporary Git repositories
-  and fake executables, without network or real credentials.
+[tach.toml](../tach.toml) holds the dependency layers between these modules,
+enforced by `tach check` in CI and `loopzero check`.

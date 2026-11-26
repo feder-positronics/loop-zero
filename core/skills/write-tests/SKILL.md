@@ -19,8 +19,7 @@ Cover material success, denial/isolation, validation, transitions and failures. 
 with minimal deterministic, isolated fixtures. Prefer cheap real producers or match the public fields
 and behavior consumed, avoiding shared mutable state, timing tolerance and duplicate cases.
 For a bug fix, observe the regression test fail on pre-fix code. If impossible, explain the oracle and its limits.
-Infrastructure failure cannot prove regression detection. New or changed tests block only through the
-consumer's admission rule. Established critical assertions remain blocking. Coverage-only tests may pass existing code.
+Infrastructure failure cannot prove regression detection. Coverage-only tests may pass existing code.
 
-Run focused and affected neighboring tests, then [contract delivery checks](../../CONTRACT.md#blockers).
+Run focused and affected neighboring tests.
 Record commands, results and limits in task Notes.

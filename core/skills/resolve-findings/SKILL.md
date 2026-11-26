@@ -13,17 +13,17 @@ Follow the contract's [findings rule](../../CONTRACT.md#findings).
 Fix valid blocking findings within commissioned scope or hand off bounded repairs
 and validation through [response handoff](reference.md#response-handoff).
 Explain repaired, inapplicable or unsupported findings in-thread with verified
-evidence using `loopzero resolve`; never resolve silently. Suggestions are optional.
+evidence using `loopzero resolve`; never resolve silently.
 If a finding cites outdated acceptance, verify the authorized criteria against
-the current head and resolve the mistaken premise with that evidence. Use the
-existing review budget if the changed head still needs review.
+the current head and resolve the mistaken premise with that evidence.
 Requester-reserved, irreversible or acceptance/scope/cost changes and external
 commitments require direction.
 
 Do not manipulate severity; corrections need evidence in-thread, and critical or
 security-path downgrades need requester authority. For conflicting findings,
-reconcile their acceptance and impact. New critical evidence requires a separate
-authorized PR review thread rather than silently expanding this batch.
+reconcile their acceptance and impact. Only threads a review publisher opens
+[block](../../CONTRACT.md#findings): report new critical evidence to the requester and fix it in
+this batch or file an issue.
 
 Before requesting the delta, compare the full repair with the primary-reviewed
 head. Identify affected callers and guarantees for each repaired behavior. Use

@@ -23,7 +23,8 @@ jobs:
     # Skip closed PRs and title/body edits before a runner is allocated. Draft churn
     # waits for readiness except when conversion or a hold change needs a refresh.
     if: >-
-      github.event_name != 'pull_request_target' || (
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion != 'skipped') &&
+      (github.event_name != 'pull_request_target' || (
         github.event.action != 'closed' &&
         (!github.event.pull_request.draft || github.event.action == 'converted_to_draft' ||
          github.event.action == 'labeled' || github.event.action == 'unlabeled') &&
@@ -31,7 +32,7 @@ jobs:
         ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
          github.event.label.name == 'hold') &&
         github.event.pull_request.user.login != 'mergify[bot]' &&
-        !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/'))
+        !startsWith(github.event.pull_request.head.ref, 'mergify/merge-queue/')))
     # Skipped events stay out of the group and cannot replace a pending refresh.
     concurrency:
       group: eligibility-source-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || format('run-{0}', github.run_id) }}
@@ -66,7 +67,7 @@ jobs:
       (github.event.action == 'opened' || github.event.action == 'synchronize')
     # Separate actions so a synchronize event cannot replace a pending opened run.
     concurrency:
-      group: eligibility-candidate-${{ github.repository }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || inputs.pr || format('run-{0}', github.run_id) }}-${{ github.event.action }}
+      group: eligibility-candidate-${{ github.repository }}-${{ github.event.pull_request.number }}-${{ github.event.action }}
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     environment:

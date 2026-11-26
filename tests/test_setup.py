@@ -28,10 +28,6 @@ def test_agent_skill_links_install_and_upgrade_without_gnu_mv(tmp_path, fake_too
             assert (home / agent / "skills/example").resolve(strict=True) == skill
         assert sorted(entry.name for entry in first_checkout.iterdir()) == ["core"]
 
-    reference = SETUP.parent / "core/skills/work-issue/reference.md"
-    reentry = reference.read_text().split("## Re-entry\n", 1)[1].split("\n## ", 1)[0]
-    assert "(../../CONTRACT.md#the-six-steps)" in reentry
-
 
 def test_api_key_permissions_without_gnu_stat(tmp_path, fake_tool):
     fake_tool("stat", '[ "$1" != "-c" ] || exit 64\nexec /usr/bin/stat "$@"\n')

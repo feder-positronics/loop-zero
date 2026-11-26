@@ -18,8 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
-from . import candidate, github
-from .types import LoopZeroError
+from . import github
+from .types import LoopZeroError, is_sha
 
 API = "https://api.mergify.com/v1"
 REQUEST = "loopzero:mergify-request"
@@ -28,6 +28,10 @@ CONFIRMED = "loopzero:mergify-confirmed"
 
 class MergifyError(LoopZeroError):
     """Authentication, transport, or response failure from Mergify."""
+
+
+class MergifyUnavailable(MergifyError):
+    """Transient Mergify lookup failure after retry or budget exhaustion."""
 
 
 @dataclass(frozen=True)
@@ -50,7 +54,7 @@ def _credential(path: Path | None = None) -> str:
         ) from exc
     if (not stat.S_ISDIR(parent.st_mode) or stat.S_ISLNK(parent.st_mode)
             or parent.st_uid != os.getuid() or stat.S_IMODE(parent.st_mode) != 0o700):
-        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}")
+        raise MergifyError(f"unsafe Mergify credential directory permissions: {path.parent}; expected mode 0700 and user ownership")
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError as exc:
@@ -59,7 +63,7 @@ def _credential(path: Path | None = None) -> str:
     if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
             or stat.S_IMODE(info.st_mode) != 0o600):
         os.close(fd)
-        raise MergifyError(f"unsafe Mergify credential file permissions: {path}")
+        raise MergifyError(f"unsafe Mergify credential file permissions: {path}; expected mode 0600 and user ownership")
     with os.fdopen(fd, encoding="utf-8") as handle:
         token = handle.read().strip()
     if not token:
@@ -140,10 +144,12 @@ def api_get(repo: str, suffix: str, deadline: float | None = None) -> object | N
             reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
             detail = f"Mergify queue transport failed: {reason}"
             transient = not isinstance(reason, ssl.SSLCertVerificationError)
-        if not retry or not transient:
+        if not transient:
             raise MergifyError(detail)
+        if not retry:
+            raise MergifyUnavailable(detail)
         if not _wait_to_retry(max(2.0, wait or 0.0), deadline):
-            raise MergifyError(f"{detail}; retry delay exceeds the wait budget")
+            raise MergifyUnavailable(f"{detail}; retry delay exceeds the wait budget")
         retry = False
 
 
@@ -164,9 +170,11 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
     try:
         if type(data["number"]) is not int or data["number"] != number:
             raise ValueError("pull request number mismatch")
-        actual = str(data["queue_rule_name"])
+        actual = data["queue_rule_name"]
+        if not isinstance(actual, str) or not actual:
+            raise ValueError("invalid queue name")
         if actual != queue:
-            raise ValueError(f"expected queue {queue!r}, got {actual!r}")
+            raise MergifyError(f"PR #{number} is in Mergify queue {actual!r}, expected {queue!r}")
         if (not isinstance(data["queued_at"], str) or not data["queued_at"]
                 or type(data["position"]) is not int or data["position"] < 0):
             raise ValueError("invalid queue position or admission time")
@@ -180,43 +188,6 @@ def membership(repo: str, number: int, queue: str, deadline: float | None = None
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise MergifyError("invalid Mergify queue membership response") from exc
-
-
-def queue_predecessors(repo: str, branch: str, queue: str, number: int) -> tuple[int, ...]:
-    """Identify a single chain of one-PR batches ahead of a new request."""
-    status = api_get(repo, f"/merge-queue/status?branch={quote(branch, safe='')}")
-    if (not isinstance(status, dict) or status.get("mode") != "serial"
-            or status.get("waiting_pull_requests") != [] or status.get("forming_batches") != []):
-        return ()
-    try:
-        batches = candidate.flatten_batches(status)
-        successors: dict[str | None, tuple[str, int]] = {}
-        for batch_id, batch in batches.items():
-            pulls, parents = batch["pull_requests"], batch["parent_ids"]
-            if pulls == [] and batch.get("sub_batches"):
-                continue  # Container batches carry no direct source.
-            if (batch.get("queue_rule_name") != queue or not isinstance(pulls, list)
-                    or len(pulls) != 1 or not isinstance(parents, list) or len(parents) > 1):
-                return ()
-            source = pulls[0]["number"]
-            parent = next(iter(parents), None)
-            if type(source) is not int or source <= 0 or source == number or parent in successors:
-                return ()
-            successors[parent] = batch_id, source
-        return _ordered_sources(successors)
-    except (candidate.CandidateError, KeyError, TypeError, RecursionError):
-        return ()
-
-
-def _ordered_sources(successors: dict[str | None, tuple[str, int]]) -> tuple[int, ...]:
-    if len(successors) > 32:
-        return ()
-    sources = []
-    cursor = None
-    while cursor in successors:
-        cursor, source = successors.pop(cursor)
-        sources.append(source)
-    return tuple(sources) if not successors and len(sources) == len(set(sources)) else ()
 
 
 def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
@@ -239,7 +210,7 @@ def _preserves_source_heads(repo: str, branch: str, queue: str) -> bool:
     blob = github.api_get(path)
     try:
         if (blob["type"] != "file" or blob["encoding"] != "base64"
-                or not isinstance(blob["sha"], str) or not re.fullmatch(r"[0-9a-f]{40}", blob["sha"])
+                or not is_sha(blob["sha"])
                 or not isinstance(blob["content"], str) or len(blob["content"]) > 90000):
             return False
         document = yaml.load(base64.b64decode("".join(blob["content"].split()), validate=True),
@@ -342,7 +313,7 @@ def _departure_payload(body: str, queue: str) -> dict:
 def departure_report(repo: str, number: int, head: str, queue: str) -> Departure | None:
     """Use a bot report only when it identifies the latest command and current head."""
     try:
-        comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+        comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     except github.GhError:
         return None
     comments = [item for item in comments if type(item.get("id")) is int and item["id"] > 0]
@@ -382,7 +353,7 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
 def request_status(repo: str, number: int, head: str, queue: str) -> tuple[bool, bool, str | None]:
     login, requested, confirmed = github.login(token=""), False, False
     requested_at = ""
-    comments = github._paged(f"repos/{repo}/issues/{number}/comments")
+    comments = github.paged(f"repos/{repo}/issues/{number}/comments")
     for item in _comments_by(comments, login):
         body = str(item.get("body") or "")
         lines, requeue = body.splitlines(), _queue_command(body, queue)

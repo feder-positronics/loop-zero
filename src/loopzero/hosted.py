@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import quote
 
@@ -77,6 +78,19 @@ def _source_status(result: github.Readiness, current: github.PR) -> tuple[str, s
     return "failure", "; ".join(reasons)
 
 
+def _check_candidate_source(cfg: Config, source_number: int, source: dict) -> None:
+    original = github.pr_from_rest(source)
+    snapshot = eligibility.source_snapshot(cfg.repo, source_number, original.head_sha, original)
+    if replace(original, mergeable=snapshot.mergeable, merge_state=snapshot.merge_state) != snapshot:
+        raise candidate_mod.CandidateRaceError(f"source PR #{source_number} changed during mergeability polling")
+    result = eligibility.evaluate(cfg.repo, source_number, original.head_sha,
+                                  cfg.base_branch, cfg.review_publishers, snapshot=snapshot)
+    if result.reasons == (github.MERGEABILITY_PENDING,):
+        raise github.GhUnavailable(("GitHub API request",), f"source #{source_number}: {github.MERGEABILITY_PENDING}")
+    if not result.ready:
+        raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
+
+
 def _run(cfg: Config) -> int:
     if cfg.repo != os.environ.get("GITHUB_REPOSITORY") or not cfg.review_publishers:
         raise LoopZeroError("trusted repository configuration or review publishers missing")
@@ -95,11 +109,7 @@ def _run(cfg: Config) -> int:
     try:
         if candidate:
             def policy(source_number: int, source: dict) -> None:
-                result = eligibility.evaluate(cfg.repo, source_number, source["head"]["sha"],
-                                              cfg.base_branch, cfg.review_publishers,
-                                              snapshot=github.pr_from_rest(source))
-                if not result.ready:
-                    raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
+                _check_candidate_source(cfg, source_number, source)
             candidate_mod.attest_candidate(
                 event, base_branch=cfg.base_branch,
                 github_get=lambda path: github.api_get(path.lstrip("/")),
@@ -116,9 +126,11 @@ def _run(cfg: Config) -> int:
             return 0
         state, message = (("success", "All attested candidate sources are reviewed") if candidate
                           else _source_status(result, current))
-    except (github.GhUnavailable, github.ProcTimeout) as exc:
-        print(f"Eligibility pending: evidence unavailable ({exc})", file=sys.stderr)
-        return 0
+    except (github.GhUnavailable, github.ProcTimeout, mergify.MergifyUnavailable) as exc:
+        print(f"Eligibility pending: evidence unavailable ({exc}); rerun this workflow", file=sys.stderr)
+        return 1
+    except _SourcePolicyRejection as exc:
+        state, message = "failure", str(exc)
     except (Exception, Terminated) as exc:
         _mark_refresh_failed(cfg.repo, head, exc)
         raise

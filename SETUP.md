@@ -10,9 +10,7 @@
   not use the snap: its confinement cannot reach the keyring. Without root,
   unpack the [release](https://github.com/cli/cli/releases) tarball and put
   `bin/gh` in `~/.local/bin` ahead of `/usr/bin`; that copy does not update.
-- Keep `gh` and `claude` current. Codex reviews run only on the versions
-  allowlisted in `src/loopzero/runners.py`; upgrade Codex with a loop-zero release
-  that accepts the new version. Tools that shape the build (`uv`,
+- Keep `gh`, `claude` and `codex` current. Tools that shape the build (`uv`,
   Python, a consumer's Node and package manager) change only with their pin in
   the repository, for example `uv` in `.github/workflows/checks.yml`.
 - Linux with `bwrap` on `PATH` for default `loopzero check` and fresh local
@@ -24,9 +22,12 @@
 
 ## Install
 
-Pin to a full commit SHA; upgrade by re-running with a new SHA.
-`loopzero --version` prints the installed revision. Never edit the installed
-package: a hotfix is a branch, a PR, and a reinstall from the merged SHA.
+Pin to a full commit SHA from `main` and upgrade by re-running with a new SHA.
+The `v0.4.x` tags refer to the retired tool.
+`loopzero --version` prints the revision of a Git-URL install; the verified
+install below prints `unknown revision`, so record its checked-out SHA. Never
+edit the installed package: a hotfix is a branch, a PR, and a reinstall from
+the merged SHA.
 User-wide:
 
 ```sh
@@ -74,20 +75,16 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
-Before resuming automated PR check refreshes or explicit PR resyncs after an
-upgrade, advance every PR-body writer to the selected CLI revision. For
-unverified receipt warnings, use a revision containing
-[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
-Once the writers are updated, run `loopzero check` for the current head to
-replace old receipts. If you roll back across that fix, pause those writes before
-switching the CLI and resume them once the writers support the warning again.
-
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
 with the publishing CLI revision or a newer compatible revision. The rollback
 CLI predating #732 expects a transcript where the newer publication has a
 retention notice. Keep the original local receipt and confirm the existing
 publication before resuming the rollback.
+
+If the checkout is already at `~/.local/share/loopzero/source`, move it to a
+separate path and use that path as `CHECKOUT`. If a skill destination is a real
+directory, move it aside before linking that skill.
 
 ```sh
 CHECKOUT=/path/to/loop-zero-checkout  # pinned to the CLI revision
@@ -105,19 +102,23 @@ with TemporaryDirectory(dir=source.parent) as staging:
     link.symlink_to(checkout.resolve(strict=True), target_is_directory=True)
     os.replace(link, source)
 PYTHON
-for d in "$SRC"/core/skills/*/; do
-  n=$(basename "$d")
-  ln -sfn "$SRC/core/skills/$n" ~/.agents/skills/"$n"
-  ln -sfn "$SRC/core/skills/$n" ~/.claude/skills/"$n"
-done
+(
+  for d in "$SRC"/core/skills/*/; do
+    n=$(basename "$d")
+    ln -sfnT "$SRC/core/skills/$n" ~/.agents/skills/"$n" || exit
+    ln -sfnT "$SRC/core/skills/$n" ~/.claude/skills/"$n" || exit
+  done
+)
 ```
 
 Repositories customise through documentation only: `AGENTS.md`, including
 folder-level `AGENTS.md` files, and the docs it links ("when X, read Y"). Project
 docs add project detail; they never relax the contract. Point your agent's
-repository instructions at the checkout's `core/skills/README.md` and
-`core/CREDENTIALS.md`. Keep those instructions in `AGENTS.md`: Codex and Claude Code (v2.1.277 or
-later) both read it directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
+repository's `AGENTS.md` at the shared [skill guide](https://github.com/feder-positronics/loop-zero/blob/main/core/skills/README.md)
+and [credential guidance](https://github.com/feder-positronics/loop-zero/blob/main/core/CREDENTIALS.md).
+These links follow `main`. For guidance that matches a pinned CLI, open the
+same GitHub pages at the installed commit SHA. Codex and Claude Code (v2.1.277
+or later) both read `AGENTS.md` directly. Do not add a `CLAUDE.md`, `.claude/CLAUDE.md` or
 `CLAUDE.local.md` on the same path; Claude reads any of them instead of
 `AGENTS.md`. Claude cannot read `AGENTS.md` directly with third-party providers
 such as Bedrock, with telemetry or the `agents-md` plugin disabled, or in the
@@ -154,6 +155,8 @@ to the base branch before starting your first task. If the base has a
 - Configure hosted check names, mounts, scratch and environment in the
   [commented workflow example](workflow.example.toml). See the contract's
   [sandbox rules](core/CONTRACT.md#sandbox-rules-for-checks) for runtime isolation.
+- Host paths in the trusted workflow must work on every delivery machine. Use a
+  machine-specific workflow with `--config` on check, ready and merge when paths differ.
 - `[delivery] reviewer_ro_paths` — optional absolute reviewer CLI/runtime paths;
   the [example](workflow.example.toml) states the default and protected-state limits.
 - Check, review, ready, merge, and status load the workflow from the
@@ -283,14 +286,13 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   pipe each into `ai-accounts add claude <name>`. Codex accounts are separate
   `CODEX_HOME`s sharing `~/.codex` except `auth.json`: `ai-accounts add codex <name>`,
   then log in as it prints; the monitor refreshes standby Codex logins before they expire.
-- Every 5 minutes the monitor probes each account and keeps the best one active:
-  Claude prefers Fable and Opus, then Opus only; Codex prefers every model
-  available. At 95% of any limit an account counts as spent. `ai-accounts status`
-  shows accounts, emails, tiers and resets.
-- Claude probes retain each window's utilization (`util`) and reset (`resets`, null
-  when absent), including healthy windows. Legacy `reset` and `next_reset` are
-  aggregate availability estimates; status labels 7d and 5h resets separately.
-  `weekly_used_percent` is the overall 7d usage, null when unknown.
+- The monitor checks accounts every five minutes. Claude prefers Fable and Opus,
+  then Opus only. Codex keeps the current usable account until it is spent at 95%
+  of any limit by default, then prefers an account with every model available.
+  Claude reads the OAuth usage API at most every 30 minutes and uses one-token
+  header probes between reads. `ai-accounts status` shows accounts, tiers and
+  per-window utilization and resets. `weekly_used_percent` is the overall 7d
+  usage, null when unknown.
 - Only `exec` (including `--identity`) refuses non-owner Claude launches with exit 3
   at >=85% overall weekly or five-hour utilization, or when that account's cached
   status is missing, unreadable or older than 20 minutes. The last 15 weekly points
@@ -306,11 +308,9 @@ PATH="$HOME/.local/lib/ai-accounts/bin:$PINNED_BIN:$PATH" loopzero review
   `loopzero` commands are never replayed by the shim. Existing processes keep their
   credentials until their harness safely replaces them; changing the active file
   does not change a running session. Never pin a token in `settings.json` `env`.
-  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`;
-  allowlisting a newer release is a periodic task: copy both `codex` and its
-  matching `codex-code-mode-host` into `codex-reviewer-<v>`, preserving executable
-  permissions and keeping them side by side so sandboxed reviews can launch the
-  helper. Repoint the symlink after the allowlist PR lands.
+  The loopzero shim prefers executable Codex in `~/.local/lib/codex-reviewer`
+  when present; keep `codex` and its matching `codex-code-mode-host` side by side
+  there with executable permissions so sandboxed reviews can launch the helper.
 - Harness integrations can call `ai-accounts launch <provider> --model <model>` for
   a nonsecret JSON identity, then `ai-accounts exec <provider> --identity <identity>
   -- /absolute/real/executable ...` to pin that exact managed revision. Pass the
@@ -345,10 +345,12 @@ that base and creates the task worktree from it.
 
 ```sh
 loopzero start hello-loopzero        # new worktree + branch; cd to the printed path
-$EDITOR .loopzero/task.md             # fill Context, Problem, Goal and Acceptance
+$EDITOR .loopzero/task.md             # fill Goal, Problem, Context and Acceptance
 ```
 
-Make and commit a change in the task worktree, then run `loopzero check` there.
+Make and commit a change in the task worktree, then run `loopzero check` there;
+for a long check suite, run `loopzero pr` first so the draft exists
+([step 2](core/CONTRACT.md#the-six-steps)).
 Afterward, `loopzero status` shows the next step and requires authenticated
 access to the configured GitHub repository even before a PR exists. See the
 [workflow diagram](docs/WORKFLOW.md#1-from-idea-to-merged) and
@@ -359,20 +361,21 @@ access to the configured GitHub repository even before a PR exists. See the
 Use one pinned CLI revision and the same effective settings for `check`,
 `ready`, and `merge`. If a shared install can change mid-task, use the
 [isolated install](#install). The coordinator runs in the task worktree and
-writes the receipt. For remote stages, configure an operator-trusted
-`[checks].runner` using the [stage protocol](docs/ARCHITECTURE.md#check-stage-runners).
+writes the receipt.
 
-Without a stage adapter, run the whole check locally. Use a local slot if the
-host requires one. On miki, if you used the isolated install, run these from
-the task worktree with the `install_dir` from that recipe.
+Run the whole check locally, through the host's slot wrapper where host policy
+requires one. If you used the isolated install, run these from the task
+worktree with the `install_dir` from that recipe.
 Make a scratch clone standalone before queueing, for example with
 `git clone --no-local`. If a Git object alternate is outside the check sandbox,
-`loopzero check` refuses it after the slot wait and before any stage runs.
+`loopzero check` refuses it before any stage runs. Move the task branch and
+`.loopzero/task.md` to the standalone clone, then recheck the same commit.
 
 ```sh
 export PATH="$install_dir/venv/bin:$PATH"
-HEAVY_SLOT_REMOTE_HOSTS="$HOME/.cache/intelflo-scratch/locks/no-remote-hosts.json" "$HOME/.cache/intelflo-scratch/locks/heavy-slot.sh" loopzero check
-# After opening and reviewing the PR, keep this PATH for delivery.
+loopzero pr      # open the draft before a long check
+loopzero check
+# After reviewing the PR, keep this PATH for delivery.
 loopzero ready --wait
 loopzero merge --wait
 ```
@@ -503,25 +506,15 @@ Local readiness reads that list from the base configuration (legacy installation
 without it use the local GitHub login). Hosted evaluation requires an explicit list;
 its CI token's login is never a reviewer identity.
 
-Codex evidence v1 can include configured settings. For that shape the hosted
-reader needs [07ad5643 (#344)](https://github.com/feder-positronics/loop-zero/commit/07ad5643b3fc32541eee3c9f88ff5f4e917b7de7)
-or a newer compatible revision. An older reader can report `no review recorded
-for the current head` even when the publisher recorded a valid approval. Advance
-the consumer CI pin that supplies `loopzero.hosted` or `loopzero.eligibility`
-(the loop-zero checkout ref or installed package revision). Dispatch the
-eligibility workflow for the existing PR, or run the command below with its
-unchanged source SHA. The refreshed reader can use the approval already on GitHub.
-
-For inherited review coverage, advance both source and candidate workflow pins to
-a revision containing [23219dd3 (#1081)](https://github.com/feder-positronics/loop-zero/commit/23219dd39e641549164c346e137f4e09718115f6).
-The updated reader accepts an ancestor approval only across verified clean merges
-from the configured base. After deploying both pins, refresh eligibility for open
-sources judged by the older reader so their statuses reflect the updated policy.
-
-From a trusted base checkout, run:
+Advance the consumer CI pin that supplies `loopzero.hosted` or
+`loopzero.eligibility` (the loop-zero checkout ref or installed package revision)
+before relying on a new reader or writer behaviour. To refresh an open PR judged
+by an older reader, dispatch the eligibility workflow for it, or run this from a
+trusted base checkout with the trusted Loop-zero pin and the source PR head SHA:
 
 ```sh
-python -m loopzero.eligibility --config workflow.toml --pr 123 --head <full-source-sha> --publish
+uv run --no-project --with "git+https://github.com/feder-positronics/loop-zero@<sha>" \
+  python -m loopzero.eligibility --config workflow.toml --pr 123 --head "<full-source-sha>" --publish
 ```
 
 Give that process pull-request read and commit-status write access.

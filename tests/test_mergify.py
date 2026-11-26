@@ -87,10 +87,10 @@ def test_dequeue_posts_to_documented_endpoint(request_log):
 
 @pytest.fixture
 def queue_api(monkeypatch):
-    def github_config(text, *, default="main", changed=False, file_overrides=None, queues=True, inplace=True):
+    def github_config(text, *, default="main", changed=False, file_overrides=None, queues=True, inplace=True, mode="serial"):
         rows = [{"name": "main", "config": {"allow_inplace_checks": inplace}}] if queues else []
         monkeypatch.setattr(mergify, "api_get", lambda _repo, suffix, *_: (
-            {"batches": [], "mode": "serial"} if suffix.startswith("/merge-queue/status")
+            {"batches": [], "mode": mode} if suffix.startswith("/merge-queue/status")
             else {"configuration": rows}
         ))
         reads = 0
@@ -125,6 +125,7 @@ UNSAFE_CONFIGS = [
 
 @pytest.mark.parametrize("text,options,accepted", [
     (SAFE_CONFIG, {}, True),
+    (SAFE_CONFIG, {"mode": "parallel"}, False),
     (ONE_CHECK.replace("main}", "main, batch_size: 8}"), {}, True),
     *((text, {}, False) for text in UNSAFE_CONFIGS),
     (SAFE_CONFIG, {"default": "other"}, False),
@@ -148,7 +149,7 @@ def test_markers_only_accept_exact_lines_from_current_login(monkeypatch):
     for later, requeued in [("", False), ("@mergifyio queued", False), ("@mergifyio requeued", False),
             ("@mergifyio queue dev", False), ("@Mergifyio queue main", True), ("@mergify requeue", True)]:
         comments = [{"body": b, "user": {"login": who}} for who, b in [*rows, ("trusted", later)]]
-        monkeypatch.setattr(mergify.github, "_paged", lambda *_, c=comments: c)
+        monkeypatch.setattr(mergify.github, "paged", lambda *_, c=comments: c)
         assert mergify.markers("acme/widgets", 7, head, "main") == (requeued, not requeued), later
 
 
@@ -174,21 +175,39 @@ def test_comment_writes_use_github_rest_api(monkeypatch, writer, body):
     ], {"body": body})]
 
 
-def test_credential_file_must_be_private(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unsafe,diagnostic", [
+    ("file", r"unsafe Mergify credential file permissions: .*expected mode 0600"),
+    ("directory", r"unsafe Mergify credential directory permissions: .*expected mode 0700"),
+    ("symlink", "unable to open Mergify credential file"),
+])
+def test_credential_file_must_be_private(tmp_path, monkeypatch, unsafe, diagnostic):
     monkeypatch.delenv("MERGIFY_API_KEY", raising=False)
     key = tmp_path / "api-key"
     key.write_text("secret\n")
-    key.chmod(0o644)
-    with pytest.raises(mergify.MergifyError, match="unsafe"):
-        mergify._credential(key)
     key.chmod(0o600)
     assert mergify._credential(key) == "secret"
+    if unsafe == "file":
+        key.chmod(0o644)
+    elif unsafe == "directory":
+        tmp_path.chmod(0o755)
+    else:
+        target = key.with_name("real-key")
+        key.rename(target)
+        key.symlink_to(target)
+    with pytest.raises(mergify.MergifyError, match=diagnostic):
+        mergify._credential(key)
 
 
 @pytest.mark.parametrize("field,value", [("number", "7"), ("position", None), ("queued_at", None)])
 def test_malformed_membership_never_confirms(request_log, field, value):
     request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "main", field: value})
     with pytest.raises(mergify.MergifyError):
+        mergify.membership("acme/widgets", 7, "main")
+
+
+def test_membership_names_a_different_queue(request_log):
+    request_log({"number": 7, "position": 1, "queued_at": "now", "queue_rule_name": "other"})
+    with pytest.raises(mergify.MergifyError, match="PR #7 is in Mergify queue 'other', expected 'main'"):
         mergify.membership("acme/widgets", 7, "main")
 
 

@@ -1,7 +1,12 @@
 # Owner-approved contributor-review exception (#264)
 
-Date: 2026-10-12. Status: active bounded exception ruling, linked from
-[core/CONTRACT.md](../../core/CONTRACT.md#owner-approved-contributor-review-exception).
+**Withdrawn 2026-11-26.** The owner decisions role withdrew this ruling. Mixed-authoring
+PRs carry truthful all-writer `Co-Authored-By` trailers; when every configured
+family wrote, review uses the disclosed same-family fallback in the
+[contract's review budget](../../core/CONTRACT.md#review-budget). PRs already open
+under this exception keep their review. The text below is history.
+
+Date: 2026-10-12. Status: withdrawn (see above).
 
 Only the mixed-authoring route confirmed by the owner's
 [#264 ruling](https://github.com/feder-positronics/loop-zero/issues/264#issuecomment-6025584110)

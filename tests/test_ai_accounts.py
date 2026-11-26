@@ -176,10 +176,10 @@ def test_pin_revision_changed_or_explicit_credentials_fails_closed(helper, monke
     assert exec_envs == []
 
 
-def test_codex_select_reserves_current_at_85_without_churn(helper):
-    for other, expected in [(.28, 'c2'), (.86, 'c3')]:
-        accounts = {'c3': {'tier': 2, 'util': .87}, 'c2': {'tier': 2, 'util': other}}
-        assert helper.select('codex', accounts, 'c3') == expected
+def test_codex_monitor_keeps_usable_current_until_spent(helper):
+    for tier, usage, chosen in [(2, .87, 'c3'), (1, .949, 'c3'), (0, .95, 'c2')]:
+        accounts = {'c3': {'tier': tier, 'util': usage}, 'c2': {'tier': 2, 'util': .28}}
+        assert helper.select('codex', accounts, 'c3') == chosen
 
 
 def test_codex_refresh_keeps_managed_binding_and_exhaustion_selection(helper, monkeypatch):
@@ -234,19 +234,18 @@ def test_partial_or_unidentified_codex_auth_keeps_strict_revision(helper, creden
     ('7d_oi', .85, 0, 'ok', False, False), ('7d', .85, 0, 'ok', False, False), ('5h', .85, 0, 'ok', False, False),
     ('7d', .84, 1200, 'ok', False, True), ('5h', .84, 0, 'ok', False, True),
     ('7d', .1, 1201, 'ok', False, False), ('7d', .1, 0, 'missing', False, False),
-    ('7d', .1, 0, 'broken', False, False), ('7d', .1, 0, 'account', False, False),
+    ('7d', .1, 0, 'broken', False, False), ('7d', .1, 0, 'account', False, False), ('7d', .1, 0, 'no-windows', False, False),
     ('7d', 1, 1201, 'ok', True, True), ('7d', 1, 0, 'missing', True, True)])
-@pytest.mark.parametrize('schema', ['legacy', 'windows'])
 @pytest.mark.parametrize('pinned', [False, True])
-def test_exec_reserve_policy(helper, monkeypatch, capsys, exec_envs, window, used, age, cache, owner, allowed, pinned, schema):
+def test_exec_reserve_policy(helper, monkeypatch, capsys, exec_envs, window, used, age, cache, owner, allowed, pinned):
     monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
     if owner:
         monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
     monkeypatch.setattr(helper, 'now', lambda: 10000)
-    result = {'models': {'fake': {'util': {window: used}, 'resets': {window: 2000}}}}
-    if schema == 'windows':
-        result = {'windows': [{'window': window, 'used_pct': used * 100, 'resets_at': 2000}]}
+    result = {'windows': [{'window': window, 'used_pct': used * 100, 'resets_at': 2000}]}
     status = {'checked_at': helper.now() - age, 'providers': {'claude': {'accounts': {'a': result}}}}
+    if cache == 'no-windows':
+        result.pop('windows')
     if cache == 'account':
         status['providers']['claude']['accounts'] = {}
     if cache != 'missing':
@@ -282,7 +281,7 @@ def test_exec_binds_approved_selection_and_preserves_explicit_auth(helper, monke
 def test_exec_selects_under_reserve_or_preserves_caller_auth(helper, monkeypatch, exec_envs, key):
     monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
     if key is None:
-        accounts = {n: {'models': {'m': {'util': {'7d': used}}}} for n, used in (('a', .9), ('b', .5))}
+        accounts = {n: {'windows': [{'window': '7d', 'used_pct': used}]} for n, used in (('a', 90), ('b', 50))}
         status = {'checked_at': helper.now(), 'providers': {'claude': {'accounts': accounts}}}
         helper.write_private(helper.STATE / 'status.json', json.dumps(status))
         key, expected = 'CLAUDE_CODE_OAUTH_TOKEN', 'synthetic-secret-b'
@@ -332,10 +331,7 @@ def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, cod
     if code not in (200, None):
         assert len(logged.splitlines()) == 1
         assert f'claude a: usage API HTTP {code}; backoff until ' in logged
-        expected_deadline = {1800: '2026-01-01T00:30:00+00:00',
-                             3600: '2026-01-01T01:00:00+00:00',
-                             86400: '2026-01-02T00:00:00+00:00'}
-        assert expected_deadline[delay] in logged
+        assert f'backoff until {helper.iso(start + delay)}' in logged and 'CET' in logged
     else:
         assert logged == ''
     assert 'synthetic-secret' not in logged
@@ -350,7 +346,7 @@ def test_claude_usage_backoff_persists_and_uses_headers(helper, monkeypatch, cod
     skipped = fresh.check_claude('a')
     assert [method for method, _ in calls] == ['POST', 'POST']
     assert skipped['source'] == 'headers (fallback)'
-    assert skipped['source_reason'].startswith('usage API backoff until ')
+    assert skipped['source_reason'] == f'next usage API read at {helper.iso(start + delay)}'
     assert skipped['util'] == .25
     assert skipped['windows'][0]['used_pct'] == 25
     assert (log_path.read_text() if log_path.exists() else '') == logged

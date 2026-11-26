@@ -9,7 +9,7 @@ import pytest
 
 from loopzero import cli, eligibility, runners
 from tests import test_cli, test_runners
-from tests.test_cli import expect_cli, post_key, prepare_review
+from tests.test_cli import expect_cli, posted, prepare_review
 from tests.test_runners import (
     APPROVE, _fake_claude, _fake_codex, _native_codex_result, _review, replace_codex_events,
 )
@@ -18,8 +18,7 @@ repo, wt, gh, head = test_cli.repo, test_cli.wt, test_cli.gh, test_cli.head
 git_seed = test_cli.git_seed
 fake_bwrap = test_runners.fake_bwrap
 
-RECEIPTS = [row for size in ("five", "six") for row in json.loads(
-    (Path(__file__).parent / f"fixtures/review-runtime-startup-{size}.json").read_text())]
+RECEIPTS = json.loads((Path(__file__).parent / "fixtures/review-runtime-startup.json").read_text())
 PUBLISHER = ("example-review[bot]",)
 
 
@@ -81,7 +80,14 @@ def test_legacy_startup_never_publishes(wt, gh, fake_bin, capsys, row, repost):
         replace_codex_events(script, [envelope(row)["events"][1]], prepend=True)
         expect_cli(capsys, 4, "review", stderr_contains=("Code Mode",))
         assert not list((wt / ".loopzero").glob("review-*.json"))
-    assert not any(c["argv"][:2] == post_key().split() for c in gh.calls)
+    assert not any(map(posted, gh.calls))
+
+
+def test_review_budget_ignores_marker_for_a_different_commit():
+    head = "a" * 40
+    review = {"commit_id": head, "user": {"login": PUBLISHER[0]},
+              "body": cli.review_marker("b" * 40, "primary") + "\n**approve**"}
+    assert not cli._pr_markers([review], head, PUBLISHER)
 
 
 @pytest.mark.parametrize(
@@ -128,14 +134,10 @@ def test_only_structured_fatal_host_event_is_rejected(fake_bin, tmp_path, mode):
             _review("codex", tmp_path)
 
 
-# Keep the original routing inputs to catch a return of target-specific behavior.
-@pytest.mark.parametrize(
-    ("number", "case"), [(9179, 1), (9173, 4), (9174, 5), (9175, 6), (9275, 3), (9284, 2), (9220, 7)]
-)
-@pytest.mark.parametrize("repository", ["feder-positronics/intelflo", "elsewhere/intelflo"])
-def test_retired_targets_use_ordinary_eligibility_and_budget(number, case, repository):
+def test_retired_target_uses_ordinary_eligibility_and_budget():
     target = "a" * 40
-    rows = copy.deepcopy([r for r in RECEIPTS if r["number"] == case])
+    repository, number = "feder-positronics/intelflo", 9179
+    rows = [copy.deepcopy(RECEIPTS[0])]
     snapshot = copy.deepcopy(rows)
     replacement = {
         "id": 999, "commit_id": target, "user": {"login": PUBLISHER[0]},

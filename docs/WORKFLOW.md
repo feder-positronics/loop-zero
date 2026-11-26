@@ -9,13 +9,15 @@ shown in small text beside each step.
 ```mermaid
 flowchart TD
     A["Start a task<br/><sub>loopzero start my-task</sub>"] --> B["Make the change and commit it"]
-    B --> C["Run checks in a sandbox<br/><sub>loopzero check</sub>"]
-    C -->|checks fail| D["Fix the problem"]
+    B --> E["Open a draft pull request<br/><sub>loopzero pr</sub>"]
+    E --> C["Run checks in a sandbox<br/><sub>loopzero check</sub>"]
+    C -->|checks fail| D["Fix, commit and push<br/><sub>loopzero pr</sub>"]
     D --> C
-    C -->|checks pass| E["Open a draft pull request<br/><sub>loopzero pr</sub>"]
-    E --> F["Get a review of the exact version<br/><sub>loopzero review</sub>"]
-    F -->|changes requested| G["Fix the findings and push"]
+    C -->|checks pass| F["Get a review of the exact version<br/><sub>loopzero review</sub>"]
+    F -->|changes requested, review budget left| G["Fix the findings, commit and push"]
     G --> C
+    F -->|changes requested after the delta| R["Reject findings with reasons,<br/>or fix in a replacement PR"]
+    R -->|findings rejected| H
     F -->|approved| H["Check it is ready: no open findings,<br/>required CI green on the same version<br/><sub>loopzero ready --wait</sub>"]
     H -->|review coverage lost and budget allows another review| F
     H -->|ready| I["Merge<br/><sub>loopzero merge --wait</sub>"]
@@ -23,28 +25,28 @@ flowchart TD
     J --> K["Clean up: delete branch and worktree"]
 ```
 
-See the contract's [Blockers](../core/CONTRACT.md#blockers) for review coverage,
-head movement and readiness, and the [review budget](../core/CONTRACT.md#review-budget)
-for when another review is available.
-
-Summarizes [The six steps](../core/CONTRACT.md#the-six-steps) and
-[Blockers](../core/CONTRACT.md#blockers); the queue is described in
-[MERGIFY.md](MERGIFY.md).
+Summarizes [The six steps](../core/CONTRACT.md#the-six-steps),
+[Blockers](../core/CONTRACT.md#blockers) (review coverage, head movement and
+readiness) and the [review budget](../core/CONTRACT.md#review-budget); the queue
+is described in [MERGIFY.md](MERGIFY.md).
 
 ## 2. How many reviews a change gets
 
+The PR owner is the session delivering the PR, or the coordinator once it
+adopts it ([The six steps](../core/CONTRACT.md#the-six-steps)).
+
 ```mermaid
 flowchart TD
-    A["First full review<br/><sub>primary</sub>"] -->|approved| Z["Done: continue to ready"]
+    A["Primary review"] -->|approved| Z["Done: continue to ready"]
     A -->|fixes needed| B["Make all fixes in one batch"]
-    B --> C["One review of only the new changes<br/><sub>delta, at most one</sub>"]
+    B --> C["One review of only the new changes<br/><sub>delta</sub>"]
     C -->|approved| Z
-    C -->|findings remain| D["Owner fixes or rejects findings with reasons"]
+    C -->|findings remain| D["PR owner rejects findings with reasons"]
     D -->|ready| Z
-    C -->|split needed| E["Owner splits the PR"]
+    C -->|code fix needed| E["PR owner opens a replacement PR"]
     G["Reviewer gives no verdict:<br/>tool or login failure"] --> H["Costs nothing: try the next<br/>eligible model family"]
     H -->|none can run| J["Same-family review in a fresh session,<br/>disclosed on the PR"]
-    J -->|none can run| I["Wait for the owner"]
+    J -->|none can run| I["Wait for the PR owner"]
 ```
 
 See the contract's [review budget](../core/CONTRACT.md#review-budget).
@@ -53,7 +55,7 @@ See the contract's [review budget](../core/CONTRACT.md#review-budget).
 
 ```mermaid
 flowchart TD
-    O["Owner<br/><sub>the human; gives orders to the decisions owner</sub>"] --> D["Decisions owner<br/><sub>resolves owner decisions within delegated authority</sub>"]
+    O["Human owner<br/><sub> gives orders to the decisions owner</sub>"] --> D["Decisions owner<br/><sub>resolves owner decisions within delegated authority</sub>"]
     D --> C["Coordinator<br/><sub>owns delivery of one repository, dispatches workers and reviews</sub>"]
     C --> W["Worker<br/><sub>one bounded delivery from a brief</sub>"]
     W --> P["Pull request with checks"]

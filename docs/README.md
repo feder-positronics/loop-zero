@@ -4,15 +4,15 @@ Start with [ARCHITECTURE.md](ARCHITECTURE.md) for the current architecture,
 ownership and documentation upkeep routine, then the top-level files for delivery
 and setup.
 
-- [../README.md](../README.md) — what loop-zero is, the six commands, adoption.
+- [../README.md](../README.md) — what loop-zero is, its commands, adoption.
 - [../SETUP.md](../SETUP.md) — prerequisites, install from a SHA, connect agent
   skills, configure API keys, verify local setup, and first run.
 - [../workflow.example.toml](../workflow.example.toml) — annotated config.
 - [../core/CONTRACT.md](../core/CONTRACT.md) — the delivery rules.
 - [../core/CREDENTIALS.md](../core/CREDENTIALS.md) — default API-key lookup,
-  local storage, Bitwarden, rotation, and CI/production boundaries.
+  local storage, rotation, and CI/production boundaries.
 - [../core/HANDOFF.md](../core/HANDOFF.md) — task file and PR body template.
-- [../core/skills/](../core/skills) — 19 core skills; start with `plan`,
+- [../core/skills/](../core/skills) — core skills; start with `plan`,
   `implement`, `work-issue`, or `write-design-doc`.
 - [../integrations/](../integrations/) — optional vendor integration skills.
 - [REWRITE-SPEC.md](REWRITE-SPEC.md) — contributor module map.
@@ -21,12 +21,12 @@ and setup.
   describe September 24, not the current backlog.
 - [design/2026-10-07-deterministic-delivery-design-assumptions.md](design/2026-10-07-deterministic-delivery-design-assumptions.md) —
   design rationale, dated reviewer evidence and native compatibility limits.
-- [design/2026-10-12-contributor-review-exception.md](design/2026-10-12-contributor-review-exception.md) —
-  bounded `#264` owner-approved contributor-review exception mechanics.
-- [DELEGATION.md](DELEGATION.md) — model selection, flexible delegation,
-  and verification through the delivery contract.
+- [DELEGATION.md](DELEGATION.md) — handoffs, team roles, liveness, retros,
+  model selection, briefs and delegate verification.
 - [WORKFLOW.md](WORKFLOW.md) — plain-language diagrams: idea to merged, review
   budget, who does what.
+- [MERGIFY.md](MERGIFY.md) — optional Mergify queue setup, protection and
+  recovery.
 - [BACKLOG.md](BACKLOG.md) — readable-backlog convention: three issue kinds,
   one to-do number, a pinned summary and a short next-up list.
 - [CODE-HEALTH.md](CODE-HEALTH.md) — code-health convention: recurring audits,
@@ -37,5 +37,6 @@ and setup.
   dated video/skill/upstream research, cross-model discussion and ranked proposals;
   only the upstream-reading documentation is commissioned here.
 - [2026-11-25 loop-zero optimization and hardening roadmap](design/2026-11-25-loop-zero-optimization-hardening-roadmap.md) —
-  dated audit and trial findings, operating rules, and the Horizon 2–3 roadmap.
+  dated audit and trial findings, the rules agreed then, and the Horizon 2–3
+  roadmap.
 - [../models.toml](../models.toml) — current model/effort preferences and category defaults.

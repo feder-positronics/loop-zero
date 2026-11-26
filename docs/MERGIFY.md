@@ -45,7 +45,8 @@ and the live attestation inputs are reread before success. Squashed parents can
 pass; unavailable live predecessors behind a missing batch and unrelated main
 advances may still reject. The fallback requires POSIX file-size limits and Git with
 `merge-tree --write-tree`; it is bounded to 32 sources, 100,000 reachable objects,
-256 MiB on disk, 8 MiB command output, history depth 200 and 120 seconds of Git work.
+256 MiB on disk, 8 MiB command output and 120 seconds of Git work. Fetches start at
+depth 200 and deepen within those bounds when merge history is incomplete.
 
 ## Protection and credentials
 
@@ -76,9 +77,8 @@ that cannot inventory organization secrets gives no basis to delete them.
 
 If the queue misbehaves, stop admission and prevent Mergify landing, restore the
 captured guardrail rules and remove the Mergify-only update restriction before
-resuming the original path (the native queue for loop-zero). See
-[IntelFlo's fallback procedure](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/loop-zero-delivery.md#fall-back-from-mergify)
-for its recovery settings. Never admit to native and Mergify queues at once. Public plans
+resuming the original path (the native queue for loop-zero). Each consumer
+documents its own recovery settings. Never admit to native and Mergify queues at once. Public plans
 may lack a pause API, so rollback revokes queue authority through reviewed
 changes. Keep all required checks; an outage does not justify lowering protection.
 After any queue configuration change, drain first and verify vendor draft-PR

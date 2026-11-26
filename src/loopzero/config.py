@@ -24,14 +24,13 @@ FORBIDDEN_RO_TREES = ("/run", "/var/run", "/proc", "/dev", "/sys", "/root")
 _SECTIONS: dict[str, dict[str, type]] = {
     "repo": {"name": str, "base": str},
     "checks": {
-        "commands": list, "runner": list, "inputs": dict, "required_ci": list, "network": bool,
+        "commands": list, "inputs": dict, "required_ci": list, "network": bool,
         "env_allowlist": list, "ro_paths": list, "writable": list, "scratch": list,
         "env": dict, "limits": dict,
     },
     "delivery": {
         "merge": str, "mergify_queue": str,
-        "reviewers": list, "review_publishers": list, "reviewer_ro_paths": list,
-        "review_chunk_bytes": int, "review": dict,
+        "reviewers": list, "review_publishers": list, "reviewer_ro_paths": list, "review": dict,
     },
 }
 _REVIEW_SETTINGS = {"model": str, "effort": str, "allowed_efforts": list}
@@ -108,20 +107,24 @@ def _has_replacement_refs(common_dir: Path) -> bool:
 def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
                      refresh: bool, require_ci: bool, read_timeout: Callable[[float], float]) -> tuple[Config, str]:
     source = f"origin/{branch}:workflow.toml"
-    hint = "Fetch the trusted base workflow, or supply --config for bootstrap or an override."
+    hint = "Check repo.base in origin/HEAD:workflow.toml or supply --config for bootstrap or an override."
     ref = f"refs/remotes/origin/{branch}"
     if refresh:
         fetched = run_git(worktree, "fetch", "--quiet", "--no-tags", "--no-recurse-submodules",
                           "--no-write-fetch-head", "origin", f"+refs/heads/{branch}:{ref}", timeout=read_timeout(60))
         if fetched.exit_code != 0:
-            raise ConfigError(f"could not refresh origin/{branch}. {hint}")
+            message = re.sub(r"""(?i)(https?://)[^\s/?#'"<>`]+@""", r"\1[REDACTED]@",
+                             _proc.tail(fetched.stderr or fetched.stdout, 1) or f"git exited {fetched.exit_code}")
+            raise ConfigError(f"could not refresh origin/{branch}: {message}. {hint}")
     directory_args = ["--path-format=absolute", "--git-common-dir"] if previous is not None else []
+    # Stage-boundary reads reuse the existing ref without fetching absent objects.
+    local_env = {"GIT_NO_LAZY_FETCH": "1"} if previous is not None and not refresh else None
     resolved = _proc.run_git_paths(
         ["git", "rev-parse", *directory_args, "--verify", f"{ref}^{{commit}}"],
-        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60),
+        cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), extra_env=local_env,
     )
     if resolved.exit_code != 0:
-        raise ConfigError(f"{source} has no remote-tracking base commit. {hint}")
+        raise ConfigError(f"{source} has no remote-tracking base commit. Fetch origin/{branch}. {hint}")
     common_dir, _, revision = resolved.stdout.rpartition("\n")
     if (previous is not None and previous.base_branch == branch and previous.trusted_base_revision == revision
             and common_dir and not _has_replacement_refs(Path(common_dir))):
@@ -129,6 +132,7 @@ def _remote_workflow(worktree: Path, branch: str, previous: Config | None, *,
     shown = _proc.run(
         ["git", "show", f"{revision}:workflow.toml"],
         cwd=worktree, env_allowlist=worktree_mod.GIT_ENV, timeout=read_timeout(60), preserve_newlines=True, encoding="utf-8",
+        extra_env=local_env,
     )
     if shown.exit_code != 0:
         raise ConfigError(f"cannot read {source}. {hint}")
@@ -185,9 +189,6 @@ def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every work
         raise ConfigError("delivery.reviewers must list at least one reviewer")
     if unknown := next((family for family in reviewers if family not in REVIEWER_FAMILIES), None):
         raise ConfigError(f"delivery.reviewers entries must be in {REVIEWER_FAMILIES}, got {unknown!r}")
-    review_chunk_bytes = delivery.get("review_chunk_bytes", Config.review_chunk_bytes)
-    if isinstance(review_chunk_bytes, bool) or review_chunk_bytes < 4096:
-        raise ConfigError("delivery.review_chunk_bytes must be an int >= 4096")
     review: dict[str, ReviewConfig] = {}
     for family, table in delivery.get("review", {}).items():
         if family not in REVIEWER_FAMILIES:
@@ -202,12 +203,6 @@ def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every work
     if any(not command.strip() for command in commands):
         raise ConfigError("checks.commands entries must each be a nonblank command")
     kwargs: dict[str, Any] = {}
-    if "runner" in checks:
-        if not (runner := _strings("checks.runner", checks["runner"])) or any("\0" in arg for arg in runner):
-            raise ConfigError("checks.runner must be a nonempty argv prefix")
-        if "/" in runner[0] and not Path(runner[0]).is_absolute():
-            raise ConfigError("checks.runner executable paths must be absolute")
-        kwargs["check_runner"] = runner
     inputs = {}
     for key, value in checks.get("inputs", {}).items():
         label = f'checks.inputs."{key}"'
@@ -228,9 +223,6 @@ def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every work
                 raise ConfigError(f"checks.scratch entries must be relative, got {entry!r}")
     if "limits" in checks:
         kwargs["limits"] = _limits(checks["limits"])
-        if "runner" in checks and checks["limits"]:
-            keys = ", ".join(f"checks.limits.{key}" for key in sorted(checks["limits"]))
-            raise ConfigError(f"{keys} apply only to local checks and cannot be set with checks.runner")
     return Config(
         reviewer_ro_paths=_host_paths("delivery.reviewer_ro_paths", delivery.get("reviewer_ro_paths", [])),
         repo=name,
@@ -243,7 +235,6 @@ def _build(data: dict[str, Any]) -> Config:  # noqa: C901 - validates every work
         review_publishers=_strings("delivery.review_publishers",
                                    delivery.get("review_publishers", [])),
         review=review,
-        review_chunk_bytes=review_chunk_bytes,
         network=checks.get("network", False),
         inputs=inputs, env=env, **kwargs,
     )
@@ -272,8 +263,8 @@ def _check_table(label: str, table: Any, schema: dict[str, type], *,
         if key in table:
             nonempty = nonempty_strings and kind is str
             if not isinstance(table[key], kind) or (nonempty and not table[key]):
-                expected = "non-empty str" if nonempty else kind.__name__
-                raise ConfigError(f"{label}.{key} must be a {expected}")
+                expected = {dict: "a table", int: "an integer", list: "an array", str: "a string", bool: "a boolean"}
+                raise ConfigError(f"{label}.{key} must be {'a non-empty string' if nonempty else expected[kind]}")
     return table
 
 

@@ -1,4 +1,4 @@
-"""Run checks in bwrap, which gives no CPU/memory quotas; ulimit is best-effort."""
+"""Run checks in bwrap, with best-effort resource limits from prlimit."""
 
 from __future__ import annotations
 
@@ -6,7 +6,6 @@ import ast
 import errno
 import hashlib
 import json
-import math
 import os
 import re
 import resource
@@ -15,16 +14,16 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
 from os.path import commonpath
 from pathlib import Path
 
-from . import __version__, _proc
+from . import _proc, installed_version
 from . import config as config_mod
 from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
-from .worktree import WorktreeError, read_local_state
+from .worktree import GitError, WorktreeError, git, read_local_state
 
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
@@ -89,49 +88,45 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
                checkpoint: Callable[[CheckReport], None] | None = None,
-               workflow: str | Path = "workflow.toml", _resolved: bool = False) -> CheckReport:
+               workflow: str | Path = "workflow.toml") -> CheckReport:
     """Run until a check fails, reporting commands via progress and stage metadata via status."""
     worktree = worktree.resolve()
-    if not config.check_runner and shutil.which("bwrap") is None:
+    if shutil.which("bwrap") is None:
         raise SandboxUnavailable(
             "bwrap binary missing: bwrap not found on PATH\n"
             "sudo apt install bubblewrap"
         )
     head = _git(config, worktree, "rev-parse", "HEAD").strip()
     dirty = bool(_git(config, worktree, "status", "--porcelain").strip())
-    if config.check_runner and dirty:
-        return CheckReport(head, True, (CheckResult("<dirty worktree>", 1, 0.0,
-                                                   "Runner requires a clean worktree"),))
     base = _check_base(config, worktree)
     settings_sha256 = settings_fingerprint(config)
-    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and settings_sha256 and not dirty else {}
+    previous = _previous(config, worktree, settings_sha256) if config.inputs and base and not dirty else {}
     common_dir = _git_dir(config, worktree, "--git-common-dir")
     git_dir = _git_dir(config, worktree, "--git-dir")
 
     _validate_scratch(config.scratch, worktree, common_dir, git_dir)
     with _proc.unwind_on_sigterm(), _private_directories() as stack:
-        prefix = []
-        if not config.check_runner:
-            home = _enter_private_directory(stack, "loopzero-home-")
-            scratch_root = _enter_private_directory(stack, "loopzero-scratch-")
-            private_parent = Path(commonpath((home, scratch_root)))
-            for exposed in (*config.sandbox_ro, *config.writable):
-                if private_parent.is_relative_to(Path(exposed).resolve()):
-                    raise SandboxUnavailable(
-                        f"sandbox path {exposed!r} would expose private check directories"
-                    )
-            scratch = {entry: scratch_root / entry for entry in config.scratch}
-            for entry, source in scratch.items():
-                source.mkdir(parents=True)
-                # Mount points must exist before bwrap binds the source read-only.
-                (worktree / entry).mkdir(parents=True, exist_ok=True)
-            prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
-            probe(config, worktree, prefix)
-            _preflight_alternates(config, worktree, prefix, common_dir)
-        missing, preparations = (None, ()) if _resolved else _preflight(config, worktree)
+        home = _enter_private_directory(stack, "loopzero-home-")
+        scratch_root = _enter_private_directory(stack, "loopzero-scratch-")
+        private_parent = Path(commonpath((home, scratch_root)))
+        for exposed in (*config.sandbox_ro, *config.writable):
+            if private_parent.is_relative_to(Path(exposed).resolve()):
+                raise SandboxUnavailable(
+                    f"sandbox path {exposed!r} would expose private check directories"
+                )
+        scratch = {entry: scratch_root / entry for entry in config.scratch}
+        for entry, source in scratch.items():
+            source.mkdir(parents=True)
+            # Mount points must exist before bwrap binds the source read-only.
+            (worktree / entry).mkdir(parents=True, exist_ok=True)
+        prefix = bwrap_argv(config, worktree, home, common_dir, git_dir, scratch)
+        probe(config, worktree, prefix)
+        _preflight_alternates(config, worktree, prefix, common_dir)
+        missing, preparations = _preflight(config, worktree)
         results = [missing] if missing else []
         commands = () if missing else (*preparations, *config.checks)
-        for ordinal, command in enumerate(commands, 1):
+        current = _current_commands(config, worktree, commands, settings_sha256)
+        for ordinal, command in enumerate(current, 1):
             if progress:
                 progress(command)
             key = _input_key(config, worktree, command, "" if dirty else base,
@@ -143,8 +138,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     status(f"reused {(old.reused_from or head)[:8]}")
             else:
                 with _stage_status(status, ordinal, len(commands)):
-                    result = (_dispatch_one(config, worktree, head, base, command, timeout)
-                              if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
+                    result = _run_one(config, worktree, prefix, command, timeout)
                 result = replace(result, input_key=key)
             if ordinal > len(preparations) or result.exit_code:
                 results.append(result)
@@ -165,12 +159,28 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                     f"dirty before: {dirty}; dirty after: {final_dirty}"
         )))
         dirty = True
-    # A runner upgrade during execution makes the resulting receipt unverified.
-    settings_sha256 = (
-        settings_sha256 if not config.check_runner
-        or settings_sha256 == settings_fingerprint(config) else None
-    )
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
+
+
+def _current_commands(config: Config, worktree: Path, commands: tuple[str, ...],
+                      settings: str | None) -> Iterator[str]:
+    if not config.trusted_base_revision:
+        yield from commands
+        return
+    previous = config
+    for command in commands:
+        try:
+            latest = config_mod.load_trusted(worktree, previous=previous)
+        except (config_mod.ConfigError, _proc.ProcTimeout):
+            # A failed local read does not establish that the pinned plan changed.
+            yield command
+            continue
+        if (latest.trusted_base_revision != previous.trusted_base_revision
+                and (latest.checks != config.checks or settings_fingerprint(latest) != settings)):
+            raise config_mod.ConfigError("trusted check plan changed during the run. "
+                                         "Run loopzero check again with the current workflow.")
+        previous = latest
+        yield command
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
@@ -212,54 +222,32 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str,
 
 
 def _check_base(config: Config, worktree: Path) -> str:
-    if config.check_runner or config.inputs:
+    if config.inputs:
         try:
             return config.trusted_base_revision or config_mod.base_revision(worktree, config.base_branch)
         except (config_mod.ConfigError, WorktreeError):
-            if config.check_runner:
-                raise
+            pass
     return ""
-
-
-def _runner_identity(config: Config) -> tuple[str, str, str] | None:
-    executable = _runner_executable(config)
-    if executable is None:
-        return None
-    try:
-        target = Path(executable).resolve(strict=True)
-        if not target.is_file():
-            return None
-        with target.open("rb") as source:
-            digest = hashlib.file_digest(source, "sha256").hexdigest()
-    except OSError:
-        return None
-    return executable, str(target), digest
 
 
 def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
-        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+        "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits"}}
     settings["local_shell"] = CHECK_SHELL
-    if config.check_runner or config.inputs:
+    settings["check_runner"] = []  # Removed setting kept so existing receipts stay valid.
+    if config.inputs:
         settings["base"] = base
-    if config.check_runner:
-        settings["runner_executable"] = _runner_identity(config)
-        settings["environment"] = _proc.build_env(config.env_allowlist)
-    else:
-        settings["environment"] = check_environment(config)
+    settings["environment"] = check_environment(config)
     return settings
 
 
-def settings_fingerprint(config: Config) -> str | None:
+def settings_fingerprint(config: Config) -> str:
     """Bind a receipt to effective check settings, independent of the base revision."""
     settings = _execution_settings(config, config.base_branch)
-    if config.check_runner and settings["runner_executable"] is None:
-        return None
-    if not config.check_runner:
-        # Inherited host settings can differ at readiness. Stage reuse still binds them.
-        host_env = {"PATH", "LANG", "LC_ALL", "TERM", "HEAVY_SLOT_GRANTED_CORES"}
-        for name in host_env - dict(config.env).keys():
-            settings["environment"].pop(name, None)
+    # Inherited host settings can differ at readiness. Stage reuse still binds them.
+    host_env = {"PATH", "LANG", "LC_ALL", "TERM", "HEAVY_SLOT_GRANTED_CORES"}
+    for name in host_env - dict(config.env).keys():
+        settings["environment"].pop(name, None)
     return hashlib.sha256(json.dumps([settings, config.inputs], sort_keys=True).encode()).hexdigest()
 
 
@@ -326,7 +314,7 @@ def _hash_inputs(config: Config, worktree: Path, command: str, base: str, blobs:
                 contents.append(hashlib.file_digest(stream, "sha256").hexdigest())
     except (OSError, ValueError, SyntaxError, RuntimeError):
         return None
-    payload = [command, __version__, _execution_settings(config, base), blobs, contents]
+    payload = [command, installed_version(), _execution_settings(config, base), blobs, contents]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -372,8 +360,8 @@ def _preflight_alternates(config: Config, worktree: Path, prefix: list[str], com
         if alternate.startswith('"'):
             alternate = os.fsdecode(ast.literal_eval("b" + alternate))
         remedy = (f"Git object alternate {alternate!r} is not readable in the check sandbox. "
-                  "Create a standalone clone without --shared/--reference, then run "
-                  "loopzero start there and rerun loopzero check.")
+                  "Transfer this task branch to a standalone clone without --shared/--reference, "
+                  "restore .loopzero/task.md, and rerun loopzero check at the same commit.")
         command = ("/bin/sh", "-c", 'test -d "$1" && test -r "$1" && test -x "$1"', "loopzero-alternate", alternate)
         try:
             result = _run_bwrap(config, worktree, prefix, command, timeout=GIT_TIMEOUT)
@@ -451,7 +439,7 @@ def _private_check_value(name: str, value: str) -> bool:
 
 
 def _redact_check_output(config: Config, text: str) -> str:
-    stage_env = _runner_environment(config) if config.check_runner else check_environment(config)
+    stage_env = check_environment(config)
     wrapper_env = _proc.build_env(config.env_allowlist)
     secrets = {value for env in (stage_env, wrapper_env) for name, value in env.items()
                if _private_check_value(name, value)}
@@ -500,13 +488,11 @@ def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
         remedy = ""
         probe_error = probe.stderr.lower()
         if any(word in probe_error for word in ("permission", "user namespace", "userns")):
-            remedy = "\nsudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
-        raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}{remedy}")
-
-
-def _runner_environment(config: Config) -> dict[str, str]:
-    return {**SANDBOX_ENV, **dict(config.env)}
-
+            remedy = ("\nRun outside the enclosing agent sandbox or ask the host operator "
+                      "to allow user namespaces for bwrap.")
+        detail = _proc.tail(probe.stderr, 1)
+        raise SandboxUnavailable(f"bwrap namespace creation failed: exit {probe.exit_code}"
+                                 f"{f': {detail}' if detail else ''}{remedy}")
 
 
 def check_environment(config: Config) -> dict[str, str]:
@@ -590,104 +576,11 @@ def bwrap_argv(  # noqa: C901 - one bind rule per sandbox mount class
 
 
 def _git(config: Config, worktree: Path, *args: str, paths: bool = False) -> str:
-    run = _proc.run_git_paths if paths else _proc.run
-    done = run(
-        ["git", *args], cwd=worktree, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT
-    )
-    if done.exit_code != 0:
-        raise SandboxUnavailable(
-            f"git {' '.join(args)} failed in {worktree}: {_proc.tail(done.stderr, 1)}"
-        )
-    return done.stdout
+    try:
+        return git(worktree, *args, env_allowlist=config.env_allowlist, timeout=GIT_TIMEOUT, paths=paths, raw=True)
+    except GitError as exc:
+        raise SandboxUnavailable(f"{' '.join(exc.command)} failed in {worktree}: {_proc.tail(exc.tail, 1)}") from None
 
 
 def _git_dir(config: Config, worktree: Path, flag: str) -> Path:
     return (worktree / _git(config, worktree, "rev-parse", flag, paths=True)).resolve()
-
-
-def _stage_unchanged(config: Config, worktree: Path, head: str) -> bool:
-    return (_git(config, worktree, "rev-parse", "HEAD").strip() == head
-            and not _git(config, worktree, "status", "--porcelain").strip())
-
-
-def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    obj = dict(pairs)
-    if len(obj) != len(pairs):
-        raise ValueError("duplicate result field")
-    return obj
-
-
-def _runner_executable(config: Config) -> str | None:
-    executable = config.check_runner[0]
-    return executable if Path(executable).is_absolute() else shutil.which(executable)
-
-
-def _stage_frame(stdout: str, binding: dict) -> dict:
-    frame = json.loads(stdout, object_pairs_hook=_unique_fields)
-    if (not isinstance(frame, dict)
-            or set(frame) != {*binding, "exit_code", "duration_s", "not_started", "tail"}
-            or any(frame[key] != value for key, value in binding.items())
-            or type(frame["network"]) is not bool
-            or type(frame["exit_code"]) is not int
-            or type(frame["duration_s"]) not in (int, float)
-            or not math.isfinite(frame["duration_s"]) or frame["duration_s"] < 0
-            or type(frame["not_started"]) is not bool
-            or not isinstance(frame["tail"], str)):
-        raise ValueError("invalid or mismatched stage result")
-    return frame
-
-
-def _dispatch_one(  # noqa: C901 - stage freshness and timeout outcomes for one check
-    config: Config, worktree: Path, head: str, base: str, command: str, timeout: float,
-) -> CheckResult:
-    env = _runner_environment(config)
-    binding = {"worktree": str(worktree.resolve()), "head": head, "base": base, "command": command, "network": config.network,
-               "env_sha256": hashlib.sha256(json.dumps(
-                   env, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
-    try:
-        if not _stage_unchanged(config, worktree, head):
-            raise ValueError("Worktree changed before stage")
-        executable = _runner_executable(config)
-        if not executable:
-            raise ValueError("Stage runner executable missing")
-        argv = (executable, *config.check_runner[1:])
-        with _private_directories() as stack:
-            cwd = _enter_private_directory(stack, "loopzero-runner-")
-            if any((cwd / path).resolve().is_relative_to(worktree.resolve())
-                   or (not Path(path).is_absolute() and ".." in Path(path).parts
-                       and not (cwd / path).resolve().is_relative_to(cwd))
-                   for arg in (*argv, str(cwd))
-                   for value in (arg, arg.partition("=")[2],
-                                 arg[2:] if arg.startswith("-") and not arg.startswith("--") else "")
-                   for path in {value, *value.split(":")}
-                   if Path(path).is_absolute() or ".." in Path(path).parts):
-                raise ValueError("Stage runner references task worktree")
-            done = _proc.run(argv, cwd=cwd, env_allowlist=config.env_allowlist, timeout=timeout,
-                             input=json.dumps({**binding, "env": env}), encoding="utf-8")
-        if done.exit_code:
-            stderr = _proc.tail(_redact_check_output(config, done.stderr))[-2000:]
-            detail = f"Stage runner failed: process exit {done.exit_code}"
-            return CheckResult(command, done.exit_code, done.duration_s,
-                               f"{detail}\n{stderr}".rstrip())
-        frame = _stage_frame(done.stdout, binding)
-        if not _stage_unchanged(config, worktree, head):
-            raise ValueError("Worktree changed after stage")
-        if frame["not_started"]:
-            if frame["exit_code"] or frame["duration_s"] or frame["tail"]:
-                raise ValueError("inconsistent not-started result")
-            if not _stage_unchanged(config, worktree, head):
-                raise ValueError("Worktree changed before fallback")
-            local = run_checks(replace(config, check_runner=(), checks=(command,), inputs={}),
-                               worktree, timeout=timeout, _resolved=True)
-            if local.dirty:
-                raise ValueError("Local fallback failed")
-            return local.results[-1]
-        return CheckResult(command, frame["exit_code"], frame["duration_s"],
-                           _check_tail(frame["tail"], config))
-    except _proc.ProcTimeout as exc:
-        return CheckResult(command, TIMEOUT_EXIT,
-                           exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(exc.stdout, config, suffix=f"\n[loopzero] timed out after {timeout:g}s"))
-    except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        detail = _redact_check_output(config, str(exc))
-        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {detail}"))

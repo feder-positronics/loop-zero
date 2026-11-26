@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 BLOCKING = ("critical", "important")  # finding severities that block readiness
+
+
+def is_sha(value: object) -> bool:
+    """A full lowercase 40-hex Git object id."""
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value) is not None
 
 
 class LoopZeroError(Exception):
@@ -34,8 +40,6 @@ class Config:
     reviewers: tuple[str, ...]  # ordered preference: ("claude", "codex")
     reviewer_ro_paths: tuple[str, ...] = ()  # reviewer CLI install/runtime paths
     review_publishers: tuple[str, ...] = ()  # trusted GitHub logins, independent of CI token
-    review_chunk_bytes: int = 200_000
-    check_runner: tuple[str, ...] = ()
     network: bool = False  # allow network inside sandbox
     env_allowlist: tuple[str, ...] = ("PATH", "HOME", "LANG", "LC_ALL", "TERM")
     sandbox_ro: tuple[str, ...] = ()  # extra host paths exposed read-only in the sandbox
