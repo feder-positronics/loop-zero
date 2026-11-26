@@ -4298,7 +4298,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     assert cli._wait_for_mergify(config, pr, 60, confirmed=True) == "e" * 40
     assert sleeps == [30, 30]
-    assert configurations == [(REPO, "main", "main")] * 3
+    assert configurations == [(REPO, "main", "main", 60)] * 3
     assert reads_at_membership == [1, 2, 3]
     assert [c["argv"][:2] for c in gh.calls] == [detail] * 4
 
