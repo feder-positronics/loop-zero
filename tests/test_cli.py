@@ -1354,12 +1354,14 @@ def test_legacy_locale_status_reflog_push_and_cleanup(wt, repo, gh, monkeypatch,
     monkeypatch.chdir(repo)
 
     gh.respond(branch_history_key(branch=branch), [])
-    gh.respond_pr_list([], [pr_json(headRefOid=rewritten_branch)], branch=branch)
+    gh.respond_pr_list([pr_json(headRefOid=rewritten_branch)], branch=branch)
+    gh.respond(reviews_key(), [])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     program = """
 from pathlib import Path
 from loopzero import cli, worktree
 
+cli._readiness = lambda *_, **__: cli.github.Readiness(False, ("check \\u0141 is pending",))
 assert cli.main(["status"]) == 0
 # The fixture verifies and uses a local bare remote.
 cli._require_push_target = lambda *_: None
@@ -1377,6 +1379,7 @@ worktree.cleanup(wt, head)
     assert result.returncode == 0, result.stderr
     escaped = branch.encode("ascii", "backslashreplace").decode("ascii")
     assert f"branch:   {escaped}" in result.stdout
+    assert r"check \u0141 is pending" in result.stdout
     assert any(pr_list_key(branch).removeprefix("api ") in call["argv"] for call in gh.calls)
     assert git(origin, "rev-parse", ref).strip() == head
     assert not wt.exists() and not git(repo, "branch", "-a", "--list", f"*{branch}")
