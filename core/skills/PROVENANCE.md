@@ -1,7 +1,7 @@
 # Skill provenance
 
-Skills not listed below derive from loop-zero's own v1 sources at `0415d321`;
-`code-review` continues the v1 diff-review skill named `review`.
+The table lists skills adapted from sources outside loop-zero. `code-review`
+continues loop-zero v1's diff-review skill named `review`.
 
 | skill | upstream URL | upstream commit | source path | relation |
 | --- | --- | --- | --- | --- |

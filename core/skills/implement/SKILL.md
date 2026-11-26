@@ -37,8 +37,8 @@ and follow the brief's [waiting and output rules](../../../docs/DELEGATION.md#br
 
 Keep receipts, evidence, review artifacts and handoffs on the PR, issue or named durable scratch;
 reserve `/tmp` for running-command logs, builds and browser runs. At task finish, leave leftover
-worktrees and generated files to the host's named [retention job](../../../docs/DELEGATION.md#leftover-cleanup);
-without one, preserve them and report cleanup to the owner.
+worktrees and generated files to the [retention job](../../../docs/DELEGATION.md#leftover-cleanup) named in host
+or repository instructions; with no named job or unverified conditions, preserve them and report cleanup to the owner.
 
 Follow the contract's [delivery steps](../../CONTRACT.md#the-six-steps) and
 [review budget](../../CONTRACT.md#review-budget) for each pushed head, including base updates after review.
@@ -47,7 +47,8 @@ generated-file edits before primary review.
 Before the check and draft push for primary review, rebase your own commits onto `origin/<base>` using
 `[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
-Leave base merges out of a branch awaiting its delta.
+Leave base merges out of a branch awaiting its delta unless it needs a conflict refresh;
+then merge the base before checking and reviewing the resolved head.
 
 Never bypass the sandbox, change the check list or enable `[checks].network` to pass checks.
 Report base failures without working around them.

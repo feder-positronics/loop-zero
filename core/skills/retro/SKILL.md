@@ -18,8 +18,8 @@ description: Judge recent workflow changes and choose at most one next change in
   report. Read each sampled case once for its wait, who could move it and first
   real consumer use or missing proof. Use a sampled contrary case to test the
   apparent constraint when available. Read additional records only to settle
-  a verdict or test that constraint. Route defects to the owning issue via
-  [diagnose](../diagnose/SKILL.md) in the same turn.
+  a verdict or test that constraint. Name each defect's owning issue for a
+  [diagnose](../diagnose/SKILL.md) referral.
 
 ## Two decisions
 
@@ -32,7 +32,8 @@ description: Judge recent workflow changes and choose at most one next change in
    unresolved verdicts to the commissioner.
 2. Name a deletion candidate first or explain why none qualifies. Choose at
    most one change for the evidenced constraint, or none when the case is weak.
-   Record it on the owning issue with a script target, two script guards,
-   review date, revert action and install marker. Recording must not delay owner orders.
+   Give its owning issue, script target, two script guards, review date,
+   revert action and install marker.
 
-Return the verdicts and at most one proposed change to the commissioner.
+Return the verdicts, defect referrals and at most one proposed change to the
+commissioner, who records them and issues any orders.

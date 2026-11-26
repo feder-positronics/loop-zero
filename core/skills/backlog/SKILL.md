@@ -35,5 +35,5 @@ every open issue into counted work, standing tracking or unclassified; show held
 work and classification gaps explicitly. Use consumer AGENTS.md conventions
 rather than inventing labels or another state store.
 
-For delivery retrospectives and digests, follow [CODE-HEALTH](../../../docs/CODE-HEALTH.md#delivery-retrospectives)
-and its [replay/partial-output contract](../../../docs/CODE-HEALTH.md#replayable-partial-digest).
+For delivery retrospectives, follow [CODE-HEALTH](../../../docs/CODE-HEALTH.md#delivery-retrospectives);
+for a delivery digest, follow its [replay/partial-output contract](../../../docs/CODE-HEALTH.md#replayable-partial-digest).
