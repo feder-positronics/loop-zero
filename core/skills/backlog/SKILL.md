@@ -22,8 +22,7 @@ For pickup, identify unmet acceptance, ownership, collisions and the smallest
 next action. Reconcile stale claims with dispatch authority; do not duplicate
 accepted work. If no pickup is justified, name missing evidence or the actual
 hold, owner and next action. Among ready items prefer open PRs, then items
-whose issue names an open parent step using [plan's `Unblocks:` format](../plan/SKILL.md)
-or a measured shared cost it removes (`Eases: <number> (source)`). Route
+whose issue names an open parent step using [plan's `Unblocks:` format](../plan/SKILL.md). Route
 authorized pickup to [work-issue](../work-issue/SKILL.md), design to
 [write-design-doc](../write-design-doc/SKILL.md), briefs to [explain](../explain/SKILL.md).
 
@@ -36,6 +35,5 @@ every open issue into counted work, standing tracking or unclassified; show held
 work and classification gaps explicitly. Use consumer AGENTS.md conventions
 rather than inventing labels or another state store.
 
-For delivery retrospectives, use the [code-health examples](../../../docs/CODE-HEALTH.md#delivery-retrospectives): report actual protection at each tree/stage, budgeted final-QA versus billed work, and wait versus execution. Keep unknowns visible; route missing consumer proof to its existing owner rather than adding a gate.
-
-For a delivery digest, follow the [replay/partial-output contract](../../../docs/CODE-HEALTH.md#replayable-partial-digest); link the external consumer reducer and maintainer, retain all 16 views and route at most three aggregate repair families to existing work, so the digest points at owners instead of filing an issue per metric.
+For delivery retrospectives and digests, follow [CODE-HEALTH](../../../docs/CODE-HEALTH.md#delivery-retrospectives)
+and its [replay/partial-output contract](../../../docs/CODE-HEALTH.md#replayable-partial-digest).

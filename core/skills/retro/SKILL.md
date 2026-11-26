@@ -5,10 +5,6 @@ description: Judge recent workflow changes and choose at most one next change in
 
 # Weekly workflow retro
 
-Lean commissions one fresh read-only analyst using the repository's `deep`
-profile on the same weekday. Run early once if a guard is outside its band
-two days running or independent incidents repeat.
-
 ## Evidence
 
 - Run [retro_metrics.py](../../../scripts/retro_metrics.py) once with the
@@ -33,18 +29,10 @@ two days running or independent incidents repeat.
    with both guards intact. Revert for a lost protection, material regression
    under comparable load or no benefit after adequate exposure. For insufficient
    evidence, name the next observation and date. Extend once, then escalate
-   unresolved verdicts to Lean.
+   unresolved verdicts to the commissioner.
 2. Name a deletion candidate first or explain why none qualifies. Choose at
    most one change for the evidenced constraint, or none when the case is weak.
-   Record it and direct owner or OD orders on `workflow-change` issues with a script target, two script guards,
-   review date, revert action and install marker. Recording must not delay orders.
+   Record it on the owning issue with a script target, two script guards,
+   review date, revert action and install marker. Recording must not delay owner orders.
 
-For structural changes, reverts or safeguard removals, Lean commissions a
-short read-only check using the same evidence and a different family's
-configured [deep route](../../../docs/DELEGATION.md#resolve-the-model-before-delegation).
-Select Anthropic for the default OpenAI analyst. Adopt on agreement or defer
-with the disputed fact.
-
-Send Marcin one “Since you were away” screen in plain language with Warsaw
-dates. Put up to two owner decisions first under a heading, each with a
-recommendation and default.
+Return the verdicts and at most one proposed change to the commissioner.
