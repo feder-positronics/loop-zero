@@ -51,11 +51,17 @@ class GitError(WorktreeError):
         super().__init__(f"{' '.join(command)} failed: {tail.strip()[-400:]}")
 
 
-def _git(cwd: Path, *args: str, timeout: float = 120, preserve_whitespace: bool = False) -> str:
+def _git(
+    cwd: Path, *args: str, timeout: float = 120,
+    preserve_whitespace: bool = False, preserve_newlines: bool = False,
+) -> str:
     argv = ("git", *args)
-    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout)
+    done = run(list(argv), cwd=cwd, env_allowlist=GIT_ENV, timeout=timeout,
+               preserve_newlines=preserve_newlines)
     if done.exit_code != 0:
         raise GitError(argv, done.stderr or done.stdout)
+    if preserve_newlines:
+        return done.stdout
     return done.stdout.removesuffix("\n") if preserve_whitespace else done.stdout.strip()
 
 
@@ -243,8 +249,9 @@ def is_dirty(wt: Path) -> bool:
     return bool(_git(Path(wt), "status", "--porcelain", "--untracked-files=all"))
 
 
-def diff_since(wt: Path, sha: str) -> str:
-    return _git(Path(wt), "diff", "--no-color", sha, "HEAD")
+def diff_since(wt: Path, sha: str) -> bytes:
+    diff = _git(Path(wt), "diff", "--no-color", sha, "HEAD", preserve_newlines=True)
+    return diff.encode("utf-8", errors="surrogateescape")
 
 
 def merges_since(wt: Path, sha: str) -> list[str]:

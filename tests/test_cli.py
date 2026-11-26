@@ -1284,7 +1284,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
-    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
+    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
     assert_git_cost(git_calls, 14, 1)
@@ -1735,7 +1735,7 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
     task = (wt / ".loopzero/task.md").read_text()
-    expected_diff = git(wt, "diff", "--no-color", first, head).strip().encode("utf-8")
+    expected_diff = git(wt, "diff", "--no-color", first, head).encode("utf-8")
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith(f"delta review by claude on {head[:12]}: approve")
     header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)

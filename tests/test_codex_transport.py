@@ -5,6 +5,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -37,8 +38,8 @@ print(json.dumps({'type':'thread.started','thread_id':session,'session_id':sessi
 for index,argv in enumerate([['git','-C',cwd,'rev-parse','HEAD'],['git','-C',cwd,'diff','--no-color',BASE,HEAD]]):
  command=' '.join(argv);item={'id':'read-'+str(index),'type':'command_execution','command':command}
  print(json.dumps({'type':'item.started','item':dict(item,status='in_progress')}))
- done=subprocess.run(argv,capture_output=True,text=True)
- print(json.dumps({'type':'item.completed','item':dict(item,status='completed',exit_code=done.returncode,aggregated_output=done.stdout)}))
+ done=subprocess.run(argv,capture_output=True)
+ print(json.dumps({'type':'item.completed','item':dict(item,status='completed',exit_code=done.returncode,aggregated_output=done.stdout.decode(errors="replace"))}))
 message=json.dumps({'verdict':'approve','findings':[]})
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text(message)
 print(json.dumps({'type':'item.completed','item':{'id':'final','type':'agent_message','text':message}}))
@@ -352,7 +353,7 @@ def test_retired_pair_marker_cannot_pass_eligibility(native, source, include_evi
     assert eligible(review) is None
 
 
-@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta"])
+@pytest.mark.parametrize("kind", ["normal", "repost", "tampered_digest", "changed_raw", "delta", "delta_legacy"])
 def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_path, fake_bin, monkeypatch, kind):
     from tests.test_github import pr_json, rest_pr_json, threads_json
 
@@ -361,12 +362,14 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
     cfg = Config(repo, "main", ("true",), (), "squash", ("codex",), review_publishers=("bot",))
     if kind.startswith("delta"):
         reviewed, merge_base = result.head, native[1]["base"]
-        commit_file(native[2], "delta.txt", "delta only\n", "delta repair")
+        git(native[2], "config", "core.autocrlf", "false")
+        content = b"hello\r\n" if kind == "delta" else b"caf\xe9\r\n"
+        (native[2] / "README.md").write_bytes(content)
+        git(native[2], "commit", "-qam", "delta repair")
         head = git(native[2], "rev-parse", "HEAD").strip()
         git(native[2], "update-ref", "refs/remotes/origin/main", merge_base)
-        task = native[2] / ".loopzero/task.md"
-        task.parent.mkdir()
-        task.write_text("Inspect the delta")
+        (native[2] / ".loopzero").mkdir()
+        (native[2] / ".loopzero/task.md").write_text("Inspect the delta")
         tool = fake_bin / "codex"
         old_range, new_range = f"{merge_base!r},{reviewed!r}", f"{reviewed!r},{head!r}"
         tool.write_text(tool.read_text().replace(old_range, new_range))
@@ -374,7 +377,12 @@ def test_large_publication_confirmation_and_hosted_agreement(native, gh, tmp_pat
                                  publication=(repo, 7, "bot"))
         proof = runners.codex_evidence(result)
         assert proof["kind"] == "delta" and proof["calls"][0]["base"] == reviewed != merge_base
-        delta_diff = git(native[2], "diff", "--no-color", reviewed, head).strip().encode()
+        argv = ["git", "diff", "--no-color", reviewed, head]
+        delta_diff = subprocess.check_output(argv, cwd=native[2])
+        assert b"-hello\n+" + content in delta_diff
+        if kind == "delta_legacy":
+            assert "+caf\\xe9\r\n" in runners.render_patch(delta_diff)
+        assert proof["calls"][0]["inspection"] == ("verified" if kind == "delta" else "unknown")
         assert proof["calls"][0]["diff_sha256"] == hashlib.sha256(delta_diff).hexdigest()
     head = result.head
     prefix = (
