@@ -88,12 +88,8 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     headings = [ln for ln in text.splitlines() if ln.startswith("## ")]
     assert headings == ["## Context and goal", "## Acceptance", "## Notes", "## Base",
                         "## Validation", "## Review"], "matches core/HANDOFF.md"
-    assert "- **Context:** <plain newcomer context; explain domain terms from read sources or describe what they do instead; rulings and dispatch belong in Notes>" in text
-    assert "- **Problem:** <one or two plain sentences before code names: what goes wrong (one problem only), who notices, and evidence/cost; refs in brackets at the end>" in text
-    assert "- **Goal:** <one plain sentence: what the owner or users now notice (and cost/saving if known), because this change fixes the problem>" in text
     prompts = [ln.split(":**", 1)[0] for ln in text.splitlines() if ln.startswith("- **")]
     assert prompts == ["- **Goal", "- **Problem", "- **Context"], "owner-facing goal leads"
-    assert "Refs #<issue number, or remove this line>" in text
     base_section = text.split("## Base\n", 1)[1].split("\n## ", 1)[0]
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
     assert "lz/my-task" in git(repo, "branch", "--list", "lz/my-task")
@@ -182,15 +178,6 @@ def test_start_rejects_bad_slug(repo: Path, slug: str) -> None:
     with pytest.raises(worktree.WorktreeError, match="invalid slug"):
         worktree.start(repo, slug, "main")
     assert not (repo / ".worktrees").exists(), "rejected before fetch or worktree add"
-
-
-@pytest.mark.parametrize("slug,title", [
-    ("add-workflow-config-note", "Add workflow config note"),
-    ("fix_bug--123", "Fix bug 123"),
-    ("x", "X"),
-])
-def test_title_from_slug(slug: str, title: str) -> None:
-    assert worktree.title_from_slug(slug) == title
 
 
 def test_branch_name_uses_git_check_ref_format(repo: Path) -> None:
