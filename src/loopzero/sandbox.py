@@ -178,6 +178,7 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
 
 
 INCOMPLETE_CHECK_COMMAND = "<checks incomplete>"
+INCOMPLETE_CHECK = CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")
 
 
 @contextmanager
@@ -191,8 +192,7 @@ def _stage_checkpoints(checkpoint: Callable[[CheckReport], None] | None, delegat
             if not stage.input_key:
                 return
             unvisited = (previous[command] for command in remaining if command in previous)
-            report = replace(report, results=(*report.results, *unvisited,
-                                              CheckResult(INCOMPLETE_CHECK_COMMAND, 1, 0.0, "")))
+            report = replace(report, results=(*report.results, *unvisited, INCOMPLETE_CHECK))
         pending = report if delegated and not stage.exit_code else None
         if pending is None:
             checkpoint(report)
