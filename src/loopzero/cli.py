@@ -607,43 +607,47 @@ def cmd_start(args: argparse.Namespace) -> int:
     return 0
 
 
+def _check_failure_preview(tail: str, limit: int = 1536) -> str:
+    if len(tail.encode()) <= limit:
+        return tail
+    readable = "\n".join(line for line in tail.splitlines() if len(line.encode()) <= limit // 2)
+    return (readable or tail).encode()[-limit:].decode(errors="ignore")
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     wt, config = _context(args, pin_checks=True)
     if not config.checks:
         raise config_mod.ConfigError("checks.commands must list at least one command to run checks")
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
-            f"running: {command}", flush=True),
-            status=lambda message: print(message, flush=True))
+            f"running: {command}", flush=True), status=partial(print, flush=True))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
+    shortened = False
     for result in report.results:
         if result.exit_code != 0:
             print(f"--- {result.command} (exit {result.exit_code}) ---", file=sys.stderr)
             tail = _proc.tail(result.tail)
-            print(tail, file=sys.stderr)
+            preview = _check_failure_preview(tail)
+            shortened |= preview != tail
+            print(preview, file=sys.stderr)
             if not config.network and (result.command.startswith("uv sync --offline --locked")
                                        or OFFLINE_FAILURE_RE.search(tail)):
-                env = {
-                    **sandbox.SANDBOX_ENV,
-                    **_proc.build_env(config.env_allowlist),
-                    **dict(config.env),
-                }
+                env = sandbox.SANDBOX_ENV | _proc.build_env(config.env_allowlist) | dict(config.env)
                 print(
                     "\nThe sandbox has no network because `[checks] network = false`; "
                     f"the effective UV_CACHE_DIR inside the sandbox is {env['UV_CACHE_DIR']}. "
-                    "To prepare offline, run UV_CACHE_DIR=<effective-cache> uv sync --group dev "
-                    "(use the groups your checks require) on the host, or the same commands, so the cache "
-                    "under `[checks] writable` is warm, or set `[checks] env` UV_CACHE_DIR to "
-                    "that cache.",
-                    file=sys.stderr,
+                    "Run UV_CACHE_DIR=<effective-cache> uv sync --group dev on the host "
+                    "(use the required groups) so the cache under `[checks] writable` is warm, "
+                    "or set `[checks] env` UV_CACHE_DIR to a warm cache.", file=sys.stderr,
                 )
-    current_head = _save_report(wt, report)
-    if current_head is not None:
+    if (current_head := _save_report(wt, report)) is not None:
         print(f"check result discarded: checked HEAD {report.head}, current HEAD {current_head}",
               file=sys.stderr)
         return 1
+    if shortened:
+        print(f"Full diagnostic tail: {CHECKS_FILE} (head {report.head})", file=sys.stderr)
     if report.ok and not report.dirty:
         _print_receipt(wt, report, "produced")
     _refresh_pr_checks(wt, config)
@@ -998,7 +1002,7 @@ def _run_review(
     task = worktree.task_text(wt)
     authors = runners.author_families(wt, head, lineage_base)
     candidates = [family for family in config.reviewers if family not in authors]
-    failures: list[str] = []
+    errors: dict[str, tuple[str, Exception | None]] = {}
     excluded = [family for family in config.reviewers if family in authors]
     def select(family: str) -> Callable[..., ReviewResult]:
         settings = config.review.get(family)
@@ -1032,7 +1036,7 @@ def _run_review(
     attempts = candidates + excluded
     for index, family in enumerate(attempts):
         if family in unusable:
-            failures.append(unusable[family])
+            errors[family] = unusable[family], None
             continue
         if family in excluded and not fallback:
             fallback = ("independent reviewers failed: " + "; ".join(reasons)
@@ -1054,33 +1058,45 @@ def _run_review(
                 break
         except RUNNER_FAILURES as exc:
             reason, detail, fallback_reason = _review_failure(family, exc)
-            failures.append(detail)
+            errors[family] = detail, exc
             reasons.append(f"{family}: {fallback_reason}")
             if any(next_family in selected for next_family in attempts[index + 1:]):
                 print(f"reviewer {family} unavailable: {reason}", file=sys.stderr)
     else:
         raise IndependentReviewerUnavailable(
-            _independence_message(authors, excluded, failures)
+            _independence_message(authors, excluded, [detail for detail, _ in errors.values()])
+            + _save_review_failure_output(wt, head, kind, errors)
         )
     return dataclasses.replace(result, fallback=fallback)
 
 
+def _save_review_failure_output(wt: Path, head: str, kind: str, errors: dict[str, tuple[str, Exception | None]]) -> str:
+    fragments = {family: exc.tail for family, (_, exc) in errors.items()
+                 if isinstance(exc, runners.RunnerMalformedOutput) and exc.tail}
+    if not fragments:
+        return ""
+    path = wt / ".loopzero" / f"reviewer-output-{head[:12]}-{kind}.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        _write_json_atomically(path, fragments)
+    except OSError as exc:
+        return f"\nCould not save reviewer output: {exc.strerror or exc}"
+    return f"\nReviewer output: {path.relative_to(wt)}"
+
+
 def _review_failure(family: str, exc: Exception) -> tuple[str, str, str]:
     lines = str(exc).splitlines()
-    detail = "\n".join(lines[:3])
-    fallback_reason = _FALLBACK_REASONS[3]
+    detail = "\n".join(lines[:1 if isinstance(exc, runners.RunnerMalformedOutput) else 3])
     if isinstance(exc, runners.RunnerAuthFailed):
         login = "claude auth login" if family == "claude" else "codex login"
-        detail += f"\nFix: run `{login}`."
-        fallback_reason = _FALLBACK_REASONS[0]
-    elif isinstance(exc, runners.RunnerUsageLimit):
-        detail += "\nFix: wait for the limit to reset or switch this reviewer's account."
-        fallback_reason = _FALLBACK_REASONS[1]
-    elif isinstance(exc, runners.RunnerMissing):
+        return lines[0], detail + f"\nFix: run `{login}`.", _FALLBACK_REASONS[0]
+    if isinstance(exc, runners.RunnerUsageLimit):
+        fix = "\nFix: wait for the limit to reset or switch this reviewer's account."
+        return lines[0], detail + fix, _FALLBACK_REASONS[1]
+    if isinstance(exc, runners.RunnerMissing):
         package = "@anthropic-ai/claude-code" if family == "claude" else "@openai/codex"
-        detail += f"\nFix: install it with `npm install -g {package}`."
-        fallback_reason = _FALLBACK_REASONS[2]
-    return lines[0], detail, fallback_reason
+        return lines[0], detail + f"\nFix: install it with `npm install -g {package}`.", _FALLBACK_REASONS[2]
+    return lines[0], detail, _FALLBACK_REASONS[3]
 
 
 def _independence_message(
@@ -1278,14 +1294,13 @@ def _poll_until(started: float, timeout: float, *, bounded: bool = False) -> Ite
 
 def _wait_with_deadline(
     wt: Path, config: Config, pr: github.PR, timeout: float, *, kicked: bool,
-    started: float | None = None, shown: tuple[str, ...] = (), args: argparse.Namespace,
+    started: float, shown: tuple[str, ...] = (), args: argparse.Namespace,
     allow_merged: bool = False, allow_skipped: bool = False, initial: github.Readiness | None = None,
 ) -> tuple[github.PR, github.Readiness | None, bool] | None:
-    started = time.monotonic() if started is None else started
+    observe = partial(_wait_for_checks, wt, config, pr, timeout, kicked=kicked, started=started,
+                      shown=shown, args=args, allow_merged=allow_merged, allow_skipped=allow_skipped, initial=initial)
     if timeout == 0:
-        return _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                shown=shown, args=args, allow_merged=allow_merged,
-                                allow_skipped=allow_skipped, initial=initial)
+        return observe()
     deadline = started + timeout
     if time.monotonic() >= deadline:
         _print_check_wait_timeout(pr)
@@ -1293,9 +1308,7 @@ def _wait_with_deadline(
     reported_timeout = False
     try:
         with github.bounded_reads(deadline, token=None, retry=True):
-            waited = _wait_for_checks(wt, config, pr, timeout, kicked=kicked, started=started,
-                                      shown=shown, args=args, bounded=True, allow_merged=allow_merged,
-                                      allow_skipped=allow_skipped, initial=initial)
+            waited = observe(bounded=True)
             reported_timeout = waited is None
     except github.ReadDeadline:
         if not reported_timeout:
@@ -1305,10 +1318,8 @@ def _wait_with_deadline(
 
 
 def _print_check_wait_timeout(pr: github.PR) -> None:
-    if pr.mergeable == "UNKNOWN":
-        print(f"timed out waiting for GitHub to compute mergeability on {pr.head_sha[:12]}")
-    else:
-        print(f"timed out waiting for required checks on {pr.head_sha[:12]}")
+    reason = "GitHub to compute mergeability" if pr.mergeable == "UNKNOWN" else "required checks"
+    print(f"timed out waiting for {reason} on {pr.head_sha[:12]}")
 
 
 def _verify_wait_snapshot(
@@ -1321,6 +1332,16 @@ def _verify_wait_snapshot(
     if _current_check_report(wt, latest, head) is None:
         raise CliError("workflow settings changed while waiting; run loopzero check and retry")
     raise CliError("workflow settings changed while waiting; retry with the current settings")
+
+
+def _print_wait_changes(shown: tuple[str, ...], pending: tuple[str, ...]) -> None:
+    def by_check(reasons: tuple[str, ...]) -> dict[str, str]:
+        return {reason.rpartition("' ")[0] or reason: reason for reason in reasons}
+    previous, current = by_check(shown), by_check(pending)
+    if changed := [reason for key, reason in current.items() if previous.get(key) != reason]:
+        print("waiting: " + "; ".join(changed))
+    if cleared := [key.removeprefix("required check '") for key in previous if key not in current]:
+        print("cleared: " + "; ".join(cleared))
 
 
 def _wait_for_checks(
@@ -1355,11 +1376,11 @@ def _wait_for_checks(
         pending = _pending_checks(
             config, current, readiness, allow_skipped=kicked or (allow_skipped and not current.is_draft),
         )
+        if pending or readiness.ready:
+            _print_wait_changes(shown, pending)
         if not pending:
             return current, readiness, kicked
-        if pending != shown:
-            print("waiting: " + "; ".join(pending))
-            shown = pending
+        shown = pending
         elapsed = time.monotonic() - grace_started
         if readiness.stale_verdicts and not stale_notice:
             print(
