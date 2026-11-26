@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -51,27 +53,29 @@ def test_branch_reads_valid_names_and_rejects_detached_head(repo: Path, slug: st
         worktree.branch(repo)
 
 
-@pytest.mark.parametrize("branch", [None, "feature/ci+release", "symbolic"])
+@pytest.mark.parametrize("branch", [None, "feature/ci+release", "symbolic", "legacy"])
 def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
     side = branch or "side"
     git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
     if branch == "symbolic":
         git(repo, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/main")
-    elif branch:
+    elif branch and branch != "legacy":
         checkout = repo.parent / "single-branch"
         origin = (repo.parent / "origin.git").as_uri()
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
-    invoke, local_head = worktree._git, worktree.head(repo)
-    def interleave(path, *args, **kwargs):
-        result = invoke(path, *args, **kwargs)
-        if args[0] == "fetch":
-            git(path, "fetch", "-q", "origin", f"refs/heads/{side}")
+    invoke, local_head = worktree.run, worktree.head(repo)
+    def interleave(argv, **kwargs):
+        if branch == "legacy" and argv[:3] == ("git", "fetch", "--porcelain"):
+            return invoke(("git", "fetch", "--loopzero-unsupported"), **kwargs)
+        result = invoke(argv, **kwargs)
+        if argv[1] == "fetch" and result.exit_code == 0:
+            git(kwargs["cwd"], "fetch", "-q", "origin", f"refs/heads/{side}")
         return result
 
-    monkeypatch.setattr(worktree, "_git", interleave)
+    monkeypatch.setattr(worktree, "run", interleave)
     wt = worktree.start(repo, "my-task", "main")
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
@@ -90,7 +94,7 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert base_section.strip().splitlines() == [f"main @ {upstream}", f"Base: {upstream}"]
 
 
-@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base"])
+@pytest.mark.parametrize("state", ["same-base", "dirty", "moved-base", "detached"])
 def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     repo = repo.rename(repo.with_name("repo\rreturn"))
     base = commit_on_origin(repo, "base-change")
@@ -99,7 +103,8 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
 
     def interrupt_after_add(cwd, *args, **kwargs):
         output = run_git(cwd, *args, **kwargs)
-        if args[:2] == ("worktree", "add"):
+        interrupted_step = ("worktree", "add") if state == "detached" else ("switch", "--quiet")
+        if args[:2] == interrupted_step:
             raise KeyboardInterrupt
         return output
 
@@ -108,9 +113,10 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
         with pytest.raises(KeyboardInterrupt):
             worktree.start(repo, "my-task", "main")
     task = worktree.task_file(wt)
-    assert (worktree.branch(wt), worktree.head(wt)) == ("lz/my-task", base)
+    current_branch = git(wt, "branch", "--show-current").strip()
+    assert (current_branch, worktree.head(wt)) == ("" if state == "detached" else "lz/my-task", base)
     assert not task.exists()
-    if state == "same-base":
+    if state in {"same-base", "detached"}:
         assert worktree.start(repo, "my-task", "main") == wt
         assert worktree.base_sha(wt) == base
         text = task.read_text()
@@ -200,7 +206,8 @@ def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> N
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
     with pytest.raises(worktree.GitError) as info:
         worktree.start(repo, "nobase", "does-not-exist")
-    assert info.value.command[:2] == ("git", "ls-remote")
+    assert info.value.command[0] == "git"
+    assert info.value.command[1] in {"fetch", "ls-remote"}
     assert info.value.tail
 
 
@@ -255,14 +262,43 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
 
-@pytest.mark.parametrize("file", ["scratch.txt", "local.env", ".loopzero/user-notes.md"])
-def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
+def test_cleanup_removes_ignored_artifacts(repo: Path) -> None:
+    (repo / ".git/info/exclude").write_text(".venv/\n")
+    wt = worktree.start(repo, "cached", "main")
+    (wt / ".venv").mkdir()
+    (wt / ".venv/dependency").write_text("generated")
+    worktree.cleanup(wt, worktree.head(wt))
+    assert not wt.exists()
+    assert not git(repo, "branch", "--list", "lz/cached")
+
+
+def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> None:
     (repo / ".git/info/exclude").write_text("local.env\n")
     wt = worktree.start(repo, "dirty", "main")
-    (wt / file).write_text("x")
-    with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
+    (wt / "local.env").write_text("ignored")
+    (wt / "scratch.txt").write_text("keep my work")
+    with pytest.raises(worktree.WorktreeError, match="worktree is dirty"):
         worktree.cleanup(wt, worktree.head(wt))
-    assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+    assert (wt / "scratch.txt").read_text() == "keep my work"
+    assert (wt / "local.env").read_text() == "ignored"
+    assert "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+
+
+@pytest.mark.parametrize("kind", ["same repo", "other repo", "clone"])
+def test_cleanup_preserves_ignored_nested_worktrees(repo: Path, tmp_path: Path, kind: str) -> None:
+    (repo / ".git/info/exclude").write_text("nested/\n")
+    wt = worktree.start(repo, "parent", "main")
+    nested = wt / "nested"
+    if kind == "clone":
+        git(repo, "clone", str(repo), str(nested))
+    else:
+        source = init_git_repo(tmp_path / "other") if kind == "other repo" else repo
+        git(source, "worktree", "add", "--detach", str(nested))
+    assert not worktree.is_dirty(wt)
+    with pytest.raises(worktree.WorktreeError, match=r"nested (Git )?worktree"):
+        worktree.cleanup(wt, worktree.head(wt))
+    assert (nested / ".git").exists()
+    assert "lz/parent" in git(repo, "branch", "--list", "lz/parent")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
@@ -303,3 +339,24 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
         assert git(repo, "ls-remote", "origin", "refs/heads/lz/abandoned").split() == [
             head, "refs/heads/lz/abandoned"
         ]
+
+
+def test_start_retries_after_git_checkout_interrupt(repo, tmp_path):
+    (repo / ".gitattributes").write_text("README.md filter=paused\n")
+    (repo / "workflow.toml").write_text('[repo]\nname="owner/repo"\n')
+    git(repo, "add", ".gitattributes", "workflow.toml")
+    git(repo, "commit", "-qm", "add checkout barrier")
+    git(repo, "push", "-q", "origin", "main")
+    pid_file, entered = tmp_path / "starter.pid", tmp_path / "checkout-entered"
+    git(repo, "config", "filter.paused.smudge",
+        f'cat >/dev/null; : > {shlex.quote(str(entered))}; '
+        f'kill -INT "$(cat {shlex.quote(str(pid_file))})"; exec sleep 30')
+    start = ("import os, sys; from pathlib import Path; from loopzero.cli import main; "
+             "Path(sys.argv[1]).write_text(str(os.getpid())); sys.exit(main(['start', 'paused']))")
+    command = [sys.executable, "-c", start, str(pid_file)]
+    first = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    assert entered.exists() and first.returncode in (-2, 130)
+    git(repo, "config", "--unset", "filter.paused.smudge")
+    resumed = subprocess.run(command, cwd=repo, capture_output=True, timeout=8, check=False)
+    assert resumed.returncode == 0, resumed.stderr
+    assert worktree.task_file(worktree.worktree_dir(repo, "paused")).is_file()
