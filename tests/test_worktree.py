@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from loopzero import worktree
-from tests.conftest import commit_file, git
+from tests.conftest import commit_file, git, git_environment, init_git_repo
 
 
 @pytest.fixture
@@ -32,6 +32,13 @@ def commit_on_origin(repo: Path, name: str) -> str:
     commit_file(clone, name, name, name)
     git(clone, "push", "-q", "origin", "main")
     return git(clone, "rev-parse", "HEAD").strip()
+
+
+def test_git_fixture_ignores_inherited_directory(tmp_path, monkeypatch):
+    ambient = tmp_path / "ambient.git"
+    monkeypatch.setenv("GIT_DIR", str(ambient))
+    checkout = init_git_repo(tmp_path / "checkout")
+    assert (checkout / ".git").is_dir() and not ambient.exists()
 
 
 def test_branch_preserves_unicode_whitespace(repo: Path) -> None:
@@ -321,7 +328,7 @@ def test_abandoned_worktree_guide(repo: Path, tmp_path: Path, state: str) -> Non
     commands = section.split("```sh\n", 1)[1].split("```", 1)[0]
     result = subprocess.run(
         ["sh", "-c", commands, "cleanup-guide", str(wt), "abandoned", head],
-        cwd=caller, capture_output=True, text=True, check=False,
+        cwd=caller, env=git_environment(), capture_output=True, text=True, check=False,
     )
 
     assert (result.returncode == 0) == (state == "clean"), result.stderr
