@@ -107,14 +107,16 @@ def _repo_root(wt: Path) -> Path:
     return root
 
 
-def _load_config(args: argparse.Namespace, root: Path, *, pin_checks: bool = False) -> Config:
+def _load_config(
+    args: argparse.Namespace, root: Path, *, pin_checks: bool = False, previous: Config | None = None,
+) -> Config:
     path = args.config or root / "workflow.toml"
     if not pin_checks:
         return config_mod.load(path)
     if args.config:
         print("checks are unpinned because --config was provided")
         return config_mod.load(path)
-    config = config_mod.load_trusted(root)
+    config = config_mod.load_trusted(root, previous=previous)
     if args.command == "check":
         if not config.checks:
             raise config_mod.ConfigError(
@@ -1330,17 +1332,18 @@ def _print_check_wait_timeout(pr: github.PR) -> None:
 
 def _verify_wait_snapshot(
     args: argparse.Namespace | None, wt: Path, config: Config, head: str, current_head: str,
-) -> None:
+    previous: Config | None = None,
+) -> Config:
     if current_head != head:
         raise CliError(f"PR head changed while waiting: {head[:12]} to {current_head[:12]}")
     if args is None:
-        return
-    latest = _load_config(args, wt, pin_checks=True)
+        return config
+    latest = _load_config(args, wt, pin_checks=True, previous=previous or config)
     changed = "workflow settings"
     if latest == config:
         if (latest.trusted_base_revision == config.trusted_base_revision
                 or not (config.check_runner or config.inputs)):
-            return
+            return latest
         changed = "check base"
     if _current_check_report(wt, latest, head) is None:
         raise CliError(f"{changed} changed while waiting; run loopzero check and retry")
@@ -1358,13 +1361,14 @@ def _wait_for_checks(
     started = grace_started if started is None else started
     current = pr
     stale_notice = False
+    previous = config
     for _ in _poll_until(started, timeout, bounded=bounded):
         if initial is not None:
             readiness = initial
             initial = None
         else:
             current = github.pr_view(config.repo, pr.number)
-            _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha)
+            previous = _verify_wait_snapshot(args, wt, config, pr.head_sha, current.head_sha, previous)
             if allow_merged and current.state == "MERGED":
                 return current, None, kicked
             readiness = _readiness(wt, config, current, pr.head_sha, workflow_wait=True)
