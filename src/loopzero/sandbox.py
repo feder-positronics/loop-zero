@@ -31,7 +31,8 @@ DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
 CHECK_SHELL = ("/bin/bash", "--posix", "-o", "pipefail", "-c")
 CHECK_TAIL_BYTES = 16 * 1024
-HEARTBEAT_INTERVAL = 30.0
+FIRST_HEARTBEAT_DELAY = 30.0
+HEARTBEAT_INTERVAL = 300.0
 SANDBOX_HOME = "/tmp/home"
 # Only these system directories are exposed read-only by default; home tool paths
 # require explicit `[checks] ro_paths`. Host homes, sockets and processes stay hidden.
@@ -253,6 +254,11 @@ def settings_fingerprint(config: Config, worktree: Path, *, base: str | None = N
     settings = _execution_settings(config, base)
     if config.check_runner and settings["runner_executable"] is None:
         return None
+    if not config.check_runner:
+        # Inherited host settings can differ at readiness. Stage reuse still binds them.
+        host_env = {"PATH", "LANG", "LC_ALL", "TERM", "HEAVY_SLOT_GRANTED_CORES"}
+        for name in host_env - dict(config.env).keys():
+            settings["environment"].pop(name, None)
     payload = [settings, config.inputs]
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
@@ -322,9 +328,11 @@ def _stage_status(status: Callable[[str], None] | None, ordinal: int, total: int
     started = time.monotonic()
 
     def heartbeat():
-        while not stopped.wait(HEARTBEAT_INTERVAL):
+        delay = FIRST_HEARTBEAT_DELAY
+        while not stopped.wait(delay):
             status(f"stage {ordinal}/{total}: running "
                    f"({time.monotonic() - started:.1f}s elapsed)")
+            delay = HEARTBEAT_INTERVAL
 
     reporter = threading.Thread(target=heartbeat, daemon=True) if status else None
     if reporter:
@@ -446,6 +454,7 @@ def _run_one(
             env_allowlist=config.env_allowlist,
             timeout=timeout,
             merge_output=True,
+            tail_chars=CHECK_TAIL_BYTES,
         )
     except _proc.ProcTimeout as exc:
         return CheckResult(command, TIMEOUT_EXIT, timeout,
