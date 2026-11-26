@@ -16,7 +16,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
-from itertools import pairwise
+from itertools import count, pairwise
 from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
@@ -176,18 +176,15 @@ def _included_response(output: str) -> tuple[str | None, dict[str, str], str]:
     """Split one `gh api --include` response into status, headers and body."""
     for line_separator in ("\r\n", "\n"):
         head, separator, body = output.partition(line_separator * 2)
-        if separator:
+        if not separator:
+            continue
+        status_line, *header_lines = head.split(line_separator)
+        if not (match := _HTTP_STATUS_RE.match(status_line)):
             break
-    else:
-        return None, {}, output
-    lines = head.split(line_separator)
-    match = _HTTP_STATUS_RE.match(lines[0])
-    if match is None:
-        return None, {}, output
-    headers = {name.strip().casefold(): value.strip()
-               for name, separator, value in (line.partition(":") for line in lines[1:])
-               if separator}
-    return match.group(1), headers, body
+        headers = {name.strip().casefold(): value.strip()
+                   for name, colon, value in (line.partition(":") for line in header_lines) if colon}
+        return match.group(1), headers, body
+    return None, {}, output
 
 
 def _api_methods(args: tuple[str, ...]) -> list[str]:
@@ -200,14 +197,6 @@ _API_BODY_FLAGS = {"-f", "-F", "--field", "--raw-field", "--input"}
 def _api_method(args: tuple[str, ...]) -> str:
     methods = _api_methods(args)
     return methods[0] if methods else "POST" if _API_BODY_FLAGS.intersection(args) else "GET"
-
-
-def _api_path(args: tuple[str, ...]) -> str:
-    endpoint = args[1] if len(args) > 1 else ""
-    path = endpoint.split("?", 1)[0]
-    if "://" in path:
-        path = path.partition("://")[2].partition("/")[2]
-    return "/" + path.lstrip("/")
 
 
 def redact_credentials(value: str) -> str:
@@ -242,28 +231,23 @@ def _api_error_detail(args: tuple[str, ...], response: tuple[str | None, dict[st
         status = match.group(1) if match else "unavailable"
     request_id = headers.get("x-github-request-id") or "unavailable"
     message = ""
-    try:
-        payload = json.loads(body)
-    except (TypeError, ValueError):
-        payload = None
-    if isinstance(payload, dict):
-        message_value = payload.get("message")
-        if isinstance(message_value, str):
-            message = message_value
-        else:
-            errors = payload.get("errors")
-            if isinstance(errors, list):
+    with suppress(TypeError, ValueError):
+        match json.loads(body):
+            case {"message": str(value)}:
+                message = value
+            case {"errors": list(errors)}:
                 message = "; ".join(
                     error["message"] for error in errors
                     if isinstance(error, dict) and isinstance(error.get("message"), str)
                 )
-    if message_tail is not None:
-        message = message_tail
-    elif not message:
-        message = body.strip() or stderr.strip().removeprefix("gh:").strip()
+    message = (message_tail if message_tail is not None
+               else message or body.strip() or stderr.strip().removeprefix("gh:").strip())
     message = " ".join(_redact_tokens(message, token).split())[:400] or "no response message"
+    path = (args[1] if len(args) > 1 else "").split("?", 1)[0]
+    if "://" in path:
+        path = path.partition("://")[2].partition("/")[2]
     return _redact_tokens(
-        f"method={_api_method(args)} endpoint={_api_path(args)} status={status} "
+        f"method={_api_method(args)} endpoint=/{path.lstrip('/')} status={status} "
         f"request_id={request_id} message={message}", token
     )
 
@@ -515,9 +499,8 @@ def record_full_page(endpoint: str, rows: list, seen: set[bytes]) -> None:
 
 def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
     """Yield validated rows until the last page."""
-    page = 1
     seen: set[bytes] = set()
-    while True:
+    for page in count(1):
         chunk = _gh_json("api", endpoint, "--method", "GET", "-F", f"per_page={PAGE}",
                          "-F", f"page={page}")
         if isinstance(chunk, dict):
@@ -529,7 +512,6 @@ def _iter_paged(endpoint: str, key: str = "check_runs") -> Iterator[dict]:
         yield from chunk
         if len(chunk) < PAGE:
             return
-        page += 1
 
 
 def _paged(endpoint: str, key: str = "check_runs") -> list:
@@ -557,11 +539,9 @@ def login(token: str | None = None) -> str:
     """Login of the identity used for GitHub reads and review publishing."""
     data = _gh_json("api", "graphql", "-f", "query=query { viewer { login } }", token=token)
     content = data.get("data") if isinstance(data, dict) else None
-    viewer = content.get("viewer") if isinstance(content, dict) else None
-    name = viewer.get("login") if isinstance(viewer, dict) else None
-    if not name:
-        raise GhError(("gh", "api", "graphql"), "no login in viewer response")
-    return str(name)
+    if isinstance(content, dict) and isinstance(viewer := content.get("viewer"), dict) and (name := viewer.get("login")):
+        return str(name)
+    raise GhError(("gh", "api", "graphql"), "no login in viewer response")
 
 
 def _not_found(number: int, exc: Exception) -> GhError:
@@ -684,8 +664,8 @@ def _commit_branch_prs(repo: str, branch: str) -> tuple[str, list[dict]]:
 
 def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state: str) -> PR:
     pr, detail = _pr_detail(repo, number)
-    states = {"CLOSED", "MERGED"} if state == "CLOSED" else {state}
-    if pr.state not in states or not _matches_branch(detail["head"], repo, branch):
+    matches_state = pr.state == state or (state == "CLOSED" and pr.state == "MERGED")
+    if not matches_state or not _matches_branch(detail["head"], repo, branch):
         lookup = "completion" if state == "MERGED" else "branch"
         raise GhError(("gh", "api", endpoint), f"PR changed during {lookup} lookup")
     return pr
@@ -695,9 +675,9 @@ def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, list_only:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
     if not list_only:
         endpoint, matches = _commit_branch_prs(repo, branch)
-        open_matches = [row for row in matches if row["state"] == "open"]
-        if open_matches:
-            newest = max(open_matches, key=lambda row: (row["created_at"], row["number"]))
+        newest = max((row for row in matches if row["state"] == "open"),
+                     key=lambda row: (row["created_at"], row["number"]), default=None)
+        if newest is not None:
             return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
 
     # A closed association cannot rule out an open PR or newer closed history.
@@ -1405,20 +1385,20 @@ def merged_sha(
     """The verified merge commit, or None while open. Admission may check the hold label."""
     argv = ("gh", "api", f"repos/{repo}/pulls/{number}")
     view = api_get(argv[2])
-    if not isinstance(view, dict) or type(view.get("merged")) is not bool:
+    if not isinstance(view, dict) or type(merged := view.get("merged")) is not bool:
         raise GhError(argv, "invalid PR merge evidence")
     if expected_head and (not isinstance(view.get("head"), dict)
                           or view["head"].get("sha") != expected_head):
         raise GhError(argv, "PR head changed before merge verification")
-    if view["merged"] and view.get("state") == "closed":
-        sha = view.get("merge_commit_sha")
-        if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha):
+    state = view.get("state")
+    if merged and state == "closed":
+        if isinstance(sha := view.get("merge_commit_sha"), str) and re.fullmatch(r"[0-9a-f]{40}", sha):
             return sha
-    elif not view["merged"] and view.get("state") == "open":
+    elif not merged and state == "open":
         if check_hold and (hold := merge_hold(number, _pr_labels(view))):
             raise GhError(argv, hold)
         return None  # An open PR's merge_commit_sha is only a test merge.
-    error = ClosedUnmerged if not view["merged"] and view.get("state") == "closed" else GhError
+    error = ClosedUnmerged if not merged and state == "closed" else GhError
     raise error(argv, "PR closed without a verified merge or invalid merge evidence")
 
 
@@ -1427,8 +1407,7 @@ def merge_pending(repo: str, number: int) -> bool:
     request that it moves into the queue shortly after (observed ~1 minute, #180)."""
     args = _pull_query(repo, number, _QUEUE_QUERY)
     try:
-        data = _gh_json(*args)
-        pr = data["data"]["repository"]["pullRequest"]
+        pr = _gh_json(*args)["data"]["repository"]["pullRequest"]
         queued = pr["isInMergeQueue"]
         auto = pr.get("autoMergeRequest")
         if type(queued) is not bool or (auto is not None and not isinstance(auto, dict)):
