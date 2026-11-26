@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
+from urllib.parse import quote
 
 from loopzero import candidate as candidate_mod
 from loopzero import config, eligibility, github, mergify
@@ -88,10 +89,10 @@ def _run(cfg: Config) -> int:
                 if not result.ready:
                     raise _SourcePolicyRejection(f"source #{source_number}: " + "; ".join(result.reasons))
             candidate_mod.attest_candidate(
-                event,
+                event, base_branch=cfg.base_branch,
                 github_get=lambda path: github.api_get(path.lstrip("/")),
                 mergify_status=lambda owner, repo, branch: mergify.api_get(
-                    f"{owner}/{repo}", f"/merge-queue/status?branch={branch}"),
+                    f"{owner}/{repo}", f"/merge-queue/status?branch={quote(branch, safe='')}"),
                 source_policy=policy,
             )
             ready, message = True, "All attested candidate sources are reviewed"

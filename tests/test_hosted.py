@@ -195,7 +195,7 @@ def test_source_errors_cannot_become_successful_waits(publisher, monkeypatch, ca
 
 
 @pytest.mark.parametrize("case,error,message", [
-    ("valid", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
+    ("valid", None, ""), ("trunk", None, ""), ("policy", hosted.LoopZeroError, "no review recorded"),
     ("hold", hosted.LoopZeroError, "source #101: PR #101 has a merge-authority hold"),
     ("race", CandidateRaceError, "metadata changed"),
     ("malformed", CandidateError, "invalid payload"),
@@ -209,8 +209,9 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
     event = candidate_event()
     event["action"], event["sender"]["id"] = (
         "edited" if case == "metadata" else event["action"], 1 if case == "untrusted" else event["sender"]["id"])
+    branch = "trunk" if case == "trunk" else "main"
     values = candidate_payloads(event)
-    if case in {"valid", "hold"}:
+    if case in {"valid", "trunk", "hold"}:
         gh = FakeGh(fake_bin, tmp_path)
         gh.respond("api graphql", threads_json())
     for number, sha in [(101, "1" * 40), (102, "2" * 40), (900, "c" * 40)]:
@@ -219,12 +220,16 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
             number=number, headRefOid=sha, isDraft=False,
             labels=[{"name": "hold"}] if case == "hold" and number == 101 else [],
         )) | values[path]
+        values[path]["base"]["ref"] = branch
         values[f"{path}/reviews?per_page=100&page=1"] = [approval(sha)]
     if case == "stale":
         values["/repos/owner/repo/pulls/900"]["head"]["sha"] = "d" * 40
     if case == "malformed":
         values["/repos/owner/repo/pulls/101"] = []
     prepare_event(tmp_path, monkeypatch, "owner/repo", {"inputs": {"pr": "900"}} if case == "manual" else event)
+    if case == "trunk":
+        workflow = Path("workflow.toml")
+        workflow.write_text(workflow.read_text().replace('base="main"', 'base="trunk"'))
     rest_calls, sleeps = [], []
 
     def api_get(path):
@@ -246,23 +251,23 @@ def test_candidate_publication_and_event_controls(tmp_path, fake_bin, monkeypatc
 
     def evaluate(repo, number, head, base, publishers, *, snapshot):
         evaluated.append((repo, number, head, base, publishers))
-        if case in {"valid", "hold"}:
+        if case in {"valid", "trunk", "hold"}:
             return real_evaluate(repo, number, head, base, publishers, snapshot=snapshot)
         if fault := {"interrupt": KeyboardInterrupt(), "api": github.GhUnavailable(("gh",), "HTTP 503")}.get(case):
             raise fault
         reasons = (github.MISSING_REVIEW_REASON,) if case == "policy" else ()
         return github.Readiness(not reasons, reasons)
-    if case not in {"valid", "hold"}:
+    if case not in {"valid", "trunk", "hold"}:
         monkeypatch.setattr(github, "pr_view", lambda *_: SimpleNamespace(head_sha=("d" if case == "head" else "c") * 40))
     monkeypatch.setattr(hosted.eligibility, "evaluate", evaluate)
     monkeypatch.setattr("loopzero.mergify.api_get", lambda repo, suffix: candidate_status()
-                        if (repo, suffix) == ("owner/repo", "/merge-queue/status?branch=main") else None)
+                        if (repo, suffix) == ("owner/repo", f"/merge-queue/status?branch={branch}") else None)
     if error:
         with pytest.raises(error, match=message or None):
             hosted.main()
     else:
         assert hosted.main() == 0
-    states = {"valid": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
+    states = {"valid": ["pending", "success"], "trunk": ["pending", "success"], "interrupt": ["pending"], "api": ["pending"],
               "manual": [], "metadata": [], "stale": []}
     assert [call[3] for call in published] == states.get(case, ["pending", "failure"])
     assert all(call[:3] == ("owner/repo", "c" * 40, "Loop-zero Eligibility") for call in published)

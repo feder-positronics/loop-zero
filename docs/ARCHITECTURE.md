@@ -335,6 +335,8 @@ candidate attestation. The caller rechecks the source fields that affect the
 verdict before publication. Standalone evaluation performs its own PR reads.
 [Mergify](MERGIFY.md) describes optional source-preserving queue integration;
 [candidate validation](../src/loopzero/candidate.py) belongs at that boundary.
+Hosted attestation uses the trusted workflow's base branch for candidate and
+source targets, queue status and integration tree verification.
 When delivery uses the existing size checker, local readiness and new Mergify
 requests evaluate a temporary integration with the freshly fetched target. The
 target supplies the checker and baseline. Existing requests continue to the
