@@ -26,7 +26,7 @@ from loopzero.runners import review_settings
 from loopzero.types import BLOCKING, Finding, ReviewResult
 
 GH_BASE_ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TERM", "GH_HOST")
-GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN")
+GH_ENV = (*GH_BASE_ENV, "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR", "XDG_CONFIG_HOME")
 APP_TOKEN_HELPER = Path.home() / ".config/loopzero/app-token"
 _app_token_cache = ("", 0.0)
 MISSING_REVIEW_REASON = "no review recorded for the current head"
@@ -666,13 +666,14 @@ def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state
     return pr
 
 
-def pr_for_branch(repo: str, branch: str, *, open_only: bool = False) -> PR | None:
+def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, list_only: bool = False) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
-    endpoint, matches = _commit_branch_prs(repo, branch)
-    open_matches = [row for row in matches if row["state"] == "open"]
-    if open_matches:
-        newest = max(open_matches, key=lambda row: (row["created_at"], row["number"]))
-        return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
+    if not list_only:
+        endpoint, matches = _commit_branch_prs(repo, branch)
+        open_matches = [row for row in matches if row["state"] == "open"]
+        if open_matches:
+            newest = max(open_matches, key=lambda row: (row["created_at"], row["number"]))
+            return _confirm_branch_pr(repo, branch, endpoint, newest["number"], "OPEN")
 
     # A closed association cannot rule out an open PR or newer closed history.
     owner = repo.split("/", 1)[0]
@@ -763,9 +764,7 @@ def finding_id(head_sha: str, path: str | None, line: int | None, title: str) ->
 
 def finding_marker(severity: str, head_sha: str, finding: Finding) -> str:
     stable_id = finding_id(head_sha, finding.path, finding.line, finding.title)
-    return (
-        f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
-    )
+    return f"<!-- loopzero:finding v=1 severity={severity} head={head_sha} id={stable_id} -->"
 
 
 def _comment_body(f: Finding, head_sha: str, prefix: str = "") -> str:

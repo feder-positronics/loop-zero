@@ -215,6 +215,24 @@ def _rename_noreplace(source: Path, target: Path) -> None:
         raise OSError(error, os.strerror(error), source, None, target)
 
 
+def _copy_across_devices(entry: Path, target: Path) -> None:
+    # The private staging directory is also excluded from future mirroring
+    # by shared() if the process is interrupted before cleanup.
+    with tempfile.TemporaryDirectory(dir=target.parent, prefix=".codex-sync-", suffix=".lock") as directory:
+        staged = Path(directory) / entry.name
+        is_directory = entry.is_dir()
+        if is_directory:
+            shutil.copytree(entry, staged, symlinks=True)
+        else:
+            shutil.copy2(entry, staged, follow_symlinks=False)
+
+        _rename_noreplace(staged, target)
+        if is_directory:
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
 def _sync_codex_home(home: Path) -> None:
     """Mirror shared Codex files while holding the home lock."""
     for entry in home.iterdir():
@@ -222,11 +240,15 @@ def _sync_codex_home(home: Path) -> None:
         if shared(entry) and not entry.is_symlink() and not target.exists() \
                 and not target.is_symlink():
             try:
-                _rename_noreplace(entry, target)
+                try:
+                    _rename_noreplace(entry, target)
+                except OSError as exc:
+                    if exc.errno != errno.EXDEV:
+                        raise
+                    _copy_across_devices(entry, target)
             except OSError as exc:
-                # A competing writer or unsupported no-replace operation leaves the source local.
                 if exc.errno not in {errno.EEXIST, errno.ENOENT, errno.ENOSYS, errno.EINVAL,
-                                     errno.EOPNOTSUPP, errno.EXDEV}:
+                                     errno.EOPNOTSUPP}:
                     raise
     for src in CODEX_MAIN.iterdir():
         dst = home / src.name
