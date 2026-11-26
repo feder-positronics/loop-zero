@@ -46,8 +46,7 @@ Local `.loopzero/task.md` is working handoff context, rendered into the PR.
 The CLI also writes a head-bound checks receipt and saved review output in
 `.loopzero/` for local readiness and reposting. The CLI rejects tracked state
 and symlinks and uses the worktree's state directory descriptor for receipt I/O.
-GitHub retains authoritative delivery history. The retention rule for Codex
-native audit receipts is described below. Local readiness requires
+GitHub retains authoritative delivery history. Local readiness requires
 its current successful check receipt; hosted eligibility evaluates GitHub
 review evidence using trusted base configuration. Local readiness and merge fetch
 the configured origin base before loading its publisher policy. Source-check waiters refresh
@@ -57,7 +56,7 @@ Losing local artifacts may require rerunning checks or review, and never creates
 a hosted approval.
 Saved runner artifacts also retain the repository, PR and actual request publisher
 before publication. A lost POST reply triggers a read-only reconciliation bounded
-by one 30-second transport deadline, with no read retries. Recovery regenerates
+by one 30-second transport deadline. Recovery regenerates
 the exact review body and finding locations, checks the complete review/comment
 pages and unchanged head, and rereads review evidence before returning the saved
 verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
@@ -65,7 +64,12 @@ verdict. Pending, dismissed, conflicting or changing evidence blocks recovery.
 only an explicit retry after complete absence may publish again. The existing
 self-review rejection fallback to COMMENT remains a separate transport rule.
 
-Private review receipts, sidecars and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
+Private review receipts and malformed output excerpts live under the task worktree's `.loopzero/` and disappear when guarded merge cleanup removes the worktree. GitHub retains the published review evidence.
+Outside the worktree the CLI keeps per-PR write locks in `~/.cache/loopzero/pr-locks`,
+runs the optional GitHub App token helper `~/.config/loopzero/app-token` (the
+identity that publishes trusted reviews) and reads the Mergify key from
+`~/.config/mergify/api-key`; setup describes the
+[token helper](../SETUP.md#hosted-review-eligibility) and [key](../SETUP.md#mergify).
 
 Private agent transcripts and metrics ledgers do not belong in this guide or in
 a new persistent store.
@@ -148,28 +152,15 @@ loading the delivery [commands](../src/loopzero/cli.py), which implement the con
    with the actual merge tree. Unavailable history blocks inherited coverage.
    Ancestor coverage includes outdated unresolved blocking threads. A primary
    that requested changes also requires resolved findings at the reviewed head.
-   For check runs with the same name, numeric run IDs take precedence. Equal
-   or missing IDs fall back to the parsed start instant, with usable times ahead
-   of missing or invalid times. Ties keep API order. A retry of the same run
-   supersedes a failure for waiting purposes only when it starts strictly after
-   the failure completed. A different run of the same workflow compares creation
-   instants first, then numeric IDs when those instants are equal.
-   After its own draft-to-ready write,
-   `ready --wait` revalidates through the same waiter and original deadline.
-   Each poll resolves the trusted workflow ref, reusing parsed policy when the
-   branch and immutable revision match the preceding observation.
-   This is best-effort observation: an immediate green read may precede
-   asynchronous CI scheduling, there is no unconditional delay, and merge
-   admission checks readiness again. Missing-run diagnosis keeps its two-minute
-   grace after activation without extending the deadline.
-   When every non-success signal of a required check strictly predates the eligible
-   review, `ready --wait` allows up to 15 minutes from that review for a refresh,
-   including time before GitHub publishes pending. Past the ordinary two-minute
-   review grace it identifies the old verdict and awaited refresh. The check still
-   blocks readiness throughout; at 15 minutes it becomes a final failure again
-   unless existing pending/replacement evidence independently permits waiting.
-   Failures at or after the review receive no extended grace. The command's own
-   timeout can end waiting sooner.
+   For check runs with the same name, the latest run (by run ID, then start
+   time) decides; a retry supersedes a failure only when it starts after that
+   failure completed. After its own draft-to-ready write, `ready --wait`
+   revalidates through the same waiter, policy refresh and original deadline.
+   Waiting is best-effort observation: short grace periods cover CI scheduling
+   and a required check refreshing after an eligible review (constants in
+   [cli.py](../src/loopzero/cli.py)), the check blocks readiness throughout,
+   the command's own timeout can end waiting sooner, and merge admission
+   checks readiness again.
 6. `merge` recomputes readiness, merges or enters the configured queue, verifies
    the landed SHA and then cleans up the task branch and worktree.
 
@@ -202,7 +193,7 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-Check, pr, review, ready, merge, and status use the workflow at one remote-tracking
+Every command except `start` uses the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
 Missing trusted refs or workflows block these commands. An explicit
 `--config` supplies validated policy for bootstrap or operator overrides.
@@ -224,7 +215,7 @@ exception. This preserves standalone CLI startup without exposing neighboring
 state; bundles needing protected siblings require installation outside state.
 The contract states the agent-facing consequences.
 
-The R3 runner separates fixed reviewer policy from supplied material
+Each reviewer runner separates fixed reviewer policy from supplied material
 inside the existing runner adapters. A fixed ASCII paragraph and validated scope
 enter Claude's append-system-prompt or Codex's developer_instructions override;
 commit identity stays in the JSON material header. Explicit UTF-8 stdin carries
@@ -253,36 +244,12 @@ not prove injection immunity, reviewer quality or backend identity.
 The [dated design note](design/2026-10-07-deterministic-delivery-design-assumptions.md#r3-native-comparison--october-7-2026)
 owns the implementation history, native comparison results and their limits.
 
-Reviewer settings distinguish requested values, explicit launch configuration and
-optional native reporting in the existing provenance container.
-Adapters retain per-call requests; publication derives CLI claims from each retained
-native envelope, ignoring unqualified compatibility fields and optional reported
-metadata. Adapters record configured values only for model/effort flags they
-explicitly pass at launch; missing flags stay unknown. Claude stores this record in
-provenance while its raw output stays unchanged; normalized Codex evidence retains only
-bounded recognized model/effort claims. Stderr banners take precedence; without a
-banner, the adapter reads the exact JSON thread's native session rollout before
-private HOME cleanup. It requires one matching rollout, matching session metadata,
-a nonempty CLI version claim and consistent complete turn-context settings. Missing,
-malformed, ambiguous or mismatched evidence remains unknown. Codex session
-persistence is enabled only in the existing temporary private HOME, which is
-removed after capture. Rollout reads stay inside that HOME and reuse the owned,
-single-link regular-file snapshot reader, opening without following symlinks or
-blocking on special files and refusing files over 8 MiB before reading. Reviewers
-can write these session files, so their claims retain the existing trusted
-publisher boundary and do not prevent coherent forgery or attest the backend.
-Per-call configured values remain separately
-labelled in human output and optional Codex projection fields; they never become
-CLI-reported claims. Missing native recovery settings may use these launch records,
-but conflicting reported values still HOLD. Legacy requested/model/effort metadata
-cannot backfill a missing launch record.
-Chunk merge pads missing request entries and preserves their native-call order.
-Legacy model/effort fields retain their historical adapter meanings for loading;
-qualified summaries never use them as execution evidence. Eligibility still checks
-core native provenance. Exact read-back tries legacy summaries when requested settings
-are absent and the pre-#344 Claude requested/reported layout when requested settings
-exist without configured settings. It still verifies exact published evidence.
-New publication and reposting use the current layout.
+Reviewer provenance keeps requested, launch-configured and natively reported
+model/effort settings apart. Only native evidence (a Codex stderr banner or the
+matching session rollout captured in the temporary private HOME) becomes a
+CLI-reported claim; missing, malformed or conflicting evidence stays unknown or
+holds. Reviewers can write that evidence, so it stays inside the trusted
+publisher boundary below.
 
 <a id="codex-review-runner-evidence"></a>
 
@@ -290,27 +257,18 @@ A structured Codex event reporting that Code Mode cannot spawn its host
 invalidates the attempt even if the process exits zero with a parseable verdict.
 The runner excludes the attempt from chunk merge, publication and saved-result
 replay without consuming review budget. Quoted diagnostics and absence of tool
-calls alone do not invalidate a review.
-Eligibility rejects fatal latest evidence without reviving an older
-approval. The retired [incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
+calls alone do not invalidate a review. The retired [incident adjudication](design/2026-10-27-codex-startup-adjudication.md)
 remains historical evidence. The leading-block reader still validates archived
 adjudication markers alongside their original evidence.
-New Codex publication derives one canonical v1 `codex-evidence` comment from the
-complete validated private native stream, across every ordered chunk/session.
-It immediately follows the byte-zero review marker, before human text. The anchored leading block is limited to 8192 bytes; strict schema,
-canonical ASCII base64url JSON, context and bounds checks reject malformed or
-ambiguous projections without legacy fallback. Duplicate blocks fail eligibility,
-and the latest invalid evidence cannot revive an older approval. Header overflow
-produces HOLD without truncation. The projection binds publisher,
-repository/PR, full head/kind, the existing relative receipt reference, exact UTF-8
-raw digest/byte count, completeness and per-call requested/reported/configured settings,
-fatal classification and attributable inspection event/range facts. It publishes
-no commands, source contents or private paths. New reviews show structured
-review fields and a local retention notice for both Codex and Claude.
-Historical transcript rendering is available only for exact read-back matching.
-Local publication, saved-result replay and exact confirmation regenerate these
-facts from complete raw, never the public transcript tail or a saved summary.
-The restricted receipt stays in the task worktree until completion.
+New Codex publication derives one canonical `codex-evidence` comment, placed
+right after the review marker, from the complete validated private native
+stream. It binds publisher, repository/PR, head and review kind, the receipt
+reference, raw digest, completeness, per-call settings and fatal classification,
+and publishes no commands, source contents or private paths. Malformed,
+duplicate or oversized projections fail eligibility without truncation or legacy
+fallback, and invalid or fatal latest evidence never revives an older approval.
+Publication, replay and confirmation regenerate it from complete raw output; the
+restricted receipt stays in the task worktree until completion.
 The review command locks the worktree’s Git directory from round selection
 through publication to reserve the round across overlapping local invocations.
 
@@ -328,15 +286,10 @@ Git removal stays non-forced. A Git ref lock keeps the
 worktree at the merged PR head during removal. Cleanup then deletes the branch
 only if it still points at that head.
 Hosted eligibility trusts the configured publisher's projection and live identity,
-state, head and latest ordering. It cannot recompute private raw or defeat a
-coherent forgery by a trusted publisher/editor; native claims do not attest the
-backend. Ordinary legacy/truncated/tool-free evidence remains UNKNOWN under its
-existing contract. New named recoveries require complete attributable evidence
-and HOLD when required commissioned evidence is missing or unknown.
-Separate successful native head and immutable-range diff commands in one session
-can qualify when explicit repository anchors, event outcomes and exact output
-match the pinned head/diff. Echoes, ambiguous shell, wrong repositories, unresolved
-refs, failed commands and cross-session combinations cannot supply that proof.
+state, head and ordering. It cannot recompute private raw output or defeat a
+coherent forgery by a trusted publisher, and native claims do not attest the
+backend. Legacy, truncated or tool-free evidence stays unknown; named recoveries
+need complete attributable evidence and hold otherwise.
 Native runner failures distinguish subscription exhaustion from transient throttling:
 weekly/session-limit text and Claude's blocking-limit terminal reason identify quota;
 HTTP 429 alone does not. This classification neither switches accounts nor retries
@@ -359,32 +312,17 @@ requests evaluate a temporary integration with the freshly fetched target. The
 target supplies the checker and baseline. Existing requests continue to the
 queue wait path. Readiness and new queue requests without an admission deadline can project an
 advisory budget after a single known chain of queued predecessors.
-Candidate lineage reads wait on zero or multiple live batch matches with exponential
-backoff capped at 30 seconds and a shared 90-second retry-admission deadline across
-both reads and all attestation attempts. Each wait revalidates the candidate before
-and after sleeping; closure is a terminal superseded-candidate error. Malformed
-status and other identity failures are not retried, and success still requires
-exactly one batch and stable lineage. Caller-owned synchronous reads are not preempted. Batch sleep time does not
-consume the separate race-retry window, but race retries remain capped by the
-shared 90-second deadline. A second-read wait lengthens the existing interval
-between source policy evaluation and final snapshots; policy evidence is not atomic.
-Candidate attestation retries typed concurrent source metadata, Mergify membership
-and main-ref drift, and landed sources still listed in lineage, up to three complete
-attempts with two-second pauses. A policy exception becomes a landing race only
-when a fresh REST read confirms `merged is True` at the same snapshotted head;
-failed reads or other evidence preserve the original exception. A non-open source
-is a race only when its REST payload confirms `merged is True`; it never passes
-source attestation. Each attempt resolves identity and lineage again, snapshots
-and evaluates current source policy again, and performs the existing tree verification when
-parent batches are missing. No evidence or approval survives a failed attempt.
-A monotonic 30-second window bounds admission of retries, with at most four
-seconds of deliberate delay; caller-owned synchronous API/policy calls and an
-already running tree verification (its own 120-second bound) are not preempted.
-Other failures stop immediately, including source-head drift. Exhaustion raises
-the last race error unchanged, and hosted eligibility publishes terminal failure;
-success requires one complete successful attestation. Source-PR eligibility uses
-its existing path without these retries; a merged source PR publishes nothing, so a
-late refresh cannot turn its landed head red.
+Candidate attestation retries only typed races (no unique live batch match
+yet, concurrent source metadata, queue membership, main-ref drift, or a landed
+source still in lineage) inside one bounded window; the constants live in
+[candidate.py](../src/loopzero/candidate.py). A policy exception or non-open
+source counts as a landing race only when a fresh REST read confirms the PR
+merged at the snapshotted head. Each attempt resolves identity, lineage and
+source policy again; no evidence or approval survives a failed attempt, other
+failures (including source-head drift) stop at once, and success requires one
+complete attestation. Policy evidence is not atomic across reads. Source-PR
+eligibility does not retry; a merged source PR publishes nothing, so a late
+refresh cannot turn its landed head red.
 After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
 bounded failure write for that SHA. Once the final write starts, publication
 recovery owns its verdict.
@@ -408,37 +346,9 @@ queue reads retry once after two seconds, subject to Retry-After and the
 remaining queue wait budget. Calls without a deadline allow less than five
 seconds of backoff. See the
 [contract's waiter and polling rules](../core/CONTRACT.md#failure).
-The optional host ai-accounts helper owns managed credential selection and exact-model
-eligibility under its existing lock. Its Claude exec reserve guard (including pinned
-identities) reads the same per-window usage as status and refuses non-owner launches
-at 85% of any reported limit, including a scoped weekly sub-cap, or with
-missing/unreadable account status or status older than 20 minutes. The owner environment
-override permits required work; direct T3, run and shims are outside this guard.
-Claude usage prefers the read-only OAuth usage API; setup tokens without profile
-access fall back to the existing model probes, explicitly labelled with the API
-failure. Claude credentials retain their existing stored-bearer-token format;
-native login/refresh integration is outside this usage-reporting helper.
-No login, account activation or T3 provider configuration is performed by reporting.
-Each status window exposes `instance`, `window`, `used_pct`, `resets_at` (ISO UTC),
-`resets_local`, `snapshot_age_s` and `unknown_reason`, alongside source and fetch
-time. Text and JSON derive from these same windows; user-facing dates use explicit
-Europe/Warsaw zoneinfo with CET/CEST labels, regardless of the host timezone.
-Codex uses its read-only usage API and classifies windows by their duration, since
-the primary window can itself be weekly. Output keeps every reset with its window,
-shows Fable before the overall Claude week, and only shows a Claude session warning
-when that window is reported. Per-window resets include healthy windows; legacy
-reset fields represent when all binding windows can clear, unknown if any binding
-reset is missing. Pace estimates use consecutive observations of the same window,
-source and reset; a refill or reset change invalidates the estimate. They are local
-linear projections, not provider forecasts. The existing status file holds this
-information; no additional usage state or policy gate is introduced.
-Nonsecret launch identities pin credential bindings
-(Codex account principals survive routine OAuth refreshes);
-explicit caller credentials and billing routes remain unchanged. Harnesses own safe live
-session replacement, including effects and native history. The shim does not replay
-whole `loopzero` commands. An explicitly repeatable one-shot helper caller may opt into
-one retry after its effective credential changes; this supplies no delivery evidence or
-permission to replay uncertain tool actions or review publication.
+The optional host [ai-accounts helper](../SETUP.md#several-subscription-accounts-optional)
+selects managed credentials and reports usage. It supplies no delivery evidence
+and never replays `loopzero` commands.
 
 ## Direction and historical evidence
 
@@ -468,8 +378,9 @@ authority boundary and is outside this direction.
 Architecture review is event-driven. When changing commands, configuration,
 state authority, sandbox/trust boundaries, review/readiness, queue integration,
 module ownership or delivery routines, read this guide and the owning sources
-before finishing. Update the affected explanation and links in the same PR, or
-explain why the guide remains accurate. A reviewer checks that claim against the
+before finishing. Edit the guide in the same PR only when a boundary it
+describes moved; when `loopzero check` reports a watched change and the guide
+still holds, record why in the trailer below. A reviewer checks that claim against the
 diff, challenges misplaced ownership and distinguishes shipped behavior from
 proposals and dated observations.
 
@@ -564,7 +475,7 @@ settings and commands. A failed stage replaces an existing receipt immediately.
 Final worktree validation is required before publishing a pass. Runners cannot
 select stages or mint receipts. Stage admission
 belongs to the runner: the outer `loopzero check`
-must not hold a heavy slot when a runner is configured. Without a runner, the
+must not hold a host concurrency slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 
 Declared `[checks.inputs]` pathspecs opt commands into local passing-result reuse.

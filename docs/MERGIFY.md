@@ -78,9 +78,8 @@ that cannot inventory organization secrets gives no basis to delete them.
 
 If the queue misbehaves, stop admission and prevent Mergify landing, restore the
 captured guardrail rules and remove the Mergify-only update restriction before
-resuming the original path (the native queue for loop-zero). See
-[IntelFlo's fallback procedure](https://github.com/feder-positronics/intelflo/blob/main/docs/guides/dev-workflow/loop-zero-delivery.md#fall-back-from-mergify)
-for its recovery settings. Never admit to native and Mergify queues at once. Public plans
+resuming the original path (the native queue for loop-zero). Each consumer
+documents its own recovery settings. Never admit to native and Mergify queues at once. Public plans
 may lack a pause API, so rollback revokes queue authority through reviewed
 changes. Keep all required checks; an outage does not justify lowering protection.
 After any queue configuration change, drain first and verify vendor draft-PR

@@ -272,8 +272,8 @@ a command error. Read the diagnostic and verify the receipt before classifying
 the failure. Exit 2 covers invalid arguments and sandbox unavailability in
 `check` or fresh `review`.
 
-Exit 3 means waiting or timeout. Review exits 4 when independent review is
-unavailable and 5 when changes are requested. SIGINT exits 130. SIGTERM is
+Exit 3 means waiting or timeout. Review exits 4 when no configured
+reviewer produces a verdict and 5 when changes are requested. SIGINT exits 130. SIGTERM is
 re-raised, yielding shell status 143 and subprocess return code `-15`.
 
 **Never pipe `loopzero`, even with pipefail**, because it can hide the verdict.
