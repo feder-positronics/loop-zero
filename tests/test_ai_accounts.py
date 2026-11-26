@@ -593,3 +593,26 @@ def test_account_lock_preserves_existing_file_and_rejects_symlink(helper):
     with pytest.raises(OSError), helper._locked(".codex-sync.lock"):
         pytest.fail("redirected lock opened")
     assert lock.read_text() == "preserve"
+
+
+def test_sync_preserves_a_shared_directory_created_during_promotion(helper, monkeypatch):
+    home = helper.codex_home("extra")
+    home.mkdir(parents=True)
+    helper.CODEX_MAIN.mkdir()
+    source = home / "sessions"
+    source.mkdir()
+    (source / "old").write_text("keep local")
+    (home / "notes").write_text("promote")
+    rename = helper._rename_noreplace
+
+    def create_destination(entry, target):
+        if entry == source:
+            target.mkdir()
+        rename(entry, target)
+
+    monkeypatch.setattr(helper, "_rename_noreplace", create_destination)
+    helper.sync_codex_home(home)
+    assert (source / "old").read_text() == "keep local"
+    assert list((helper.CODEX_MAIN / "sessions").iterdir()) == []
+    assert (home / "notes").is_symlink()
+    assert (home / "notes").read_text() == "promote"

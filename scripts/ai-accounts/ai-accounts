@@ -46,7 +46,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import datetime as dt
+import errno
 from email.utils import parsedate_to_datetime
 import fcntl
 import hashlib
@@ -200,6 +202,18 @@ def sync_codex_home(home: Path, *, create: bool = False) -> None:
         _sync_codex_home(home)
 
 
+def _rename_noreplace(source: Path, target: Path) -> None:
+    """Publish a shared entry atomically, including directories."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "atomic no-replace promotion requires renameat2")
+    at_fdcwd, rename_noreplace = -100, 1
+    if renameat2(at_fdcwd, os.fsencode(source), at_fdcwd, os.fsencode(target), rename_noreplace):
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), source, None, target)
+
+
 def _sync_codex_home(home: Path) -> None:
     """Mirror shared Codex files while holding the home lock."""
     for entry in home.iterdir():
@@ -207,8 +221,8 @@ def _sync_codex_home(home: Path) -> None:
         if shared(entry) and not entry.is_symlink() and not target.exists() \
                 and not target.is_symlink():
             try:
-                os.rename(entry, target)
-            except FileNotFoundError:
+                _rename_noreplace(entry, target)
+            except (FileExistsError, FileNotFoundError):
                 pass
     for src in CODEX_MAIN.iterdir():
         dst = home / src.name
