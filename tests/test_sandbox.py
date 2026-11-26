@@ -20,7 +20,7 @@ from select import select
 
 import pytest
 
-from loopzero import sandbox
+from loopzero import cli, sandbox
 from loopzero.cli import _current_check_report, _save_report
 from loopzero.types import Config, ResourceLimits
 
@@ -149,6 +149,26 @@ sys.exit(7)
     assert peak - baseline < 4 * 1024 * 1024
 
 
+@pytest.mark.parametrize(
+    ("command", "stage_exit"),
+    [
+        ("/bin/sh -c 'exit 7' | /bin/cat", 7),
+        ("/bin/sh -c 'kill -TERM $$' | /bin/cat", 143),
+        ("echo ok | /bin/cat", 0),
+        ("echo ok", 0),
+    ],
+)
+def test_check_pipeline_verdict(git_repo, bwrap_log, monkeypatch, capsys, command, stage_exit):
+    config = make_config(checks=(command,))
+    monkeypatch.setattr(cli, "_context", lambda *args, **kwargs: (git_repo, config))
+    monkeypatch.setattr(cli, "_refresh_pr_checks", lambda *args: None)
+
+    assert cli.main(["check"]) == (1 if stage_exit else 0)
+    receipt = json.loads((git_repo / ".loopzero/checks.json").read_text())
+    assert [stage["exit_code"] for stage in receipt["results"]] == [stage_exit]
+    assert capsys.readouterr().out.splitlines()[-1] == ("FAIL" if stage_exit else "PASS")
+
+
 def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     monkeypatch.setenv("LZ_KEEP", "kept")
     monkeypatch.setenv("LZ_DROP", "dropped")
@@ -188,7 +208,7 @@ def test_bwrap_flags(git_repo, bwrap_log, monkeypatch):
     assert head.index("--tmpfs") < head.index(str(git_repo))
     assert tail == ["prlimit", f"--as={sandbox._cap_limit(4096 << 20, resource.RLIMIT_AS)}",
                     f"--fsize={sandbox._cap_limit(2048 << 20, resource.RLIMIT_FSIZE)}",
-                    "--", "/bin/sh", "-c", "echo hello"]
+                    "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello"]
 
 
 def test_probe_uses_real_flags(git_repo, bwrap_log):
@@ -281,7 +301,7 @@ def test_configured_resource_limits_are_converted_to_bytes(git_repo, bwrap_log, 
     argv = argv_of(bwrap_log)
     assert argv[argv.index("--") + 1:] == [
         "prlimit", "--as=33554432", "--fsize=3145728",
-        "--", "/bin/sh", "-c", "echo hello",
+        "--", "/bin/bash", "--posix", "-o", "pipefail", "-c", "echo hello",
     ]
 
 

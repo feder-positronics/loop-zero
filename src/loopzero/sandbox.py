@@ -30,6 +30,7 @@ from .worktree import WorktreeError
 GIT_TIMEOUT = 60.0
 DEFAULT_TIMEOUT = 3600.0
 TIMEOUT_EXIT = 124
+CHECK_SHELL = ("/bin/bash", "--posix", "-o", "pipefail", "-c")
 CHECK_TAIL_BYTES = 16 * 1024
 HEARTBEAT_INTERVAL = 30.0
 SANDBOX_HOME = "/tmp/home"
@@ -128,6 +129,7 @@ def private_directory(prefix: str):
 def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEOUT,
                progress: Callable[[str], None] | None = None,
                status: Callable[[str], None] | None = None,
+               checkpoint: Callable[[CheckReport], None] | None = None,
                _resolved: bool = False) -> CheckReport:
     """Run checks, stopping at the first failure; status emits only stage metadata.
 
@@ -179,22 +181,25 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
                 progress(command)
             key = _input_key(config, worktree, command, base) if not dirty else None
             old = previous.get(command)
-            if (key and old and old.get("input_key") == key
-                    and is_check_exit_code(old.get("exit_code")) and old["exit_code"] == 0):
-                result = CheckResult(command, 0, 0.0, _check_tail(old.get("tail", "")), key, old["head"])
+            if key and old and old.input_key == key:
+                result = old
                 if status:
-                    status(f"reused {old['head'][:8]}")
+                    status(f"reused {(old.reused_from or head)[:8]}")
             else:
                 with _stage_status(status, index + 1, len(commands)):
                     result = (_dispatch_one(config, worktree, head, base, command, timeout)
                               if config.check_runner else _run_one(config, worktree, prefix, command, timeout))
                 if key:
                     result = replace(result, input_key=key)
+            if index >= len(preparations) or result.exit_code:
+                results.append(result)
+                _checkpoint_success(
+                    checkpoint, CheckReport(head, dirty, tuple(results), settings_sha256),
+                    previous, commands[index + 1:],
+                )
             if status:
                 status(f"stage {index + 1}/{len(commands)}: exit {result.exit_code} "
                        f"({result.duration_s:.1f}s)")
-            if index >= len(preparations) or result.exit_code:
-                results.append(result)
             if result.exit_code != 0:
                 break
     final_head = _git(config, worktree, "rev-parse", "HEAD").strip()
@@ -213,7 +218,18 @@ def run_checks(config: Config, worktree: Path, *, timeout: float = DEFAULT_TIMEO
     return CheckReport(head=head, dirty=dirty, results=tuple(results), settings_sha256=settings_sha256)
 
 
-def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
+def _checkpoint_success(checkpoint: Callable[[CheckReport], None] | None,
+                        report: CheckReport, previous: dict[str, CheckResult],
+                        remaining: tuple[str, ...]) -> None:
+    stage = report.results[-1]
+    if checkpoint is not None and stage.input_key and stage.exit_code == 0:
+        # Even the last stage leaves a nonpassing receipt until final validation.
+        incomplete = CheckResult("<checks incomplete>", 1, 0.0, "")
+        unvisited = tuple(previous[command] for command in remaining if command in previous)
+        checkpoint(replace(report, results=(*report.results, *unvisited, incomplete)))
+
+
+def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str, CheckResult]:
     if _git(config, worktree, "ls-files", "--", ".loopzero"):
         return {}
     try:
@@ -221,8 +237,18 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict:
         if (data["dirty"] is not False or not isinstance(data["head"], str)
                 or data.get("settings_sha256") != settings_sha256):
             return {}
-        return {r["command"]: dict(r, head=data["head"]) for r in data["results"]
-                if isinstance(r.get("tail", ""), str)}
+        previous = {}
+        for result in data["results"]:
+            command, key = result.get("command"), result.get("input_key")
+            code, tail = result.get("exit_code"), result.get("tail", "")
+            if (isinstance(command, str) and isinstance(key, str) and key
+                    and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
+                source = result.get("reused_from")
+                previous[command] = CheckResult(
+                    command, 0, 0.0, _check_tail(tail), key,
+                    source if isinstance(source, str) else data["head"],
+                )
+        return previous
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
@@ -255,6 +281,7 @@ def _runner_identity(config: Config) -> tuple[str, str, str] | None:
 def _execution_settings(config: Config, base: str) -> dict:
     settings = {k: v for k, v in asdict(config).items() if k in {
         "network", "env_allowlist", "sandbox_ro", "writable", "scratch", "env", "limits", "check_runner"}}
+    settings["local_shell"] = CHECK_SHELL
     if config.check_runner or config.inputs:
         settings["base"] = base
     if config.check_runner:
@@ -428,7 +455,7 @@ def _run_one(
             [*prefix, "prlimit",
              f"--as={_cap_limit(limits.memory_mb * 1024 * 1024, resource.RLIMIT_AS)}",
              f"--fsize={_cap_limit(limits.file_mb * 1024 * 1024, resource.RLIMIT_FSIZE)}",
-             "--", "/bin/sh", "-c", command],
+             "--", *CHECK_SHELL, command],
             cwd=worktree,
             env_allowlist=config.env_allowlist,
             timeout=timeout,

@@ -9,9 +9,11 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 
@@ -94,13 +96,25 @@ def git_seed(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture
-def repo(git_seed: Path, tmp_path: Path, fake_tool, request: pytest.FixtureRequest) -> Path:
+def repo(git_seed: Path, tmp_path: Path, fake_tool, monkeypatch, request: pytest.FixtureRequest) -> Path:
     """A private copy of both Git repositories and a per-case fake bwrap."""
     checkout = tmp_path / "repo"
     seed_checkout = "prepared" if "wt" in request.fixturenames else "repo"
     shutil.copytree(git_seed / seed_checkout, checkout)
     origin = shutil.copytree(git_seed / "origin.git", tmp_path / "origin.git")
     git(checkout, "remote", "set-url", "origin", str(origin))
+    run_command = github.run
+
+    def local_transport(argv, **kwargs):
+        if argv[0] == "git" and "push" in argv:
+            assert argv[-2] == f"https://github.com/{REPO}.git"
+            assert Path(kwargs["cwd"]) != Path.cwd()
+            assert kwargs["extra_env"]["GIT_CONFIG_NOSYSTEM"] == "1"
+            assert kwargs["extra_env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+            argv = (*argv[:-2], str(origin), argv[-1])
+        return run_command(argv, **kwargs)
+
+    monkeypatch.setattr(github, "run", local_transport)
     fake_tool("bwrap", FAKE_BWRAP.format(log=tmp_path / "bwrap.argv"))
     return checkout
 
@@ -298,6 +312,26 @@ def test_check_pass_writes_report(wt: Path, gh: FakeGh, capsys) -> None:
     assert report["results"][0]["tail"] == "ok"
 
 
+@pytest.mark.parametrize("state", [None, "CLOSED", "MERGED"])
+def test_check_skips_closed_pr_history(wt, gh, capsys, head, state):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    associated = (
+        [dict(rest_pr_json(pr_json(headRefOid=head, state=state)),
+              created_at="2026-11-25T00:00:00Z")] if state else []
+    )
+    commit_read = f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1"
+    gh.respond(branch_head_key(), {"commit": {"sha": head}})
+    gh.respond(commit_read, associated)
+    gh.respond_pr_list([pr_json(headRefOid=head, state=state)] if state else [])
+
+    code, out, err = run(capsys, "check")
+
+    assert (code, err) == (0, "") and out.endswith("PASS\n")
+    assert [c["argv"][:2] for c in gh.calls] == [
+        BRANCH_READ, commit_read.split(), PR_LIST_READ,
+    ]
+
+
 @pytest.mark.parametrize("pushed,refresh_timeout,stage_exit", [
     (False, False, 0), (True, False, 0), (True, True, 0), (True, True, 124),
 ])
@@ -381,10 +415,11 @@ def test_initial_pr_keeps_human_validation(wt: Path, gh: FakeGh, capsys) -> None
 def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, capsys, command) -> None:
     head = head_of(wt)
     if command == "check":
+        config = cli._load_config(SimpleNamespace(config=None, command="ready"), wt, pin_checks=True)
         cli._save_report(wt, CheckReport(head, False, (
             CheckResult("echo ok", 0, 999.0, "ok"),
             CheckResult("test -f README.md", 0, 999.0, ""),
-        )))
+        ), cli.sandbox.settings_fingerprint(config, wt)))
     gh.respond_pr_list([pr_json(headRefOid=head)])
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
     assert run(capsys, "pr")[0] == 0
@@ -455,6 +490,88 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
+
+
+@pytest.mark.parametrize("cut", ["second stage", "final validation"])
+def test_check_reuses_checkpoint_after_interruption(wt, gh, capsys, monkeypatch, cut):
+    original_context = cli._context
+    calls = []
+    interrupt = True
+
+    def context(*args, **kwargs):
+        path, settings = original_context(*args, **kwargs)
+        return path, replace(settings, check_runner=(sys.executable,),
+                             inputs={command: ("feature.py",) for command in settings.checks})
+
+    def dispatch(_config, _wt, _head, _base, command, _timeout):
+        calls.append(command)
+        if interrupt and cut == "second stage" and len(calls) == 2:
+            raise KeyboardInterrupt
+        return CheckResult(command, 0, 0.0, "")
+
+    original_git = cli.sandbox._git
+
+    def check_git(config, path, *args):
+        if interrupt and cut == "final validation" and len(calls) == 2 and args == ("rev-parse", "HEAD"):
+            raise KeyboardInterrupt
+        return original_git(config, path, *args)
+
+    monkeypatch.setattr(cli, "_context", context)
+    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    monkeypatch.setattr(cli.sandbox, "_git", check_git)
+
+    assert run(capsys, "check")[0] == 130
+    report = cli._load_report(wt)
+    assert report is not None and not report.ok
+    assert [result.command for result in report.results if result.input_key] == (
+        calls[:1] if cut == "second stage" else calls
+    )
+
+    interrupt = False
+    assert run(capsys, "check")[0] == 0
+    assert calls == ["echo ok", "test -f README.md"] + (
+        ["test -f README.md"] if cut == "second stage" else []
+    )
+    assert cli._load_report(wt).ok
+
+
+def test_check_checkpoint_preserves_unreached_reusable_stages(wt, gh, capsys, monkeypatch):
+    original_context = cli._context
+    calls = []
+    interrupt = False
+    commands = ("first", "second", "third")
+
+    def context(*args, **kwargs):
+        path, settings = original_context(*args, **kwargs)
+        return path, replace(
+            settings, check_runner=(sys.executable,), checks=commands,
+            inputs={"first": ("feature.py",), "second": ("feature.py",), "third": ("README.md",)},
+        )
+
+    def dispatch(_config, _wt, _head, _base, command, _timeout):
+        calls.append(command)
+        if interrupt and command == "second":
+            raise KeyboardInterrupt
+        return CheckResult(command, 0, 0.0, "")
+
+    monkeypatch.setattr(cli, "_context", context)
+    monkeypatch.setattr(cli.sandbox, "_dispatch_one", dispatch)
+    assert run(capsys, "check")[0] == 0
+    original_head = cli._load_report(wt).head
+
+    (wt / "feature.py").write_text("updated = True\n")
+    git(wt, "add", "feature.py")
+    git(wt, "commit", "-m", "Change the first two stages' inputs")
+    interrupt = True
+    assert run(capsys, "check")[0] == 130
+    assert not cli._load_report(wt).ok
+
+    interrupt = False
+    assert run(capsys, "check")[0] == 0
+    assert calls == [*commands, "first", "second", "second"]
+    report = cli._load_report(wt)
+    assert report.ok
+    assert report.results[-1].reused_from == original_head
 
 
 def advance_checks(repo, commands):
@@ -733,13 +850,15 @@ exec /usr/bin/git "$@"
 
 
 @pytest.mark.parametrize("branch", [
-    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task",
+    "lz/t1", "t3/archive-review-receipts", "od183-fable-5-2", "codex/task", "lz/zażółć\u00a0",
 ])
 def test_pr_pushes_and_creates_draft(
     wt: Path, repo: Path, gh: FakeGh, fake_tool, tmp_path: Path, capsys, branch
 ) -> None:
     git(wt, "branch", "-m", branch)
-    history_key = branch_history_key().replace("lz%2Ft1", branch.replace("/", "%2F"))
+    if branch.endswith("\u00a0"):
+        git(wt, "branch", branch.removesuffix("\u00a0"), "origin/main")
+    history_key = branch_history_key().replace("lz%2Ft1", quote(branch, safe=""))
     gh.respond(history_key, [])
     run(capsys, "check")
     head = head_of(wt)
@@ -748,7 +867,7 @@ def test_pr_pushes_and_creates_draft(
     pushes = trace_pushes(fake_tool, tmp_path)
     code, out, err = run(capsys, "pr")
     assert (code, out, err) == (0, URL + "\n", "")
-    assert pushes.read_text().strip() == f"push -u origin {branch}"
+    assert pushes.read_text() == f"push -u origin {branch}\n"
     origin = repo.parent / "origin.git"
     assert git(origin, "rev-parse", branch).strip() == head
     assert [c["argv"][:2] for c in gh.calls] == [
@@ -908,7 +1027,7 @@ def test_pr_migrates_old_checks_heading_to_validation(wt: Path) -> None:
     task = wt / ".loopzero" / "task.md"
     task.write_text(task.read_text().replace("## Validation", "## Checks"))
 
-    body = cli._pr_body(wt, head_of(wt))
+    body = cli._pr_body(wt, head_of(wt), cli.config_mod.load(wt / "workflow.toml"))
 
     assert "## Checks" not in body
     assert body.count("## Validation") == 1
@@ -1012,7 +1131,7 @@ def test_pr_refuses_dirty(wt: Path, gh: FakeGh, capsys) -> None:
 def arm_pr(gh: FakeGh, head: str, *, branch: str = "lz/t1", **over) -> None:
     body = "# T1\n\n## Review\n(filled by `loopzero review`)\n\n## Notes\n"
     gh.respond_pr_list([pr_json(headRefOid=head, body=body, **over)], branch=branch)
-    gh.respond(f"api repos/{REPO}/git/ref/heads/{branch}", {"object": {"sha": head}})
+    gh.fail(f"api repos/{REPO}/git/ref/heads/{branch}", "gh: Not Found (HTTP 404)")
     gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
 
 
@@ -3043,6 +3162,51 @@ def test_merge_wait_rejects_verdicts_after_deadline(wt, gh, capsys, monkeypatch,
     assert all(c["argv"][:2] != ["pr", "merge"] for c in gh.calls)
 
 
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("safe", [False, True])
+def test_merge_uses_one_queue_proof_for_admission(
+    wt, gh, capsys, monkeypatch, source_queue_api, pending, safe,
+):
+    commit_mergify_configuration(wt)
+    head = head_of(wt)
+    arm_approved_pr_with_check_result(gh, head, wt, "pending" if pending else "success", isDraft=False)
+    repo, config_path, vendor_calls = source_queue_api
+    requests = []
+    clock = 0.0
+    before_final = 0
+
+    def set_unsafe():
+        gh.respond(f"api {config_path}", {"type": "symlink"})
+
+    def sleep(delay):
+        nonlocal clock, before_final
+        clock += delay
+        before_final = len(gh.calls)
+        vendor_calls.clear()
+        arm_check_runs(gh, head, [{"name": "checks", "conclusion": "success"}])
+        if not safe:
+            set_unsafe()
+
+    if not pending and not safe:
+        set_unsafe()
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock)
+    monkeypatch.setattr(cli, "_sleep", sleep)
+    monkeypatch.setattr(mergify, "markers", lambda *_: (False, False))
+    monkeypatch.setattr(mergify, "membership", lambda *_: None)
+    monkeypatch.setattr(mergify, "request", lambda *args: requests.append(args))
+    monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
+
+    code, out, err = run(capsys, "merge", "--wait=90")
+
+    assert (clock > 0) == pending
+    assert requests == ([(REPO, 7, head, "main")] if safe else [])
+    assert code == (3 if safe else 1), out + err
+    assert ("Mergify queue configuration is unverified" in err) == (not safe)
+    paths = [call["argv"][1] for call in gh.calls[before_final:]]
+    assert paths.count(repo) == paths.count(config_path) == (2 if safe else 1)
+    assert vendor_calls == ["/merge-queue/status?branch=main", "/queues/configuration"]
+
+
 @pytest.mark.parametrize("wait", [False, True])
 @pytest.mark.parametrize("outcome", ["open", "changed", "closed", "invalid", "merged"])
 def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeypatch, wait, outcome):
@@ -3218,16 +3382,16 @@ def test_merge_cleans_only_stale_task_tracking_ref(
     arm_pr(gh, head, state="MERGED", isDraft=False)
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="e" * 40))
     ref = f"api repos/{REPO}/git/ref/heads/{branch}"
+    git(repo, "config", "push.followTags", "true")
+    git(wt, "tag", "-am", "local only", "local-only", "origin/main")
     if remote == "absent":
-        git(repo, "push", "--delete", "origin", branch)
+        git(repo, "push", "--no-follow-tags", "--delete", "origin", branch)
         git(repo, "update-ref", "--create-reflog", tracking, head if tracking_matches else other)
         gh.fail(ref, "gh: Not Found (HTTP 404)")
     else:
         gh.respond(ref, {"object": {"sha": other if remote == "moved" else head}})
         if remote == "failed":
-            gh.fail("api -X", "gh: Forbidden (HTTP 403)")
-        else:
-            gh.respond("api -X", "")
+            git(repo.parent / "origin.git", "config", "receive.denyDeletes", "true")
 
     code, _, _ = run(capsys, "merge")
 
@@ -3238,23 +3402,37 @@ def test_merge_cleans_only_stale_task_tracking_ref(
     else:
         assert git(repo, "rev-parse", tracking).strip() == (head if tracking_matches else other)
         assert reflog.is_file()
+    assert not git(repo, "ls-remote", "--tags", "origin")
     assert git(repo, "rev-parse", "origin/main").strip() == other
 
 
-def test_merge_warns_when_remote_branch_moves(wt: Path, gh: FakeGh, capsys, head) -> None:
+@pytest.mark.parametrize("raced", [False, True])
+def test_merge_warns_when_remote_branch_moves(wt, repo, gh, capsys, monkeypatch, head, raced):
     landed_sha = "e" * 40
+    branch = "refs/heads/lz/t1"
     remote_ref = f"repos/{REPO}/git/ref/heads/lz/t1"
     arm_pr(gh, head, state="MERGED", isDraft=False)
     gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha=landed_sha))
-    gh.respond(f"api {remote_ref}", {"object": {"sha": "f" * 40}})
+    git(wt, "push", "origin", f"{head}:{branch}")
+    newer = git(wt, "commit-tree", "HEAD^{tree}", "-p", head, "-m", "new work").strip()
+    read = github.api_get
 
+    def observe(endpoint, *args, **kwargs):
+        if endpoint == remote_ref:
+            current = git(wt, "ls-remote", "origin", branch).split()[0]
+            if current == head:
+                git(wt, "push", "origin", f"{newer}:{branch}")
+                current = head if raced else newer
+            return {"object": {"sha": current}}
+        return read(endpoint, *args, **kwargs)
+
+    monkeypatch.setattr(github, "api_get", observe)
     code, out, err = run(capsys, "merge")
 
     assert code == 0
     assert out.splitlines()[-1] == landed_sha
     assert f"warning: merged; remote branch lz/t1 moved from {head[:12]}; skipping deletion" in err
-    assert any(call["argv"] == ["api", remote_ref, "--include"] for call in gh.calls)
-    assert not any(call["argv"][:3] == ["api", "-X", "DELETE"] for call in gh.calls)
+    assert git(repo, "ls-remote", "origin", branch).split() == [newer, branch]
 
 
 def test_merge_warns_when_remote_cleanup_times_out(
@@ -3275,7 +3453,7 @@ def test_merge_warns_when_remote_cleanup_times_out(
 
 
 def test_second_merge_retries_remote_branch_cleanup(
-    wt: Path, gh: FakeGh, capsys, monkeypatch, head
+    wt: Path, repo: Path, gh: FakeGh, capsys, monkeypatch, head
 ) -> None:
     gh.respond(f"api repos/{REPO}/git/ref/heads/lz/t1", {"object": {"sha": head}})
     gh.respond_pr_list(
@@ -3290,20 +3468,19 @@ def test_second_merge_retries_remote_branch_cleanup(
                merge_json(state='MERGED', head=head, sha='e' * 40),
                rest_pr_json(pr_json(headRefOid=head, isDraft=False, state="MERGED")),
                merge_json(state='MERGED', head=head, sha='e' * 40))
-    gh.respond(
-        "api -X",
-        {"stdout": "", "stderr": "HTTP 500: delete failed", "exit": 1},
-        "",
-    )
+    origin = repo.parent / "origin.git"
+    git(wt, "push", "origin", "HEAD:refs/heads/lz/t1")
+    git(origin, "config", "receive.denyDeletes", "true")
     monkeypatch.setattr(cli, "_cleanup", lambda *_: None)
 
     first = run(capsys, "merge")
+    git(origin, "config", "receive.denyDeletes", "false")
     second = run(capsys, "merge")
 
     assert first[0] == 0 and "remote branch cleanup failed for lz/t1" in first[2]
     assert second[0] == 0 and second[2] == ""
-    deletes = [call for call in gh.calls if call["argv"][:2] == ["api", "-X"]]
-    assert len(deletes) == 2
+    assert not git(repo, "ls-remote", "origin", "refs/heads/lz/t1")
+
 
 
 def test_status_names_base_workflow_for_invalid_pinned_checks(git_repo, monkeypatch, capsys):
@@ -3987,7 +4164,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
     configurations = []
     def configured(*_):
         configurations.append(True)
-        if len(configurations) > 2:
+        if len(configurations) > 1:
             if outcome == "config_error":
                 raise mergify.MergifyError("configuration HTTP 503")
             if outcome in {"unsafe_config", "unsafe_pending"}:
@@ -4282,7 +4459,7 @@ def test_load_report_requires_integer_exit_code(wt, head, capsys, exit_code, ok)
 def test_passive_receipt_load_is_silent(wt, gh, capsys, head):
     arm_approved_ready_pr(gh, head, wt)
     cli._load_report(wt)
-    cli._validation_section(wt, head)
+    cli._validation_section(wt, head, cli.config_mod.load(wt / "workflow.toml"))
     assert "receipt " not in capsys.readouterr().out
 
 
@@ -4438,3 +4615,24 @@ def test_generated_pr_body_limit(wt, gh, capsys, monkeypatch, create, extra):
         assert err == ""
         assert len(writes) == 1
         assert json.loads(writes[0]["--input"])["body"] == prose + suffix
+
+
+def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
+    head = head_of(wt)
+    live = "# PR\n\n## Validation\nManual validation evidence.\n"
+    gh.respond_pr_list([pr_json(headRefOid=head, body=live)])
+    gh.respond(f"api repos/{REPO}/pulls/7 --method PATCH", {})
+    cli._save_report(wt, CheckReport(head, False, (CheckResult("echo ok", 0, 0.0, ""),)))
+
+    assert run(capsys, "pr")[0] == 0
+    draft = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "unverified" in draft and "run `loopzero check`" in draft
+    assert "Manual validation evidence." in draft
+
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    gh.respond_pr_list([pr_json(headRefOid=head, body=draft)])
+    assert run(capsys, "check")[0] == 0
+    draft = json.loads(gh.calls[-1]["--input"])["body"]
+    assert "unverified" not in draft
+    assert f"Recorded for `{head[:12]}`\n- `echo ok`: exit 0" in draft
+    assert "Manual validation evidence." in draft

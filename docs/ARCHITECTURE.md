@@ -255,8 +255,10 @@ through publication to reserve the round across overlapping local invocations.
 
 After confirming a merge, cleanup reads the remote branch ref and deletes it
 only when its SHA matches the merged PR head. An absent ref completes that
-step, and a moved ref is left in place with a warning. GitHub REST uses separate
-read and delete requests, so the ref can still change between those requests.
+step, and a moved ref is left in place with a warning. The Git push lease
+checks the expected SHA at deletion time even if the ref changes after the REST read.
+The push uses a temporary bare repository and ignores local, global, and system
+Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
 An already-merged PR can resume cleanup from its task worktree. Local removal
@@ -436,6 +438,10 @@ leaving this guide evergreen.
 
 ## Check stage runners
 
+Local stages run in Bash POSIX mode with pipefail enabled. A pipeline returns
+the status of its rightmost failed member, or zero when all members succeed.
+The local shell is part of the receipt and stage reuse fingerprints.
+
 `[checks].runner` is an operator-trusted argv prefix executed outside local bwrap,
 from a fresh temporary directory outside the task worktree. Delegation does not
 require local bwrap. Its executable must
@@ -468,8 +474,10 @@ every stage and after execution, aggregates in order and stops on failure. No
 stage is retried after success or uncertain launch. Only the coordinator writes
 the authoritative `checks.json` receipt. Writers lock the task state directory
 while rechecking HEAD and atomically replacing the receipt from a synced sibling
-temporary file. Runners cannot select stages or
-mint receipts. Stage admission belongs to the runner: the outer `loopzero check`
+temporary file. Successful keyed stages are checkpointed in the same receipt
+for reuse. The checkpoint cannot satisfy readiness before final worktree
+validation. Runners cannot select stages or mint receipts. Stage admission
+belongs to the runner: the outer `loopzero check`
 must not hold a heavy slot when a runner is configured. Without a runner, the
 existing local execution path is unchanged.
 

@@ -346,14 +346,18 @@ def _readiness(
 # --------------------------------------------------------------------------- checks report
 
 
+def _check_report_matches(report: CheckReport, wt: Path, config: Config, head: str) -> bool:
+    return (report.head == head and not report.dirty
+            and tuple(result.command for result in report.results) == config.checks
+            and report.settings_sha256 is not None
+            and report.settings_sha256 == sandbox.settings_fingerprint(config, wt))
+
+
 def _current_check_report(wt: Path, config: Config, head: str) -> CheckReport | None:
     report = _load_report(wt)
-    if (report is None or report.head != head or report.dirty or not report.ok
-            or tuple(result.command for result in report.results) != config.checks
-            or report.settings_sha256 is None
-            or report.settings_sha256 != sandbox.settings_fingerprint(config, wt)):
-        return None
-    return report
+    if report is not None and report.ok and _check_report_matches(report, wt, config, head):
+        return report
+    return None
 
 
 def _print_receipt(wt: Path, report: CheckReport, action: str) -> None:
@@ -434,12 +438,14 @@ def _load_report(wt: Path) -> CheckReport | None:
         return None
 
 
-def _validation_section(wt: Path, head: str) -> str:
+def _validation_section(wt: Path, head: str, config: Config) -> str:
     loaded = _load_report(wt)
     if loaded is None:
         return "(no `loopzero check` run recorded)"
     recorded, results = loaded.head, loaded.results
     lines = [f"Recorded for `{recorded[:12]}`" + ("" if recorded == head else " (not current head)")]
+    if not _check_report_matches(loaded, wt, config, head):
+        lines[0] += " (unverified, run `loopzero check`)"
     lines += [
         f"- `{r.command}`: exit {r.exit_code}" for r in results
     ] or ["- (no check commands configured)"]
@@ -456,10 +462,10 @@ _LEGACY_CHECKS = re.compile(
 )
 
 
-def _pr_body(wt: Path, head: str, existing: str | None = None) -> str:
+def _pr_body(wt: Path, head: str, config: Config, existing: str | None = None) -> str:
     """Refresh only generated checks; the live body owns existing PR prose."""
     body = (existing if existing is not None else worktree.task_text(wt)).replace("\r\n", "\n")
-    block = f"{_CHECKS_START}\n{_validation_section(wt, head)}\n{_CHECKS_END}"
+    block = f"{_CHECKS_START}\n{_validation_section(wt, head, config)}\n{_CHECKS_END}"
     pattern = re.compile(r"^## (?:Validation|Checks)\n(.*?)(?=^## |\Z)",
                          re.DOTALL | re.MULTILINE)
     match = pattern.search(body)
@@ -520,7 +526,7 @@ def _sync_task_narrative(wt: Path, existing: str) -> str:
 
 
 def _update_pr_checks(wt: Path, head: str, config: Config, pr: github.PR) -> None:
-    body = _pr_body(wt, head, pr.body)
+    body = _pr_body(wt, head, config, pr.body)
     if body != (pr.body or "").replace("\r\n", "\n"):
         github.update_body(config.repo, pr.number, body)
 
@@ -566,8 +572,8 @@ def _refresh_pr_checks(wt: Path, config: Config) -> None:
         if upstream.exit_code != 0:
             return
         branch, head = worktree.branch(wt), worktree.head(wt)
-        pr = github.pr_for_branch(config.repo, branch)
-        if pr is not None and pr.state == "OPEN" and pr.head_sha == head:
+        pr = github.pr_for_branch(config.repo, branch, open_only=True)
+        if pr is not None and pr.head_sha == head:
             _update_pr_checks(wt, head, config, pr)
     except (github.GhError, _proc.ProcTimeout, OSError, ValueError, CliError) as exc:
         print(f"note: could not refresh PR checks: {_one_line(exc)}", file=sys.stderr)
@@ -608,7 +614,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     try:
         report = sandbox.run_checks(config, wt, progress=lambda command: print(
             f"running: {command}", flush=True),
-            status=lambda message: print(message, flush=True))
+            status=lambda message: print(message, flush=True),
+            checkpoint=lambda partial: _save_report(wt, partial))
     except sandbox.SandboxUnavailable as exc:
         print(f"sandbox unavailable: {exc}", file=sys.stderr)
         return 2
@@ -646,7 +653,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 
 
 def cmd_pr(args: argparse.Namespace) -> int:
-    wt, config = _context(args)
+    wt, config = _context(args, pin_checks=True)
     branch, head = worktree.branch(wt), worktree.head(wt)
     _require_task_branch(config, branch)
     _require_clean(wt)
@@ -660,7 +667,7 @@ def cmd_pr(args: argparse.Namespace) -> int:
             "run `loopzero start <new-task-slug>` for a new task"
         )
     existing = _sync_task_narrative(wt, pr.body or "") if pr is not None else None
-    body = _pr_body(wt, head, existing)
+    body = _pr_body(wt, head, config, existing)
     force_lease = pr is not None and pr.state == "OPEN" and not _is_ancestor(wt, pr.head_sha, head)
     push = ["push", "-u", "origin"]
     if force_lease:
@@ -895,12 +902,15 @@ def _recover_review(wt: Path, config: Config, pr: github.PR, result: ReviewResul
 def _review_formats(result: ReviewResult) -> list[tuple[str, github.ReviewSettingsLayout, bool]]:
     old_settings = "requested_settings" not in result.provenance
     formats: list[tuple[github.ReviewSettingsLayout, bool]] = [("current", False)]
-    if runners.codex_evidence(result) is None:
+    codex = runners.codex_evidence(result)
+    if codex is None:
         formats.append(("current", True))
         if old_settings:
             formats.append(("summary", True))
     if result.family == "claude" and not old_settings and "configured_settings" not in result.provenance:
         formats.append(("requested-reported", True))
+    if codex is not None and all("configured" not in call for call in codex["calls"]):
+        formats.append(("requested-reported", False))
     if result.family == "codex" and old_settings:
         formats.append(("summary", False))
     return [(prefix, settings, display)
@@ -1492,16 +1502,12 @@ def _merge_with_mergify(
     config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
 ) -> str | None:
-    """Request Mergify after source gates pass; BEHIND is admission state, not readiness."""
-    behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
-    blockers = tuple(reason for reason in readiness.reasons if reason != behind)
-    if blockers:
+    """Request Mergify after readiness verifies the source gates and queue configuration."""
+    if not readiness.ready:
         hint = _merge_check_hint(config, pr, readiness)
-        raise CliError("not ready to request Mergify: " + "; ".join(blockers) + hint)
+        raise CliError("not ready to request Mergify: " + "; ".join(readiness.reasons) + hint)
     queue = config.mergify_queue
     assert queue is not None
-    if not mergify.configured(config.repo, config.base_branch, queue):
-        raise CliError("Mergify queue configuration is unverified or permits in-place head updates")
     requested, confirmed_marker = mergify.markers(
         config.repo, pr.number, pr.head_sha, queue
     )
