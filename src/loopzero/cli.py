@@ -1583,12 +1583,26 @@ class _AdmissionDeadline(Exception):
     """The --wait budget expired before a new merge or queue request."""
 
 
+def _follow_blocked_mergify(
+    config: Config, pr: github.PR, readiness: github.Readiness | None, deadline: float | None,
+) -> bool:
+    queue = config.mergify_queue
+    if (deadline is None or readiness is None or readiness.ready or config.merge_strategy != "mergify"
+            or queue is None or pr.base_ref != config.base_branch):
+        return False
+    return mergify.membership(config.repo, pr.number, queue) is not None
+
+
 def _merge_with_mergify(
     config: Config, pr: github.PR,
     readiness: github.Readiness, deadline: float | None, admit_by: float | None = None,
+    *, follow_confirmed: bool = False,
 ) -> str | None:
-    """Request Mergify after readiness verifies the source gates and queue configuration."""
+    """Request admission after readiness, or follow a confirmed entry without writing."""
     if not readiness.ready:
+        if follow_confirmed:
+            assert deadline is not None
+            return _wait_for_mergify(config, pr, max(0.0, deadline - time.monotonic()), confirmed=True)
         hint = _merge_check_hint(config, pr, readiness)
         raise CliError("not ready to request Mergify: " + "; ".join(_readiness_messages(pr, readiness)) + hint)
     queue = config.mergify_queue
@@ -1644,7 +1658,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
     deadline = None if args.wait is None else started + args.wait
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
     admit_by = deadline if args.wait else None
-    if readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
+    follow_confirmed = _follow_blocked_mergify(config, pr, readiness, deadline)
+    if not follow_confirmed and readiness is not None and args.wait is not None and _pending_checks(config, pr, readiness):
         # One waiter and one deadline span source checks and landing: a check created
         # by the ready transition must not end the turn between `ready` and the queue.
         waited = _wait_with_deadline(wt, config, pr, args.wait, kicked=False, started=started,
@@ -1652,6 +1667,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if waited is None:
             return 3
         pr, readiness, _ = waited
+        follow_confirmed = _follow_blocked_mergify(config, pr, readiness, deadline)
     if readiness is None:
         sha = github.merged_sha(
             config.repo, pr.number,
@@ -1662,7 +1678,8 @@ def cmd_merge(args: argparse.Namespace) -> int:
         print(f"PR #{pr.number} was already merged as {sha[:12]}; cleaning up")
     elif config.merge_strategy == "mergify":
         try:
-            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by)
+            sha = _merge_with_mergify(config, pr, readiness, deadline, admit_by,
+                                      follow_confirmed=follow_confirmed)
         except _AdmissionDeadline:
             print(f"timed out before requesting Mergify for PR #{pr.number}")
             return 3
