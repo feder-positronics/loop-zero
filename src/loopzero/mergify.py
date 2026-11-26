@@ -8,6 +8,7 @@ import json
 import os
 import re
 import stat
+import ssl
 import time
 import urllib.error
 import urllib.request
@@ -73,7 +74,11 @@ _retry_sleep = time.sleep
 
 
 def _open(request: urllib.request.Request):
-    return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    try:
+        return urllib.request.build_opener(_NoRedirect).open(request, timeout=30)
+    except ValueError:
+        # The HTTP client can include the Authorization value in a header error.
+        raise MergifyError("Mergify API request has an invalid URL or header") from None
 
 
 def api_get(repo: str, suffix: str) -> object | None:
@@ -96,7 +101,11 @@ def api_get(repo: str, suffix: str) -> object | None:
                 return None
             if delay is None or not (exc.code >= 500 or exc.code == 429):
                 raise MergifyError(f"Mergify queue lookup failed with HTTP {exc.code}") from exc
-        except (OSError, ValueError, http.client.IncompleteRead) as exc:
+        except (OSError, http.client.IncompleteRead) as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if delay is None or isinstance(reason, ssl.SSLCertVerificationError):
+                raise MergifyError(f"Mergify queue transport failed: {reason}") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             if delay is None:
                 raise MergifyError("Mergify queue lookup returned no valid JSON") from exc
         _retry_sleep(delay)

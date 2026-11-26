@@ -216,7 +216,14 @@ def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     head = source.get("head")
     base = source.get("base")
     base_repo = base.get("repo") if isinstance(base, dict) else None
+    labels = source.get("labels", [])
+    if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
+        raise CandidateError("invalid source PR labels")
     return (
+        source.get("number"),
+        source.get("merged"),
+        source.get("mergeable") is False,
+        tuple(label["name"] for label in labels),
         source.get("state"),
         source.get("draft"),
         source.get("body"),
@@ -324,7 +331,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env) -> str:
+        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
@@ -353,6 +360,8 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
                     _require(len(result) <= _TREE_OUTPUT, "Git object/output bound exceeded")
+                    if preserve_newlines:
+                        return result.decode("utf-8", errors="surrogateescape")
                     return result.decode().strip()
                 finally:
                     if process.poll() is None:
@@ -403,7 +412,10 @@ def attest_candidate(
     mergify_status: MergifyStatus,
     source_policy: SourcePolicy,
 ) -> list[dict[str, object]]:
-    """Retry races afresh; the deadline bounds retry admission, not synchronous I/O."""
+    """Retry races afresh, bounded by retry admission rather than synchronous I/O.
+
+    Source policy must raise CandidateError for an expected rejection.
+    """
     batch_wait = [0.0]
     batch_deadline = _retry_clock() + _BATCH_SECONDS
     deadline = _retry_clock() + _ATTEST_SECONDS
@@ -525,7 +537,7 @@ def _attest_candidate_once(
         source_snapshots[number] = (source_sha, _source_fingerprint(source))
         try:
             source_policy(number, source)
-        except Exception as exc:
+        except CandidateError as exc:
             current = None
             with contextlib.suppress(Exception):
                 current = _lookup_source(github_get, full_name, number)

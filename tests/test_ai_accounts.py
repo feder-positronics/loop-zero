@@ -23,6 +23,13 @@ def helper(tmp_path, monkeypatch):
     return module
 
 
+@pytest.fixture
+def exec_envs(helper, monkeypatch):
+    children = []
+    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
+    return children
+
+
 @pytest.mark.parametrize('provider,key', [('claude', 'CLAUDE_CODE_OAUTH_TOKEN'), ('codex', 'CODEX_HOME')])
 def test_managed_credentials_rebind_and_preserve_explicit(helper, provider, key):
     if provider == 'codex':
@@ -95,6 +102,12 @@ def test_codex_requires_requested_model_evidence(helper, monkeypatch):
     assert helper.active('codex') == 'main'
 
 
+def test_run_returns_after_leader_exits_with_inherited_stderr(helper):
+    argv = [helper.sys.executable, helper.__file__, 'run', 'claude', '--', helper.sys.executable,
+            '-c', 'import subprocess, sys; subprocess.Popen(["sleep", "6"]); sys.exit(7)']
+    assert helper.subprocess.run(argv, timeout=5).returncode == 7
+
+
 @pytest.mark.parametrize('providers,explicit,retry_safe,runs,active', [
     ('claude,codex', False, False, 1, 'a'), ('claude', False, False, 1, 'b'),
     ('claude', False, True, 2, 'b'), ('claude', True, True, 1, 'a')])
@@ -124,7 +137,7 @@ def test_stale_failure_requires_exact_model_evidence(helper, monkeypatch, cache,
     assert helper.active('claude') == active
 
 
-def test_launch_then_pin_survives_active_change(helper, monkeypatch, capsys):
+def test_launch_then_pin_survives_active_change(helper, monkeypatch, capsys, exec_envs):
     monkeypatch.setattr(helper, 'probe_claude_model', lambda token, model: {'ok': True, 'http': 200, 'util': {}})
     assert helper.main(['launch', 'claude', '--model', 'm']) == 0
     output = capsys.readouterr().out
@@ -135,18 +148,14 @@ def test_launch_then_pin_survives_active_change(helper, monkeypatch, capsys):
     monkeypatch.setattr(helper, 'probe_claude_model', lambda *args: pytest.fail('cached launch probed'))
     assert helper.launch('claude', 'm', {})['identity'] == launch['identity']
     helper.set_active('claude', 'b')
-    child = []
-    monkeypatch.setattr(helper.os, 'execvpe', lambda executable, argv, env: child.append(env))
     monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
     helper.main(['exec', 'claude', '--identity', launch['identity'], '--', 'real-harness'])
-    assert child[0]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-a'
-    assert child[0]['AI_ACCOUNTS_CLAUDE_IDENTITY'] == launch['identity']
+    assert exec_envs[0]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-a'
+    assert exec_envs[0]['AI_ACCOUNTS_CLAUDE_IDENTITY'] == launch['identity']
 
 
-def test_pin_revision_changed_or_explicit_credentials_fails_closed(helper, monkeypatch, capsys):
+def test_pin_revision_changed_or_explicit_credentials_fails_closed(helper, monkeypatch, capsys, exec_envs):
     revision = helper.with_accounts('claude', {})['AI_ACCOUNTS_CLAUDE_IDENTITY']
-    children = []
-    monkeypatch.setattr(helper.os, 'execvpe', lambda *args: children.append(args))
     monkeypatch.setenv('CLAUDE_CODE_OAUTH_TOKEN', 'caller-explicit')
     assert helper.main(['exec', 'claude', '--identity', revision, '--', 'real-harness']) == 2
     assert json.loads(capsys.readouterr().out)['outcome'] == 'unmanaged'
@@ -154,7 +163,7 @@ def test_pin_revision_changed_or_explicit_credentials_fails_closed(helper, monke
     helper.write_private(helper.STATE / 'claude/tokens/a', 'synthetic-revised-secret')
     assert helper.main(['exec', 'claude', '--identity', revision, '--', 'real-harness']) == 2
     assert json.loads(capsys.readouterr().out)['outcome'] == 'unmanaged'
-    assert children == []
+    assert exec_envs == []
 
 
 def test_launch_keeps_unknown_model_unknown(helper, monkeypatch):
@@ -211,7 +220,7 @@ def test_partial_or_unidentified_codex_auth_keeps_strict_revision(helper, creden
     ('7d', 1, 1201, 'ok', True, True), ('7d', 1, 0, 'missing', True, True)])
 @pytest.mark.parametrize('schema', ['legacy', 'windows'])
 @pytest.mark.parametrize('pinned', [False, True])
-def test_exec_reserve_policy(helper, monkeypatch, capsys, window, used, age, cache, owner, allowed, pinned, schema):
+def test_exec_reserve_policy(helper, monkeypatch, capsys, exec_envs, window, used, age, cache, owner, allowed, pinned, schema):
     monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
     if owner:
         monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
@@ -224,15 +233,13 @@ def test_exec_reserve_policy(helper, monkeypatch, capsys, window, used, age, cac
         status['providers']['claude']['accounts'] = {}
     if cache != 'missing':
         helper.write_private(helper.STATE / 'status.json', '{' if cache == 'broken' else json.dumps(status))
-    children = []
-    monkeypatch.setattr(helper.os, 'execvpe', lambda *args: children.append(args))
     monkeypatch.setattr(helper, 'probe_claude_model', lambda *args: pytest.fail('exec must not probe'))
     args = ['exec', 'claude']
     if pinned:
         args += ['--identity', helper.identity('claude', 'a')]
     code = helper.main([*args, '--', 'fake-cli'])
     assert code == (127 if allowed else 3)
-    assert bool(children) is allowed
+    assert bool(exec_envs) is allowed
     stderr = capsys.readouterr().err
     if not allowed:
         assert 'account a' in stderr
@@ -240,40 +247,32 @@ def test_exec_reserve_policy(helper, monkeypatch, capsys, window, used, age, cac
             assert window in stderr and '85%' in stderr and helper.iso(2000) in stderr
 
 
-def test_exec_binds_approved_selection_and_preserves_explicit_auth(helper, monkeypatch):
+def test_exec_binds_approved_selection_and_preserves_explicit_auth(helper, monkeypatch, exec_envs):
     monkeypatch.setenv('AI_ACCOUNTS_CLAUDE_OWNER', '1')
     original = helper.with_accounts
     def rotate(providers, base, selected=None):
         helper.set_active('claude', 'b')
         return original(providers, base, selected)
     monkeypatch.setattr(helper, 'with_accounts', rotate)
-    children = []
-    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
     assert helper.cmd_exec('claude', ['fake']) == 127
-    assert children[-1]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-a'
+    assert exec_envs[-1]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-a'
     assert original('claude', {}, {'claude': None}) == {}
     assert original('claude', {'ANTHROPIC_API_KEY': 'explicit'}, {'claude': 'a'}) == {'ANTHROPIC_API_KEY': 'explicit'}
 
 
-def test_exec_prefers_account_under_reserve(helper, monkeypatch):
+@pytest.mark.parametrize('key', [None, 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'])
+def test_exec_selects_under_reserve_or_preserves_caller_auth(helper, monkeypatch, exec_envs, key):
     monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
-    accounts = {n: {'models': {'m': {'util': {'7d': used}}}} for n, used in (('a', .9), ('b', .5))}
-    status = {'checked_at': helper.now(), 'providers': {'claude': {'accounts': accounts}}}
-    helper.write_private(helper.STATE / 'status.json', json.dumps(status))
-    children = []
-    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
+    if key is None:
+        accounts = {n: {'models': {'m': {'util': {'7d': used}}}} for n, used in (('a', .9), ('b', .5))}
+        status = {'checked_at': helper.now(), 'providers': {'claude': {'accounts': accounts}}}
+        helper.write_private(helper.STATE / 'status.json', json.dumps(status))
+        key, expected = 'CLAUDE_CODE_OAUTH_TOKEN', 'synthetic-secret-b'
+    else:
+        expected = 'caller-owned'
+        monkeypatch.setenv(key, expected)
     assert helper.cmd_exec('claude', ['fake']) == 127
-    assert children[0]['CLAUDE_CODE_OAUTH_TOKEN'] == 'synthetic-secret-b'
-
-
-@pytest.mark.parametrize('key', ['ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'])
-def test_exec_explicit_auth_skips_reserve_guard(helper, monkeypatch, key):
-    monkeypatch.delenv('AI_ACCOUNTS_CLAUDE_OWNER', raising=False)
-    monkeypatch.setenv(key, 'caller-owned')
-    children = []
-    monkeypatch.setattr(helper.os, 'execvpe', lambda command, args, env: children.append(env))
-    assert helper.cmd_exec('claude', ['fake']) == 127
-    assert children[0][key] == 'caller-owned'
+    assert exec_envs[0][key] == expected
 
 
 @pytest.mark.parametrize('code,retry_after,delay', [
@@ -384,7 +383,7 @@ def test_claude_window_report_prefers_api_and_labels_fallback(helper, monkeypatc
     assert ('fallback' in output and 'HTTP 403' in output) is (api == 403)
 
 
-@pytest.mark.parametrize('short_reset', [None, 1793912400, 'offline'])
+@pytest.mark.parametrize('short_reset', [None, 1793912400, 'offline', 'all-unknown'])
 def test_codex_json_and_text_share_each_existing_window(helper, monkeypatch, capsys, short_reset):
     helper.write_private(helper.codex_home('c2') / 'auth.json', '{"tokens":{"access_token":"fake"}}')
     monkeypatch.setattr(helper, 'now', lambda: 10000)
@@ -396,10 +395,17 @@ def test_codex_json_and_text_share_each_existing_window(helper, monkeypatch, cap
         assert 'unknown (network: offline)' in capsys.readouterr().out
         return
     week = {'used_percent': 96, 'limit_window_seconds': 604800, 'reset_at': 1794384770}
-    short = {'used_percent': 99, 'limit_window_seconds': 18000, 'reset_at': short_reset} if short_reset else None
-    data = {'rate_limit': {'primary_window': short or week, 'secondary_window': week if short else None}, 'model_usage': {'m': {'available': True}}}
+    short = {'used_percent': 99, 'limit_window_seconds': 18000, 'reset_at': short_reset} if isinstance(short_reset, int) else None
+    data = {'rate_limit': {'primary_window': short or week, 'secondary_window': week if short else None}, 'model_usage': {'m': {'available': True}, 'partial': {}}}
+    if short_reset == 'all-unknown':
+        del data['model_usage']['m']
     monkeypatch.setattr(helper, '_http', lambda req: (200, {}, json.dumps(data).encode()))
     result = helper.check_codex('c2')
+    assert result['models_unknown'] == ['partial']
+    if short_reset == 'all-unknown':
+        assert result['tier'] == -1 and result['error'] == 'usage response has no known model availability'
+        return
+    assert result['models'] == {'m': True}
     assert result['next_reset'] == 1794384770
     status = {'checked_at': 10000, 'providers': {'codex': {'active': 'c2', 'accounts': {'c2': result}}}}
     helper.write_private(helper.STATE / 'status.json', json.dumps(status))
