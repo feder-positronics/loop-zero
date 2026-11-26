@@ -2512,6 +2512,49 @@ def test_ready_not_ready_lists_reasons(wt: Path, gh: FakeGh, capsys, head) -> No
     assert not any("actions/runs" in " ".join(c["argv"]) for c in gh.calls)
 
 
+@pytest.mark.parametrize("command,required,code,override", [
+    ("ready", "", 1, False), ("merge", "", 1, False), ("ready", "", 1, True),
+    ("ready", "required_ci = []", 0, False), ("ready", 'required_ci = ["checks"]', 1, False),
+])
+def test_delivery_requires_explicit_ci_policy(wt, gh, capsys, head, tmp_path, command, required, code, override):
+    if not required:
+        arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
+    publish_workflow(wt, WORKFLOW.replace('required_ci = ["checks"]', required) + "\n")
+    if required:
+        arm_approved_pr_with_check_result(gh, head, wt, "failure", isDraft=False)
+    source, options = "origin/main:workflow.toml", ()
+    if override:
+        path = tmp_path / "override.toml"
+        path.write_text(WORKFLOW.replace('required_ci = ["checks"]', required))
+        source, options = str(path), ("--config", str(path))
+    actual, out, err = run(capsys, *options, command)
+    assert actual == code, (out, err)
+    if not required:
+        assert f"{source}: checks.required_ci must list the required contexts" in err
+        assert "required_ci = []" in err and not gh.calls
+    elif code:
+        assert "required check 'checks' is failure" in out
+    else:
+        assert not any("/check-runs" in " ".join(call["argv"]) for call in gh.calls)
+
+
+@pytest.mark.parametrize("declared", [False, True])
+def test_ready_reads_required_ci_from_selected_workflow(wt, repo, declared):
+    redirect = WORKFLOW.replace('base = "main"', 'base = "release"').replace('required_ci = ["checks"]', "")
+    publish_workflow(wt, redirect)
+    if declared:
+        policy = redirect.replace('commands = ', 'required_ci = []\ncommands = ')
+        commit_file(repo, "workflow.toml", policy, "set release policy")
+    git(repo, "push", "-q", "origin", "HEAD:refs/heads/release")
+    args = SimpleNamespace(config=None, command="ready")
+    if declared:
+        config = cli._load_config(args, wt, pin_checks=True, refresh=True)
+        assert config.base_branch == "release" and config.required_ci == ()
+    else:
+        with pytest.raises(cli.config_mod.ConfigError, match=r"origin/release:workflow\.toml: checks\.required_ci"):
+            cli._load_config(args, wt, pin_checks=True, refresh=True)
+
+
 @pytest.mark.parametrize("retargeted,reason", [
     (True, "PR targets release, configured base is main"),
     (False, f"required check 'checks' is failure{FAILED_CHECK_HINT}"),
