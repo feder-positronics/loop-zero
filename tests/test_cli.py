@@ -467,7 +467,8 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
     before = len(gh.calls)
     assert run(capsys, command)[0] == 0
     history = HISTORY_CALLS if command == "pr" else []
-    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS
+    refresh = [["api", f"repos/{REPO}/pulls/7"]] if command == "pr" else []
+    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS + refresh
 
 
 @pytest.mark.parametrize("body", [
@@ -496,6 +497,25 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
     for text in ["Retained browser proof.", "Human evidence.", "Approved."]:
         if text in body:
             assert text in updated
+
+
+def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, capsys, monkeypatch):
+    head = prepare_review(wt, gh, fake_bin)
+    body = "# PR\n\n## Notes\nHuman evidence.\n"
+    gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    refresh = cli._refresh_pr_checks
+
+    def delay(path, config):
+        assert run(capsys, "review")[0] == 0
+        live = json.loads(gh.calls[-1]["--input"])["body"]
+        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=live)))
+        refresh(path, config)
+
+    monkeypatch.setattr(cli, "_refresh_pr_checks", delay)
+    assert run(capsys, "check")[0] == 0
+    final = json.loads(gh.calls[-1]["--input"])["body"]
+    assert all(text in final for text in ("Human evidence.", "Recorded for", "- primary, claude"))
 
 
 @pytest.mark.parametrize("command,exit_code", [("check", 0), ("pr", 1)])
@@ -1085,7 +1105,7 @@ def test_pr_updates_existing_open_pr(wt: Path, gh: FakeGh, capsys) -> None:
     code, out, _ = run(capsys, "pr")
     assert code == 0 and out == URL + "\n"
     assert [c["argv"][:2] for c in gh.calls] == (
-        HISTORY_CALLS + LOOKUP_CALLS + [["api", f"repos/{REPO}/pulls/7"]])
+        HISTORY_CALLS + LOOKUP_CALLS + [["api", f"repos/{REPO}/pulls/7"]] * 2)
     assert "(no `loopzero check` run recorded)" in gh.calls[-1]["--input"]
 
 
@@ -1280,7 +1300,7 @@ def test_review_primary_posts_marker(wt: Path, gh: FakeGh, fake_bin: Path, capsy
     git(wt, "branch", "-m", branch)
     head = prepare_review(wt, gh, fake_bin, payload=CHANGES, branch=branch)
     task = (wt / ".loopzero/task.md").read_text()
-    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).strip().encode("utf-8")
+    expected_diff = git(wt, "diff", "--no-color", "origin/main", head).encode("utf-8")
     git_calls.clear()
     code, out, err = run(capsys, "review")
     assert_git_cost(git_calls, 14, 1)
@@ -1750,7 +1770,7 @@ def test_review_delta_diffs_since_primary(wt: Path, gh: FakeGh, fake_bin: Path, 
     head = prepare_review(wt, gh, fake_bin, post_id=2, history=[
         rev(first, "primary", state="CHANGES_REQUESTED", verdict="request_changes")])
     task = (wt / ".loopzero/task.md").read_text()
-    expected_diff = git(wt, "diff", "--no-color", first, head).strip().encode("utf-8")
+    expected_diff = git(wt, "diff", "--no-color", first, head).encode("utf-8")
     code, out, _ = run(capsys, "review")
     assert code == 0 and out.splitlines()[-1].startswith(f"delta review by claude on {head[:12]}: approve")
     header, diff = (fake_bin / "claude.stdin").read_bytes().split(b"\n", 1)
