@@ -443,8 +443,8 @@ def _graphql_reset(args: tuple[str, ...], tail: str, cwd: Path, token: str = "")
     return ""
 
 
-def _gh_json(*args: str, token: str | None = None) -> object:
-    out = _gh(*args, token=token)
+def _gh_json(*args: str, token: str | None = None, timeout: float = 120) -> object:
+    out = _gh(*args, token=token, timeout=timeout)
     try:
         return json.loads(out) if out.strip() else None
     except json.JSONDecodeError as exc:
@@ -505,10 +505,11 @@ def _not_found(number: int, exc: Exception) -> GhError:
 
 
 def _api(endpoint: str, payload: dict, method: str = "POST",
-         token: str | None = None) -> object:
+         token: str | None = None, *, timeout: float = 120) -> object:
     path = _with_file(json.dumps(payload))
     try:
-        return _gh_json("api", endpoint, "--method", method, "--input", str(path), token=token)
+        return _gh_json("api", endpoint, "--method", method, "--input", str(path),
+                        token=token, timeout=timeout)
     finally:
         path.unlink(missing_ok=True)
 
@@ -1450,11 +1451,13 @@ def delete_remote_branch(repo: str, branch: str, expected_head: str) -> bool:
     raise GhError(argv, done.stderr or done.stdout)
 
 
-def commit_status(repo: str, head: str, context: str, state: str, description: str) -> None:
+def commit_status(
+    repo: str, head: str, context: str, state: str, description: str, *, timeout: float = 120,
+) -> None:
     """Publish a SHA-scoped status using the caller's narrowly scoped credential."""
     endpoint = f"repos/{repo}/statuses/{head}"
     try:
-        _api(endpoint, {"state": state, "context": context, "description": description})
+        _api(endpoint, {"state": state, "context": context, "description": description}, timeout=timeout)
     except GhError as exc:
         validation_error = re.search(r"\bHTTP 422\b|^method=POST endpoint=\S+ status=422\b", exc.tail)
         if validation_error and _status_limit_reached(repo, head, context):

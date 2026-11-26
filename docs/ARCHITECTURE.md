@@ -317,6 +317,9 @@ the last race error unchanged, and hosted eligibility publishes terminal failure
 success requires one complete successful attestation. Source-PR eligibility uses
 its existing path without these retries; a merged source PR publishes nothing, so a
 late refresh cannot turn its landed head red.
+After GitHub acknowledges a pending status, SIGTERM during evaluation triggers a
+bounded failure write for that SHA. Once the final write starts, publication
+recovery owns its verdict.
 
 
 Agent sessions and T3 runs own interaction, execution and workspace management.

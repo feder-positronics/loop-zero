@@ -4,12 +4,13 @@ from __future__ import annotations
 import json
 import os
 import sys
-from collections.abc import Callable
+import time
 from contextlib import suppress
 from pathlib import Path
 
 from loopzero import candidate as candidate_mod
 from loopzero import config, eligibility, github, mergify
+from loopzero._proc import Terminated, unwind_on_sigterm
 from loopzero.types import Config, LoopZeroError
 
 
@@ -36,7 +37,7 @@ def main() -> int:
     except config.ConfigError as exc:
         print(exc, file=sys.stderr)
         return 1
-    with github.api_error_diagnostics():
+    with unwind_on_sigterm(), github.api_error_diagnostics():
         return _run(cfg)
 
 
@@ -62,9 +63,8 @@ def _run(cfg: Config) -> int:
         event_head = event_pr.get("head")
         if not isinstance(event_head, dict) or event_head.get("sha") != head:
             raise LoopZeroError("candidate event head is no longer current")
-    def publish(state: str, message: str) -> None:
-        github.commit_status(cfg.repo, head, eligibility.CONTEXT, state, message[:140])
-    publish("pending", "Refreshing live source review evidence")
+    github.commit_status(cfg.repo, head, eligibility.CONTEXT, "pending",
+                         "Refreshing live source review evidence")
     try:
         if candidate:
             def policy(source_number: int, source: dict) -> None:
@@ -89,8 +89,8 @@ def _run(cfg: Config) -> int:
         if not candidate and not ready and result.reasons == (github.MISSING_REVIEW_REASON,):
             message = "Awaiting trusted review of current source head"
             state = "pending"
-    except Exception as exc:
-        _mark_refresh_failed(publish, exc)
+    except (Exception, Terminated) as exc:
+        _mark_refresh_failed(cfg.repo, head, exc)
         raise
     _publish_verdict(cfg.repo, head, state, message[:140])
     print(message)
@@ -110,10 +110,18 @@ def _publish_verdict(repo: str, head: str, state: str, description: str) -> None
         raise LoopZeroError(f"Could not confirm eligibility status publication: {exc}") from exc
 
 
-def _mark_refresh_failed(publish: Callable[[str, str], None], exc: Exception) -> None:
-    if not isinstance(exc, github.StatusLimitReached):
-        with suppress(Exception):
-            publish("failure", "Eligibility refresh failed; inspect workflow logs")
+def _mark_refresh_failed(repo: str, head: str, exc: Exception | Terminated) -> None:
+    if isinstance(exc, github.StatusLimitReached):
+        return
+    with suppress(Exception):
+        if isinstance(exc, Terminated):
+            timeout = 2.0
+            with github.bounded_reads(time.monotonic() + timeout):
+                github.commit_status(repo, head, eligibility.CONTEXT, "failure",
+                                     "Eligibility refresh interrupted", timeout=timeout)
+        else:
+            github.commit_status(repo, head, eligibility.CONTEXT, "failure",
+                                 "Eligibility refresh failed; inspect workflow logs")
 
 
 if __name__ == "__main__":
