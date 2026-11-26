@@ -37,19 +37,13 @@ def no_retry_delay(monkeypatch):
 def event(head: str = "c" * 40) -> dict:
     repo = {"id": 7, "full_name": "owner/repo"}
     bot = {
-        "id": 37929162,
-        "login": "mergify[bot]",
-        "type": "Bot",
+        "id": 37929162, "login": "mergify[bot]", "type": "Bot",
         "html_url": "https://github.com/apps/mergify",
     }
     return {
-        "action": "synchronize",
-        "repository": repo,
-        "sender": deepcopy(bot),
+        "action": "synchronize", "repository": repo, "sender": deepcopy(bot),
         "pull_request": {
-            "number": 900,
-            "state": "open",
-            "draft": True,
+            "number": 900, "state": "open", "draft": True,
             "user": bot,
             "head": {"sha": head, "ref": "mergify/merge-queue/batch", "repo": deepcopy(repo)},
             "base": {"sha": "b" * 40, "ref": "main", "repo": deepcopy(repo)},
@@ -73,11 +67,8 @@ def status() -> dict:
 
 def pull(number: int, sha: str) -> dict:
     return {
-        "number": number,
-        "state": "open",
-        "draft": False,
-        "body": f"source {number}",
-        "head": {"sha": sha},
+        "number": number, "state": "open", "draft": False,
+        "body": f"source {number}", "head": {"sha": sha},
         "base": {"ref": "main", "repo": {"id": 7, "full_name": "owner/repo"}},
     }
 
@@ -100,14 +91,9 @@ def source_payloads(values, head, *sources):
 
 
 def payloads(candidate_event: dict) -> dict[str, object]:
-    candidate = deepcopy(candidate_event["pull_request"])
-    candidate["number"] = 900
+    candidate = deepcopy(candidate_event["pull_request"]) | {"number": 900}
     values = {
-        "/apps/mergify": {
-            "id": 10562,
-            "slug": "mergify",
-            "owner": {"login": "Mergifyio"},
-        },
+        "/apps/mergify": {"id": 10562, "slug": "mergify", "owner": {"login": "Mergifyio"}},
         "/users/mergify%5Bbot%5D": deepcopy(candidate["user"]),
         "/repos/owner/repo/pulls/900": candidate,
     }
@@ -116,14 +102,9 @@ def payloads(candidate_event: dict) -> dict[str, object]:
 
 
 def run_attestation(
-    candidate_event: dict | None = None,
-    *,
-    status_reads: list[dict] | None = None,
-    github_payloads: dict[str, object] | None = None,
-    github_get=None,
-    mergify_status=None,
-    source_policy=lambda _number, _source: None,
-    run=attest_candidate,
+    candidate_event: dict | None = None, *,
+    status_reads: list[dict] | None = None, github_payloads: dict[str, object] | None = None,
+    github_get=None, mergify_status=None, source_policy=lambda _number, _source: None, run=attest_candidate,
 ):
     candidate_event = candidate_event or event()
     reads = cycle(status_reads or [status()])
@@ -143,41 +124,44 @@ def test_attests_nested_candidate_and_transitive_parent_sources() -> None:
     assert seen == [101, 102]
 
 
-@pytest.mark.parametrize(
-    "mutation,message",
-    [
-        (lambda value: value["pull_request"]["user"].update(id=1), "Mergify GitHub App"),
-        (lambda value: value["sender"].update(id=1), "head event was not sent"),
-        (lambda value: value.update(action="edited"), "creation or head-update event"),
-        (
-            lambda value: value["pull_request"]["head"].update(ref="feature/forged"),
-            "unexpected head ref",
-        ),
-    ],
-)
-def test_rejects_forged_bot_or_prefix(mutation, message: str) -> None:
-    candidate_event = event()
-    mutation(candidate_event)
-    with pytest.raises(CandidateError, match=message):
-        run_attestation(candidate_event=candidate_event, github_payloads=payloads(event()))
-
-
 @pytest.mark.parametrize("case,diagnostic", [
+    ("author", "Mergify GitHub App"), ("sender", "head event was not sent"),
+    ("action", "creation or head-update event"), ("ref", "unexpected head ref"),
     ("missing status", "status is not an object"), ("missing ancestor", "not an ancestor"),
+    ("same-head policy", "source policy blocked"),
 ])
 def test_rejects_invalid_attestation_evidence(case, diagnostic):
-    values = payloads(event())
-    if case == "missing ancestor":
+    incoming = event()
+    values = payloads(incoming)
+    status_reads = [None] if case == "missing status" else None
+
+    def policy(number, _source):
+        if case == "same-head policy" and number == 102:
+            raise CandidateError("source policy blocked same-head source")
+
+    if case == "author":
+        incoming["pull_request"]["user"]["id"] = 1
+    elif case == "sender":
+        incoming["sender"]["id"] = 1
+    elif case == "action":
+        incoming["action"] = "edited"
+    elif case == "ref":
+        incoming["pull_request"]["head"]["ref"] = "feature/forged"
+    elif case == "missing ancestor":
         values[f"/repos/owner/repo/compare/{'2' * 40}...{'c' * 40}"]["status"] = "diverged"
+    elif case == "same-head policy":
+        head = "c" * 40
+        values["/repos/owner/repo/pulls/102"]["head"]["sha"] = head
+        values[f"/repos/owner/repo/compare/{head}...{head}"] = {
+            "status": "identical", "merge_base_commit": {"sha": head},
+        }
     with pytest.raises(CandidateError, match=diagnostic):
-        run_attestation(github_payloads=values, status_reads=[None] if case == "missing status" else None)
+        run_attestation(incoming, github_payloads=values, status_reads=status_reads, source_policy=policy)
 
 
-@pytest.mark.parametrize(
-    "pr_number,diagnostic",
-    [(101, "head changed"), (900, "Candidate head changed")],
-    ids=["source-head", "candidate-head"],
-)
+@pytest.mark.parametrize("pr_number,diagnostic", [
+    (101, "head changed"), (900, "Candidate head changed"),
+], ids=["source-head", "candidate-head"])
 def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str) -> None:
     values = payloads(event())
     calls = 0
@@ -193,21 +177,6 @@ def test_rejects_head_change_during_attestation(pr_number: int, diagnostic: str)
 
     with pytest.raises(CandidateError, match=diagnostic):
         run_attestation(github_get=github_get)
-
-
-def test_same_head_still_obeys_source_policy() -> None:
-    values = payloads(event())
-    values["/repos/owner/repo/pulls/102"]["head"]["sha"] = "c" * 40
-    values["/repos/owner/repo/compare/" + "c" * 40 + "..." + "c" * 40] = {
-        "status": "identical",
-        "merge_base_commit": {"sha": "c" * 40},
-    }
-
-    def block(number: int, _source: dict) -> None:
-        if number == 102:
-            raise CandidateError("source policy blocked same-head source")
-    with pytest.raises(CandidateError, match="source policy blocked"):
-        run_attestation(github_payloads=values, source_policy=block)
 
 
 @pytest.fixture(scope="session")
@@ -456,10 +425,7 @@ def test_predecessor_landing_restarts_complete_attestation(tree_candidate, monke
     source_payloads(values, head, (101, parent), (102, source))
     main, vanished = git("rev-parse", "main"), status()
     vanished["batches"].pop(0)
-    reads = iter(
-        ([status(), status()] if timing == "metadata" else [status()])
-        + [vanished, vanished]
-    )
+    reads = iter([status()] * (2 if timing == "metadata" else 1) + [vanished, vanished])
     source_reads = candidate_reads = status_reads = 0
     seen, verified, sleeps, verify = [], [], [], candidate._verify_tree
 
