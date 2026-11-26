@@ -292,19 +292,22 @@ def _readiness(
     elif announce_receipt:
         _print_receipt(wt, report, "accepted")
     if config.merge_strategy == "mergify" and pr.state == "OPEN":
-        behind = f"PR #{pr.number} is behind {pr.base_ref}; rebase and rerun checks"
+        behind = github.behind_reason(pr, head if review else None)
         reasons = result.reasons
         if mergify.configured(config.repo, config.base_branch, config.mergify_queue or ""):
             reasons = tuple(reason for reason in reasons if reason != behind)
         else:
             reasons = (*reasons, "Mergify queue configuration is unverified or permits in-place head updates")
         result = dataclasses.replace(result, ready=not reasons, reasons=reasons)
-    if result.reasons == (github.MISSING_REVIEW_REASON,):
+    if github.MISSING_REVIEW_REASON in result.reasons:
         markers = _pr_markers(reviews, head, publishers, repo=config.repo, number=pr.number)
         if _review_cap_spent(markers) and all(marker.head != head for marker in markers):
-            result = dataclasses.replace(result, reasons=(
-                f"review cap spent (primary + delta) and {head[:12]} has no eligible review. "
-                "Open a new PR for the changes that need review",
+            exhausted = (
+                f"Both review rounds are spent (primary + delta) and {head[:12]} has no eligible review. "
+                "Open a replacement PR for changes that need review. Another `loopzero review` on this PR will be refused."
+            )
+            result = dataclasses.replace(result, reasons=tuple(
+                exhausted if reason == github.MISSING_REVIEW_REASON else reason for reason in result.reasons
             ))
     if pr.state == "OPEN" and pr.mergeable == "UNKNOWN":
         result = dataclasses.replace(result, ready=False, reasons=(*result.reasons, MERGEABILITY_PENDING))
