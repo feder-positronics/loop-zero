@@ -521,9 +521,9 @@ def test_silent_stage_reports_live_metadata_then_completion(
 
     monkeypatch.setattr(sandbox, "HEARTBEAT_INTERVAL", 0.03)
     observed, events, reporters = threading.Event(), [], set()
-    monkeypatch.setenv("LZ_KEEP", "credential-value")
-    command = f'echo "$LZ_KEEP"; echo private-stderr >&2; exit {exit_code}'
-    cfg = make_config(checks=(command, "echo next"))
+    monkeypatch.setenv("AUDIT_TOKEN", "credential-value")
+    command = f'echo "$AUDIT_TOKEN"; echo "private-stderr $FORCE_COLOR" >&2; exit {exit_code}'
+    cfg = make_config(checks=(command, "echo next"), env_allowlist=("PATH", "AUDIT_TOKEN"), env=(("FORCE_COLOR", "1"),))
     run_one = sandbox._run_one
 
     def run_stage(config, worktree, prefix, stage_command, timeout):
@@ -542,7 +542,7 @@ def test_silent_stage_reports_live_metadata_then_completion(
     monkeypatch.setattr(sandbox, "_run_one", run_stage)
     report = sandbox.run_checks(cfg, git_repo, progress=events.append, status=status)
     assert report.results[0].exit_code == exit_code
-    assert report.results[0].tail == "[REDACTED]\nprivate-stderr"
+    assert report.results[0].tail == "[REDACTED]\nprivate-stderr 1"
     statuses = [event for event in events if event not in cfg.checks]
     heartbeats = [event for event in statuses if "running" in event]
     assert heartbeats and all(re.fullmatch(

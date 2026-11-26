@@ -14,10 +14,10 @@ from .test_sandbox import bwrap_log, make_config  # noqa: F401
 
 @pytest.mark.parametrize('base_ref', ['stale', 'missing', 'recorded'])
 @pytest.mark.parametrize('body,verdict,tails', [
-    ('r["tail"]="ok "+env["AUDIT_TOKEN"];print(json.dumps(r))', True, ['ok [REDACTED]'] * 2),
-    ('r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_TOKEN"];print(json.dumps(r))', False, ['ok [REDACTED]']),
-    ('print("x" * 3000 + "worker socket unavailable " + env["AUDIT_TOKEN"], file=sys.stderr);sys.exit(42)', False, None),
-    ('r["exit_code"]=7;r["tail"]=env["AUDIT_TOKEN"]+"Ω"*8183+" newest";print(json.dumps(r))', False,
+    ('r["tail"]=env["UV_CACHE_DIR"]+" "+env["AUDIT_VALUE"];print(json.dumps(r))', True, ['/operator/cache [REDACTED]'] * 2),
+    ('r["exit_code"]=7;r["tail"]="ok "+env["AUDIT_VALUE"];print(json.dumps(r))', False, ['ok [REDACTED]']),
+    ('print("x" * 3000 + "worker socket unavailable " + env["AUDIT_VALUE"], file=sys.stderr);sys.exit(42)', False, None),
+    ('r["exit_code"]=7;r["tail"]=env["AUDIT_VALUE"]+"Ω"*8183+" newest";print(json.dumps(r))', False,
      ['[REDACTED]' + 'Ω' * 8183 + ' newest']),
     ('r["exit_code"]=7;r["tail"]="Ω"*10000+" newest";print(json.dumps(r))', False,
      ['Ω' * 8188 + ' newest']),
@@ -45,7 +45,7 @@ def test_runner(git_repo, tmp_path, bwrap_log, body, verdict, tails, base_ref): 
         git(git_repo, 'update-ref', 'refs/remotes/origin/main', base)
     if base_ref == 'missing':
         git(git_repo, 'branch', '-D', 'main')
-    configured = {"UV_CACHE_DIR": "/operator/cache", "AUDIT_TOKEN": "ghs_FAKE0123"}
+    configured = {"UV_CACHE_DIR": "/operator/cache", "AUDIT_VALUE": "ghs_FAKE0123"}
     body = (f'repo=r["worktree"]\nassert r["base"] == "{base}"\n'
             'assert not Path.cwd().is_relative_to(Path(repo))\n'
             f'env=r.pop("env");assert env == {dict(sandbox.SANDBOX_ENV, **configured)!r}\n'
@@ -158,7 +158,7 @@ def test_runner_timeout(git_repo, monkeypatch):
             raise sandbox._proc.ProcTimeout('deadline', 'partial ghs_FAKE0123', duration_s=0.25)
         return original(argv, **kwargs)
     monkeypatch.setattr(sandbox._proc, 'run', run)
-    cfg = make_config(check_runner=(sys.executable,), env=(("AUDIT_TOKEN", "ghs_FAKE0123"),))
+    cfg = make_config(check_runner=(sys.executable,), env=(("AUDIT_VALUE", "ghs_FAKE0123"),))
     report = sandbox.run_checks(cfg, git_repo, timeout=0.1)
     assert not report.ok
     result = report.results[0]

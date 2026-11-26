@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import __version__, _proc
 from . import config as config_mod
-from .types import DEFAULT_CHECK_ENV, CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
+from .types import CheckReport, CheckResult, Config, LoopZeroError, is_check_exit_code
 from .worktree import WorktreeError
 
 GIT_TIMEOUT = 60.0
@@ -245,7 +245,7 @@ def _previous(config: Config, worktree: Path, settings_sha256: str) -> dict[str,
                     and is_check_exit_code(code) and code == 0 and isinstance(tail, str)):
                 source = result.get("reused_from")
                 previous[command] = CheckResult(
-                    command, 0, 0.0, _check_tail(config, tail), key,
+                    command, 0, 0.0, _check_tail(_redact_check_output(config, tail)), key,
                     source if isinstance(source, str) else data["head"],
                 )
         return previous
@@ -404,7 +404,7 @@ def _preflight(config: Config, worktree: Path) -> tuple[CheckResult | None, tupl
                 "into this task branch (resolve conflicts), then rerun loopzero check; "
                 "otherwise restore the required file."
             )
-            return CheckResult(command, 1, 0.0, _check_tail(config, message)), ()
+            return CheckResult(command, 1, 0.0, _check_tail(message)), ()
         match = re.fullmatch(r"uv run((?: --group [A-Za-z0-9_-]+)*) [A-Za-z0-9_./][A-Za-z0-9_./-]*(?: [A-Za-z0-9_./=-]+)*", command)
         if match:
             groups = [*(groups or []), *match[1].split()[1::2]]
@@ -440,13 +440,15 @@ def _cap_limit(requested: int, resource_limit: int) -> int:
 
 
 def _redact_check_output(config: Config, text: str) -> str:
-    forwarded = _proc.build_env(config.env_allowlist)
-    supplied = (*dict(config.env).values(), *(forwarded[name] for name in forwarded.keys() - DEFAULT_CHECK_ENV))
-    return _proc.redact_values(text, supplied)
+    supplied = (*_proc.build_env(config.env_allowlist).items(), *config.env)
+    secret_name = r"(?:^|_)(?:TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?|AUTHORIZATION|(?:API|ACCESS|PRIVATE)_KEY)(?:_|$)"
+    token_shape = r"(?:gh[pousr]_[A-Za-z0-9_]{8,}|github_pat_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{8,})"
+    secrets = (value for name, value in supplied if re.search(secret_name, name, re.I) or re.fullmatch(token_shape, value))
+    return _proc.redact_values(text, secrets)
 
 
-def _check_tail(config: Config, text: str) -> str:
-    suffix = _redact_check_output(config, text).rstrip("\n")[-CHECK_TAIL_BYTES:]
+def _check_tail(text: str) -> str:
+    suffix = text.rstrip("\n")[-CHECK_TAIL_BYTES:]
     encoded = suffix.encode("utf-8", errors="replace")[-CHECK_TAIL_BYTES:]
     # A byte cut can start inside a multibyte character.
     return _proc.tail(encoded.decode("utf-8", errors="ignore"))
@@ -468,9 +470,10 @@ def _run_one(
             merge_output=True,
         )
     except _proc.ProcTimeout as exc:
+        output = _redact_check_output(config, exc.stdout)
         return CheckResult(command, TIMEOUT_EXIT, timeout,
-                           _check_tail(config, exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
-    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(config, done.stdout))
+                           _check_tail(output + f"\n[loopzero] timed out after {timeout:g}s"))
+    return CheckResult(command, done.exit_code, done.duration_s, _check_tail(_redact_check_output(config, done.stdout)))
 
 
 def probe(config: Config, worktree: Path, prefix: list[str]) -> None:
@@ -659,10 +662,12 @@ def _dispatch_one(
                 raise ValueError("Local fallback failed")
             return local.results[-1]
         return CheckResult(command, frame["exit_code"], frame["duration_s"],
-                           _check_tail(config, frame["tail"]))
+                           _check_tail(_redact_check_output(config, frame["tail"])))
     except _proc.ProcTimeout as exc:
+        output = _redact_check_output(config, exc.stdout)
         return CheckResult(command, TIMEOUT_EXIT,
                            exc.duration_s if exc.duration_s is not None else timeout,
-                           _check_tail(config, exc.stdout + f"\n[loopzero] timed out after {timeout:g}s"))
+                           _check_tail(output + f"\n[loopzero] timed out after {timeout:g}s"))
     except (LoopZeroError, ValueError, TypeError, OverflowError, RecursionError, OSError) as exc:
-        return CheckResult(command, 1, 0.0, _check_tail(config, f"Stage runner failed: {exc}"))
+        detail = _redact_check_output(config, str(exc))
+        return CheckResult(command, 1, 0.0, _check_tail(f"Stage runner failed: {detail}"))
