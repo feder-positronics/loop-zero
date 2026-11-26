@@ -31,7 +31,6 @@ from loopzero.types import CheckReport, CheckResult, Config, Finding, LoopZeroEr
 
 CHECKS_FILE = Path(".loopzero") / "checks.json"
 GIT_TIMEOUT = 60.0
-REVIEW_MARKER_RE = eligibility.REVIEW_MARKER_RE
 RUNNER_FAILURES = (runners.RunnerMissing, runners.RunnerAuthFailed, runners.RunnerBadOutput)
 HANDLED = (LoopZeroError, worktree.WorktreeError, github.GhError, OSError, ValueError)
 UNEXPECTED = (KeyError, TypeError)
@@ -56,11 +55,7 @@ class CliError(LoopZeroError):
     """A refused command; the message says what to do instead."""
 
 
-class ReviewersUnavailable(CliError):
-    """All reviewer failures, retained as separate diagnostic lines."""
-
-
-class IndependentReviewerUnavailable(ReviewersUnavailable):
+class IndependentReviewerUnavailable(CliError):
     """No independent configured model family can provide the review."""
 
 
@@ -285,7 +280,6 @@ def _select_review_round(config: Config, pr: github.PR, head: str, reviews: list
     return _decide_kind(markers, head)
 
 
-MERGEABILITY_PENDING = github.MERGEABILITY_PENDING
 
 
 def _readiness(
@@ -1326,7 +1320,7 @@ def cmd_ready(args: argparse.Namespace) -> int:
     if waiting:
         _mark_ready(wt, config, pr.number, pr.head_sha)
         if args.wait is None:
-            pending = f"; {MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
+            pending = f"; {github.MERGEABILITY_PENDING}" if pr.mergeable == "UNKNOWN" else ""
             print(f"marked ready; waiting for required checks: {', '.join(waiting)}{pending}; {NEXT_WAIT}")
             return 3
         print("marked ready; " + "; ".join(readiness.reasons))
@@ -1361,7 +1355,7 @@ def _required_check_reasons(names: tuple[str, ...], *states: str) -> dict[str, s
 def _draft_checks_waiting(
     config: Config, pr: github.PR, readiness: github.Readiness
 ) -> tuple[str, ...]:
-    reasons = set(readiness.reasons) - {MERGEABILITY_PENDING}
+    reasons = set(readiness.reasons) - {github.MERGEABILITY_PENDING}
     if not pr.is_draft or not reasons:
         return ()
     expected = _required_check_reasons(config.required_ci, f"missing on {pr.head_sha[:12]}", "is skipped")
@@ -1380,7 +1374,7 @@ def _pending_checks(
     """
     states = [f"missing on {pr.head_sha[:12]}", "is pending", *(["is skipped"] if allow_skipped else [])]
     waitable = {*_required_check_reasons(config.required_ci, *states),
-                *readiness.waitable_failures, MERGEABILITY_PENDING}
+                *readiness.waitable_failures, github.MERGEABILITY_PENDING}
     reasons = readiness.reasons
     return reasons if reasons and all(r in waitable for r in reasons) else ()
 
@@ -1938,9 +1932,8 @@ def _run(args: argparse.Namespace) -> int:
         if isinstance(exc, sandbox.SandboxUnavailable) and args.command in {"check", "review"}:
             print(f"sandbox unavailable: {exc}", file=sys.stderr)
             return 2
-        message = str(exc) if isinstance(exc, ReviewersUnavailable) else _one_line(exc)
         prefix = "unexpected response: " if isinstance(exc, UNEXPECTED) else ""
-        print(f"loopzero {args.command}: {prefix}{message}", file=sys.stderr)
+        print(f"loopzero {args.command}: {prefix}{_one_line(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print(f"loopzero {args.command}: interrupted", file=sys.stderr)
