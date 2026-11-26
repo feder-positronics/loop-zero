@@ -90,7 +90,7 @@ def _object(value: JsonValue, message: str) -> JsonObject:
     return value
 
 
-def _flatten_batches(status: object) -> dict[str, JsonObject]:
+def flatten_batches(status: object) -> dict[str, JsonObject]:
     _require(isinstance(status, dict), "Mergify status is not an object")
     batches = status.get("batches")
     _require(isinstance(batches, list), "Mergify status has no batches list")
@@ -116,7 +116,7 @@ def _flatten_batches(status: object) -> dict[str, JsonObject]:
 
 
 def _candidate_lineage(status: JsonObject, candidate_number: int) -> tuple[str, list[int], list[str]]:
-    indexed = _flatten_batches(status)
+    indexed = flatten_batches(status)
     matches = [
         batch
         for batch in indexed.values()
@@ -216,7 +216,14 @@ def _source_fingerprint(source: JsonObject) -> tuple[object, ...]:
     head = source.get("head")
     base = source.get("base")
     base_repo = base.get("repo") if isinstance(base, dict) else None
+    labels = source.get("labels", [])
+    if not isinstance(labels, list) or any(not isinstance(label, dict) or not isinstance(label.get("name"), str) for label in labels):
+        raise CandidateError("invalid source PR labels")
     return (
+        source.get("number"),
+        source.get("merged"),
+        source.get("mergeable") is False,
+        tuple(label["name"] for label in labels),
         source.get("state"),
         source.get("draft"),
         source.get("body"),
@@ -324,7 +331,7 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
         }
         deadline = time.monotonic() + _TREE_SECONDS
 
-        def git(*args: str, command_env: dict[str, str] = env) -> str:
+        def git(*args: str, command_env: dict[str, str] = env, preserve_newlines: bool = False) -> str:
             with (root / "output").open("w+b") as output:
                 process = subprocess.Popen(
                     [sys.executable, "-I", "-S", "-c", _LIMITED_GIT, str(_TREE_BYTES),
@@ -353,6 +360,8 @@ def fetched_git(repo: str, heads: list[str]) -> Iterator[Callable[..., str]]:
                     output.seek(0)
                     result = output.read(_TREE_OUTPUT + 1)
                     _require(len(result) <= _TREE_OUTPUT, "Git object/output bound exceeded")
+                    if preserve_newlines:
+                        return result.decode("utf-8", errors="surrogateescape")
                     return result.decode().strip()
                 finally:
                     if process.poll() is None:

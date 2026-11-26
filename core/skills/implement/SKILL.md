@@ -64,8 +64,8 @@ Before the check and draft push for primary review, rebase your own commits onto
 `[repo].base` (default `main`). For a stack, follow
 [stacked delivery](../../../docs/DELEGATION.md#stacked-delivery).
 Leave base merges out of a branch awaiting its delta.
-After an approved primary or a delta, merge `origin/<base>` into the existing
-branch when the base or its check scripts change.
+For base or check-script changes after review, follow the
+[Review budget](../../CONTRACT.md#review-budget).
 Preserve the primary for the delta and the delta for
 post-review fixes. Split the PR if resolving conflicts requires rewriting its reviewed history.
 
