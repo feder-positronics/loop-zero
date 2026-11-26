@@ -80,6 +80,18 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT) -> str:
     return done.stdout.strip()
 
 
+def _require_push_target(wt: Path, repo: str) -> None:
+    urls = _git(wt, "remote", "get-url", "--push", "--all", "origin").splitlines()
+    github_url = re.compile(
+        r"(?:https://(?:[a-z0-9._~%:+-]+@)?github\.com(?::443)?/"
+        r"|git@github\.com:|ssh://git@github\.com(?::22)?/|ssh://git@ssh\.github\.com:443/)"
+        + re.escape(repo) + r"(?:\.git)?/?",
+        re.IGNORECASE | re.ASCII,
+    )
+    if not urls or any(not github_url.fullmatch(url) for url in urls):
+        raise CliError(f"origin push URL does not target {repo}; correct the Git remote before running pr")
+
+
 def _git_push(wt: Path, args: list[str], *, force_lease: bool) -> None:
     done = _proc.run(["git", *args], cwd=wt, env_allowlist=worktree.GIT_ENV,
                      extra_env={"LC_ALL": "C"}, timeout=PUSH_TIMEOUT)
@@ -678,7 +690,6 @@ def cmd_pr(args: argparse.Namespace) -> int:
     force_lease = False
     push = ["push", "-u", "origin"]
     if pr is not None and pr.state == "OPEN":
-        # Only rewrite history this worktree has seen; an unknown remote head is someone else's.
         known = _proc.run(["git", "cat-file", "-e", f"{pr.head_sha}^{{commit}}"], cwd=wt,
                           env_allowlist=worktree.GIT_ENV, timeout=GIT_TIMEOUT)
         if known.exit_code != 0:
@@ -687,8 +698,14 @@ def cmd_pr(args: argparse.Namespace) -> int:
             )
         force_lease = not _is_ancestor(wt, pr.head_sha, head)
         if force_lease:
+            previous_heads = _git(wt, "reflog", "show", "--format=%H", f"refs/heads/{branch}").splitlines()
+            if not any(_is_ancestor(wt, pr.head_sha, previous) for previous in previous_heads):
+                raise CliError(
+                    f"PR head {pr.head_sha[:12]} is absent from this task branch's history; integrate it first"
+                )
             push.extend(("--porcelain", f"--force-with-lease={branch}:{pr.head_sha}"))
     push.append(branch)
+    _require_push_target(wt, config.repo)
     _git_push(wt, push, force_lease=force_lease)
     if pr is not None and pr.state == "OPEN":
         with _lock_task_state(wt):
