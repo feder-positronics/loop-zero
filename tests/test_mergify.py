@@ -5,6 +5,7 @@ import http.client
 import io
 import json
 import signal
+import socket
 import ssl
 import subprocess
 import sys
@@ -275,3 +276,51 @@ def test_request_deadline_covers_headers_and_body(monkeypatch, phase):
         expire()
     assert signal.getsignal(signal.SIGALRM) is handler
     assert signal.getitimer(signal.ITIMER_REAL) == (0, 0)
+
+
+
+def test_request_deadline_stops_address_fallback(monkeypatch):
+    addresses = [("192.0.2.1", 443), ("192.0.2.2", 443)]
+    attempted = []
+
+    def connect(address):
+        attempted.append(address)
+        if len(attempted) == 1:
+            signal.raise_signal(signal.SIGALRM)
+
+    def open_(*args, **kwargs):
+        socket.create_connection(("example.invalid", 443))
+        return io.BytesIO(b"{}")
+
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *_: [
+        (socket.AF_INET, socket.SOCK_STREAM, 0, "", address) for address in addresses
+    ])
+    monkeypatch.setattr(socket, "socket", lambda *_: SimpleNamespace(connect=connect, close=lambda: None))
+    monkeypatch.setattr(mergify.urllib.request, "build_opener", lambda *_: SimpleNamespace(open=open_))
+    with (
+        pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),
+        mergify._open(urllib.request.Request("https://example.invalid")),
+    ):
+        pytest.fail("address fallback swallowed the deadline")
+    assert attempted == addresses[:1]
+
+
+def test_request_deadline_restores_handler_when_disarming_is_interrupted(monkeypatch):
+    handler = signal.getsignal(signal.SIGALRM)
+    setitimer = signal.setitimer
+
+    def interrupt(timer, seconds):
+        result = setitimer(timer, seconds)
+        if seconds == 0:
+            signal.raise_signal(signal.SIGALRM)
+        return result
+
+    monkeypatch.setattr(signal, "setitimer", interrupt)
+    monkeypatch.setattr(mergify.urllib.request, "build_opener",
+                        lambda *_: SimpleNamespace(open=lambda *_, **__: io.BytesIO(b"{}")))
+    with (
+        pytest.raises(TimeoutError, match="Mergify HTTP request timed out"),
+        mergify._open(urllib.request.Request("https://example.invalid")),
+    ):
+        pass
+    assert signal.getsignal(signal.SIGALRM) is handler
