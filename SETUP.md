@@ -74,6 +74,14 @@ symlinked skill directory and resolve its relative links from the real files, so
 the contract and references stay reachable. Do not also keep copies of these
 skills in a repository: both would load.
 
+Before resuming automated PR check refreshes or explicit PR resyncs after an
+upgrade, advance every PR-body writer to the selected CLI revision. For
+unverified receipt warnings, use a revision containing
+[3ff80bd9 (#1160)](https://github.com/feder-positronics/loop-zero/commit/3ff80bd91c92f12d557cead31776df40d4328097).
+Once the writers are updated, run `loopzero check` for the current head to
+replace old receipts. If you roll back across that fix, pause those writes before
+switching the CLI and resume them once the writers support the warning again.
+
 If you roll back across [#732](https://github.com/feder-positronics/loop-zero/pull/732)
 after GitHub may have accepted a Claude review, run `loopzero review --repost`
 with the publishing CLI revision or a newer compatible revision. The rollback
