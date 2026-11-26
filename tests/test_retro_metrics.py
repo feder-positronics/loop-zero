@@ -92,17 +92,14 @@ def sources(tmp_path, monkeypatch, request):
     ]
 
 
-def recorded_output(capsys, args, *options):
-    assert retro_metrics.main([*args, *options, "--record"]) == 0
-    return capsys.readouterr()
-
-
 def test_record_replay_and_weekly_window(sources, capsys):
     calls, args = sources
-    live = recorded_output(capsys, args, "--host-command", "host-adapter")
+    assert retro_metrics.main([*args, "--record", "--host-command", "host-adapter"]) == 0
+    live = capsys.readouterr()
     assert sum(call == ["host-adapter"] for call in calls) == 1
+    assert retro_metrics.main(args) == 0
+    assert capsys.readouterr() == live
     assert len(calls) == 6
-    assert_replay(args, calls, capsys, live)
 
     report = json.loads(live.out)
     row = report["custom_window"]
@@ -161,7 +158,8 @@ def assert_replay(args, calls, capsys, live):
 def test_weekly_report_uses_stall_threshold_without_running_other_alerts(sources, capsys):
     calls, args = sources
     args = [*args, "--stall-hours", "12", "--dead-owner", "coordinator"]
-    live = recorded_output(capsys, args)
+    assert retro_metrics.main([*args, "--record"]) == 0
+    live = capsys.readouterr()
     report = json.loads(live.out)
     assert {"kind": "stalled_p0", "number": 4} in report["weekly_sample"]["items"]
     assert all(alert["kind"] == "unknown" for alert in report["alerts"])
@@ -172,7 +170,8 @@ def test_alerts_find_stalled_order_and_dead_owner(sources, capsys):
     calls, args = sources
     options = ["--alerts", "--stall-hours", "12", "--owner", "coordinator",
                "--band", "merges", "2", "3"]
-    live = recorded_output(capsys, args, *options, "--host-command", "host-adapter")
+    assert retro_metrics.main([*args, *options, "--record", "--host-command", "host-adapter"]) == 0
+    live = capsys.readouterr()
     findings = json.loads(live.out)["alerts"]
     assert live.err == ""
     assert [finding for finding in findings if finding["kind"] != "unknown"] == [
@@ -187,7 +186,8 @@ def test_missing_and_failed_sources_do_not_report_zero(sources, capsys):
     _, args = sources
     args[args.index("--label-order") + 1] = "missing"
     args[args.index("--check-receipts") + 1] = "/no-such-receipt-test-file"
-    report = json.loads(recorded_output(capsys, args).out)
+    assert retro_metrics.main([*args, "--record"]) == 0
+    report = json.loads(capsys.readouterr().out)
     for key in ("orders_accepted", "checks_passed", "checks_failed", *retro_metrics.HOST_KEYS):
         assert report["custom_window"][key] == "UNKNOWN"
         assert any(a["source"] == f"custom_window/{key}" for a in report["alerts"])
@@ -211,7 +211,8 @@ def test_invalid_band_is_usage_error(capsys):
 def test_stalled_issue_checks_linked_pr_commit_count_at_limit(sources, detail_reads, stalled, capsys):
     calls, args = sources
     options = ["--alerts", "--stall-hours", "1"]
-    live = recorded_output(capsys, args, *options)
+    assert retro_metrics.main([*args, *options, "--record"]) == 0
+    live = capsys.readouterr()
     alerts = json.loads(live.out)["alerts"]
     assert any(a["kind"] == "stalled_p0" and a["issue"] == 5 for a in alerts) == stalled
     assert any(a.get("source") == "p0/#5/activity" for a in alerts) == (not stalled)
