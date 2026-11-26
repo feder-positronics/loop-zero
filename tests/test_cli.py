@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -500,6 +501,28 @@ def test_check_sandbox_unavailable_exits_two(wt: Path, fake_tool, capsys) -> Non
     assert "namespace creation failed: exit 1" in err
     assert "kernel.apparmor_restrict_unprivileged_userns=0" in err
     assert not (wt / ".loopzero" / "checks.json").exists()
+
+
+def test_check_runner_outage_preserves_receipt(wt, gh, monkeypatch, capsys):
+    assert run(capsys, "check")[0] == 0
+    receipt = wt / ".loopzero/checks.json"
+    previous = receipt.read_bytes()
+    calls = list(gh.calls)
+    context = cli._context
+
+    def with_runner(*args, **kwargs):
+        worktree, settings = context(*args, **kwargs)
+        return worktree, replace(settings, check_runner=("/bin/sh", "-c", "exit 75"))
+
+    monkeypatch.setattr(cli, "_context", with_runner)
+
+    code, out, err = run(capsys, "check")
+
+    assert code == 2
+    assert "process exit 75" in err and "Retry" in err
+    assert "PASS" not in out and "FAIL" not in out
+    assert receipt.read_bytes() == previous
+    assert gh.calls == calls
 
 
 def test_config_flag_overrides_root(wt: Path, tmp_path: Path, capsys) -> None:

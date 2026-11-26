@@ -454,10 +454,13 @@ ASCII escaping and compact separators (`,` and `:`). Stdout must contain exactly
 one JSON object echoing worktree, head, base, command, network and env_sha256, plus
 `exit_code` (integer), `duration_s` (finite nonnegative number), `not_started`
 (boolean), and `tail` (string). Env values must not be echoed. Diagnostics belong
-on stderr. Missing, extra, duplicate, malformed or mismatched fields and runner
-process failures fail the stage closed. Runner timeouts report exit code 124
-and the measured elapsed duration. `not_started=true` requires exit_code=0,
+on stderr. Missing, extra, duplicate, malformed or mismatched fields fail the
+stage closed. A nonzero runner process exit or a supervisor timeout aborts with
+retryable infrastructure exit 2 and leaves the prior receipt and PR Validation
+intact. A valid frame from a successful runner supplies the stage verdict.
+`not_started=true` requires exit_code=0,
 duration_s=0 and empty tail, and permits only local fallback through bwrap.
+Unavailable local fallback uses the same infrastructure exit.
 
 The runner may read `worktree` as data to execute the exact clean head, including
 unpushed local commits, with the supplied environment and network policy under
