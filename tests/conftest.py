@@ -19,8 +19,8 @@ GIT_ENV = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
 def isolate_github_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token", raising=False)
-    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0), raising=False)
+    monkeypatch.setattr(github, "APP_TOKEN_HELPER", tmp_path / "absent-app-token")
+    monkeypatch.setattr(github, "_app_token_cache", ("", 0.0))
 
 
 @pytest.fixture(autouse=True)

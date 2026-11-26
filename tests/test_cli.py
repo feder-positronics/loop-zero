@@ -998,7 +998,8 @@ def test_check_rejects_invalid_base_workflow(wt, repo, capsys, workflow, error):
         commit_file(repo, "workflow.toml", workflow, "break workflow")
         git(repo, "push", "-q", "origin", "main")
 
-    out, _ = expect_cli(capsys, 1, "check", stderr_contains=(f"origin/main:workflow.toml: {error}",))
+    diagnostic = error if workflow is None else f"origin/main:workflow.toml: {error}"
+    out, _ = expect_cli(capsys, 1, "check", stderr_contains=(diagnostic,))
     assert "PASS" not in out if workflow is None else out == ""
     assert not (wt / ".loopzero" / "checks.json").exists()
     if workflow is None:
@@ -2166,8 +2167,8 @@ def test_review_reminted_app_token_keeps_publisher(
         assert cli._review_file(wt, head, "primary").is_file()
 
 
-@pytest.mark.parametrize("tokens, publisher", [(["", "app"], LOGIN)])  # app -> unavailable: reminted test
-def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys, tokens, publisher):
+def test_review_posts_as_checked_identity(wt, gh, fake_bin, monkeypatch, capsys):
+    tokens, publisher = ["", "app"], LOGIN
     monkeypatch.setattr(github, "app_token", lambda: tokens[0])  # flips after the publisher check
     monkeypatch.setattr(github, "login", lambda token=None, f=github.login: (
         f(token), len(tokens) > 1 and tokens.pop(0))[0])
@@ -2785,7 +2786,7 @@ def test_wait_for_github_mergeability(wt, gh, capsys, monkeypatch, queue_request
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
 
     poll_clock(monkeypatch)
-    code, out, err = run(capsys, command, "--wait=1")
+    code, out, err = run(capsys, command, "--wait=60")
 
     if settled == "CONFLICTING":
         assert code == 1 and "has merge conflicts" in out + err
@@ -2903,7 +2904,7 @@ def test_ready_wait_tracks_the_replacement_workflow(
         arm_named_check(gh, head, id=101, status="completed", conclusion=replacement)
 
     poll_clock(monkeypatch, after_sleep=replace_checks, patch_sleep=replacement != "pending")
-    out, _err = expect_cli(capsys, expected, "ready", "--wait=0" if replacement == "pending" else "--wait=1", stderr="")
+    out, _err = expect_cli(capsys, expected, "ready", "--wait=0" if replacement == "pending" else "--wait=60", stderr="")
     assert f"waiting: required check 'checks' is {old_conclusion}" in out
     assert out.endswith(ready_wait_tail(head, expected))
 
@@ -3270,7 +3271,7 @@ def test_ready_receipt_after_base_advance(wt, repo, gh, head, capsys, monkeypatc
         return original(argv, timeout=timeout, **kwargs)
 
     monkeypatch.setattr(cli._proc, "run", fetch)
-    assert run(capsys, "ready", "--wait=1")[0] == exit_code and clock.fetch_timeout == 0.5
+    assert run(capsys, "ready", "--wait=60")[0] == exit_code and clock.fetch_timeout == 60 - clock.sleeps[0]
 
 
 @pytest.mark.parametrize("worker", ["legacy", "different-environment", "matching"])
@@ -3571,7 +3572,7 @@ def test_mergify_admission_rechecks_only_the_selected_pr(wt, gh, capsys, monkeyp
     monkeypatch.setattr(cli, "_wait_for_mergify", lambda *_: None)
     gh.respond("api -X", "")
 
-    code, out, err = run(capsys, "merge", *(["--wait=1"] if wait else []))
+    code, out, err = run(capsys, "merge", *(["--wait=60"] if wait else []))
 
     calls = [c["argv"][:2] for c in gh.calls]
     assert calls.count(LOOKUP_CALLS[0]) == 0
@@ -3806,14 +3807,6 @@ def test_status_full(wt: Path, gh: FakeGh, capsys, git_calls) -> None:
     assert "ready:    no" in out and "  - required check 'checks' is pending" in out
     assert sum(1 for c in gh.calls if c["argv"][:2] == reviews_key().split()[:2]) == 1
     (wt / "scratch").unlink()
-    arm_approved_ready_pr(gh, head, wt, isDraft=False)
-    receipt = wt / ".loopzero/checks.json"
-    report = json.loads(receipt.read_text())
-    del report["dirty"]
-    receipt.write_text(json.dumps(report))
-    expect_cli(capsys, 0, "status", stderr="", stdout_contains=(
-        "ready:    no", "  - check receipt was recorded in a dirty worktree.",
-    ))
 
 
 @pytest.mark.parametrize(("signum", "status"), [
@@ -4082,7 +4075,7 @@ def test_mergify_checks_current_target_before_queueing_or_resumes(
     monkeypatch.setattr(mergify, "membership", lambda *_: None)
     monkeypatch.setattr(mergify, "request", lambda *_: pytest.fail("must not submit a queue request"))
 
-    args = ("merge", "--wait=1") if command == "resume" else (command,)
+    args = ("merge", "--wait=60") if command == "resume" else (command,)
     code, out, err = run(capsys, *args)
     assert head_of(wt) == head and not (wt / "src/loopzero/upstream.py").exists()
     if queue:

@@ -165,17 +165,18 @@ work, through the repository's queue priority if it has one. Infra-only fixes
 may use the infra-only route above.
 
 Finish planned base updates before starting checks. Reuse an identical check
-already queued or running at the same head and fingerprint. A second local
+already queued or running at the same head and settings fingerprint. A second local
 check times out after 60 seconds if the first still holds the task lock. Before a fallback
 check on a published head, run `loopzero ready` and reuse any receipt it accepts.
 The session the brief assigns verification to (the worker, or under parent
 verification the parent or the integration executor it names) runs each full
 local check once and records its command,
-exact head SHA, environment fingerprint (for `loopzero check`, the settings
-fingerprint in its check receipt; for other suites, as consumer AGENTS.md/docs
-define it), result, time and log path. Workers, reviewers and coordinators
-reuse green receipts at the same head and fingerprint. Rerun only if head or inputs changed (including rebase), the fingerprint
-changed or cannot be shown, or the receipt is missing, red, partial or unverifiable.
+exact head SHA, result, time and log path; a `loopzero check` receipt also
+carries the settings fingerprint the CLI computes. Workers, reviewers and
+coordinators reuse green results at the same head (and, for `loopzero check`,
+the same settings fingerprint). Rerun only if head or inputs changed (including
+rebase), a `loopzero check` receipt's settings fingerprint changed or is
+missing, or the result is missing, red, partial or unverifiable.
 Reviewers still verify tests prove the claimed behavior. Hosted CI and sandboxed
 receipt requirements remain.
 
@@ -232,8 +233,8 @@ Freeze new work on Codex evidence projections (the `codex-evidence` comment publ
   configured family and reports reasons/nonzero if all fail. Only
   runner-produced reviews count. If no independent reviewer can run, try the
   preferred configured family in a fresh session and publish a visible same-family
-  fallback line. When no configured reviewer can run (exit 4), report the
-  blocker to whoever commissioned the PR.
+  fallback line. When no configured reviewer can run (exit 4), wait for the PR
+  owner.
 - Unconfirmed publication: inspect the cause and use
   `loopzero review --repost` to reconcile or explicitly retry the saved
   result; never substitute a fabricated review.

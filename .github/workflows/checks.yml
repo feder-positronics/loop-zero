@@ -26,7 +26,6 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
         run: |
-          git fetch -q --depth=1 origin "$BASE_SHA"
           if [ "$GITHUB_EVENT_NAME" = "push" ]; then
             uv run --python 3.14 python scripts/check_architecture_docs.py --links-only
           else
@@ -42,7 +41,7 @@ jobs:
           command -v bwrap >/dev/null
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Tests
-        run: uv run --python 3.14 --locked --group dev pytest -q
+        run: uv run --python 3.14 --locked --group dev pytest
       - name: Wheel builds and CLI runs
         run: |
           uv build --python 3.14 --build-constraints build-constraints.txt --require-hashes --wheel -q
