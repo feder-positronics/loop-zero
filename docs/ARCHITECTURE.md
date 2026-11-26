@@ -166,7 +166,7 @@ For a Codex executable installed inside protected native state, the implicit
 runtime mount exposes only the resolved executable and its existing sibling
 `codex-code-mode-host`, read-only. Neighboring history and configuration remain
 hidden; helper aliases into protected state and explicit state mounts fail closed.
-Check, review, ready, merge, and status use the workflow at one remote-tracking
+Check, pr, review, ready, merge, and status use the workflow at one remote-tracking
 delivery revision selected by the workflow at Git's local `origin/HEAD`.
 Missing trusted refs or workflows block these commands. An explicit
 `--config` supplies validated policy for bootstrap or operator overrides.
@@ -515,8 +515,8 @@ command, version, sandbox configuration and the resolved base SHA. A stage runs
 fresh when a matched path cannot be identified as a readable regular file.
 The receipt fingerprint also binds the base SHA when reuse
 is configured, so advancing the base invalidates a pass at the same task head.
-If the remote ref is absent, checks use the task's recorded base. Without
-either base, local stages run fresh.
+With explicit `--config`, reuse can fall back to the recorded task base if the
+remote ref is absent. Without either base, local stages run fresh.
 The `"*"` entry adds shared inputs to listed commands. Unlisted commands reuse only
 when `"*"` includes `"."` (the whole tree); a partial or empty `"*"` leaves them unkeyed.
 Consumers own complete input declarations.
