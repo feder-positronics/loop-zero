@@ -334,15 +334,21 @@ def _retry_pause(delay: float | None, limit: float, *, scoped: bool = True) -> b
     return True
 
 
+def retry_after(value: str) -> float | None:
+    try:
+        if re.fullmatch(r"[0-9]{1,18}", value):
+            return float(value)
+        date = parsedate_to_datetime(value)
+        return max(0.0, date.timestamp() - time.time()) if date.tzinfo is not None else None
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _rate_limit_delay(headers: dict[str, str], delay: float | None) -> float | None:
     if delay is None or headers.get("x-ratelimit-remaining") == "0":
         return None
-    value = headers.get("retry-after", "")
-    try:
-        wait = int(value) if re.fullmatch(r"[0-9]{1,18}", value) else parsedate_to_datetime(value).timestamp() - time.time()
-    except (OverflowError, OSError, ValueError):
-        return None
-    return max(delay, wait)
+    wait = retry_after(headers.get("retry-after", ""))
+    return None if wait is None else max(delay, wait)
 
 
 def _pr_list_error_guidance(args: tuple[str, ...], stderr: str, using_app: bool) -> str:

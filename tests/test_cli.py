@@ -2423,7 +2423,7 @@ def source_queue_api(gh, monkeypatch):
     })
     vendor_calls = []
 
-    def get(_repo, path):
+    def get(_repo, path, *_):
         vendor_calls.append(path)
         return {
             "/merge-queue/status?branch=main": {"batches": [], "mode": "serial"},
@@ -4156,7 +4156,7 @@ def test_mergify_confirmed_wait_reads_pr_once_per_steady_poll(wt, gh, monkeypatc
 
     assert cli._wait_for_mergify(config, pr, 60, confirmed=True) == "e" * 40
     assert clock.sleeps == [30, 30]
-    assert configurations == [(REPO, "main", "main")] * 3
+    assert configurations == [(REPO, "main", "main", 60)] * 3
     assert reads_at_membership == [1, 2, 3]
     assert [c["argv"][:2] for c in gh.calls] == [detail] * 4
 
@@ -4200,9 +4200,8 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         snapshots.extend((merge_json(head=head), merge_json(state="MERGED", head="f" * 40, sha="e" * 40)))
     gh.append(f"api repos/{REPO}/pulls/7", *snapshots)
     configurations = []
-
-    def configured(*_):
-        configurations.append(True)
+    def configured(*args):
+        configurations.append(args[-1])
         if len(configurations) > 1:
             if outcome == "config_error":
                 raise mergify.MergifyError("configuration HTTP 503")
@@ -4246,7 +4245,7 @@ def test_mergify_wait_outcomes_preserve_unmerged_work(wt, repo, gh, capsys, monk
         assert clock.sleeps == ([30, 60, 120, 40] if jitter == 1 else [27, 54, 108, 61])
         assert sum(c["argv"][:2] == PR_LIST_READ for c in gh.calls) == 1
         assert sum(c["argv"][:2] == ["api", "graphql"] for c in gh.calls) == 2
-    assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else [])
+    assert requests == ([(REPO, 7, head, "main")] if outcome == "requested_head_changed" else []) and all(deadline == (250 if outcome == "timeout" else 0) for deadline in configurations)
     if outcome in {"merged", "already_merged", "worktree_removed"}:
         assert code == 0 and "e" * 40 in out and not wt.exists(), err
         if outcome == "worktree_removed":
