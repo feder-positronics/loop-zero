@@ -1575,10 +1575,7 @@ def _follow_blocked_mergify(
     if (deadline is None or readiness is None or readiness.ready or config.merge_strategy != "mergify"
             or queue is None or pr.base_ref != config.base_branch):
         return False
-    try:
-        return mergify.membership(config.repo, pr.number, queue) is not None
-    except mergify.MergifyError:
-        return False
+    return mergify.membership(config.repo, pr.number, queue) is not None
 
 
 def _merge_with_mergify(
@@ -1655,6 +1652,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
         if waited is None:
             return 3
         pr, readiness, _ = waited
+        follow_confirmed = _follow_blocked_mergify(config, pr, readiness, deadline)
     if readiness is None:
         sha = github.merged_sha(
             config.repo, pr.number,
