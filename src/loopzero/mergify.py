@@ -311,6 +311,8 @@ def departure_report(repo: str, number: int, head: str, queue: str) -> Departure
         ("**The failure is in this pull request.** It failed tested alone on top of ", "isolated"),
         ("**Not proven to be this pull request's failure.** It failed on top of the pull requests ahead of it, and was not tested alone.", "stacked"),
     ) if any(line.startswith(prefix) for line in body.splitlines())), "")
+    if isinstance(reason, dict) and reason.get("code") == "CONFLICT_WITH_BASE_BRANCH":
+        attribution = "base_conflict"
     return Departure(f"{url}{latest['id']}", names, attribution)
 
 
