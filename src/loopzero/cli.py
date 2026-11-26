@@ -578,8 +578,15 @@ def cmd_start(args: argparse.Namespace) -> int:
 def _check_failure_preview(tail: str, limit: int = 1536) -> str:
     if len(tail.encode()) <= limit:
         return tail
-    readable = "\n".join(line for line in tail.splitlines() if len(line.encode()) <= limit // 2)
-    return (readable or tail).encode()[-limit:].decode(errors="ignore")
+    edge = limit // 8
+    lines = (line.encode() for line in tail.splitlines())
+    preview = b"\n".join(
+        line if len(line) <= 2 * edge else line[:edge] + b" [...] " + line[-edge:]
+        for line in lines
+    )
+    if len(preview) > limit:
+        preview = b"[...]\n" + preview[6 - limit:]
+    return preview.decode(errors="ignore")
 
 
 def cmd_check(args: argparse.Namespace) -> int:

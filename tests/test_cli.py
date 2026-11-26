@@ -303,7 +303,7 @@ def test_wait_reports_only_check_changes(wt, gh, head, capsys, monkeypatch, stab
 @pytest.mark.parametrize("receipt", ["saved", "head moved", "write failed"])
 def test_check_bounds_large_failure_and_preserves_receipt(wt, head, capsys, monkeypatch, receipt):
     tail = 'TEST_FAILURES={"detail":"' + "é" * 7500 + '","error":"Failed to fetch package"}\n'
-    tail += "migration failed: relation widgets already exists"
+    tail += "migration failed: relation widgets already exists\nAssertionError: assert " + "x" * 1000
     monkeypatch.setattr(cli.sandbox, "run_checks", lambda *a, **k: CheckReport(
         "a" * 40 if receipt == "head moved" else head, False,
         (CheckResult("apply migrations", 7, 0.1, tail),),
@@ -313,7 +313,7 @@ def test_check_bounds_large_failure_and_preserves_receipt(wt, head, capsys, monk
     code, out, err = run(capsys, "check")
     assert len((out + err).encode()) < 2500
     assert code == 1 and "apply migrations (exit 7)" in err
-    assert "migration failed: relation widgets already exists" in err
+    assert all(text in err for text in ("migration failed: relation widgets already exists", "AssertionError: assert", "[...]"))
     assert "uv sync --group dev" in err
     if receipt == "saved":
         assert out.endswith("FAIL\n") and ".loopzero/checks.json" in err and head in err
