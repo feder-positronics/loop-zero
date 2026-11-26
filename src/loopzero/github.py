@@ -1148,7 +1148,7 @@ def _eligibility_dispatched(repo: str, number: int, base: str, since: str) -> bo
     if not complete or not all(t is None or isinstance(t, str) for t in titles):
         raise GhError(("refresh Loop-zero Eligibility",), "could not identify all recent refresh runs")
     # Consumer workflows may not set a run title; a title naming another PR excludes a run.
-    return any(not (m := re.search(r"#([0-9]+)", t or "")) or int(m[1]) == number for t in titles)
+    return any(not (m := re.search(r"\bPR #([0-9]+)", t or "")) or int(m[1]) == number for t in titles)
 
 
 def refresh_eligibility(repo: str, pr: PR, branch: str, base: str, publishers: tuple[str, ...]) -> None:

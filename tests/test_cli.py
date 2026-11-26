@@ -4156,19 +4156,19 @@ REPLY_ACCEPTED = {"data": {"addPullRequestReviewThreadReply": {"comment": {"id":
 THREAD_RESOLVED = {"data": {"resolveReviewThread": {"thread": {"isResolved": True}}}}
 
 
-@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "consumer", "other", "malformed", "retry", "unknown"])
+@pytest.mark.parametrize("outcome", ["refreshed", "remaining", "denied", "applied", "consumer", "other", "numbered", "malformed", "retry", "unknown"])
 def test_resolve_lists_then_replies_and_resolves_one_finding(finding_pr, gh: FakeGh, capsys, monkeypatch, outcome) -> None:
     sys.stdout.reconfigure(encoding="ascii" if outcome == "refreshed" else "utf-8", errors="strict")
     finding_pr["comments"]["nodes"][0]["body"] = finding_pr["comments"]["nodes"][0]["body"].replace("Off by one", "Łódź")
     listing, backoffs = threads_json({**finding_pr, "path": "src/Łódź.py"}), []
     gh.respond("api graphql", listing, listing, REPLY_ACCEPTED, THREAD_RESOLVED,
                listing if outcome == "remaining" else threads_json())
-    transient = outcome in {"applied", "consumer", "other", "malformed", "retry", "unknown"}
+    transient = outcome in {"applied", "consumer", "other", "numbered", "malformed", "retry", "unknown"}
     gh.respond("api -X", {"stdout": "", "exit": 1, "stderr": "HTTP 503" if transient else "HTTP 403"} if transient or outcome == "denied" else "", "")
     monkeypatch.setattr(github, "_retry_sleep", backoffs.append)
-    titles = {"applied": "Refresh eligibility for PR #7", "consumer": "Eligibility", "malformed": {"x": 1}}
+    titles = {"applied": "Refresh eligibility for PR #7", "consumer": "Eligibility", "numbered": "Run #42: eligibility for PR #7", "malformed": {"x": 1}}
     runs = [] if outcome in {"retry", "other"} else [{"display_title": titles.get(outcome, "Refresh eligibility for PR #8")}]
-    runs = [{"display_title": "Eligibility for PR #8"}] if outcome == "other" else runs
+    runs = [{"display_title": "Run #7: eligibility for PR #8"}] if outcome == "other" else runs
     monkeypatch.setattr(github.time, "time", lambda: 1795640554)
     endpoint = ELIGIBILITY_DISPATCH.removesuffix("/dispatches")
     gh.respond(f"api {endpoint}/runs?event=workflow_dispatch&branch=main&created=%3E%3D2026-11-25T21%3A02%3A34%2B00%3A00&per_page=100", {"workflow_runs": runs, "total_count": len(runs) + (outcome == "unknown")})
