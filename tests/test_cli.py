@@ -2028,6 +2028,7 @@ def test_review_delta_after_conflict_merge(wt, repo, gh, fake_bin, capsys, isola
         base = reviewed = head_of(wt)
         git(wt, "commit", "--amend", "-qm", "rewritten feature")
     elif case == "empty":
+        gh.respond("api graphql", threads_json())
         reviewed = head_of(wt)
         commit_file(repo, "new-base.txt", "new base\n", "advance base cleanly")
         base = head_of(repo)

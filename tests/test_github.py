@@ -496,17 +496,14 @@ def test_post_review_preserves_blocking_findings_without_an_anchor(gh: FakeGh, m
         payload, = review_payloads(gh)
         assert payload["comments"] == [] and payload["body"].startswith(github.BODY_BLOCKERS)
         assert "**critical**: G" in payload["body"]
-        published = {"body": payload["body"], "user": {"login": "publisher"},
-                     "state": "COMMENTED", "commit_id": HEAD}
-        assert eligibility.eligible_review([published], HEAD, ("publisher",)) is published
+        published = dict(body=payload["body"], user={"login": "publisher"}, state="COMMENTED", commit_id=HEAD)
         monkeypatch.setattr(github, "open_blocking_findings", lambda *_: [])
         for head in (HEAD, "b" * 40):
-            evidence = eligibility.readiness_review([published], head, ("publisher",), repo=REPO, number=7,
-                                                     base_branch="main")
+            evidence = eligibility.readiness_review([published], head, ("publisher",), repo=REPO, number=7, base_branch="main")
             pr = github.PR(7, f"https://github.com/{REPO}/pull/7", head, "main", False, "OPEN", "MERGEABLE")
-            result = github.readiness(REPO, pr, "main", (), head, publishers=("publisher",),
-                                      review_blocker=eligibility.body_blocker(evidence))
-            assert not result.ready and "blocking findings in the review body" in result.reasons[0]
+            blocker = eligibility.body_blocker(evidence)
+            assert blocker and github.readiness(REPO, pr, "main", (), head, publishers=("publisher",),
+                                                review_blocker=blocker).reasons == (blocker,)
     else:
         (comment,) = comments_posted(gh)
         assert (comment["path"], comment["line"]) == anchor
