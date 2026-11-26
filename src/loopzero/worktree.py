@@ -117,11 +117,6 @@ def _local_state_directory(wt: Path, *, create: bool = False, lock: bool = False
         os.close(fd)
 
 
-def lock_local_state(wt: Path):
-    """Serialize receipt publication and PR-body updates for this worktree."""
-    return _local_state_directory(wt, create=True, lock=True)
-
-
 def _regular_state(wt: Path, fd: int, name: str) -> bool:
     with suppress(FileNotFoundError):
         if not stat.S_ISREG(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):

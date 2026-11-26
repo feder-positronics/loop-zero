@@ -11,10 +11,12 @@ import shutil
 import signal
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import asdict, replace
 from pathlib import Path
 from select import select
+from threading import Event, current_thread, main_thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import quote
@@ -505,8 +507,8 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, push
         monkeypatch.setattr(github, "update_body", Mock(side_effect=timeout))
     code, out, err = run(capsys, "check")
     assert (code, out.splitlines()[-1]) == ((1, "FAIL") if stage_exit else (0, "PASS"))
-    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS + (
-        [["api", endpoint]] if pushed and not refresh_timeout else [])
+    extra = [["api", endpoint]] * (2 - refresh_timeout) if pushed else []
+    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS + extra
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert report["head"] == head_of(wt) and report["dirty"] is False
     assert report["results"][0]["exit_code"] == stage_exit
@@ -514,9 +516,46 @@ def test_check_refresh_preserves_local_verdict(wt, gh, capsys, monkeypatch, push
     if refresh_timeout:
         assert f"note: could not refresh PR checks: PATCH {endpoint} timed out" in err
     if pushed and not refresh_timeout:
-        body = json.loads(gh.calls[len(LOOKUP_CALLS)]["--input"])["body"]
+        body = json.loads(gh.calls[-1]["--input"])["body"]
         assert body.count("## Validation") == 1
         assert_contains(body, f"Recorded for `{head_of(wt)[:12]}`", "- `echo ok`: exit 0")
+
+
+def test_check_and_review_serialize_shared_pr_body(wt, tmp_path, capsys, monkeypatch):
+    git(wt, "push", "-q", "-u", "origin", "lz/t1")
+    other = tmp_path / "review"
+    git(wt, "clone", "-q", "-b", "lz/t1", git(wt, "remote", "get-url", "origin").strip(), str(other))
+    monkeypatch.chdir(other)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(cli, "_context", lambda *_, **__: (wt, config.load_trusted(wt)))
+    pr = github.pr_from_rest(rest_pr_json(pr_json(headRefOid=head_of(wt), body="# Human prose\n")))
+    monkeypatch.setattr(github, "pr_for_branch", lambda *_, **__: pr)
+    bodies, proceed, flock = [pr.body], Event(), cli.fcntl.flock
+    monkeypatch.setattr(github, "pr_view", lambda *_: replace(pr, body=bodies[-1]))
+
+    def acquire(fd, flags):
+        if current_thread() is not main_thread():
+            try:
+                return flock(fd, flags | cli.fcntl.LOCK_NB)
+            except BlockingIOError:
+                proceed.set()
+        return flock(fd, flags)
+
+    result = ReviewResult("claude", pr.head_sha, "primary", "approve", (), "")
+    with ThreadPoolExecutor(1) as pool:
+        def patch(repo, number, body):
+            if "## Review" not in body:
+                pending.append(pool.submit(cli._refresh_pr_review, repo, number, result))
+                assert proceed.wait(5)
+            bodies.append(body)
+            proceed.set()
+
+        pending = []
+        monkeypatch.setattr(cli.fcntl, "flock", acquire)
+        monkeypatch.setattr(github, "update_body", patch)
+        assert run(capsys, "check")[0] == 0
+        pending[0].result(timeout=5)
+    assert_contains(bodies[-1], "# Human prose", "## Validation", "Recorded for", "## Review", "approve")
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
@@ -581,8 +620,7 @@ def test_pr_body_is_unchanged_when_checks_are_unchanged(wt: Path, gh: FakeGh, ca
     before = len(gh.calls)
     assert run(capsys, command)[0] == 0
     history = HISTORY_CALLS if command == "pr" else []
-    refresh = [["api", f"repos/{REPO}/pulls/7"]] if command == "pr" else []
-    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS + refresh
+    assert [c["argv"][:2] for c in gh.calls[before:]] == history + LOOKUP_CALLS + LOOKUP_CALLS[-1:]
 
 
 @pytest.mark.parametrize("body", [
@@ -610,25 +648,6 @@ def test_check_refresh_replaces_previous_head_without_losing_evidence(
             assert text in updated
 
 
-def test_delayed_check_preserves_review_summary(wt, gh, fake_bin, capsys, monkeypatch):
-    head = prepare_review(wt, gh, fake_bin)
-    body = "# PR\n\n## Notes\nHuman evidence.\n"
-    gh.respond_pr_list([pr_json(headRefOid=head, body=body)])
-    git(wt, "push", "-q", "-u", "origin", "lz/t1")
-    refresh = cli._refresh_pr_checks
-
-    def delay(path, config):
-        assert run(capsys, "review")[0] == 0
-        live = json.loads(gh.calls[-1]["--input"])["body"]
-        gh.respond(f"api repos/{REPO}/pulls/7", rest_pr_json(pr_json(headRefOid=head, body=live)))
-        refresh(path, config)
-
-    monkeypatch.setattr(cli, "_refresh_pr_checks", delay)
-    assert run(capsys, "check")[0] == 0
-    final = json.loads(gh.calls[-1]["--input"])["body"]
-    assert all(text in final for text in ("Human evidence.", "Recorded for", "- primary, claude"))
-
-
 @pytest.mark.parametrize("command,exit_code", [("check", 0), ("pr", 1)])
 def test_malformed_live_markers_do_not_mask_check_verdict(
     wt: Path, gh: FakeGh, capsys, command: str, exit_code: int,
@@ -638,7 +657,7 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
     gh.respond_pr_list([pr_json(headRefOid=head_of(wt), body=body)])
     out, _ = expect_cli(capsys, exit_code, command, stderr_contains=("malformed loopzero checks block",))
     history = HISTORY_CALLS if command == "pr" else []
-    assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS
+    assert [c["argv"][:2] for c in gh.calls] == history + LOOKUP_CALLS + (LOOKUP_CALLS[-1:] if command == "check" else [])
     if command == "check":
         assert out.endswith("PASS\n")
         assert json.loads((wt / ".loopzero/checks.json").read_text())["results"][0]["exit_code"] == 0
