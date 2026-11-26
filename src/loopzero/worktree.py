@@ -102,10 +102,13 @@ def _branch_exists(repo_root: Path, branch: str) -> bool:
 
 
 def _ensure_excludes(repo_root: Path) -> None:
-    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir"))
-    exclude = common / "info" / "exclude"
+    common = Path(_git(repo_root, "rev-parse", "--path-format=absolute", "--git-common-dir",
+                       preserve_whitespace=True)).resolve()
+    info = (common / "info").resolve()
+    exclude = (info / "exclude").resolve()
+    if not info.is_relative_to(common) or not exclude.is_relative_to(common):
+        raise WorktreeError(f"Git exclude is outside its Git directory: {exclude}")
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    exclude = exclude.resolve()
     existing = exclude.read_text() if exclude.exists() else ""
     lines = set(existing.splitlines())
     missing = [e for e in EXCLUDES if e not in lines]
@@ -136,9 +139,13 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
         raise WorktreeError(refusal)
     if not existing and _branch_exists(repo_root, branch):
         raise WorktreeError(f"branch already exists: {branch}")
-    base_ref = f"refs/remotes/origin/{base_branch}"
+    remote_ref = f"refs/heads/{base_branch}"
     try:
-        _git(repo_root, "fetch", "--quiet", "origin", f"+refs/heads/{base_branch}:{base_ref}")
+        advertised = _git(repo_root, "ls-remote", "--exit-code", "--refs", "origin", remote_ref)
+        base, _, ref = advertised.partition("\t")
+        if ref != remote_ref:
+            raise WorktreeError(f"origin did not report a unique {remote_ref}")
+        _git(repo_root, "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--refmap=", "origin", base)
     except GitError:
         if "origin" not in _git(repo_root, "remote").splitlines():
             raise WorktreeError(
@@ -147,7 +154,7 @@ def start(repo_root: Path, slug: str, base_branch: str) -> Path:
                 "with `git remote rename <name> origin`."
             ) from None
         raise
-    base = _git(repo_root, "rev-parse", "--verify", f"{base_ref}^{{commit}}")
+    _git(repo_root, "update-ref", "--no-deref", f"refs/remotes/origin/{base_branch}", base)
     if existing:
         existing_head = _resumable_head(repo_root, wt, branch)
         if existing_head is None:

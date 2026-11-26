@@ -48,18 +48,20 @@ def test_branch_refuses_detached_head(repo: Path) -> None:
         worktree.branch(repo)
 
 
-@pytest.mark.parametrize("branch", [None, "feature/ci+release"])
+@pytest.mark.parametrize("branch", [None, "feature/ci+release", "symbolic"])
 def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | None, monkeypatch) -> None:
     side = branch or "side"
     git(repo, "push", "-q", "origin", f"HEAD:refs/heads/{side}")
     upstream = commit_on_origin(repo, "feature.txt")
-    if branch:
+    if branch == "symbolic":
+        git(repo, "symbolic-ref", "refs/remotes/origin/main", "refs/heads/main")
+    elif branch:
         checkout = repo.parent / "single-branch"
         origin = (repo.parent / "origin.git").as_uri()
         git(repo, "clone", "-q", "--single-branch", "--branch", branch, origin, str(checkout))
         assert not git(checkout, "for-each-ref", "refs/heads/main", "refs/remotes/origin/main").strip()
         repo = checkout
-    invoke = worktree._git
+    invoke, local_head = worktree._git, worktree.head(repo)
     def interleave(path, *args, **kwargs):
         result = invoke(path, *args, **kwargs)
         if args[0] == "fetch":
@@ -71,7 +73,8 @@ def test_start_creates_branch_worktree_and_task_file(repo: Path, branch: str | N
     assert wt == repo / ".worktrees" / "my-task"
     assert (wt / "feature.txt").exists(), "fetched origin/main before branching"
     assert worktree.branch(wt) == "lz/my-task"
-    assert worktree.head(wt) == upstream
+    assert worktree.head(wt) == upstream and worktree.head(repo) == local_head
+    assert git(repo, "rev-parse", "refs/remotes/origin/main").strip() == upstream
     assert worktree.base_sha(wt) == upstream
     text = worktree.task_text(wt)
     assert text.startswith("# My task\n")
@@ -131,15 +134,21 @@ def test_start_retries_after_git_creates_worktree(repo, monkeypatch, state):
     assert task.read_text().endswith("(filled by `loopzero review`)\n")
 
 
-def test_start_excludes_worktrees_and_task_dir(repo: Path) -> None:
+@pytest.mark.parametrize("redirect", [None, "file", "directory"])
+def test_start_excludes_worktrees_and_task_dir(repo: Path, redirect: str | None) -> None:
     exclude = repo / ".git" / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
     exclude.write_text("*.log")  # no trailing newline on purpose
+    if redirect:
+        link = exclude if redirect == "file" else exclude.parent
+        link.symlink_to(link.rename(repo.parent / "outside"))
+        with pytest.raises(worktree.WorktreeError, match="outside its Git directory"):
+            worktree.start(repo, "t1", "main")
+        assert exclude.read_text() == "*.log" and not (repo / ".worktrees").exists()
+        return
     old_inode = exclude.stat().st_ino
     wt = worktree.start(repo, "t1", "main")
     assert exclude.stat().st_ino != old_inode
-    lines = exclude.read_text().splitlines()
-    assert lines == ["*.log", ".worktrees/", ".loopzero/"]
+    assert exclude.read_text().splitlines() == ["*.log", ".worktrees/", ".loopzero/"]
     assert not worktree.is_dirty(wt), "fresh worktree with task.md is clean"
     assert git(repo, "status", "--porcelain") == ""
     installed = exclude.stat()
@@ -199,7 +208,7 @@ def test_start_explains_missing_origin(repo: Path, change: tuple[str, ...]) -> N
 def test_start_reports_git_failure_with_command(repo: Path) -> None:
     with pytest.raises(worktree.GitError) as info:
         worktree.start(repo, "nobase", "does-not-exist")
-    assert info.value.command[:2] == ("git", "fetch")
+    assert info.value.command[:2] == ("git", "ls-remote")
     assert info.value.tail
 
 
