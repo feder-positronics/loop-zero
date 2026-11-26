@@ -3094,7 +3094,7 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
     out, _ = expect_cli(capsys, int(reason is not None), "ready")
     if reason:
         assert f"not ready: {reason}" in out
-        assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS
+        assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS[1:]
     if draft:
         assert "receipt accepted:" not in out
     if condition in {"legacy", "incompatible"}:
@@ -3102,11 +3102,15 @@ def test_ready_requires_clean_successful_local_report_at_head(wt, gh, capsys, co
                 "settings as ready, using a local coordinator for delegated stages." in out)
 
 
-def test_merge_missing_receipt_skips_remote_gates(wt, gh, capsys, head):
+@pytest.mark.parametrize("associations", [0, 100])
+def test_merge_missing_receipt_skips_remote_gates(wt, gh, capsys, head, associations):
     commit_mergify_configuration(wt)
     arm_pr(gh, head, isDraft=False)
+    gh.respond(branch_head_key(), {"commit": {"sha": head}})
+    gh.respond(f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1",
+               [{"head": {"ref": "lz/other"}}] * associations)
     expect_cli(capsys, 1, "merge", "--wait", stderr_contains=("run loopzero check at this head",))
-    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS
+    assert [call["argv"][:2] for call in gh.calls] == LOOKUP_CALLS[1:]
     assert all("--method" not in call["argv"] and "--input" not in call["argv"] for call in gh.calls)
 
 

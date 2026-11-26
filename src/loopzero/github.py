@@ -671,9 +671,9 @@ def _confirm_branch_pr(repo: str, branch: str, endpoint: str, number: int, state
     return pr
 
 
-def pr_for_branch(repo: str, branch: str, *, open_only: bool = False) -> PR | None:
+def pr_for_branch(repo: str, branch: str, *, open_only: bool = False, list_only: bool = False) -> PR | None:
     """Return the open PR, falling back to the most recent closed PR unless open_only."""
-    endpoint, matches = _commit_branch_prs(repo, branch)
+    endpoint, matches = ("", ()) if list_only else _commit_branch_prs(repo, branch)
     open_matches = [row for row in matches if row["state"] == "open"]
     if open_matches:
         newest = max(open_matches, key=lambda row: (row["created_at"], row["number"]))

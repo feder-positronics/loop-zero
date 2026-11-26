@@ -193,8 +193,8 @@ def _require_task_branch(config: Config, branch: str) -> None:
         )
 
 
-def _require_pr(config: Config, branch: str, *, allow_merged: bool = False) -> github.PR:
-    pr = github.pr_for_branch(config.repo, branch)
+def _require_pr(config: Config, branch: str, *, allow_merged: bool = False, list_only: bool = False) -> github.PR:
+    pr = github.pr_for_branch(config.repo, branch, list_only=list_only)
     if pr is None:
         raise CliError(f"no pull request for {branch}; run `loopzero pr` first")
     if pr.state != "OPEN" and not (allow_merged and pr.state == "MERGED"):
@@ -286,11 +286,7 @@ def _readiness(
 ) -> github.Readiness:
     if hold := github.merge_hold(pr.number, pr.labels):
         return github.Readiness(False, (hold,))
-    report = _load_report(wt)
-    receipt_problem = _check_report_problem(report, wt, config, head)
     if reviews is None:
-        if receipt_problem:
-            return github.Readiness(False, (receipt_problem,))
         reviews = _pr_reviews(config.repo, pr.number)
     publishers = config.review_publishers or (github.login(),)
     review = eligibility.readiness_review(
@@ -313,6 +309,8 @@ def _readiness(
         ),
         publishers=publishers,
     )
+    report = _load_report(wt)
+    receipt_problem = _check_report_problem(report, wt, config, head)
     result = (github.Readiness(False, (*result.reasons, receipt_problem))
               if receipt_problem else result)
     if announce_receipt and not receipt_problem:
@@ -1249,10 +1247,13 @@ def _pr_readiness(
     """PR plus readiness; readiness is None only for an already merged PR (allow_merged)."""
     head = worktree.head(wt)
     _require_task_branch(config, branch)
-    pr = _require_pr(config, branch, allow_merged=allow_merged)
+    problem = _check_report_problem(_load_report(wt), wt, config, head)
+    pr = _require_pr(config, branch, allow_merged=allow_merged, list_only=bool(problem))
     _require_pushed(pr, head)
     if pr.state == "MERGED":
         return pr, None
+    if problem:
+        return pr, github.Readiness(False, (github.merge_hold(pr.number, pr.labels) or problem,))
     return pr, _readiness(wt, config, pr, head, workflow_wait=workflow_wait,
                           announce_receipt=True)
 
