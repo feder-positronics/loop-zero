@@ -727,12 +727,9 @@ def test_api_get_and_login_helpers(gh: FakeGh) -> None:
         github.login()
 
 
-def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
+def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatch, app_token_helper) -> None:
     counter = tmp_path / "helper-calls"
-    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-app-token\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    app_token_helper(f"echo called >> {counter}\necho synthetic-app-token\n")
     wall_time = boot_time = 10_000.0
     monkeypatch.setattr(github.time, "time", lambda: wall_time)
     monkeypatch.setattr(github.time, "CLOCK_BOOTTIME", 7, raising=False)
@@ -762,12 +759,9 @@ def test_app_identity_selection_and_cache(gh: FakeGh, tmp_path: Path, monkeypatc
     assert counter.read_text().splitlines() == ["called", "called"]
 
 
-def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
+def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path: Path, monkeypatch, app_token_helper) -> None:
     counter = tmp_path / "helper-calls"
-    helper.write_text(f"#!/bin/sh\necho called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+    app_token_helper(f"echo called >> {counter}\necho synthetic-token-$(wc -l < {counter})\n")
     boot, real_run = [1_000_000.0], github.run
     suspend = lambda: boot.append(boot.pop() + 3601)  # noqa: E731
     monkeypatch.setattr(github, "_app_token_clock", lambda: boot[0])
@@ -782,22 +776,16 @@ def test_app_token_age_counts_suspend_during_mint_and_retry(gh: FakeGh, tmp_path
     assert [c["token"] for c in gh.calls] == ["operator-token", "synthetic-token-2", "synthetic-token-3"]
 
 
-def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
-    helper.write_text("#!/bin/sh\nexit 1\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+def test_app_helper_failure_falls_back_to_operator(gh: FakeGh, monkeypatch, app_token_helper) -> None:
+    app_token_helper("exit 1\n")
     monkeypatch.setenv("GH_TOKEN", "operator-token")
     gh.respond("api repos/acme/widgets", {})
     github.api_get("repos/acme/widgets")
     assert gh.calls[0]["token"] == "operator-token"
 
 
-def test_app_review_is_comment_with_inline_findings(gh: FakeGh, tmp_path: Path, monkeypatch) -> None:
-    helper = tmp_path / "app-token"
-    helper.write_text("#!/bin/sh\necho synthetic-app-token\n")
-    helper.chmod(0o755)
-    monkeypatch.setattr(github, "APP_TOKEN_HELPER", helper)
+def test_app_review_is_comment_with_inline_findings(gh: FakeGh, app_token_helper) -> None:
+    app_token_helper()
     gh.respond(f"api repos/{REPO}/pulls/7/files", PR_FILES)
     gh.respond(f"api repos/{REPO}/pulls/7/reviews", {"id": 3})
     github.post_review(REPO, 7, HEAD, review(verdict="approve", findings=FINDINGS[:1]),
@@ -894,24 +882,18 @@ def test_check_runs_merges_runs_and_statuses(gh: FakeGh) -> None:
 
 
 @pytest.mark.parametrize("rows,expected", [
-    pytest.param([(10, "checks", None, "skipped"), (11, "checks", None, "success")],
-                 {"checks": "success"}, id="stale-skipped"),
-    pytest.param([(20, "checks", "01:00:00Z", None), (19, "checks", "02:00:00Z", "success")],
-                 {"checks": "pending"}, id="id-before-time"),
-    pytest.param([(30, "checks", None, "success"), (31, "lint", None, "failure")],
-                 {"checks": "success", "lint": "failure"}, id="distinct-names"),
-    pytest.param([(40, "checks", "01:00:00Z", "failure"), (40, "checks", "02:00:00Z", "success")],
-                 {"checks": "success"}, id="timestamp-tie"),
-    pytest.param([(7, "checks", "12:00:00Z", "success"), (7, "checks", "12:00:00.250Z", "failure")],
-                 {"checks": "failure"}, id="same-id-fraction"),
-    pytest.param([(None, "checks", "12:00:00Z", "success"), (None, "checks", "09:00:01-03:00", "failure")],
-                 {"checks": "failure"}, id="missing-ids-offset"),
-    pytest.param([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "14:00:00+02:00", "success")],
-                 {"checks": "failure"}, id="equal-instants"),
-    pytest.param([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "23:00:00+00:99", "success")],
-                 {"checks": "failure"}, id="invalid-loses-to-valid"),
-    pytest.param([(None, "checks", None, "failure"), (None, "checks", "23:00:00", "success")],
-                 {"checks": "failure"}, id="unusable-times-tie"),
+    ([(10, "checks", None, "skipped"), (11, "checks", None, "success")], {"checks": "success"}),
+    ([(20, "checks", "01:00:00Z", None), (19, "checks", "02:00:00Z", "success")], {"checks": "pending"}),
+    ([(30, "checks", None, "success"), (31, "lint", None, "failure")], {"checks": "success", "lint": "failure"}),
+    ([(40, "checks", "01:00:00Z", "failure"), (40, "checks", "02:00:00Z", "success")], {"checks": "success"}),
+    ([(7, "checks", "12:00:00Z", "success"), (7, "checks", "12:00:00.250Z", "failure")], {"checks": "failure"}),
+    ([(None, "checks", "12:00:00Z", "success"), (None, "checks", "09:00:01-03:00", "failure")], {"checks": "failure"}),
+    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "14:00:00+02:00", "success")], {"checks": "failure"}),
+    ([(7, "checks", "12:00:00Z", "failure"), (7, "checks", "23:00:00+00:99", "success")], {"checks": "failure"}),
+    ([(None, "checks", None, "failure"), (None, "checks", "23:00:00", "success")], {"checks": "failure"}),
+], ids=[
+    "stale-skipped", "id-before-time", "distinct-names", "timestamp-tie", "same-id-fraction",
+    "missing-ids-offset", "equal-instants", "invalid-loses-to-valid", "unusable-times-tie",
 ])
 def test_check_runs_ordering(gh: FakeGh, rows: list[tuple], expected: dict) -> None:
     runs = [dict({"id": number} if number is not None else {}, name=name, conclusion=conclusion,
@@ -1009,19 +991,21 @@ def test_readiness_no_review(gh: FakeGh) -> None:
     assert r.reasons == ("no review recorded for the current head",)
 
 
-def test_readiness_blocking_finding(gh: FakeGh) -> None:
-    arm_readiness(gh, threads=(thread(f"{marker('important')}\n**important: Oops**"),))
-    r = readiness()
-    assert r.reasons == ("open important finding at src/a.py:3: Oops",)
-
-
-def test_readiness_blocks_on_anchored_unlocated_finding(gh: FakeGh) -> None:
-    body = f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n" \
-           "**critical: Global**\n\nno file"
-    arm_readiness(gh, threads=(thread(body, path="src/first.py", line=12),))
-    r = readiness()
-    assert not r.ready
-    assert r.reasons == ("open critical finding at src/first.py:12: Global",)
+@pytest.mark.parametrize("finding,reason", [
+    pytest.param(
+        thread(f"{marker('important')}\n**important: Oops**"),
+        "open important finding at src/a.py:3: Oops", id="located",
+    ),
+    pytest.param(
+        thread(f"{marker('critical')}\nNo file location given by the reviewer; anchored here.\n\n"
+               "**critical: Global**\n\nno file", path="src/first.py", line=12),
+        "open critical finding at src/first.py:12: Global", id="anchored",
+    ),
+])
+def test_readiness_blocking_finding(gh: FakeGh, finding: dict, reason: str) -> None:
+    arm_readiness(gh, threads=(finding,))
+    result = readiness()
+    assert not result.ready and result.reasons == (reason,)
 
 
 def test_readiness_resolved_or_suggestion_threads_do_not_block(gh: FakeGh) -> None:
@@ -1067,7 +1051,6 @@ def test_readiness_missing_and_failed_checks(gh: FakeGh, failure, wait, grace) -
     ("failure", {"workflow_id": 8}, False), ("failure", {"head_sha": "b" * 40}, False),
     ("failure", {"status": "completed"}, False),
     ("failure", {"created_at": "2026-09-23T21:52:00Z"}, False),
-    ("failure", {"created_at": "2026-09-23T21:53:00Z"}, True),
     ("failure", {"created_at": "2026-09-23T22:53:00+01:00", "id": 0}, False),
     ("failure", {"created_at": "2026-09-23T21:53:00.250Z"}, True),
     ("failure", {"created_at": "invalid"}, False),
@@ -1083,12 +1066,16 @@ def test_readiness_waits_only_for_newer_active_producing_workflow(gh, failure, c
     assert not result.ready
 
 
-def test_readiness_keeps_failing_commit_status_blocker(gh: FakeGh) -> None:
-    arm_workflow_check(gh, failed_check(id=100), [{"context": "checks", "state": "failure"}])
-    arm_workflow_runs(gh, producing_run(), replacement_run())
+@pytest.mark.parametrize("created_at,statuses,waitable", [
+    ("2026-09-23T21:54:21Z", [], True),
+    ("2026-09-23T21:53:00Z", [{"context": "checks", "state": "failure"}], False),
+], ids=["same-second-newer-run", "failing-commit-status"])
+def test_readiness_defers_only_replaceable_failure(gh: FakeGh, created_at, statuses, waitable):
+    arm_workflow_check(gh, failed_check(id=100), statuses)
+    arm_workflow_runs(gh, producing_run(created_at=created_at), replacement_run())
     result = readiness(workflow_wait=True)
     assert result.reasons == ("required check 'checks' is failure",)
-    assert result.waitable_failures == ()
+    assert result.waitable_failures == (result.reasons if waitable else ())
 
 
 def test_readiness_looks_up_only_required_failed_checks(gh: FakeGh) -> None:
