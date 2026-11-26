@@ -2988,6 +2988,28 @@ def test_ready_requires_receipt_from_current_check_environment(
     assert run(capsys, *args, "check")[0] == 1
 
 
+@pytest.mark.parametrize("worker", ["legacy", "different-path", "matching"])
+def test_ready_checks_transferred_whole_job_receipt(wt, gh, capsys, head, tmp_path, monkeypatch, worker):
+    arm_approved_ready_pr(gh, head, wt, readiness={"local_exit": None}, isDraft=False)
+    with monkeypatch.context() as worker_env:
+        if worker != "matching":
+            worker_env.setenv("PATH", str(tmp_path / "worker-bin"), prepend=":")
+        assert run(capsys, "check")[0] == 0
+
+    receipt = wt / ".loopzero/checks.json"
+    payload = json.loads(receipt.read_bytes())
+    if worker == "legacy":
+        # Older producers serialize these results without a settings fingerprint.
+        del payload["settings_sha256"]
+    # Whole-job transport preserves the producer's fields.
+    receipt.write_text(json.dumps(payload))
+    assert run(capsys, "ready")[0] == (0 if worker == "matching" else 1)
+
+    if worker != "matching":
+        assert run(capsys, "check")[0] == 0
+        assert run(capsys, "ready")[0] == 0
+
+
 @pytest.mark.parametrize("fixed", [False, True])
 def test_ready_matches_effective_inherited_check_environment(
     wt, gh, capsys, head, tmp_path, monkeypatch, fixed,
