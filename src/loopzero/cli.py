@@ -1955,6 +1955,14 @@ def _one_line(exc: BaseException) -> str:
     return " | ".join(ln.strip() for ln in (str(exc) or type(exc).__name__).splitlines() if ln.strip())
 
 
+def _exit_status(code: int) -> int:
+    if code < 0:
+        import signal
+        if -code not in (signal.SIGKILL, signal.SIGSTOP):
+            signal.signal(-code, signal.SIG_DFL)
+        signal.raise_signal(-code)
+    return code
+
+
 if __name__ == "__main__":
-    from loopzero._cli_entry import _exit_status
     sys.exit(_exit_status(_run(_module_args)))
