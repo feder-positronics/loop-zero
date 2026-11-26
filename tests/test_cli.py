@@ -2634,7 +2634,7 @@ def test_hold_blocks_ready_and_merge(wt, gh, capsys, monkeypatch, command, check
 def test_hold_label_refresh_matches_local_readiness(wt, gh, head, tmp_path, monkeypatch, capsys):
     trusted = tmp_path / "trusted"
     trusted.mkdir()
-    (trusted / "workflow.toml").write_text(WORKFLOW + f'review_publishers = ["{LOGIN}"]\n')
+    (trusted / "workflow.toml").write_text(WORKFLOW)
     event = trusted / "event.json"
     monkeypatch.setenv("GITHUB_REPOSITORY", REPO)
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
