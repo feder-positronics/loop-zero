@@ -3496,41 +3496,21 @@ def test_mergify_uses_one_deadline_for_checks_admission_and_landing(
         assert budgets == [4.0]
 
 
-@pytest.mark.parametrize("removed,error,hint", [
-    (False, "worktree is dirty",
-     "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"),
-    (True, "cannot lock ref",
-     "; worktree removed; delete local branch 'lz/t1' if it still points at the merged head"),
-], ids=["worktree-remains", "branch-remains"])
-def test_merge_warns_when_cleanup_fails(wt, gh, capsys, monkeypatch, head, removed, error, hint):
+def test_merge_warns_when_cleanup_fails(wt, gh, capsys, monkeypatch, head):
     arm_squash_merge(gh, head, wt, merge_json(state="MERGED", head=head, sha="d" * 40))
     gh.respond("api -X", "")
-
-    def fail_cleanup(path, _expected_head):
-        if removed:
-            shutil.rmtree(path)
-        raise cli.worktree.WorktreeError(error)
-
-    monkeypatch.setattr(cli.worktree, "cleanup", fail_cleanup)
+    monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
+        cli.worktree.WorktreeError("worktree is dirty")))
     code, out, err = run(capsys, "merge")
-
     assert code == 0 and out.splitlines()[-1] == "d" * 40
-    assert err.startswith(f"warning: merged but worktree cleanup failed: {error}")
-    assert err.rstrip().endswith(hint)
+    assert err.startswith("warning: merged but worktree cleanup failed: worktree is dirty")
+    assert err.rstrip().endswith("; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup")
 
 
-def test_cleanup_hints_name_branch_and_configured_repo_without_commands(
+def test_remote_cleanup_hint_names_branch_and_configured_repo_without_commands(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
     branch = "lz/fix$version"
-    monkeypatch.setattr(cli, "_repo_root", lambda _wt: tmp_path)
-    monkeypatch.setattr(cli.worktree, "branch", lambda _wt: branch)
-    monkeypatch.setattr(cli.worktree, "cleanup", lambda *_: (_ for _ in ()).throw(
-        cli.worktree.WorktreeError("cannot lock ref")))
-    cli._cleanup(tmp_path / "gone", SimpleNamespace(head_sha="a" * 40))
-    assert capsys.readouterr().err.rstrip().endswith(
-        "delete local branch 'lz/fix$version' if it still points at the merged head")
-
     monkeypatch.setattr(cli.github, "delete_remote_branch", lambda *_: (_ for _ in ()).throw(
         cli.github.GhError(("gh", "api"), "HTTP 500")))
     cli._cleanup_remote_refs(tmp_path / "gone", SimpleNamespace(repo="acme/widgets"), branch, "a" * 40)
@@ -4769,26 +4749,43 @@ def test_checks_report_survives_failed_publication(tmp_path, monkeypatch, redire
         assert receipt.read_text() == "user file" and external.stat().st_mode & 0o777 == 0o755
 
 
-@pytest.mark.parametrize("moved", [False, True])
-def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head, moved):
+@pytest.mark.parametrize("event", ["gone", "moved", "update-ref", "worktree", "no-proof"])
+def test_already_merged_finishes_partial_cleanup(wt, repo, gh, capsys, monkeypatch, head, event):
     cli._review_file(wt, head, "primary").write_text("{broken")
     arm_pr(gh, head, isDraft=False, state="MERGED")
-    gh.append(f"api repos/{REPO}/pulls/7", merge_json(state="MERGED", head=head, sha="c" * 40))
-    gh.fail(f"api repos/{REPO}/git/ref/heads/lz/t1", "gh: Not Found (HTTP 404)")
+    merged = merge_json(state="MERGED", head=head, sha="c" * 40)
+    row = {**closed_history_row(pr_json(state="MERGED", headRefOid=head)), "created_at": "2026-10-07T05:04:00Z"}
+    gh.append(f"api repos/{REPO}/pulls/7", merged, row, merged)
+    gh.respond(f"api repos/{REPO}/commits/{head}/pulls?per_page=100&page=1", [] if event == "no-proof" else [row])
+    if event == "no-proof":
+        git(wt, "switch", "--detach", head)
+        code, _, err = run(capsys, "merge")
+        assert code == 1 and "no merged PR proves cleanup" in err
+        assert wt.exists() and git(repo, "branch", "--list", "lz/t1").strip()
+        return
     original = cli.worktree._git
     advanced = git(wt, "commit-tree", f"{head}^{{tree}}", "-p", head, "-m", "newer").strip()
 
     def cleanup_git(cwd, *args, **kwargs):
-        if args[1:3] == ("update-ref", "--no-deref"):
-            update = ("update-ref", "refs/heads/lz/t1", advanced) if moved else ("branch", "-D", "lz/t1")
+        if args[1:3] == ("update-ref", "--no-deref") and event in {"gone", "moved"}:
+            update = ("update-ref", "refs/heads/lz/t1", advanced) if event == "moved" else ("branch", "-D", "lz/t1")
             git(repo, *update)
+        if (len(args) > 1 and args[0].startswith("--git-dir=") and args[1] == event
+                and args[1:3] != ("worktree", "list")):
+            raise KeyboardInterrupt
         return original(cwd, *args, **kwargs)
 
-    monkeypatch.setattr(cli.worktree, "_git", cleanup_git)
-    code, out, err = run(capsys, "merge")
-    assert code == 0 and "was already merged" in out and not wt.exists()
-    assert ("but expected" in err) if moved else err == ""
-    assert git(repo, "branch", "--list", "lz/t1", "--format=%(objectname)").strip() == (advanced if moved else "")
+    with monkeypatch.context() as patch:
+        patch.setattr(cli.worktree, "_git", cleanup_git)
+        code, out, err = run(capsys, "merge")
+    if event in {"update-ref", "worktree"}:
+        assert code == 130 and "interrupted" in err and wt.exists()
+        assert not git(wt, "branch", "--show-current").strip()
+        assert bool(git(repo, "branch", "--list", "lz/t1").strip()) == (event == "update-ref")
+        code, out, err = run(capsys, "merge")
+    assert code == 0 and "was already merged" in out and wt.exists() == (event == "moved")
+    assert ("but expected" in err) if event == "moved" else err == ""
+    assert git(repo, "branch", "--list", "lz/t1", "--format=%(objectname)").strip() == (advanced if event == "moved" else "")
     assert not any(call["argv"][:2] == ["api", "-X"] for call in gh.calls)
 
 

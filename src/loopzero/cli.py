@@ -1200,16 +1200,12 @@ def _pr_readiness(
 CLEANUP_RETRY = "; fix the cause, then rerun `loopzero merge` in this worktree to finish cleanup"
 
 
-def _cleanup(wt: Path, pr: github.PR) -> None:
-    name = None
+def _cleanup(wt: Path, pr: github.PR, branch: str | None = None) -> None:
     try:
         _repo_root(wt)
-        name = worktree.branch(wt)
-        worktree.cleanup(wt, pr.head_sha)
+        worktree.cleanup(wt, pr.head_sha, branch)
     except (worktree.WorktreeError, OSError) as exc:
         retry = CLEANUP_RETRY if wt.exists() else ""
-        if not retry and name is not None:
-            retry = f"; worktree removed; delete local branch {name!r} if it still points at the merged head"
         print(f"warning: merged but worktree cleanup failed: {exc}{retry}", file=sys.stderr)
 
 
@@ -1630,21 +1626,34 @@ def _merge_with_mergify(
     return None
 
 
+def _merge_pr_readiness(
+    wt: Path, config: Config, *, workflow_wait: bool
+) -> tuple[str, github.PR, github.Readiness | None]:
+    if previous := worktree.detached_from(wt):
+        _repo_root(wt)
+        _require_task_branch(config, previous)
+        pr = github.merged_pr_at_head(config.repo, previous, worktree.head(wt))
+        if pr is None:
+            raise CliError(f"no merged PR proves cleanup of detached worktree for {previous!r}")
+        return previous, pr, None
+    branch = worktree.branch(wt)
+    pr, readiness = _pr_readiness(wt, config, allow_merged=True, workflow_wait=workflow_wait)
+    return branch, pr, readiness
+
+
 def cmd_merge(args: argparse.Namespace) -> int:
     if args.cancel and args.wait is not None:
         raise CliError("merge --cancel cannot be combined with --wait")
     wt, config = _context(args, pin_checks=True)
-    branch = worktree.branch(wt)
     if args.cancel:
+        branch = worktree.branch(wt)
         if config.merge_strategy != "mergify":
             raise CliError("merge --cancel is only available with delivery.merge = 'mergify'")
         pr = _require_pr(config, branch)
         mergify.dequeue(config.repo, pr.number)
         print(f"requested removal of PR #{pr.number} from Mergify")
         return 0
-    pr, readiness = _pr_readiness(
-        wt, config, allow_merged=True, workflow_wait=args.wait is not None
-    )
+    branch, pr, readiness = _merge_pr_readiness(wt, config, workflow_wait=args.wait is not None)
     started = time.monotonic()
     deadline = None if args.wait is None else started + args.wait
     # --wait=0 observes once; a positive budget also bounds merge or queue admission.
@@ -1693,7 +1702,7 @@ def cmd_merge(args: argparse.Namespace) -> int:
             )
             return 0
     _cleanup_remote_refs(wt, config, branch, pr.head_sha)
-    _cleanup(wt, pr)
+    _cleanup(wt, pr, branch)
     print(sha)
     return 0
 

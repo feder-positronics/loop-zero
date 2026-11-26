@@ -286,10 +286,13 @@ The push uses a temporary bare repository and ignores local, global, and system
 Git configuration so URL rewrites cannot change its destination.
 After confirmed remote deletion or absence, cleanup deletes the matching
 `origin/lz/<slug>` tracking ref only if it still points to the merged head.
-An already-merged PR can resume cleanup from its task worktree. Local removal
-requires a clean worktree with no ignored user files. A Git ref lock keeps the
-worktree at the merged PR head during removal. Cleanup then deletes the branch
-only if it still points at that head.
+After confirming the merge, a ref lock verifies the task branch before cleanup
+detaches its clean worktree. Cleanup deletes the local branch
+only at that head and removes the worktree after branch deletion. If interrupted,
+rerunning `loopzero merge` in the detached worktree looks up the previous branch
+from Git's checkout history and requires a live merged PR for that exact branch
+and head. Another worktree's checkout, a moved branch or an ignored user file
+blocks removal.
 Hosted eligibility trusts the configured publisher's projection and live identity,
 state, head and latest ordering. It cannot recompute private raw or defeat a
 coherent forgery by a trusted publisher/editor; native claims do not attest the
