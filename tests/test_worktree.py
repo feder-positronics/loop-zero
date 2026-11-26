@@ -255,14 +255,40 @@ def test_cleanup_removes_worktree_and_branch(repo: Path, monkeypatch) -> None:
     assert not wt.exists() and not git(repo, "branch", "--list", "lz/done") and "done" not in git(repo, "worktree", "list")
 
 
-@pytest.mark.parametrize("file", ["scratch.txt", "local.env", ".loopzero/user-notes.md"])
-def test_cleanup_preserves_user_files(repo: Path, file: str) -> None:
+def test_cleanup_removes_ignored_artifacts(repo: Path) -> None:
+    (repo / ".git/info/exclude").write_text(".venv/\n")
+    wt = worktree.start(repo, "cached", "main")
+    (wt / ".venv").mkdir()
+    (wt / ".venv/dependency").write_text("generated")
+    worktree.cleanup(wt, worktree.head(wt))
+    assert not wt.exists()
+    assert not git(repo, "branch", "--list", "lz/cached")
+
+
+def test_cleanup_preserves_untracked_work_with_ignored_artifacts(repo: Path) -> None:
     (repo / ".git/info/exclude").write_text("local.env\n")
     wt = worktree.start(repo, "dirty", "main")
-    (wt / file).write_text("x")
-    with pytest.raises(worktree.WorktreeError, match="worktree is dirty" if file == "scratch.txt" else "ignored file"):
+    (wt / "local.env").write_text("ignored")
+    (wt / "scratch.txt").write_text("keep my work")
+    with pytest.raises(worktree.WorktreeError, match="worktree is dirty"):
         worktree.cleanup(wt, worktree.head(wt))
-    assert (wt / file).read_text() == "x" and "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+    assert (wt / "scratch.txt").read_text() == "keep my work"
+    assert (wt / "local.env").read_text() == "ignored"
+    assert "lz/dirty" in git(repo, "branch", "--list", "lz/dirty")
+
+
+@pytest.mark.parametrize("other_repo", [False, True])
+def test_cleanup_preserves_ignored_nested_worktrees(repo: Path, tmp_path: Path, other_repo: bool) -> None:
+    (repo / ".git/info/exclude").write_text("nested/\n")
+    wt = worktree.start(repo, "parent", "main")
+    source = init_git_repo(tmp_path / "other") if other_repo else repo
+    nested = wt / "nested"
+    git(source, "worktree", "add", "--detach", str(nested))
+    assert not worktree.is_dirty(wt)
+    with pytest.raises(worktree.WorktreeError, match=r"nested (Git )?worktree"):
+        worktree.cleanup(wt, worktree.head(wt))
+    assert (nested / ".git").is_file()
+    assert "lz/parent" in git(repo, "branch", "--list", "lz/parent")
 
 
 def test_cleanup_missing_worktree(repo: Path) -> None:
