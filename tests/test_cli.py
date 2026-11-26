@@ -544,7 +544,7 @@ def test_malformed_live_markers_do_not_mask_check_verdict(
 
 
 @pytest.mark.parametrize("command,exit_code,tail", [
-    ("echo no; exit 3", 3, "no\n"),
+    ("echo no; exit 3 # https://fake-heading-secret@example.invalid", 3, "no\n"),
     ("seq 1 50; exit 1", 1, "".join(f"{i}\n" for i in range(11, 51)))])
 def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit_code, tail):
     (wt / "workflow.toml").write_text(WORKFLOW.replace(
@@ -552,10 +552,10 @@ def test_check_failure_reports_verdict_and_capped_tail(wt, capsys, command, exit
     code, out, err = run(capsys, "--config", str(wt / "workflow.toml"), "check")
     assert code == 1 and out.endswith("FAIL\n")
     assert out.startswith("checks are unpinned because --config was provided\n")
-    assert sum(line.startswith(("stage 1/2: exit ", "exit "))
-               for line in out.splitlines()) == 1
+    heading = command.replace("fake-heading-secret", "[REDACTED]")
+    assert out.count(f"running: {heading}\n") == out.count("stage 1/2: exit ") == 1
     assert f"stage 1/2: exit {exit_code} (" in out and "README.md" not in out
-    assert err == f"--- {command} (exit {exit_code}) ---\n{tail}"
+    assert err == f"--- {heading} (exit {exit_code}) ---\n{tail}"
     report = json.loads((wt / ".loopzero/checks.json").read_text())
     assert [result["command"] for result in report["results"]] == [command]
 
