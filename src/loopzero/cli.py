@@ -75,7 +75,7 @@ def _git(cwd: Path, *args: str, timeout: float = GIT_TIMEOUT,
     done = _proc.run(["git", *args], cwd=cwd, env_allowlist=worktree.GIT_ENV,
                      timeout=timeout, extra_env=extra_env)
     if done.exit_code != 0:
-        raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr, 1)}")
+        raise CliError(f"git {' '.join(args)} failed: {_proc.tail(done.stderr or done.stdout, 1)}")
     return done.stdout.strip()
 
 
@@ -1164,6 +1164,7 @@ def _prequeue_size_budget(
                "GIT_ATTR_NOSYSTEM": "1", "GIT_NO_REPLACE_OBJECTS": "1", "PYTHON": sys.executable}
         git = partial(_git, root, extra_env=env)
         git("clone", "--shared", "--no-checkout", "--template=", str(wt), ".")
+        # Fetch with the user's credential configuration for private origins.
         _git(root, "fetch", "--no-tags", "--no-recurse-submodules", "--",
              origin, f"refs/heads/{config.base_branch}")
         base = git("rev-parse", "FETCH_HEAD^{commit}")

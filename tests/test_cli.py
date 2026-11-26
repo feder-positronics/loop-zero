@@ -4702,6 +4702,7 @@ def test_pr_marks_legacy_same_head_check_unverified(wt, gh, capsys):
 def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, command):
     # PR #1230 fit its fork point at 7,482. Current main added 26 independent lines.
     checker = Path(__file__).resolve().parents[1] / "scripts/size_budget.sh"
+    cap = int(re.search(r"^SRC_CAP=(\d+)$", checker.read_text(), re.MULTILINE)[1])
     (repo / "scripts").mkdir()
     shutil.copyfile(checker, repo / "scripts/size_budget.sh")
     policy = (repo / "workflow.toml").read_text().replace(
@@ -4711,7 +4712,7 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
     publish_workflow(wt, policy)
     fork = head_of(repo)
     git(wt, "merge", "--no-edit", fork)
-    for checkout, name, lines in [(wt, "feature", 7482), (repo, "upstream", 26)]:
+    for checkout, name, lines in [(wt, "feature", cap - 18), (repo, "upstream", 26)]:
         folder = checkout / "src/loopzero"
         folder.mkdir(parents=True)
         (folder / f"{name}.py").write_text("# counted line\n" * lines)
@@ -4734,6 +4735,6 @@ def test_prequeue_size_budget_replays_1230(wt, repo, gh, capsys, monkeypatch, co
     if command == "resume":
         assert code == 3 and "size budget" not in out + err
     else:
-        assert code == 1 and "src=7508 (base 26, delta 7482, cap 7500" in out + err
+        assert code == 1 and f"src={cap + 8} (base 26, delta {cap - 18}, cap {cap}" in out + err
     assert head_of(wt) == head
     assert not (wt / "src/loopzero/upstream.py").exists()
